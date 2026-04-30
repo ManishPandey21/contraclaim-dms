@@ -1,0 +1,542 @@
+from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
+
+from fastapi import Depends, HTTPException, status, Request
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from .config import settings
+from .database import get_db  # Corrected import
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, EmailStr, Field
+import uuid
+from bson import ObjectId
+from pydantic import ConfigDict
+from ..services.permission_service import PermissionService
+from ..utils.audit_logger import get_audit_logger
+
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Compatibility role aliases to normalize various role naming schemes
+ROLE_ALIASES = {
+    "organization-user": "orguser",
+    "org-user": "orguser",
+    "organization user": "orguser",
+    "organizationuser": "orguser",
+    "orguser": "orguser",
+    "organization-admin": "orgadmin",
+    "org-admin": "orgadmin",
+    "organization admin": "orgadmin",
+    "organizationadmin": "orgadmin",
+    "orgadmin": "orgadmin",
+    "project-user": "projectuser",
+    "project user": "projectuser",
+    "projectuser": "projectuser",
+    "proj-user": "projectuser",
+    "proj user": "projectuser",
+    "projuser": "projectuser",
+    "project-admin": "projectadmin",
+    "project admin": "projectadmin",
+    "projectadmin": "projectadmin",
+    "proj-admin": "projectadmin",
+    "proj admin": "projectadmin",
+    "projadmin": "projectadmin",
+    "super-admin": "superadmin",
+    "super admin": "superadmin",
+    "superadministrator": "superadmin",
+}
+
+def _normalize_roles_list(roles):
+    out = []
+    for r in (roles or []):
+        s = str(r).strip().lower()
+        s = ROLE_ALIASES.get(s, s)
+        out.append(s)
+    # de-duplicate while preserving order
+    result = []
+    seen = set()
+    for r in out:
+        if r not in seen:
+            result.append(r)
+            seen.add(r)
+    return result
+
+# Moved from organizations.py
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/token")  # Use correct API path
+class CurrentUser(BaseModel):
+    id: str
+    username: str
+    email: EmailStr
+    roles: List[str]
+    organization_id: Optional[str] = None
+    organizations: List[str] = Field(default_factory=list)
+    projects: List[str] = Field(default_factory=list)
+    disabled: bool = False
+# Moved from organizations.py
+async def get_current_user(request: Request, db = Depends(get_db)):
+    """
+    Resolve current user from:
+    1) Bearer token (preferred)
+    2) Optional dev headers (only when ALLOW_DEV_HEADERS=True): X-User-Id, X-User-Role(s), X-Org-Id, X-Proj-Id
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # Try Authorization: Bearer <token>
+    auth_header = request.headers.get("authorization", "")
+    token = None
+    if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+
+    if token:
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            email: str = payload.get("sub")
+            if email:
+                user = await db.users.find_one({"email": email})
+                if user:
+                    # Derive organizations for superuser/similar users if not present
+                    orgs = user.get("organizations", [])
+                    org_id = user.get("organization_id")
+                    if (not orgs) and org_id:
+                        try:
+                            orgs = [str(org_id)]
+                        except Exception:
+                            orgs = [org_id]
+                    roles = _normalize_roles_list(user.get("roles", []))
+                    org_id_sanitized = org_id
+                    orgs_sanitized = orgs or []
+                    projects_sanitized = (user.get("projects", []) or [])
+                    if "superadmin" in roles:
+                        org_id_sanitized = None
+                        orgs_sanitized = []
+                        projects_sanitized = []
+                    return CurrentUser(
+                        id=str(user["_id"]),
+                        username=user.get("username", email),
+                        email=user.get("email", email),
+                        roles=roles,
+                        organization_id=org_id_sanitized,
+                        organizations=orgs_sanitized,
+                        projects=projects_sanitized,
+                        disabled=user.get("disabled", False),
+                    )
+        except JWTError:
+            # Fall through to header-based dev mode
+            pass
+        except Exception:
+            # Any unexpected token error -> try header fallback
+            pass
+
+    # Fallback: Dev headers (explicitly disabled unless ALLOW_DEV_HEADERS is True)
+    if not settings.ALLOW_DEV_HEADERS:
+        raise credentials_exception
+
+    x_user_id = request.headers.get("x-user-id")
+    x_user_roles = request.headers.get("x-user-role") or request.headers.get("x-user-roles")
+    x_org_id = request.headers.get("x-org-id")
+    x_proj_id = request.headers.get("x-proj-id")
+
+    if x_user_id:
+        # Parse roles
+        roles: list[str] = []
+        if x_user_roles:
+            try:
+                import json
+                parsed = json.loads(x_user_roles)
+                if isinstance(parsed, list):
+                    roles = [str(r) for r in parsed]
+            except Exception:
+                roles = [r.strip() for r in str(x_user_roles).split(",") if r.strip()]
+        roles = [str(r).lower() for r in roles]
+        if not roles:
+            raise credentials_exception
+
+        # Try load real user if possible
+        user_doc = await db.users.find_one({"_id": x_user_id}) or await db.users.find_one({"email": x_user_id})
+        username = (user_doc.get("username") if user_doc else None) or str(x_user_id)
+        # Use example.com (RFC 2606) to keep fabricated emails valid for EmailStr while indicating non-production
+        email = (user_doc.get("email") if user_doc else None) or f"{x_user_id}@example.com"
+        org_id = x_org_id or (user_doc.get("organization_id") if user_doc else None)
+        projects = [x_proj_id] if x_proj_id else (user_doc.get("projects", []) if user_doc else [])
+        disabled = bool(user_doc.get("disabled")) if user_doc else False
+        orgs = (user_doc.get("organizations", []) if user_doc else [])
+        # If orgs empty but org_id present, seed with single org for convenience
+        if not orgs and org_id:
+            try:
+                orgs = [str(org_id)]
+            except Exception:
+                orgs = [org_id]
+
+        # Sanitize for superadmin: reflect global access (no tenant scoping)
+        if "superadmin" in roles:
+            org_id = None
+            orgs = []
+            projects = []
+
+        return CurrentUser(
+            id=str(user_doc["_id"]) if user_doc and user_doc.get("_id") else str(x_user_id),
+            username=username,
+            email=email,
+            roles=roles,
+            organization_id=org_id,
+            organizations=orgs,
+            projects=projects,
+            disabled=disabled,
+        )
+
+    # No valid auth found
+    raise credentials_exception
+    
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+async def get_current_active_user(current_user: CurrentUser = Depends(get_current_user)):
+    if current_user.disabled:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+
+def require_permission(permission_name: str):
+    """
+    Dependency factory that enforces a specific permission for the current request.
+    """
+    normalized = (permission_name or "").strip()
+    permission_service = PermissionService()
+    audit_logger = get_audit_logger()
+
+    async def permission_checker(current_user: CurrentUser = Depends(get_current_active_user)):
+        roles = {str(r).lower() for r in getattr(current_user, "roles", []) or []}
+        if "superadmin" in roles:
+            try:
+                await audit_logger.log_permission_check(
+                    current_user.id,
+                    normalized,
+                    True,
+                    resource_type="permission",
+                    resource_id=normalized,
+                )
+            except Exception:
+                pass
+            return True
+
+        has_perm = await permission_service.user_has_permission(
+            current_user.id,
+            normalized,
+            log=False,
+            resource_type="permission",
+            resource_id=normalized,
+        )
+
+        try:
+            await audit_logger.log_permission_check(
+                current_user.id,
+                normalized,
+                has_perm,
+                resource_type="permission",
+                resource_id=normalized,
+            )
+        except Exception:
+            pass
+
+        if not has_perm:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required permission: {normalized}",
+            )
+        return True
+
+    return permission_checker
+
+def has_permission(permission: str):
+    async def has_permission_dependency(current_user: CurrentUser = Depends(get_current_active_user), db = Depends(get_db)):
+        try:
+            # Check if user has superadmin role (bypass permission check)
+            if "superadmin" in current_user.roles:
+                return current_user
+            
+            # Query roles using string IDs (not ObjectIds)
+            try:
+                user_roles = await db.roles.find({"_id": {"$in": current_user.roles}}).to_list(length=None)
+            except Exception as e:
+                # If role query fails, check if user is superadmin
+                if "superadmin" in current_user.roles:
+                    return current_user
+                raise HTTPException(status_code=500, detail="Error checking user permissions")
+            
+            user_permissions = []
+            for role in user_roles:
+                role_permissions = role.get("permissions", [])
+                if role_permissions:
+                    user_permissions.extend(role_permissions)
+
+            if permission not in user_permissions:
+                raise HTTPException(status_code=403, detail="Not enough permissions")
+            
+            return current_user
+            
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
+        except Exception as e:
+            # For superadmin users, grant access even if there's an error
+            if "superadmin" in current_user.roles:
+                return current_user
+            raise HTTPException(status_code=500, detail="Internal server error during permission check")
+    return has_permission_dependency
+
+def require_roles(*roles: str):
+    async def role_dependency(current_user: CurrentUser = Depends(get_current_active_user)):
+        # Superadmin bypass
+        if "superadmin" in current_user.roles:
+            return current_user
+        # If no roles specified, allow any authenticated user
+        if not roles:
+            return current_user
+        # Ensure user has at least one required role
+        if any(role in current_user.roles for role in roles):
+            return current_user
+        raise HTTPException(status_code=403, detail="Insufficient role permissions")
+    return role_dependency
+
+# RBAC scope helpers
+def effective_project_ids(user: CurrentUser) -> List[str]:
+    """
+    Return list of project IDs (as strings) the user is assigned to.
+    """
+    try:
+        return [str(p) for p in getattr(user, "projects", []) if p is not None]
+    except Exception:
+        return []
+
+def authorize_scope(
+    current_user: CurrentUser,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    db=None,
+) -> None:
+    """
+    Centralized scope enforcement:
+      - superadmin: global access
+      - orgadmin/orguser: restricted to their organization and all projects within it
+      - projectadmin/projectuser: restricted to their organization and assigned project(s) only
+    Raises HTTPException 403 on violations.
+    """
+    roles = set(current_user.roles or [])
+    if "superadmin" in roles:
+        return
+
+    if "superuser" in roles:
+        allowed_orgs = {str(o) for o in (getattr(current_user, "organizations", []) or []) if o}
+        org_id_val = getattr(current_user, "organization_id", None)
+        if org_id_val:
+            allowed_orgs.add(str(org_id_val))
+        allowed_projects = effective_project_ids(current_user)
+
+        if organization_id is not None and (allowed_orgs and str(organization_id) not in allowed_orgs):
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        if project_id is not None and (allowed_projects and str(project_id) not in allowed_projects):
+            raise HTTPException(status_code=403, detail="Not authorized for this project")
+        return
+
+    # Organization-scoped roles
+    if "orgadmin" in roles or "orguser" in roles:
+        if organization_id is not None and str(organization_id) != str(current_user.organization_id):
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        if project_id is not None:
+            proj_ids = effective_project_ids(current_user)
+            # If user has explicit project assignments, enforce them
+            if proj_ids and str(project_id) not in proj_ids:
+                raise HTTPException(status_code=403, detail="Not authorized for this project")
+        return
+
+    # Project-scoped roles
+    if "projectadmin" in roles or "projectuser" in roles:
+        proj_ids = effective_project_ids(current_user)
+        if project_id is None or str(project_id) not in proj_ids:
+            raise HTTPException(status_code=403, detail="Not authorized for this project")
+        if organization_id is not None and str(organization_id) != str(current_user.organization_id):
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        return
+
+    # Default deny
+    raise HTTPException(status_code=403, detail="Not authorized")
+
+def _expand_object_ids(values: List[str]) -> List[Any]:
+    """
+    Expand string identifiers into both string and ObjectId variants when possible.
+    This avoids type-mismatch misses for collections storing ObjectIds.
+    """
+    expanded: List[Any] = []
+    for value in values or []:
+        if value is None:
+            continue
+        value_str = str(value)
+        if value_str not in expanded:
+            expanded.append(value_str)
+        try:
+            oid = ObjectId(value_str)
+        except Exception:
+            continue
+        if oid not in expanded:
+            expanded.append(oid)
+    return expanded
+
+def build_scope_query(
+    current_user: CurrentUser,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    org_field: str = "organization_id",
+    project_field: Optional[str] = "project_id",
+    id_field: str = "_id",
+) -> Dict[str, Any]:
+    """
+    Build a MongoDB query filter enforcing scope for list endpoints, aligned with authorize_scope rules.
+    - superadmin: unrestricted (honors explicit filters if provided)
+    - orgadmin/orguser: restricted to user's organization (all projects within it)
+    - projectadmin/projectuser: restricted to assigned project(s) and their organization
+    """
+    roles = set([str(r).lower() for r in (current_user.roles or [])])
+
+    # Helper to return an empty-result filter
+    def _deny_all() -> Dict[str, Any]:
+        return {"_id": {"$in": []}}
+
+    if "superadmin" in roles:
+        q: Dict[str, Any] = {}
+        if organization_id is not None:
+            q[org_field] = str(organization_id)
+        if project_id is not None:
+            if project_field:
+                q[project_field] = str(project_id)
+            else:
+                q[id_field] = str(project_id)
+        return q
+
+    if "superuser" in roles:
+        allowed_orgs = {str(o) for o in (getattr(current_user, "organizations", []) or []) if o}
+        org_id_val = getattr(current_user, "organization_id", None)
+        if org_id_val:
+            allowed_orgs.add(str(org_id_val))
+        allowed_projects = [str(p) for p in (getattr(current_user, "projects", []) or []) if p]
+        if not allowed_orgs:
+            return _deny_all()
+        q = {org_field: {"$in": _expand_object_ids(list(allowed_orgs))}}
+        if organization_id is not None and str(organization_id) not in allowed_orgs:
+            return _deny_all()
+        if project_id is not None:
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids([project_id])}
+            else:
+                q[id_field] = {"$in": _expand_object_ids([project_id])}
+        elif allowed_projects and project_field:
+            q[project_field] = {"$in": _expand_object_ids(allowed_projects)}
+        return q
+
+    if "orgadmin" in roles or "orguser" in roles:
+        org_id_val = getattr(current_user, "organization_id", None)
+        if not org_id_val:
+            return _deny_all()
+        if organization_id is not None and str(organization_id) != str(org_id_val):
+            return _deny_all()
+        q = {org_field: str(org_id_val)}
+        # If user has explicit project assignments, optionally restrict
+        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
+        if project_id is not None:
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids([project_id])}
+            else:
+                q[id_field] = {"$in": _expand_object_ids([project_id])}
+        elif proj_ids and project_field:
+            q[project_field] = {"$in": _expand_object_ids(proj_ids)}
+        return q
+
+    if "projectadmin" in roles or "projectuser" in roles:
+        org_id_val = getattr(current_user, "organization_id", None)
+        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
+        if not proj_ids:
+            return _deny_all()
+        if organization_id is not None and (org_id_val is None or str(organization_id) != str(org_id_val)):
+            return _deny_all()
+        q: Dict[str, Any] = {}
+        if org_id_val is not None:
+            q[org_field] = str(org_id_val)
+        if project_id is not None:
+            if str(project_id) not in proj_ids:
+                return _deny_all()
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids([project_id])}
+            else:
+                q[id_field] = {"$in": _expand_object_ids([project_id])}
+        else:
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids(proj_ids)}
+            else:
+                q[id_field] = {"$in": _expand_object_ids(proj_ids)}
+        return q
+
+    return {"_id": {"$in": []}}
+
+
+def validate_role_assignment(actor: CurrentUser, target_roles: List[str]) -> None:
+    """
+    Prevent privilege escalation on role assignments.
+    Rules:
+      - superadmin: may assign any role.
+      - orgadmin: may not assign 'superadmin' or 'orgadmin'.
+      - orguser: may not assign roles.
+      - projectadmin: may not assign 'superadmin', 'orgadmin', or 'projectadmin'.
+      - projectuser: may not assign roles.
+      - others: deny.
+    Raises HTTPException 403 on violations.
+    """
+    actor_roles = set(_normalize_roles_list(actor.roles or []))
+    targets = set(_normalize_roles_list(target_roles or []))
+
+    if "superadmin" in actor_roles:
+        return
+
+    if not actor_roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign roles")
+
+    if "orgadmin" in actor_roles:
+        if {"superadmin"} & targets:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization-scoped roles cannot assign superadmin")
+        if {"orgadmin"} & targets:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign organization admin role")
+        return
+
+    if "orguser" in actor_roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign roles")
+
+    if "projectadmin" in actor_roles:
+        if {"superadmin", "orgadmin"} & targets:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project-scoped roles may not assign organization or system roles")
+        if {"projectadmin"} & targets:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign project admin role")
+        return
+
+    if "projectuser" in actor_roles:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign roles")
+
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to assign roles")
+
+
+class TokenData(BaseModel):
+    username: str | None = None

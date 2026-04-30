@@ -1,0 +1,19 @@
+# Core LangChain
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.0.10
+
+# AI/ML
+openai>=1.0.0
+tiktoken>=0.5.0
+
+# Vector Database
+qdrant-client>=1.6.0
+
+# Database
+pymongo>=4.5.0
+redis>=5.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.0.0

@@ -1,0 +1,110 @@
+@router.post("/email/resolve-recipients", response_model=List[EmailSuggestion])
+async def resolve_recipients(
+    payload: ResolveRecipientsRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Resolve recipients with flags include_representatives/include_parties and optional scope.
+    Falls back to same RBAC scoping behavior as GET /email/suggestions.
+    """
+    try:
+        # Roles and scope
+        roles = set(current_user.roles or [])
+        user_org_id = getattr(current_user, "organization_id", None)
+        user_projects = getattr(current_user, "projects", []) or []
+
+        effective_org_ids: Optional[list[str] | str] = payload.organization_id or None
+        effective_project_ids: Optional[list[str] | str] = payload.project_id or None
+
+        if "superadmin" not in roles:
+            if ("orgadmin" in roles or "orguser" in roles) and not effective_org_ids:
+                if user_org_id:
+                    effective_org_ids = str(user_org_id)
+            if ("projectadmin" in roles or "projectuser" in roles):
+                if not effective_project_ids and user_projects:
+                    effective_project_ids = [str(p) for p in user_projects if p]
+                if not effective_org_ids and user_org_id:
+                    effective_org_ids = str(user_org_id)
+
+        # Build filters
+        rep_filter: dict = {}
+        party_filter: dict = {}
+        if payload.query:
+            rep_filter["$or"] = [
+                {"name": {"$regex": payload.query, "$options": "i"}},
+                {"email": {"$regex": payload.query, "$options": "i"}},
+                {"organization": {"$regex": payload.query, "$options": "i"}},
+            ]
+            party_filter["$or"] = [
+                {"name": {"$regex": payload.query, "$options": "i"}},
+                {"contact_email": {"$regex": payload.query, "$options": "i"}},
+                {"contactEmail": {"$regex": payload.query, "$options": "i"}},
+            ]
+
+        if effective_org_ids:
+            cond = {"$or": [
+                {"organization_id": {"$in": effective_org_ids}} if isinstance(effective_org_ids, list) else {"organization_id": effective_org_ids},
+                {"organizationId": {"$in": effective_org_ids}} if isinstance(effective_org_ids, list) else {"organizationId": effective_org_ids},
+            ]}
+            rep_filter["$and"] = (rep_filter.get("$and") or []) + [cond]
+            party_filter["$and"] = (party_filter.get("$and") or []) + [cond]
+
+        if effective_project_ids:
+            rep_cond = {"$or": [
+                {"project_id": {"$in": effective_project_ids}} if isinstance(effective_project_ids, list) else {"project_id": effective_project_ids},
+                {"projectId": {"$in": effective_project_ids}} if isinstance(effective_project_ids, list) else {"projectId": effective_project_ids},
+            ]}
+            party_cond = {"$or": [
+                {"projects": {"$in": effective_project_ids}} if isinstance(effective_project_ids, list) else {"projects": {"$in": [effective_project_ids]}},
+                {"project_id": {"$in": effective_project_ids}} if isinstance(effective_project_ids, list) else {"project_id": effective_project_ids},
+                {"projectId": {"$in": effective_project_ids}} if isinstance(effective_project_ids, list) else {"projectId": effective_project_ids},
+            ]}
+            rep_filter["$and"] = (rep_filter.get("$and") or []) + [rep_cond]
+            party_filter["$and"] = (party_filter.get("$and") or []) + [party_cond]
+
+        suggestions: List[EmailSuggestion] = []
+        seen_emails = set()
+
+        if payload.include_representatives:
+            representatives = await db.representatives.find(
+                {**rep_filter, "email": {"$exists": True, "$ne": ""}}
+            ).limit(50).to_list(length=50)
+            for rep in representatives:
+                email = rep.get("email", "")
+                if not email or email in seen_emails:
+                    continue
+                seen_emails.add(email)
+                suggestions.append(EmailSuggestion(
+                    email=email,
+                    name=rep.get("name", "") or rep.get("designation", "") or "",
+                    organization=str(rep.get("organization") or rep.get("organization_id") or rep.get("organizationId") or "")
+                ))
+
+        if payload.include_parties:
+            parties = await db.parties.find(
+                {
+                    **party_filter,
+                    "$or": [
+                        {"contact_email": {"$exists": True, "$ne": ""}},
+                        {"contactEmail": {"$exists": True, "$ne": ""}},
+                    ],
+                }
+            ).limit(50).to_list(length=50)
+            for party in parties:
+                email = party.get("contact_email") or party.get("contactEmail") or ""
+                if not email or email in seen_emails:
+                    continue
+                seen_emails.add(email)
+                suggestions.append(EmailSuggestion(
+                    email=email,
+                    name=party.get("name", ""),
+                    organization=str(party.get("organization_id") or party.get("organizationId") or "")
+                ))
+
+        return suggestions[:50]
+    except Exception as e:
+        logger.error(f"Error resolving recipients: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to resolve recipients")
+
+async def download_file_from_s3(s3_url: str, local_path: str) -> bool:

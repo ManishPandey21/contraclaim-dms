@@ -1,0 +1,79 @@
+
+services:
+  # ========== MongoDB ==========
+  mongodb:
+    image: mongo:8.0
+    container_name: contraclaim_mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+
+  # ========== Qdrant Vector DB ==========
+  vectordb:
+    image: qdrant/qdrant:v1.10.1
+    container_name: contraclaim_qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ========== Graphiti Knowledge Graph ==========
+  graphiti:
+    build: ./graphiti   # cloned Graphiti repo
+    container_name: contraclaim_graphiti
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      - GRAPHITI_API_KEY=${GRAPHITI_API_KEY}
+      - GRAPHITI_WORKSPACE=${GRAPHITI_WORKSPACE}
+      - HOST=0.0.0.0
+      - PORT=8080
+    volumes:
+      - graphiti_data:/data
+
+  # ========== OCRmyPDF Service ==========
+  ocrmypdf:
+    image: jbarlow83/ocrmypdf   # official OCRmyPDF docker image
+    container_name: contraclaim_ocrmypdf
+    restart: always
+    entrypoint: ["tail", "-f", "/dev/null"] # keep container alive
+    volumes:
+      - ./uploads:/uploads
+
+  # ========== EasyOCR Service ==========
+  easyocr:
+    build: ./easyocr_service
+    container_name: contraclaim_easyocr
+    restart: always
+    ports:
+      - "7001:7001"
+
+  # ========== FastAPI Backend ==========
+  backend:
+    build: ./backend
+    container_name: contraclaim_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - QDRANT_URL=http://vectordb:6333
+      - GRAPHITI_API_URL=http://graphiti:8080
+      - GRAPHITI_API_KEY=${GRAPHITI_API_KEY}
+      - GRAPHITI_WORKSPACE=${GRAPHITI_WORKSPACE}
+      - EASYOCR_URL=http://easyocr:7001/ocr
+    depends_on:
+      - mongodb
+      - vectordb
+      - graphiti
+      - ocrmypdf
+      - easyocr
+
+volumes:
+  mongodb_data:
+  qdrant_data:
+  graphiti_data:

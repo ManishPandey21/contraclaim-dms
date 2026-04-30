@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ContraClaim-DMS</title>
+    <meta name="description" content="ContraClaim DMS Project" />
+    <meta name="author" content="ContraClaim" />
+    <meta property="og:image" content="/og-image.png" />
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <!-- IMPORTANT: DO NOT REMOVE THIS SCRIPT TAG OR THIS VERY COMMENT! -->
+    <script src="https://cdn.gpteng.co/gptengineer.js" type="module"></script>
+    <script>
+      (function () {
+        try {
+          var host = window.location.hostname;
+          // Runtime override for API base URL when served from production web host
+          if (!window.__API_BASE_URL__) {
+            if (host === "web.contraclaim.com") {
+              window.__API_BASE_URL__ = "https://api.contraclaim.com/api";
+            }
+          }
+        } catch (e) {
+          // no-op
+        }
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

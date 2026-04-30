@@ -1,0 +1,80 @@
+                letterNo: letterNoValue ? String(letterNoValue) : undefined,
+                date: dateValue ? String(dateValue) : undefined,
+                linkedId: ref.documentId ?? ref.id ?? null,
+              });
+            }
+          }
+        } else if (typeof d.reference === "string") {
+          // Existing logic for bullet string references
+          parseBulletString(d.reference).forEach((raw) =>
+            refsFromDoc.push({ raw })
+          );
+        }
+
+        const l: Letter = {
+          id: String(letterId),
+          letterNo: d.letterNo ?? d.letter_no ?? undefined,
+          date: d.date,
+          subject: d.subject,
+          from_: d.from_ ?? d.from ?? undefined,
+          to: d.to,
+          summary: d.summary,
+          keywords: d.keywords ?? d.Key_words ?? [],
+          clauses: d.contractual_clauses ?? d.clauses ?? [],
+          referencesParsed: refsFromDoc, //.map((raw) => ({ raw })),
+          referencesLinked: [],
+          thread: {
+            threadId: d.chain_id || d.chain_head_id || "",
+            ancestors: [],
+            descendants: [],
+            lastInThread: true,
+          },
+        };
+        setLetter(l);
+      } catch (e: any) {
+        setError(e.message);
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [letterId]);
+
+  useEffect(() => {
+    if (!letterId) return;
+    (async () => {
+      try {
+        const token = localStorage.getItem("accessToken") || "";
+        const headers: Record<string, string> = token
+          ? { Authorization: `Bearer ${token}` }
+          : {};
+        const res = await fetch(
+          joinApiUrl(`/documents/${letterId}/references`),
+          { headers }
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && ("parsed" in data || "linked" in data)) {
+          const parsed: RefParsed[] = (data.parsed || []).map((x: any) => {
+            if (typeof x === "string") {
+              return { raw: x } as RefParsed;
+            }
+            if (x && typeof x === "object") {
+              const raw =
+                x.letter_no ??
+                x.letterNo ??
+                x.raw ??
+                x.documentId ??
+                x.id ??
+                "";
+              return {
+                raw: String(raw),
+                letterNo: x.letter_no ?? x.letterNo,
+                date: x.date,
+                linkedId: x.documentId ?? x.id ?? null,
+              } as RefParsed;
+            }
+            return { raw: String(x ?? "") } as RefParsed;
+          });
+          const linked = (data.linked || []).map((x: any) => ({
+            id: x.id ?? x.documentId,

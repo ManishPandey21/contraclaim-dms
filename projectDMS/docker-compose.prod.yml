@@ -1,0 +1,54 @@
+
+services:
+  backend:
+    extends:
+      file: docker-compose.yml
+      service: backend
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+
+  client:
+    extends:
+      file: docker-compose.yml
+      service: client
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  graphiti:
+    extends:
+      file: docker-compose.yml
+      service: graphiti
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  langgraph:
+    extends:
+      file: docker-compose.yml
+      service: langgraph
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+
+  gateway:
+    extends:
+      file: docker-compose.yml
+      service: gateway
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m

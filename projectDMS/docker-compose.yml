@@ -1,0 +1,241 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file:
+      - ./backend/.env
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_started
+    networks:
+      - service-net
+      - data-net
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging: *default-logging
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    env_file:
+      - ./client/.env.development
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - edge-net
+      - service-net
+    ports:
+      - "3000:5173"
+    logging: *default-logging
+
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - data-net
+    healthcheck:
+      test: ["CMD-SHELL", 'mongosh --quiet --eval "db.adminCommand(''ping'')"']
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY}"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__LOG_LEVEL: "INFO"
+      QDRANT__STORAGE__SNAPSHOT_PATH: "/qdrant/snapshots"
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    secrets:
+      - qdrant_api_key
+    networks:
+      - data-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/localhost/6333'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  falkordb:
+    image: falkordb/falkordb:latest
+    restart: unless-stopped
+    command:
+      - "--save"
+      - "900"
+      - "1"
+      - "300"
+      - "10"
+      - "--appendonly"
+      - "yes"
+      - "--maxmemory"
+      - "2gb"
+      - "--maxmemory-policy"
+      - "volatile-lru"
+    ports:
+      - "6380:6379"
+    volumes:
+      - falkordb_data:/data
+    networks:
+      - data-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h localhost ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD:
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - service-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h localhost -a $REDIS_PASSWORD ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  graphiti:
+    build:
+      context: ./services/graphiti
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      GRAPHITI_DB_URL: "redis://falkordb:6379"
+      GRAPHITI_QDRANT_URL: "http://qdrant:6333"
+      GRAPHITI_QDRANT_API_KEY: "${QDRANT_API_KEY}"
+      GRAPHITI_OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging: *default-logging
+
+  langgraph:
+    build:
+      context: ./services/langgraph
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LANGGRAPH_REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379/0"
+      LANGGRAPH_GRAPHITI_URL: "http://graphiti:8080"
+      LANGGRAPH_QDRANT_URL: "http://qdrant:6333"
+      LANGGRAPH_BACKEND_URL: "http://backend:8000"
+      LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN}"
+      LANGGRAPH_LOG_DIR: "/app/logs"
+    depends_on:
+      redis:
+        condition: service_healthy
+      graphiti:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+    networks:
+      - service-net
+      - data-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 50s
+    logging: *default-logging
+
+  gateway:
+    image: httpd:2.4
+    restart: unless-stopped
+    depends_on:
+      client:
+        condition: service_started
+      backend:
+        condition: service_started
+      langgraph:
+        condition: service_started
+    ports:
+      - "80:80"
+    volumes:
+      - ./config/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+    networks:
+      - edge-net
+      - service-net
+    logging: *default-logging
+
+volumes:
+  mongo_data:
+  qdrant_data:
+  qdrant_snapshots:
+  falkordb_data:
+  redis_data:
+
+networks:
+  data-net:
+    driver: bridge
+  service-net:
+    driver: bridge
+  edge-net:
+    driver: bridge
+
+secrets:
+  qdrant_api_key:
+    file: ./config/secrets/qdrant_api_key

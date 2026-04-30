@@ -1,0 +1,64 @@
+services:
+  qdrant:
+    extends:
+      file: docker-compose.yml
+      service: qdrant
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 1g
+
+  falkordb:
+    extends:
+      file: docker-compose.yml
+      service: falkordb
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+        reservations:
+          cpus: "0.25"
+          memory: 512m
+
+  redis:
+    extends:
+      file: docker-compose.yml
+      service: redis
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  graphiti:
+    extends:
+      file: docker-compose.yml
+      service: graphiti
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+
+  langgraph:
+    extends:
+      file: docker-compose.yml
+      service: langgraph
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 1g

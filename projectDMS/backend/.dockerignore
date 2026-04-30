@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+uploads/
+.env
+.venv/
+venv/
+node_modules/
+*.log
+rbac_backend/uploads/
