@@ -1,5 +1,6 @@
 ﻿import { useCallback, useState } from "react";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import { LanggraphDraftResponse } from "@/types/langgraph";
 
 export interface LanggraphDraftPayload {
@@ -26,13 +27,9 @@ export const useLanggraphDraft = () => {
       setLoading(true);
       setError(null);
       try {
-        const token = localStorage.getItem("accessToken") || "";
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (token) {
-          headers.Authorization = `Bearer ${token}`;
-        }
 
         const body = {
           letter_id: payload.letterId,
@@ -52,7 +49,7 @@ export const useLanggraphDraft = () => {
           ? "/ai-assistant/langgraph/background"
           : "/ai-assistant/langgraph/draft";
 
-        const response = await fetch(joinApiUrl(endpoint), {
+        const response = await authenticatedFetch(joinApiUrl(endpoint), {
           method: "POST",
           headers,
           body: JSON.stringify(body),

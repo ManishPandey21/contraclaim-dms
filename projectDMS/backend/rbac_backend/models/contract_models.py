@@ -52,6 +52,9 @@ class ChunkUploadResponse(BaseModel):
     received: bool = False
     merged: bool = False
     scheduled: bool = False
+    received_chunks: List[int] = Field(default_factory=list)
+    missing_chunks: List[int] = Field(default_factory=list)
+    upload_complete: bool = False
 
 
 class StatusResponse(BaseModel):
@@ -71,6 +74,8 @@ class StatusResponse(BaseModel):
     createdAt: Optional[datetime] = None
     queue_job_id: Optional[str] = None
     progress: Optional[int] = None
+    processing_stage: Optional[str] = None
+    stage_label: Optional[str] = None
 
 
 class ContractUploadRecord(BaseModel):
@@ -163,6 +168,14 @@ class ContractSearchRequest(BaseModel):
     top_docs: Optional[int] = Field(default=None, ge=1, le=20)
     chunks_per_doc: Optional[int] = Field(default=None, ge=1, le=20)
     summarize: bool = False
+    exact_phrase: bool = False
+    clause_number: Optional[str] = None
+    clause_title: Optional[str] = None
+    section_heading: Optional[str] = None
+    clause_tags: List[str] = Field(default_factory=list)
+    category_terms: List[str] = Field(default_factory=list)
+    page_from: Optional[int] = Field(default=None, ge=1)
+    page_to: Optional[int] = Field(default=None, ge=1)
 
 
 class ContractSearchResponse(BaseModel):

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -87,13 +88,9 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
     const fetchLinkedDocuments = async () => {
       if (!documentId) return;
       try {
-        const response = await fetch(
+        const response = await authenticatedFetch(
           joinApiUrl(`/documents/${documentId}/linked`),
-          {
-            headers: {
-              Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-            },
-          }
+          {}
         );
         if (!response.ok) {
           const err = await readJsonSafe(response);
@@ -104,15 +101,9 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
         const formatted: DocumentReference[] = await Promise.all(
           (refs || []).map(async (ref: any) => {
             try {
-              const docResponse = await fetch(
+              const docResponse = await authenticatedFetch(
                 joinApiUrl(`/documents/${ref.documentId}`),
-                {
-                  headers: {
-                    Authorization: `Bearer ${localStorage.getItem(
-                      "accessToken"
-                    )}`,
-                  },
-                }
+                {}
               );
               if (!docResponse.ok) throw new Error("doc fetch failed");
               const docData = await docResponse.json();
@@ -161,17 +152,13 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
     setIsSearching(true);
     try {
       const projectFilter = projectId ? `&project_id=${projectId}` : "";
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(
           `/stakeholders/documents/search?search=${encodeURIComponent(
             searchQuery
           )}&limit=20${projectFilter}`
         ),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!response.ok) throw new Error("Failed to search documents");
       const data = await response.json();
@@ -222,13 +209,9 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
     setIsSearching(true);
     try {
       const projectFilter = projectId ? `&project_id=${projectId}` : "";
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(`/documents?limit=20${projectFilter}`),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!response.ok) throw new Error("Failed to fetch documents");
       const data = await response.json();
@@ -266,13 +249,12 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
       return;
     }
     try {
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(`/documents/${documentId}/references`),
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
           },
           body: JSON.stringify({
             referenced_document_id: referencedDocumentId,
@@ -286,13 +268,9 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
       }
 
       // Fetch details for the newly linked doc
-      const docResponse = await fetch(
+      const docResponse = await authenticatedFetch(
         joinApiUrl(`/documents/${referencedDocumentId}`),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!docResponse.ok) {
         const err = await readJsonSafe(docResponse);
@@ -328,13 +306,10 @@ const ReferencesPanel: React.FC<ReferencesPanelProps> = ({
   // Remove a reference
   const handleRemoveReference = async (referenceId: string) => {
     try {
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(`/documents/${documentId}/references/${referenceId}`),
         {
           method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
         }
       );
       if (!response.ok) {

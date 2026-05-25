@@ -37,9 +37,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { LocalDocument } from "@/pages/DocumentViewerPage";
+import type { LocalDocument } from "@/pages/DocumentViewerPage";
 import { emailService, EmailSuggestion } from "@/services/email-service";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 
 interface DocumentHeaderProps {
   document: LocalDocument | null;
@@ -228,18 +229,10 @@ const DocumentHeader: React.FC<DocumentHeaderProps> = ({
         return;
       }
 
-      const token = localStorage.getItem("accessToken");
-      if (!token) {
-        toast.error("You are not authenticated. Please login again.");
-        return;
-      }
-
       // Always prefer the authenticated backend endpoint; it streams local files
       // and redirects to presigned URLs when needed.
       const downloadApi = joinApiUrl(`/documents/${id}/download`);
-      const response = await fetch(downloadApi, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const response = await authenticatedFetch(downloadApi);
 
       if (!response.ok) {
         throw new Error(
@@ -321,7 +314,10 @@ const DocumentHeader: React.FC<DocumentHeaderProps> = ({
           setLoading(false);
         }
       },
-      [recipientSource, document?.organization_id, document?.project_id]
+      // RecipientEditor is declared inside DocumentHeader, so the hook linter
+      // cannot classify parent-scope values correctly here.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [document, recipientSource]
     );
 
     return (

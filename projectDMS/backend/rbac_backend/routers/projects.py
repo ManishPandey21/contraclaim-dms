@@ -1,15 +1,22 @@
+from datetime import datetime
 from typing import List, Dict, Any
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pymongo import ReturnDocument
 
 from ..core.security import require_permission, get_current_user, build_scope_query
 from ..core.database import get_db
 from ..models.project import Project
 from ..models.representative import Representative
+from ..models.notification import (
+    ProjectNotificationSubscriptionResponse,
+    ProjectNotificationSubscriptionUpdate,
+)
 from ..services.project_service import ProjectService
 from ..services.permission_service import PermissionService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
 
 router = APIRouter()
 permission_service = PermissionService()
@@ -32,7 +39,25 @@ async def _ensure_project_access(
     current_user,
     project_id: str,
     permission: str,
+    db=None,
 ):
+    canonical_permission = (
+        "dms.dashboard.view" if permission == "projects:read" else "dms.project.manage"
+    )
+    organization_id = getattr(current_user, "organization_id", None)
+    if db is not None:
+        project = await _find_by_id(db.projects, project_id)
+        if project:
+            organization_id = str(project.get("organization_id") or organization_id or "")
+    await PolicyService(db).authorize(
+        current_user,
+        canonical_permission,
+        resource_type="project",
+        resource_id=project_id,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+
     allowed = await permission_service.check_resource_access(
         getattr(current_user, "id", None),
         permission,
@@ -46,6 +71,12 @@ async def _ensure_project_access(
         )
 
 
+def _project_subscription_response(doc: Dict[str, Any]) -> ProjectNotificationSubscriptionResponse:
+    payload = dict(doc)
+    payload.pop("_id", None)
+    return ProjectNotificationSubscriptionResponse(**payload)
+
+
 @router.post("/projects", response_model=Project)
 async def create_project(
     project: Project,
@@ -55,6 +86,12 @@ async def create_project(
 ):
     # Only superadmin may create projects
     await AuthorizationService().require_role(current_user, "superadmin")
+    await PolicyService(db).authorize(
+        current_user,
+        "dms.project.manage",
+        resource_type="project",
+        organization_id=project.organization_id,
+    )
     organization = await _find_by_id(db.organizations, project.organization_id)
     if not organization:
         raise HTTPException(
@@ -166,11 +203,88 @@ async def read_project(
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:read")),
 ):
-    await _ensure_project_access(current_user, project_id, "projects:read")
+    await _ensure_project_access(current_user, project_id, "projects:read", db)
     project = await _find_by_id(db.projects, project_id)
     if not project:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
     return Project(**project)
+
+
+@router.get(
+    "/projects/{project_id}/notification-settings",
+    response_model=ProjectNotificationSubscriptionResponse,
+)
+async def read_project_notification_settings(
+    project_id: str,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    await _ensure_project_access(current_user, project_id, "projects:read", db)
+    project = await _find_by_id(db.projects, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    existing = await db.project_notification_subscriptions.find_one(
+        {"project_id": project_id, "user_id": current_user.id}
+    )
+    if existing:
+        return _project_subscription_response(existing)
+
+    now = datetime.utcnow()
+    doc = {
+        "project_id": project_id,
+        "organization_id": str(project.get("organization_id")) if project.get("organization_id") else current_user.organization_id,
+        "user_id": current_user.id,
+        "subscribed": True,
+        "event_settings": {},
+        "role_default_source": None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.project_notification_subscriptions.update_one(
+        {"project_id": project_id, "user_id": current_user.id},
+        {"$setOnInsert": doc},
+        upsert=True,
+    )
+    return _project_subscription_response(doc)
+
+
+@router.patch(
+    "/projects/{project_id}/notification-settings",
+    response_model=ProjectNotificationSubscriptionResponse,
+)
+async def update_project_notification_settings(
+    project_id: str,
+    payload: ProjectNotificationSubscriptionUpdate,
+    db=Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    await _ensure_project_access(current_user, project_id, "projects:read", db)
+    project = await _find_by_id(db.projects, project_id)
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    now = datetime.utcnow()
+    update_doc = payload.model_dump(exclude_unset=True, exclude_none=True)
+    update_doc["updated_at"] = now
+    await db.project_notification_subscriptions.update_one(
+        {"project_id": project_id, "user_id": current_user.id},
+        {
+            "$set": update_doc,
+            "$setOnInsert": {
+                "project_id": project_id,
+                "organization_id": str(project.get("organization_id")) if project.get("organization_id") else current_user.organization_id,
+                "user_id": current_user.id,
+                "role_default_source": None,
+                "created_at": now,
+            },
+        },
+        upsert=True,
+    )
+    saved = await db.project_notification_subscriptions.find_one(
+        {"project_id": project_id, "user_id": current_user.id}
+    )
+    return _project_subscription_response(saved or {})
 
 
 @router.put("/projects/{project_id}", response_model=Project)
@@ -181,7 +295,7 @@ async def update_project(
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:update")),
 ):
-    await _ensure_project_access(current_user, project_id, "projects:update")
+    await _ensure_project_access(current_user, project_id, "projects:update", db)
     if project_update.organization_id:
         organization = await _find_by_id(db.organizations, project_update.organization_id)
         if not organization:
@@ -211,11 +325,13 @@ async def update_project(
 @router.delete("/projects/{project_id}", response_model=dict)
 async def delete_project(
     project_id: str,
+    request: Request,
     db = Depends(get_db),
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:delete")),
 ):
-    await _ensure_project_access(current_user, project_id, "projects:delete")
+    await require_step_up(request, current_user, action="projects.delete")
+    await _ensure_project_access(current_user, project_id, "projects:delete", db)
     existing = await _find_by_id(db.projects, project_id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -232,7 +348,7 @@ async def get_project_representatives(
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:read")),
 ):
-    await _ensure_project_access(current_user, project_id, "projects:read")
+    await _ensure_project_access(current_user, project_id, "projects:read", db)
     proj = await _find_by_id(db.projects, project_id)
     if not proj:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
@@ -242,15 +358,18 @@ async def get_project_representatives(
 @router.post("/projects/{project_id}/deactivate", response_model=dict)
 async def deactivate_project(
     project_id: str,
+    request: Request,
     db = Depends(get_db),
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:delete")),
 ):
+    await require_step_up(request, current_user, action="projects.deactivate")
     # Strict superadmin-only check
     roles = getattr(current_user, "roles", []) or []
     if "superadmin" not in [str(r).lower() for r in roles]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only superadmin can deactivate projects")
     try:
+        await _ensure_project_access(current_user, project_id, "projects:delete", db)
         service = ProjectService()
         ok = await service.delete_project(project_id, current_user)
         if not ok:

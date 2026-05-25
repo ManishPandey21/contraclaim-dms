@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..core.security import get_current_user, CurrentUser, authorize_scope
 from ..models.storage_settings import (
@@ -12,6 +12,7 @@ from ..models.storage_settings import (
     ResolvedStorageSettings,
 )
 from ..services.storage_settings_service import StorageSettingsService
+from ..services.step_up_service import require_step_up
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +66,11 @@ async def get_org_storage_settings(
 async def update_org_storage_settings(
     org_id: str,
     payload: OrganizationStorageSettings,
+    request: Request,
     service: StorageSettingsService = Depends(get_storage_settings_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    await require_step_up(request, current_user, action="storage.settings.manage")
     _ensure_role(current_user, org_id)
     _validate_short_name(payload.org_short_name)
     saved = await service.upsert_org_settings(org_id, payload)
@@ -88,10 +91,12 @@ async def get_org_storage_settings_alias(
 async def update_org_storage_settings_alias(
     org_id: str,
     payload: OrganizationStorageSettings,
+    request: Request,
     service: StorageSettingsService = Depends(get_storage_settings_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await update_org_storage_settings(org_id, payload, service, current_user)
+    await require_step_up(request, current_user, action="storage.settings.manage")
+    return await update_org_storage_settings(org_id, payload, request, service, current_user)
 
 
 @router.get("/settings/storage/project/{project_id}", response_model=ProjectStorageSettings)
@@ -116,9 +121,11 @@ async def get_project_storage_settings(
 async def update_project_storage_settings(
     project_id: str,
     payload: ProjectStorageSettings,
+    request: Request,
     service: StorageSettingsService = Depends(get_storage_settings_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
+    await require_step_up(request, current_user, action="storage.settings.manage")
     org_id = payload.org_id or current_user.organization_id
     if not org_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="org_id is required")
@@ -154,10 +161,12 @@ async def get_project_storage_settings_alias(
 async def update_project_storage_settings_alias(
     project_id: str,
     payload: ProjectStorageSettings,
+    request: Request,
     service: StorageSettingsService = Depends(get_storage_settings_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    return await update_project_storage_settings(project_id, payload, service, current_user)
+    await require_step_up(request, current_user, action="storage.settings.manage")
+    return await update_project_storage_settings(project_id, payload, request, service, current_user)
 
 
 @router.get("/storage-settings/resolve", response_model=ResolvedStorageSettings)

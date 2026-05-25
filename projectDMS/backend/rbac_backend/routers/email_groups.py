@@ -11,6 +11,7 @@ from datetime import datetime
 from ..core.security import get_current_user, CurrentUser
 from ..services.email_group_service import EmailGroupService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..models.email_group import (
     EmailGroup, EmailGroupCreate, EmailGroupUpdate, EmailGroupListResponse
 )
@@ -21,6 +22,34 @@ from ..utils.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _fallback_scope(current_user: CurrentUser) -> tuple[Optional[str], Optional[str]]:
+    projects = getattr(current_user, "projects", None) or []
+    return getattr(current_user, "organization_id", None), projects[0] if projects else None
+
+
+def _group_scope(group: EmailGroup) -> tuple[Optional[str], Optional[str]]:
+    return getattr(group, "organization_id", None), getattr(group, "project_id", None)
+
+
+async def _authorize_email_group_policy(
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    resource_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    fallback_org_id, fallback_project_id = _fallback_scope(current_user)
+    await PolicyService().authorize(
+        current_user,
+        permission,
+        resource_type="email_group",
+        resource_id=resource_id,
+        organization_id=organization_id or fallback_org_id,
+        project_id=project_id or fallback_project_id,
+    )
 
 
 class EmailGroupController:
@@ -48,8 +77,15 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
-            # Authorization check
+
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.view",
+                organization_id=filters.get("organization_id"),
+                project_id=filters.get("project_id"),
+            )
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
             
             # Build authorized query based on user scope
@@ -83,8 +119,15 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
-            # Authorization check
+
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.edit_metadata",
+                organization_id=group_data.organization_id,
+                project_id=group_data.project_id,
+            )
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:create")
             
             # Validate and sanitize input
@@ -138,8 +181,8 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
-            # Authorization check
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
             
             # Validate group ID
@@ -149,6 +192,14 @@ class EmailGroupController:
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
                 raise EmailGroupError("Email group not found", status.HTTP_404_NOT_FOUND)
+            group_org_id, group_project_id = _group_scope(group)
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.view",
+                resource_id=validated_group_id,
+                organization_id=group_org_id,
+                project_id=group_project_id,
+            )
             
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
@@ -173,8 +224,8 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
-            # Authorization check
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:update")
             
             # Validate group ID
@@ -184,6 +235,14 @@ class EmailGroupController:
             existing_group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not existing_group:
                 raise EmailGroupError("Email group not found", status.HTTP_404_NOT_FOUND)
+            group_org_id, group_project_id = _group_scope(existing_group)
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.edit_metadata",
+                resource_id=validated_group_id,
+                organization_id=group_org_id,
+                project_id=group_project_id,
+            )
             
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
@@ -235,8 +294,8 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
-            # Authorization check
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:delete")
             
             # Validate group ID
@@ -246,6 +305,14 @@ class EmailGroupController:
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
                 raise EmailGroupError("Email group not found", status.HTTP_404_NOT_FOUND)
+            group_org_id, group_project_id = _group_scope(group)
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.edit_metadata",
+                resource_id=validated_group_id,
+                organization_id=group_org_id,
+                project_id=group_project_id,
+            )
             
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(
@@ -278,8 +345,8 @@ class EmailGroupController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
-            # Authorization check
+
+            # Legacy authorization check kept during migration for compatibility.
             await self.auth_service.require_permission(current_user, "email_groups:read")
             
             # Validate group ID
@@ -289,6 +356,14 @@ class EmailGroupController:
             group = await self.email_group_service.get_group_by_id(validated_group_id)
             if not group:
                 raise EmailGroupError("Email group not found", status.HTTP_404_NOT_FOUND)
+            group_org_id, group_project_id = _group_scope(group)
+            await _authorize_email_group_policy(
+                current_user,
+                "dms.document.view",
+                resource_id=validated_group_id,
+                organization_id=group_org_id,
+                project_id=group_project_id,
+            )
             
             # Check authorization for this specific group
             await self.auth_service.check_email_group_access(

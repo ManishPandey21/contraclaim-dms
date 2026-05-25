@@ -1,333 +1,589 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import logo from "@/assets/logo.png";
+import React, { FormEvent, useState } from "react";
+import { Link } from "react-router-dom";
 import {
-  FileText,
-  Building2,
-  Mail,
-  FileSignature,
-  Users,
-  CheckSquare,
-  BarChart3,
-  Shield,
-  Cloud,
   ArrowRight,
-  Upload,
-  Search,
-  CheckCircle,
-  Sparkles,
-  Lock,
-  Zap,
-  Globe,
-} from 'lucide-react';
+  BarChart3,
+  Bell,
+  Building2,
+  CheckCircle2,
+  FileSearch,
+  FileText,
+  FolderTree,
+  LockKeyhole,
+  MailCheck,
+  MessageSquareText,
+  ShieldCheck,
+  UploadCloud,
+  Users,
+  Scale,
+  Clock3,
+  FileSignature,
+  CalendarDays,
+  ShieldAlert
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { publicApi } from "@/services/http";
+
+const features = [
+  {
+    icon: MailCheck,
+    title: "Correspondence & Claim Control",
+    description:
+      "Track and interconnect letters, contractual notifications, and variation orders. Prevent missed reply timelines or time-barred Clause 20.1 exposure.",
+  },
+  {
+    icon: FileSignature,
+    title: "Expert-Assisted Drafting Desk",
+    description:
+      "Access specialized contract engineering and claim advisory. Seamlessly request technically sound letters and notices drawn directly from your live project history.",
+  },
+  {
+    icon: MessageSquareText,
+    title: "Contract Intelligence Q&A",
+    description:
+      "Upload project contracts, execute cross-package clause searches, and run context-aware Q&A queries against complex concession agreements.",
+  },
+  {
+    icon: FolderTree,
+    title: "Project-Wide Chronology Logs",
+    description:
+      "Maintain a tamper-proof, interconnected history of variations, delay events, and engineer instructions across individual contract packages.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Enterprise RBAC Protection",
+    description:
+      "Safeguard critical evidence. Enforce rigorous, role-based access control, project-level data scoping, and unalterable document download audit trails.",
+  },
+  {
+    icon: BarChart3,
+    title: "Risk & Claims Dashboards",
+    description:
+      "Gain full executive visibility over pending responses, active dispute balances, EOT milestones, and organizational project metrics.",
+  },
+  {
+    icon: Users,
+    title: "Stakeholder Matrix Mapping",
+    description:
+      "Manage critical project parties, independent engineers, PMC groups, and specialized email distribution groups inside a secure ecosystem.",
+  },
+  {
+    icon: Bell,
+    title: "Active Timeline Notifications",
+    description:
+      "Keep commercial and project management teams aligned with real-time tracking of input requests, draft review stages, and urgent submission windows.",
+  },
+];
+
+const commercialLines = [
+  {
+    title: "ContraClaim DMS Platform",
+    badge: "SaaS Line",
+    description: "Designed for infrastructure teams managing internal contract resources who require a purpose-built record engine.",
+    features: [
+      "Project-centric monthly/annual flat subscriptions",
+      "Advanced correspondence linking & relational metadata",
+      "High-volume OCR & advanced semantic search filters",
+      "Multi-project dashboard & custom analytics workflows"
+    ],
+    cta: "Request Platform Quote",
+    href: "#contact"
+  },
+  {
+    title: "Expert Drafting + Platform Bundle",
+    badge: "Premium Line",
+    description: "The complete outsourced contract correspondence solution, featuring specialized engineering advisory backed by our platform.",
+    features: [
+      "Dedicated contract engineering advisory retainers",
+      "Technically sound contractual replies, notices, & EOT logs",
+      "Complementary ContraClaim DMS access included during active engagement",
+      "Seamless transition to read-only archive paths post-project"
+    ],
+    cta: "Speak with a Contract Expert",
+    href: "#contact",
+    premium: true
+  }
+];
+
+const benefits = [
+  "Protects project bottom-lines against liquidated damages by keeping contractual timelines strictly enforced.",
+  "Eradicates weak, contradictory, or legally compromised outbound letters through record-backed engineering reviews.",
+  "Replaces fragmented data silos across scattered personal emails, WhatsApp text records, and broken Excel trackers.",
+  "Preserves audit-grade chronological evidence for Extension of Time (EOT) applications and arbitration panels.",
+];
+
+const steps = [
+  {
+    title: "Initialize the Structural Workspace",
+    description:
+      "Map your organizations, contract packages, stakeholder groups, and custom role-based permissions before data onboarding.",
+  },
+  {
+    title: "Ingest & Index Project Records",
+    description:
+      "Onboard current or legacy correspondence streams. Enrich documents with relational metadata, custom tags, and folder structures.",
+  },
+  {
+    title: "Control, Draft, & Defend Claims",
+    description:
+      "Leverage workflow metrics, context-aware AI search, and expert drafting desks to issue responses and secure variations.",
+  },
+];
+
+type ContactStatus =
+  | { type: "idle"; message: "" }
+  | { type: "success"; message: string }
+  | { type: "error"; message: string };
 
 const LandingPage = () => {
-  const features = [
-    {
-      icon: <FileText className="h-10 w-10" />,
-      title: "Document Management",
-      description: "Upload, organize, and view documents with powerful search capabilities. Tag documents with metadata for easy retrieval and maintain complete version history.",
-      color: "from-blue-500 to-cyan-500"
-    },
-    {
-      icon: <Building2 className="h-10 w-10" />,
-      title: "Organization & Project Management",
-      description: "Multi-tenant architecture supporting multiple organizations and projects. Create hierarchical structures with custom short names and dedicated storage paths.",
-      color: "from-purple-500 to-pink-500"
-    },
-    {
-      icon: <Mail className="h-10 w-10" />,
-      title: "Letter Workflow",
-      description: "End-to-end letter processing with strategic planning, drafting, review, and approval stages. Track pendency and manage correspondence efficiently.",
-      color: "from-orange-500 to-red-500"
-    },
-    {
-      icon: <FileSignature className="h-10 w-10" />,
-      title: "Contract Management",
-      description: "Upload contracts and search through clauses with AI-powered analysis. Extract key terms, dates, and obligations automatically for better compliance.",
-      color: "from-green-500 to-emerald-500"
-    },
-    {
-      icon: <Users className="h-10 w-10" />,
-      title: "Stakeholder Management",
-      description: "Track and manage all parties, representatives, and their concerns effectively. Maintain comprehensive records of all stakeholder interactions and communications.",
-      color: "from-indigo-500 to-violet-500"
-    },
-    {
-      icon: <CheckSquare className="h-10 w-10" />,
-      title: "Task Allocation",
-      description: "Assign and track tasks across teams with priority management and deadlines. Get notifications for overdue items and monitor team productivity.",
-      color: "from-teal-500 to-cyan-500"
-    },
-    {
-      icon: <BarChart3 className="h-10 w-10" />,
-      title: "Reports & Analytics",
-      description: "Comprehensive reporting with customizable filters and interactive data visualization. Export reports in multiple formats and schedule automated reports.",
-      color: "from-amber-500 to-orange-500"
-    },
-    {
-      icon: <Shield className="h-10 w-10" />,
-      title: "User Management & Permissions",
-      description: "Role-based access control with granular permissions for secure collaboration. Define custom roles and manage user access at organization, project, and document levels.",
-      color: "from-rose-500 to-pink-500"
-    },
-    {
-      icon: <Cloud className="h-10 w-10" />,
-      title: "Flexible Storage",
-      description: "Support for Local, Amazon S3, Azure Blob, and Google Cloud Storage providers. Configure storage at organization or project level with seamless integration.",
-      color: "from-sky-500 to-blue-500"
-    },
-  ];
+  const [contactStatus, setContactStatus] = useState<ContactStatus>({
+    type: "idle",
+    message: "",
+  });
+  const [submittingContact, setSubmittingContact] = useState(false);
 
-  const steps = [
-    {
-      icon: <Building2 className="h-12 w-12" />,
-      step: "01",
-      title: "Set Up Organization",
-      description: "Create your organization and configure projects with custom short names, storage paths, and team members."
-    },
-    {
-      icon: <Upload className="h-12 w-12" />,
-      step: "02",
-      title: "Upload Documents",
-      description: "Upload and organize documents into structured folders with rich metadata, tags, and custom attributes."
-    },
-    {
-      icon: <Search className="h-12 w-12" />,
-      step: "03",
-      title: "Search & Collaborate",
-      description: "Find documents instantly with powerful search and collaborate with your team through automated workflows."
-    },
-  ];
+  const handleContactSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmittingContact(true);
+    setContactStatus({ type: "idle", message: "" });
 
-  const highlights = [
-    {
-      icon: <Sparkles className="h-6 w-6" />,
-      title: "AI-Powered",
-      description: "Smart document analysis"
-    },
-    {
-      icon: <Lock className="h-6 w-6" />,
-      title: "Enterprise Security",
-      description: "256-bit encryption"
-    },
-    {
-      icon: <Zap className="h-6 w-6" />,
-      title: "Lightning Fast",
-      description: "Sub-second search"
-    },
-    {
-      icon: <Globe className="h-6 w-6" />,
-      title: "Multi-Cloud",
-      description: "Deploy anywhere"
-    },
-  ];
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const payload = {
+      name: String(data.get("name") || "").trim(),
+      email: String(data.get("email") || "").trim(),
+      organization: String(data.get("organization") || "").trim() || undefined,
+      phone: String(data.get("phone") || "").trim() || undefined,
+      message: String(data.get("message") || "").trim(),
+    };
+
+    try {
+      await publicApi.post("/contact", payload);
+      form.reset();
+      setContactStatus({
+        type: "success",
+        message: "Your inquiry has been successfully transmitted. A ContraClaim commercial specialist will connect with you shortly.",
+      });
+    } catch (error: unknown) {
+      const responseMessage =
+        typeof error === "object" &&
+        error !== null &&
+        "response" in error &&
+        typeof (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail === "string"
+          ? (error as { response: { data: { detail: string } } }).response.data.detail
+          : undefined;
+      const fallbackMessage = error instanceof Error ? error.message : undefined;
+      setContactStatus({
+        type: "error",
+        message:
+          responseMessage ||
+          fallbackMessage ||
+          "Unable to submit your request at this moment. Please reach out via phone or try again later.",
+      });
+    } finally {
+      setSubmittingContact(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-md border-b border-border">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <img src={logo} alt="ContraClaim Logo" className="h-10 w-auto" />
-          </div>
-          <nav className="hidden md:flex items-center gap-8">
-            <a href="#features" className="text-muted-foreground hover:text-foreground transition-colors font-medium">Features</a>
-            <a href="#how-it-works" className="text-muted-foreground hover:text-foreground transition-colors font-medium">How It Works</a>
-            <a href="#about" className="text-muted-foreground hover:text-foreground transition-colors font-medium">About</a>
-          </nav>
-          <Link to="/login">
-            <Button className="gap-2 shadow-lg hover:shadow-xl transition-shadow">
-              Login <ArrowRight className="h-4 w-4" />
-            </Button>
+    <div className="min-h-screen bg-white text-slate-800">
+      <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="container flex h-16 items-center justify-between gap-6">
+          <Link to="/" className="flex items-center gap-3" aria-label="ContraClaim Home">
+            <img src="/contraclaim2.png" alt="ContraClaim Platform" className="h-9 w-auto" />
           </Link>
+          <nav className="hidden items-center gap-6 text-sm font-semibold text-slate-600 md:flex">
+            <a href="#features" className="hover:text-blue-600 transition-colors">
+              Platform Capabilities
+            </a>
+            <a href="#solutions" className="hover:text-blue-600 transition-colors">
+              Commercial Lines
+            </a>
+            <a href="#benefits" className="hover:text-blue-600 transition-colors">
+              Risk Mitigation
+            </a>
+            <a href="#pilot" className="hover:text-blue-600 transition-colors">
+              90-Day Pilot
+            </a>
+          </nav>
+          <div className="flex items-center gap-4">
+            <Button asChild variant="ghost" className="hidden sm:inline-flex text-slate-600 font-semibold">
+              <Link to="/login">Sign In</Link>
+            </Button>
+            <Button asChild className="gap-2 bg-blue-600 hover:bg-blue-700">
+              <a href="#contact">
+                Schedule Consult <ArrowRight className="h-4 w-4" />
+              </a>
+            </Button>
+          </div>
         </div>
       </header>
 
-      {/* Hero Section */}
-      <section className="pt-32 pb-20 px-4 relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-primary/10 pointer-events-none" />
-        <div className="absolute top-20 left-10 w-72 h-72 bg-primary/10 rounded-full blur-3xl pointer-events-none" />
-        <div className="absolute bottom-10 right-10 w-96 h-96 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
-        
-        <div className="container mx-auto text-center relative z-10">
-          <div className="inline-flex items-center gap-2 bg-primary/10 text-primary px-4 py-2 rounded-full text-sm font-medium mb-6 border border-primary/20">
-            <CheckCircle className="h-4 w-4" />
-            Trusted Document Management Solution
+      <main>
+        {/* Hero Section Re-aligned away from "simple storage software" */}
+        <section
+          className="relative flex min-h-[80vh] items-center overflow-hidden bg-cover bg-center"
+          style={{
+            backgroundImage:
+              "linear-gradient(90deg, rgba(15, 23, 42, 0.95), rgba(15, 23, 42, 0.8), rgba(15, 23, 42, 0.4)), url('/New%20folder/Contract-Management.jpeg')",
+          }}
+        >
+          <div className="container py-20 text-white">
+            <div className="max-w-4xl">
+              <p className="mb-4 inline-flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/10 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-blue-400">
+                <Scale className="h-4 w-4" />
+                Infrastructure Correspondence & Claims Control
+              </p>
+              <h1 className="text-4xl font-extrabold leading-tight tracking-tight md:text-6xl text-white">
+                Defend Your Contractual Margins. Control Your Records.
+              </h1>
+              <p className="mt-6 max-w-2xl text-lg md:text-xl leading-8 text-slate-300">
+                Stop treating project letters like simple data storage. ContraClaim pairs a precision, multi-package tracking platform with elite contract engineering expertise to eliminate missed responses and bulletproof your claims.
+              </p>
+              <div className="mt-10 flex flex-col gap-4 sm:flex-row">
+                <Button asChild size="lg" className="gap-2 bg-blue-600 hover:bg-blue-700 text-white">
+                  <a href="#solutions">
+                    Explore Commercial Lines <ArrowRight className="h-5 w-5" />
+                  </a>
+                </Button>
+                <Button
+                  asChild
+                  size="lg"
+                  variant="outline"
+                  className="border-slate-500 text-white bg-white/5 hover:bg-white hover:text-slate-950 transition-colors"
+                >
+                  <a href="#pilot">Review 90-Day Pilot Offer</a>
+                </Button>
+              </div>
+            </div>
           </div>
-          <h1 className="text-4xl md:text-6xl lg:text-7xl font-bold text-foreground mb-6 leading-tight">
-            Streamline Your
-            <span className="text-primary block bg-gradient-to-r from-primary to-primary/70 bg-clip-text">Document Management</span>
-          </h1>
-          <p className="text-xl text-muted-foreground max-w-3xl mx-auto mb-10 leading-relaxed">
-            A comprehensive enterprise platform for managing documents, contracts, and correspondence 
-            with powerful workflows, real-time collaboration tools, and advanced analytics for data-driven decisions.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-4 justify-center mb-16">
-            <Link to="/login">
-              <Button size="lg" className="gap-2 text-lg px-10 shadow-lg hover:shadow-xl transition-all hover:scale-105">
-                Get Started <ArrowRight className="h-5 w-5" />
-              </Button>
-            </Link>
-            <a href="#features">
-              <Button size="lg" variant="outline" className="text-lg px-10 hover:bg-primary/5">
-                Explore Features
-              </Button>
-            </a>
-          </div>
+        </section>
 
-          {/* Highlights Bar */}
-          <div className="flex flex-wrap justify-center gap-6 md:gap-12">
-            {highlights.map((item, index) => (
-              <div key={index} className="flex items-center gap-3 text-left">
-                <div className="p-2 rounded-lg bg-primary/10 text-primary">
-                  {item.icon}
-                </div>
-                <div>
-                  <div className="font-semibold text-foreground text-sm">{item.title}</div>
-                  <div className="text-xs text-muted-foreground">{item.description}</div>
-                </div>
+        {/* Quick Value Metrics Ribbon */}
+        <section className="border-b border-slate-200 bg-slate-50">
+          <div className="container grid gap-4 py-6 sm:grid-cols-2 lg:grid-cols-4">
+            {[
+              { icon: Clock3, label: "Zero Time-Bar Exposures" },
+              { icon: UploadCloud, label: "Relational Package Tagging" },
+              { icon: ShieldAlert, label: "Claim Leakage Isolation" },
+              { icon: FileText, label: "Audit-Grade Chronologies" },
+            ].map((item) => (
+              <div key={item.label} className="flex items-center gap-3 rounded-md bg-white p-4 shadow-sm border border-slate-100">
+                <item.icon className="h-5 w-5 text-blue-600" />
+                <span className="text-sm font-bold text-slate-700">{item.label}</span>
               </div>
             ))}
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* Features Section */}
-      <section id="features" className="py-24 px-4 bg-muted/30">
-        <div className="container mx-auto">
-          <div className="text-center mb-16">
-            <span className="text-primary font-semibold text-sm uppercase tracking-wider">Features</span>
-            <h2 className="text-3xl md:text-5xl font-bold text-foreground mt-2 mb-4">
-              Powerful Features for Modern Teams
+        {/* Features Modules */}
+        <section id="features" className="container py-24">
+          <div className="max-w-3xl">
+            <p className="text-xs font-bold uppercase tracking-widest text-blue-600">
+              Platform Architecture
+            </p>
+            <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-slate-900 md:text-4xl">
+              Engineered Specially for Heavy Construction & Engineering Risks
             </h2>
-            <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              Everything you need to manage documents, contracts, and correspondence in one unified platform.
+            <p className="mt-4 text-lg leading-8 text-slate-600">
+              Unlike generic business cloud storage frameworks, ContraClaim is calibrated to manage the exact interconnected dynamics of project execution, delay tracking, and formal employer interactions.
             </p>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-            {features.map((feature, index) => (
-              <Card key={index} className="group hover:shadow-2xl transition-all duration-500 hover:-translate-y-2 border-border/50 overflow-hidden relative">
-                <div className={`absolute inset-0 bg-gradient-to-br ${feature.color} opacity-0 group-hover:opacity-5 transition-opacity duration-500`} />
-                <CardContent className="p-8 relative">
-                  <div className={`mb-6 p-3 rounded-xl bg-gradient-to-br ${feature.color} text-white w-fit shadow-lg group-hover:scale-110 transition-transform duration-300`}>
-                    {feature.icon}
+
+          <div className="mt-12 grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+            {features.map((feature) => (
+              <Card key={feature.title} className="border-slate-200 shadow-sm hover:shadow-md transition-shadow">
+                <CardContent className="p-6">
+                  <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-md bg-blue-50 text-blue-600">
+                    <feature.icon className="h-5 w-5" />
                   </div>
-                  <h3 className="text-xl font-bold text-foreground mb-3">{feature.title}</h3>
-                  <p className="text-muted-foreground leading-relaxed">{feature.description}</p>
+                  <h3 className="text-md font-bold text-slate-900">
+                    {feature.title}
+                  </h3>
+                  <p className="mt-2.5 text-xs sm:text-sm leading-6 text-slate-600">
+                    {feature.description}
+                  </p>
                 </CardContent>
               </Card>
             ))}
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* How It Works Section */}
-      <section id="how-it-works" className="py-24 px-4 relative">
-        <div className="absolute inset-0 bg-gradient-to-b from-transparent via-primary/5 to-transparent pointer-events-none" />
-        <div className="container mx-auto relative z-10">
-          <div className="text-center mb-16">
-            <span className="text-primary font-semibold text-sm uppercase tracking-wider">Process</span>
-            <h2 className="text-3xl md:text-5xl font-bold text-foreground mt-2 mb-4">
-              How It Works
-            </h2>
-            <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
-              Get started in three simple steps and transform your document management
-            </p>
+        {/* Commercial Lines Structure Section */}
+        <section id="solutions" className="bg-slate-50 border-y border-slate-200 py-24">
+          <div className="container">
+            <div className="mx-auto max-w-3xl text-center mb-16">
+              <p className="text-xs font-bold uppercase tracking-widest text-blue-600">Commercial Framework</p>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-slate-900 md:text-4xl">Select Your Operational Mode</h2>
+              <p className="mt-4 text-md text-slate-600">Deploy our platform infrastructure or leverage a completely managed contract correspondence workspace.</p>
+            </div>
+
+            <div className="grid gap-8 lg:grid-cols-2 max-w-5xl mx-auto">
+              {commercialLines.map((line) => (
+                <div 
+                  key={line.title} 
+                  className={`relative flex flex-col justify-between p-8 rounded-xl bg-white border shadow-sm transition-transform ${
+                    line.premium ? 'border-blue-600 ring-1 ring-blue-600/30' : 'border-slate-200'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-4 mb-4">
+                      <span className={`px-2.5 py-1 text-xs font-bold uppercase tracking-wider rounded ${
+                        line.premium ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700'
+                      }`}>
+                        {line.badge}
+                      </span>
+                    </div>
+                    <h3 className="text-2xl font-bold text-slate-900">{line.title}</h3>
+                    <p className="mt-3 text-slate-600 text-sm leading-relaxed">{line.description}</p>
+                    <ul className="mt-6 space-y-3">
+                      {line.features.map((feat) => (
+                        <li key={feat} className="flex items-start gap-2.5 text-sm text-slate-700">
+                          <CheckCircle2 className="h-4 w-4 mt-0.5 text-blue-600 flex-shrink-0" />
+                          <span>{feat}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div className="mt-8 pt-4 border-t border-slate-100">
+                    <Button asChild className={`w-full ${line.premium ? 'bg-blue-600 hover:bg-blue-700' : 'bg-slate-900 hover:bg-slate-800'}`}>
+                      <a href={line.href}>{line.cta}</a>
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-12 max-w-6xl mx-auto">
+        </section>
+
+        {/* Benefits Panel */}
+        <section id="benefits" className="bg-slate-900 py-24 text-white">
+          <div className="container grid gap-12 lg:grid-cols-[0.85fr_1.15fr] lg:items-center">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-blue-400">
+                Risk Containment
+              </p>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight md:text-4xl text-white">
+                A Unified Single Source of Truth for Claims Defense
+              </h2>
+              <p className="mt-4 text-base leading-8 text-slate-400">
+                Infrastructure contracts are won or lost on documentation history. ContraClaim shields cash-flow positions by ensuring your site records are system-linked, readily retrievable, and auditable.
+              </p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {benefits.map((benefit) => (
+                <div key={benefit} className="rounded-lg border border-slate-800 bg-slate-950 p-6">
+                  <ShieldCheck className="mb-4 h-6 w-6 text-emerald-400" />
+                  <p className="text-sm leading-relaxed text-slate-300 font-medium">{benefit}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Workflow Mechanics */}
+        <section id="how-it-works" className="container py-24">
+          <div className="mx-auto max-w-3xl text-center">
+            <p className="text-xs font-bold uppercase tracking-widest text-blue-600">
+              Strategic Onboarding
+            </p>
+            <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-slate-900 md:text-4xl">
+              Systematic Deployment Sequence
+            </h2>
+          </div>
+          <div className="mt-12 grid gap-6 md:grid-cols-3">
             {steps.map((step, index) => (
-              <div key={index} className="relative text-center group">
-                <div className="inline-flex items-center justify-center w-24 h-24 rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-white mb-8 shadow-xl group-hover:scale-110 transition-transform duration-300">
-                  {step.icon}
+              <div key={step.title} className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm relative">
+                <div className="mb-4 flex h-8 w-8 items-center justify-center rounded-md bg-blue-50 text-xs font-bold text-blue-600">
+                  0{index + 1}
                 </div>
-                <div className="absolute -top-4 left-1/2 -translate-x-1/2 text-8xl font-bold text-primary/10 group-hover:text-primary/20 transition-colors">
-                  {step.step}
-                </div>
-                <h3 className="text-2xl font-bold text-foreground mb-4">{step.title}</h3>
-                <p className="text-muted-foreground leading-relaxed">{step.description}</p>
-                {index < steps.length - 1 && (
-                  <div className="hidden md:block absolute top-12 left-[60%] w-[80%] border-t-2 border-dashed border-primary/30" />
-                )}
+                <h3 className="text-lg font-bold text-slate-900">{step.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-slate-600">{step.description}</p>
               </div>
             ))}
           </div>
-        </div>
-      </section>
+        </section>
 
-      {/* About Section */}
-      <section id="about" className="py-24 px-4 bg-muted/30">
-        <div className="container mx-auto max-w-5xl">
-          <div className="text-center mb-12">
-            <span className="text-primary font-semibold text-sm uppercase tracking-wider">About Us</span>
-            <h2 className="text-3xl md:text-5xl font-bold text-foreground mt-2 mb-6">
-              About ContraClaim DMS
-            </h2>
-            <p className="text-lg text-muted-foreground leading-relaxed max-w-3xl mx-auto">
-              ContraClaim DMS is a modern, enterprise-grade document management system designed for organizations 
-              that need to handle complex document workflows, contract management, and correspondence 
-              tracking. Built with security, scalability, and ease of use at its core, our platform 
-              empowers teams to work more efficiently and make data-driven decisions.
+        {/* Strategic Market Entry Offer Box (90-Day Pilot) */}
+        <section id="pilot" className="bg-blue-50 border-y border-blue-100 py-20">
+          <div className="container max-w-4xl mx-auto text-center">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-blue-100 text-blue-800 text-xs font-bold uppercase tracking-wider mb-4">
+              <CalendarDays className="h-4 w-4" /> Market Entry Framework
+            </div>
+            <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">The 90-Day Enterprise Pilot Program</h2>
+            <p className="mt-4 text-md text-slate-600 max-w-2xl mx-auto">
+              Lower initial friction. Fast-track setup on a single major package or active project milestone to experience combined software-plus-drafting defense.
             </p>
+            <div className="mt-8 grid gap-4 text-left bg-white p-6 sm:p-8 rounded-xl border border-blue-200 shadow-sm sm:grid-cols-2">
+              <div className="space-y-3">
+                <h4 className="font-bold text-slate-900 text-sm uppercase tracking-wider text-blue-600">Program Inclusions:</h4>
+                <ul className="space-y-2 text-sm text-slate-700">
+                  <li className="flex items-center gap-2">✔ Standard DMS setup for 1 project</li>
+                  <li className="flex items-center gap-2">✔ Content ingestion of active letter backlog</li>
+                  <li className="flex items-center gap-2">✔ Up to 15 expert-drafted letters / mo</li>
+                </ul>
+              </div>
+              <div className="space-y-3">
+                <h4 className="font-bold text-slate-900 text-sm uppercase tracking-wider text-blue-600">Analytical Deliverables:</h4>
+                <ul className="space-y-2 text-sm text-slate-700">
+                  <li className="flex items-center gap-2">✔ Initial claims event chronology map</li>
+                  <li className="flex items-center gap-2">✔ Monthly contractual exposure audit report</li>
+                  <li className="flex items-center gap-2">✔ Safe dashboard seats for 5–10 active users</li>
+                </ul>
+              </div>
+            </div>
+            <p className="mt-6 text-xs text-slate-500 italic">Following program conclusion, accounts seamlessly convert to standard DMS subscriptions, monthly retainers, or a full Contract Correspondence Desk.</p>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mt-12">
-            <div className="text-center p-6 rounded-2xl bg-background shadow-lg hover:shadow-xl transition-shadow">
-              <div className="text-4xl font-bold text-primary mb-2">99.9%</div>
-              <div className="text-muted-foreground font-medium">Uptime SLA</div>
-            </div>
-            <div className="text-center p-6 rounded-2xl bg-background shadow-lg hover:shadow-xl transition-shadow">
-              <div className="text-4xl font-bold text-primary mb-2">256-bit</div>
-              <div className="text-muted-foreground font-medium">AES Encryption</div>
-            </div>
-            <div className="text-center p-6 rounded-2xl bg-background shadow-lg hover:shadow-xl transition-shadow">
-              <div className="text-4xl font-bold text-primary mb-2">24/7</div>
-              <div className="text-muted-foreground font-medium">Expert Support</div>
-            </div>
-            <div className="text-center p-6 rounded-2xl bg-background shadow-lg hover:shadow-xl transition-shadow">
-              <div className="text-4xl font-bold text-primary mb-2">Multi</div>
-              <div className="text-muted-foreground font-medium">Cloud Ready</div>
-            </div>
-          </div>
-        </div>
-      </section>
+        </section>
 
-      {/* CTA Section */}
-      <section className="py-24 px-4 relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-r from-primary/10 via-primary/5 to-primary/10 pointer-events-none" />
-        <div className="container mx-auto max-w-4xl text-center relative z-10">
-          <h2 className="text-3xl md:text-5xl font-bold text-foreground mb-6">
-            Ready to Transform Your Document Management?
-          </h2>
-          <p className="text-lg text-muted-foreground mb-10 max-w-2xl mx-auto">
-            Join leading organizations that trust ContraClaim DMS for their document management needs. 
-            Start your journey to streamlined workflows today.
-          </p>
-          <Link to="/login">
-            <Button size="lg" className="gap-2 text-lg px-12 shadow-xl hover:shadow-2xl transition-all hover:scale-105">
-              Login Now <ArrowRight className="h-5 w-5" />
+        {/* Contact Form Section */}
+        <section id="contact" className="bg-white py-24">
+          <div className="container grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+            <div>
+              <p className="text-xs font-bold uppercase tracking-widest text-blue-600">
+                Commercial Intake
+              </p>
+              <h2 className="mt-3 text-3xl font-extrabold tracking-tight text-slate-900 md:text-4xl">
+                Initiate Project Assessment
+              </h2>
+              <p className="mt-4 text-lg leading-relaxed text-slate-600">
+                Connect with our commercial solutions team to map out your infrastructure package layout, review legacy file migration steps, or structure a custom expert drafting retainer.
+              </p>
+              <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-5">
+                <div className="flex items-start gap-3">
+                  <FileSearch className="mt-1 h-5 w-5 text-blue-600 flex-shrink-0" />
+                  <p className="text-xs sm:text-sm leading-6 text-slate-600">
+                    <strong>Notice:</strong> This channel routes inquiries directly to our secure enterprise onboarding inbox. To preserve confidentiality parameters, do not include specific live case details, passkeys, or sensitive dispute-sensitive documents within this layout.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <Card className="border-slate-200 shadow-sm">
+              <CardContent className="p-6">
+                <form className="space-y-5" onSubmit={handleContactSubmit}>
+                  {contactStatus.type !== "idle" && (
+                    <Alert
+                      variant={contactStatus.type === "error" ? "destructive" : "default"}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <AlertDescription>{contactStatus.message}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-name">Full Name</Label>
+                      <Input
+                        id="contact-name"
+                        name="name"
+                        autoComplete="name"
+                        minLength={2}
+                        maxLength={120}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-email">Corporate Email</Label>
+                      <Input
+                        id="contact-email"
+                        name="email"
+                        type="email"
+                        autoComplete="email"
+                        required
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-organization">Enterprise Entity</Label>
+                      <Input
+                        id="contact-organization"
+                        name="organization"
+                        autoComplete="organization"
+                        maxLength={160}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="contact-phone">Contact Number</Label>
+                      <Input
+                        id="contact-phone"
+                        name="phone"
+                        type="tel"
+                        autoComplete="tel"
+                        maxLength={60}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="contact-message">Project Outline or Scope Requirements</Label>
+                    <Textarea
+                      id="contact-message"
+                      name="message"
+                      placeholder="Specify if you are inquiring about the 90-Day Pilot, Platform SaaS, or Managed Expert Drafting Services..."
+                      minLength={10}
+                      maxLength={4000}
+                      required
+                      className="min-h-32 resize-y"
+                    />
+                  </div>
+
+                  <Button type="submit" size="lg" className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700" disabled={submittingContact}>
+                    {submittingContact ? "Transmitting..." : "Submit Inquiry"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        {/* Pre-Footer Action Trigger */}
+        <section className="border-t border-slate-200 bg-slate-50 py-16">
+          <div className="container flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
+            <div className="max-w-2xl">
+              <h2 className="text-2xl font-bold text-slate-900 md:text-3xl">
+                Access Active Project Instances
+              </h2>
+              <p className="mt-2 text-slate-600 text-sm sm:text-base">
+                Authorized project managers, independent engineers, and contract executives can log directly into their secured package instances below.
+              </p>
+            </div>
+            <Button asChild size="lg" className="gap-2 bg-slate-900 hover:bg-slate-800">
+              <Link to="/login">
+                Workspace Secure Login <ArrowRight className="h-5 w-5" />
+              </Link>
             </Button>
-          </Link>
-        </div>
-      </section>
+          </div>
+        </section>
+      </main>
 
-      {/* Footer */}
-      <footer className="py-12 px-4 border-t border-border bg-muted/20">
-        <div className="container mx-auto">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="flex items-center gap-2">
-              <img src={logo} alt="ContraClaim Logo" className="h-10 w-auto" />
-            </div>
-            <div className="flex items-center gap-8 text-sm text-muted-foreground">
-              <Link to="/login" className="hover:text-foreground transition-colors font-medium">Login</Link>
-              <a href="#features" className="hover:text-foreground transition-colors font-medium">Features</a>
-              <a href="#how-it-works" className="hover:text-foreground transition-colors font-medium">How It Works</a>
-              <a href="#about" className="hover:text-foreground transition-colors font-medium">About</a>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              © {new Date().getFullYear()} ContraClaim DMS. All rights reserved.
-            </p>
+      <footer className="bg-white border-t border-slate-100">
+        <div className="container flex flex-col gap-4 py-8 text-xs sm:text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-center gap-3">
+            <img src="/page.png" alt="" className="h-8 w-8 rounded-md object-cover" aria-hidden="true" />
+            <span className="font-bold text-slate-700 tracking-tight">ContraClaim Platform</span>
+          </div>
+          <div className="flex flex-wrap gap-5 font-medium">
+            <a href="#features" className="hover:text-blue-600 transition-colors">
+              Capabilities
+            </a>
+            <a href="#solutions" className="hover:text-blue-600 transition-colors">
+              Commercial Lines
+            </a>
+            <a href="#pilot" className="hover:text-blue-600 transition-colors">
+              90-Day Pilot
+            </a>
+            <Link to="/login" className="hover:text-blue-600 transition-colors">
+              Sign In
+            </Link>
           </div>
         </div>
       </footer>

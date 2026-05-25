@@ -26,6 +26,26 @@ export interface Tag {
   created_by_label?: string;
 }
 
+export interface TagsListResult {
+  tags: Tag[];
+  total: number;
+  page: number;
+  limit: number;
+  has_next: boolean;
+  has_prev: boolean;
+}
+
+export interface ListTagsParams {
+  search?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface ListSubTagsParams {
+  page?: number;
+  limit?: number;
+}
+
 const normalizeTag = (tag: any): Tag => ({
   _id: tag?._id ?? tag?.id ?? "",
   name: tag?.name ?? "",
@@ -66,9 +86,37 @@ const normalizeList = <T>(
   return list.map(normalizer);
 };
 
-export async function listTags(): Promise<Tag[]> {
-  const { data } = await api.get("/tags");
-  return normalizeList(data, "tags", normalizeTag);
+export async function listTags(
+  params: ListTagsParams = {}
+): Promise<TagsListResult> {
+  const limit = Math.max(params.limit ?? 50, 1);
+  const page = Math.max(params.page ?? 1, 1);
+  const requestParams = {
+    skip: (page - 1) * limit,
+    limit,
+    ...(params.search?.trim() ? { search: params.search.trim() } : {}),
+  };
+  const { data } = await api.get("/tags", { params: requestParams });
+  const tags = normalizeList(data, "tags", normalizeTag);
+  const total =
+    typeof data?.total === "number" ? data.total : Array.isArray(data) ? data.length : tags.length;
+  const responsePage =
+    typeof data?.page === "number" && data.page > 0 ? data.page : page;
+  const responseLimit =
+    typeof data?.limit === "number" && data.limit > 0 ? data.limit : limit;
+
+  return {
+    tags,
+    total,
+    page: responsePage,
+    limit: responseLimit,
+    has_next:
+      typeof data?.has_next === "boolean"
+        ? data.has_next
+        : responsePage * responseLimit < total,
+    has_prev:
+      typeof data?.has_prev === "boolean" ? data.has_prev : responsePage > 1,
+  };
 }
 
 export async function createTag(payload: { name: string }): Promise<Tag> {
@@ -88,8 +136,18 @@ export async function deleteTag(tagId: string): Promise<void> {
   await api.delete(`/tags/${tagId}`);
 }
 
-export async function listSubTags(tagId: string): Promise<SubTag[]> {
-  const { data } = await api.get(`/tags/${tagId}/subtags`);
+export async function listSubTags(
+  tagId: string,
+  params: ListSubTagsParams = {}
+): Promise<SubTag[]> {
+  const limit = Math.max(params.limit ?? 200, 1);
+  const page = Math.max(params.page ?? 1, 1);
+  const { data } = await api.get(`/tags/${tagId}/subtags`, {
+    params: {
+      skip: (page - 1) * limit,
+      limit,
+    },
+  });
   return normalizeList(data, "subtags", normalizeSubTag);
 }
 

@@ -53,6 +53,7 @@ import {
 import { toast } from "sonner";
 import { format, parse, parseISO, isValid } from "date-fns";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import { LANGGRAPH_ENABLED } from "@/config/features";
 import GraphStatusBadge from "@/components/langgraph/GraphStatusBadge";
 
@@ -146,18 +147,7 @@ const prettifyDate = (value?: string) => {
 };
 
 const buildAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem("accessToken") || "";
-  const headers: Record<string, string> = {};
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-  const userId = localStorage.getItem("user_id");
-  const roles = localStorage.getItem("user_roles");
-  const orgId = localStorage.getItem("org_id");
-  const projId = localStorage.getItem("proj_id");
-  if (userId) headers["X-User-Id"] = userId;
-  if (roles) headers["X-User-Role"] = roles;
-  if (orgId) headers["X-Org-Id"] = orgId;
-  if (projId) headers["X-Proj-Id"] = projId;
-  return headers;
+  return {};
 };
 
 const normalizeParsedReferences = (refData: any): RefParsed[] => {
@@ -212,7 +202,7 @@ const ReferencePage: React.FC = () => {
     (async () => {
       try {
         const headers = buildAuthHeaders();
-        const res = await fetch(joinApiUrl(`/documents/${letterId}`), {
+        const res = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), {
           headers,
         });
         if (!res.ok) throw new Error(`Failed to fetch letter: ${res.status}`);
@@ -269,7 +259,7 @@ const ReferencePage: React.FC = () => {
   const fetchAndSetReferences = async (docId: string) => {
     try {
       const headers = buildAuthHeaders();
-      const res = await fetch(joinApiUrl(`/documents/${docId}/references`), {
+      const res = await authenticatedFetch(joinApiUrl(`/documents/${docId}/references`), {
         headers,
       });
       if (!res.ok) return;
@@ -305,7 +295,7 @@ const ReferencePage: React.FC = () => {
         linked = await Promise.all(
           refs.map(async (r) => {
             try {
-              const rd = await fetch(joinApiUrl(`/documents/${r.documentId}`), {
+              const rd = await authenticatedFetch(joinApiUrl(`/documents/${r.documentId}`), {
                 headers,
               });
               if (!rd.ok) throw new Error();
@@ -434,7 +424,7 @@ const ReferencePage: React.FC = () => {
     setSyncing(true);
     try {
       const headers = buildAuthHeaders();
-      const res = await fetch(
+      const res = await authenticatedFetch(
         joinApiUrl(`/documents/${letterId}/sync-references`),
         {
           method: "POST",
@@ -447,7 +437,7 @@ const ReferencePage: React.FC = () => {
       }
       toast.success("Reference sync completed");
       // Refresh data
-      const r = await fetch(joinApiUrl(`/documents/${letterId}`), { headers });
+      const r = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), { headers });
       if (r.ok) {
         const d = await r.json();
         const refsFromDoc = normalizeParsedReferences(d.reference);
@@ -473,15 +463,10 @@ const ReferencePage: React.FC = () => {
     if (!newRef.trim() || !letter) return;
     setLinking(true);
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-
       // Lookup referenced document by letter number
-      const searchRes = await fetch(
+      const searchRes = await authenticatedFetch(
         joinApiUrl(`/documents?letterNo=${encodeURIComponent(newRef.trim())}`),
-        { headers }
+        {}
       );
       if (!searchRes.ok) throw new Error(`Lookup failed: ${searchRes.status}`);
       const searchData = await searchRes.json();
@@ -498,7 +483,7 @@ const ReferencePage: React.FC = () => {
         "Content-Type": "application/json",
         ...buildAuthHeaders(),
       };
-      const res = await fetch(
+      const res = await authenticatedFetch(
         joinApiUrl(`/documents/${letter.id}/references`),
         {
           method: "POST",

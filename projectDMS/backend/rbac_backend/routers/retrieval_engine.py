@@ -122,6 +122,8 @@ async def contract_qa(
     retrieval_service: RetrievalService = Depends(get_retrieval_service),
     current_user: CurrentUser = Depends(get_current_user),
 ) -> ContractQAResponse:
+    request.filters.metadata["uploadType"] = "contract"
+    request.filters.metadata["document_type"] = "contract"
     contract_service = ContractService()
     if request.filters.document_id:
         document = await contract_service.get_contract_document(request.filters.document_id, current_user)

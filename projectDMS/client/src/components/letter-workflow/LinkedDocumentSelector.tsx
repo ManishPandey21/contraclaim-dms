@@ -232,7 +232,7 @@ export const LinkedDocumentSelector: React.FC<
         setContext(normalised);
         handleSelectionChange(normalised.document_ids, normalised.documents);
         toast.success("Context documents updated", {
-          description: `${normalised.document_ids.length} document(s) selected for LangGraph context.`,
+          description: `${normalised.document_ids.length} document(s) selected for drafting context.`,
         });
       } catch (error: any) {
         toast.error("Failed to update context documents", {

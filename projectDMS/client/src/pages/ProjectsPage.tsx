@@ -8,7 +8,7 @@ import {
 import { Card, CardContent } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
-import { logoutAndRedirect } from "@/services/auth";
+import { redirectToLoginAfterSessionExpiry } from "@/services/auth";
 import {
   Select,
   SelectContent,
@@ -26,7 +26,7 @@ import {
   Filter as FilterIcon,
 } from "lucide-react";
 import { enhancedApi, Organization } from "../services/enhanced-api";
-import { joinApiUrl } from "../config/api";
+import { getCurrentUserProfile } from "@/services/session-api";
 import { Project } from "../types/api";
 import useRBAC from "../hooks/useRBAC";
 import useHasPermission from "@/hooks/useHasPermission";
@@ -80,8 +80,7 @@ const ProjectsPage = () => {
   }, [isOrganizationScopedView, requestedOrganizationId]);
 
   const handleTokenExpiration = () => {
-    // Clear session and redirect to base URL per new requirement
-    logoutAndRedirect("/");
+    redirectToLoginAfterSessionExpiry();
   };
 
   useEffect(() => {
@@ -89,9 +88,10 @@ const ProjectsPage = () => {
       setLoading(true);
       try {
         console.log("Fetching projects and organizations...");
-        const [projectsData, orgsData] = await Promise.all([
+        const [projectsData, orgsData, sessionProfile] = await Promise.all([
           enhancedApi.getProjects(),
           enhancedApi.getOrganizations(),
+          getCurrentUserProfile().catch(() => null),
         ]);
 
         console.log("Projects data received:", projectsData);
@@ -108,54 +108,12 @@ const ProjectsPage = () => {
         const isProjectScopedRole = normalizedRoles.some(
           (role) => role === "projectadmin" || role === "projectuser"
         );
-        const storedOrgId =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem("org_id")
-            : null;
-        let normalizedOrgId = storedOrgId ? String(storedOrgId) : null;
-        let allowedProjectIds: string[] = [];
-        const storedProjId =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem("proj_id")
-            : null;
-        if (storedProjId) {
-          allowedProjectIds = [String(storedProjId)];
-        }
-
-        if (!normalizedOrgId && isOrgScopedRole && typeof window !== "undefined") {
-          try {
-            const token = window.localStorage.getItem("accessToken");
-            if (token) {
-              const meResponse = await fetch(joinApiUrl("/me"), {
-                headers: { Authorization: `Bearer ${token}` },
-              });
-              if (meResponse.ok) {
-                const meData = await meResponse.json();
-                if (meData?.organization_id) {
-                  normalizedOrgId = String(meData.organization_id);
-                  try {
-                    window.localStorage.setItem("org_id", normalizedOrgId);
-                  } catch {
-                    // Ignore storage write failures
-                  }
-                }
-                if (Array.isArray(meData?.projects)) {
-                  allowedProjectIds = meData.projects.map((p: any) => String(p));
-                  try {
-                    window.localStorage.setItem(
-                      "proj_id",
-                      allowedProjectIds.join(",")
-                    );
-                  } catch {
-                    // ignore
-                  }
-                }
-              }
-            }
-          } catch (meError) {
-            console.warn("Failed to resolve organization scope from /me:", meError);
-          }
-        }
+        const normalizedOrgId = sessionProfile?.organization_id
+          ? String(sessionProfile.organization_id)
+          : null;
+        const allowedProjectIds = Array.isArray(sessionProfile?.projects)
+          ? sessionProfile.projects.map((p) => String(p))
+          : [];
 
         let scopedProjects = projectsData;
         let scopedOrganizations = orgsData;

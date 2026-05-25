@@ -5,8 +5,17 @@ __pycache__/
 *.sqlite3
 uploads/
 .env
+.env.*
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.crt
+**/secrets/
 .venv/
 venv/
 node_modules/
 *.log
 rbac_backend/uploads/
+tests/
+archive/

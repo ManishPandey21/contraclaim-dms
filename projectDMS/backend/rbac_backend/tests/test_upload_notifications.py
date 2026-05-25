@@ -73,6 +73,11 @@ def _match_value(value: Any, expected: Any) -> bool:
             if isinstance(value, list):
                 return bool(set(value).intersection(set(options)))
             return value in options
+        if "$regex" in expected:
+            import re
+
+            flags = re.IGNORECASE if "i" in str(expected.get("$options", "")) else 0
+            return re.search(str(expected["$regex"]), str(value or ""), flags) is not None
         return True
 
     if isinstance(value, list):
@@ -81,13 +86,21 @@ def _match_value(value: Any, expected: Any) -> bool:
 
 
 def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
+    def _get_value(record: Dict[str, Any], dotted_key: str) -> Any:
+        value: Any = record
+        for part in dotted_key.split("."):
+            if not isinstance(value, dict):
+                return None
+            value = value.get(part)
+        return value
+
     for key, expected in query.items():
         if key == "$or":
             if not any(_matches(doc, clause) for clause in expected):
                 return False
             continue
 
-        if not _match_value(doc.get(key), expected):
+        if not _match_value(_get_value(doc, key), expected):
             return False
 
     return True
@@ -97,7 +110,7 @@ class FakeCollection:
     def __init__(self, docs: Optional[List[Dict[str, Any]]] = None):
         self.docs = [deepcopy(doc) for doc in (docs or [])]
 
-    async def find_one(self, query: Dict[str, Any]):
+    async def find_one(self, query: Dict[str, Any], *args, **kwargs):
         for doc in self.docs:
             if _matches(doc, query):
                 return deepcopy(doc)
@@ -120,7 +133,14 @@ class FakeCollection:
         self.docs.append(stored)
         return FakeInsertResult(stored["_id"])
 
-    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any]):
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], *args, **kwargs):
+        def _set_nested(record: Dict[str, Any], key: str, value: Any) -> None:
+            target = record
+            parts = key.split(".")
+            for part in parts[:-1]:
+                target = target.setdefault(part, {})
+            target[parts[-1]] = value
+
         for doc in self.docs:
             if not _matches(doc, query):
                 continue
@@ -130,7 +150,23 @@ class FakeCollection:
                 if value not in doc[field]:
                     doc[field].append(value)
                     modified = 1
+            for field, value in update.get("$set", {}).items():
+                _set_nested(doc, field, value)
+                modified = 1
+            for field, value in update.get("$push", {}).items():
+                doc.setdefault(field, [])
+                doc[field].append(value)
+                modified = 1
             return FakeUpdateResult(1, modified)
+        if kwargs.get("upsert"):
+            stored = deepcopy(query)
+            for field, value in update.get("$setOnInsert", {}).items():
+                stored[field] = value
+            for field, value in update.get("$set", {}).items():
+                stored[field] = value
+            stored.setdefault("_id", ObjectId())
+            self.docs.append(stored)
+            return FakeUpdateResult(1, 1)
         return FakeUpdateResult(0, 0)
 
     async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
@@ -162,12 +198,22 @@ class FakeDatabase:
         documents: Optional[List[Dict[str, Any]]] = None,
         projects: Optional[List[Dict[str, Any]]] = None,
         notifications: Optional[List[Dict[str, Any]]] = None,
+        notification_preferences: Optional[List[Dict[str, Any]]] = None,
+        project_notification_subscriptions: Optional[List[Dict[str, Any]]] = None,
+        notification_templates: Optional[List[Dict[str, Any]]] = None,
+        notification_delivery_logs: Optional[List[Dict[str, Any]]] = None,
+        notification_action_logs: Optional[List[Dict[str, Any]]] = None,
         letters: Optional[List[Dict[str, Any]]] = None,
     ):
         self.users = FakeCollection(users)
         self.documents = FakeCollection(documents)
         self.projects = FakeCollection(projects)
         self.notifications = FakeCollection(notifications)
+        self.notification_preferences = FakeCollection(notification_preferences)
+        self.project_notification_subscriptions = FakeCollection(project_notification_subscriptions)
+        self.notification_templates = FakeCollection(notification_templates)
+        self.notification_delivery_logs = FakeCollection(notification_delivery_logs)
+        self.notification_action_logs = FakeCollection(notification_action_logs)
         self.letters = FakeCollection(letters)
 
     def __getitem__(self, item: str):
@@ -375,6 +421,336 @@ async def test_notification_service_unread_since_filters_by_time_and_read_status
     )
 
     assert [item.resource_id for item in notifications] == ["doc-fresh"]
+
+
+@pytest.mark.asyncio
+async def test_notification_service_emit_persists_phase1_metadata_and_dedupes():
+    db = FakeDatabase(
+        users=[
+            {"_id": "uploader", "roles": ["orguser"], "organization_id": "org-1", "projects": ["proj-1"]},
+            {"_id": "recipient", "roles": ["projectuser"], "projects": ["proj-1"]},
+        ],
+        documents=[
+            {
+                "_id": "doc-1",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
+                "createdBy": "uploader",
+            }
+        ],
+    )
+    manager = StubManager()
+    service = NotificationService(db, manager=manager)
+
+    first = await service.emit(
+        NotificationType.NEW_UPLOAD,
+        "doc-1",
+        "document",
+        context=NotificationContext.PROJECT,
+        actor_id="uploader",
+        data={"title": "New document uploaded", "message": "A file was uploaded"},
+        actions=[{"key": "view_document", "label": "View Document", "href": "/documentviewer/doc-1"}],
+        dedupe_key="document:new_upload:doc-1",
+    )
+    second = await service.emit(
+        NotificationType.NEW_UPLOAD,
+        "doc-1",
+        "document",
+        context=NotificationContext.PROJECT,
+        actor_id="uploader",
+        data={"title": "Duplicate"},
+        dedupe_key="document:new_upload:doc-1",
+    )
+
+    assert first.id == second.id
+    assert len(db.notifications.docs) == 1
+    stored_doc = dict(db.notifications.docs[0])
+    stored_doc["_id"] = str(stored_doc["_id"])
+    stored = Notification(**stored_doc)
+    assert stored.recipients == ["recipient"]
+    assert stored.title == "New document uploaded"
+    assert stored.message == "A file was uploaded"
+    assert stored.resource_link == "/documentviewer/doc-1"
+    assert stored.dedupe_key == "document:new_upload:doc-1"
+    assert stored.actions[0].key == "view_document"
+    assert manager.messages[0]["recipients"] == ["recipient"]
+
+
+@pytest.mark.asyncio
+async def test_notification_service_list_and_mark_all_support_phase1_filters():
+    now = datetime.now(timezone.utc)
+    db = FakeDatabase(
+        notifications=[
+            {
+                "_id": str(ObjectId()),
+                "type": NotificationType.NEW_UPLOAD.value,
+                "category": NotificationCategory.UPLOADS.value,
+                "resource_id": "doc-1",
+                "resource_type": "document",
+                "project_id": "proj-1",
+                "recipients": ["user-1"],
+                "read_by": [],
+                "created_at": now,
+                "title": "Contract uploaded",
+                "data": {"subject": "Contract package"},
+            },
+            {
+                "_id": str(ObjectId()),
+                "type": NotificationType.COMMENT_ADDED.value,
+                "category": NotificationCategory.COMMENTS.value,
+                "resource_id": "doc-2",
+                "resource_type": "document",
+                "project_id": "proj-2",
+                "recipients": ["user-1"],
+                "read_by": [],
+                "created_at": now,
+                "title": "Comment added",
+                "data": {},
+            },
+        ]
+    )
+    service = NotificationService(db, manager=StubManager())
+
+    listed = await service.list_notifications(
+        "user-1",
+        event_type=NotificationType.NEW_UPLOAD.value,
+        project_id="proj-1",
+        search="contract",
+    )
+    assert listed.total == 1
+    assert listed.notifications[0].resource_id == "doc-1"
+
+    updated = await service.mark_all_as_read(
+        "user-1",
+        event_type=NotificationType.NEW_UPLOAD.value,
+        project_id="proj-1",
+    )
+    assert updated == 1
+    assert db.notifications.docs[0]["read_by"] == ["user-1"]
+    assert db.notifications.docs[1]["read_by"] == []
+
+
+@pytest.mark.asyncio
+async def test_notification_preferences_disable_event_delivery():
+    db = FakeDatabase(
+        users=[
+            {"_id": "uploader", "roles": ["orguser"], "organization_id": "org-1", "projects": ["proj-1"]},
+            {"_id": "recipient", "roles": ["projectuser"], "projects": ["proj-1"]},
+        ],
+        documents=[
+            {
+                "_id": "doc-1",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
+                "createdBy": "uploader",
+            }
+        ],
+        notification_preferences=[
+            {
+                "user_id": "recipient",
+                "organization_id": "org-1",
+                "default_channels": ["in_app", "websocket", "email"],
+                "event_settings": {NotificationType.NEW_UPLOAD.value: {"enabled": False}},
+                "quiet_hours": {},
+                "digest_enabled": True,
+                "browser_notifications_enabled": False,
+                "email_notifications_enabled": True,
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        ],
+    )
+    service = NotificationService(db, manager=StubManager())
+
+    notification = await service.emit(
+        NotificationType.NEW_UPLOAD,
+        "doc-1",
+        "document",
+        context=NotificationContext.PROJECT,
+        actor_id="uploader",
+        data={"title": "New document uploaded"},
+    )
+
+    assert notification.recipients == []
+    assert db.notifications.docs == []
+
+
+@pytest.mark.asyncio
+async def test_project_notification_subscription_can_unsubscribe_user():
+    db = FakeDatabase(
+        users=[
+            {"_id": "uploader", "roles": ["orguser"], "organization_id": "org-1", "projects": ["proj-1"]},
+            {"_id": "recipient", "roles": ["projectuser"], "projects": ["proj-1"]},
+        ],
+        documents=[
+            {
+                "_id": "doc-1",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
+                "createdBy": "uploader",
+            }
+        ],
+        project_notification_subscriptions=[
+            {
+                "project_id": "proj-1",
+                "organization_id": "org-1",
+                "user_id": "recipient",
+                "subscribed": False,
+                "event_settings": {},
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc),
+            }
+        ],
+    )
+    service = NotificationService(db, manager=StubManager())
+
+    notification = await service.emit(
+        NotificationType.NEW_UPLOAD,
+        "doc-1",
+        "document",
+        context=NotificationContext.PROJECT,
+        actor_id="uploader",
+        data={"title": "New document uploaded"},
+    )
+
+    assert notification.recipients == []
+    assert db.notifications.docs == []
+
+
+@pytest.mark.asyncio
+async def test_email_delivery_log_records_smtp_disabled_skip():
+    db = FakeDatabase(
+        users=[
+            {
+                "_id": "user-1",
+                "email": "user@example.com",
+                "preferences": {"emailNotifications": True},
+            }
+        ]
+    )
+    service = EmailService(db)
+    service.smtp_host = None
+    service.smtp_user = None
+    service.smtp_password = None
+
+    notification = Notification(
+        type=NotificationType.NEW_UPLOAD,
+        category=NotificationCategory.UPLOADS,
+        resource_id="doc-1",
+        resource_type="document",
+        context=NotificationContext.PROJECT,
+        recipients=["user-1"],
+        title="New document uploaded",
+        message="A document was uploaded",
+        resource_link="/documentviewer/doc-1",
+        data={},
+    )
+
+    assert await service.send_immediate_notification("user-1", notification) is False
+    assert len(db.notification_delivery_logs.docs) == 1
+    log = db.notification_delivery_logs.docs[0]
+    assert log["status"] == "skipped"
+    assert log["error_code"] == "smtp_disabled"
+
+
+@pytest.mark.asyncio
+async def test_notification_action_approve_rechecks_letter_and_marks_action_complete():
+    letter_id = ObjectId()
+    notification_id = ObjectId()
+    db = FakeDatabase(
+        notifications=[
+            {
+                "_id": notification_id,
+                "type": NotificationType.APPROVAL_ASSIGNED.value,
+                "category": NotificationCategory.APPROVALS.value,
+                "resource_id": str(letter_id),
+                "resource_type": "letter",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
+                "recipients": ["approver"],
+                "read_by": [],
+                "created_at": datetime.now(timezone.utc),
+                "title": "Approval assigned",
+                "message": "Letter is waiting for approval",
+                "actions": [
+                    {"key": "approve", "label": "Approve", "method": "post"},
+                    {"key": "reject", "label": "Reject", "method": "post"},
+                ],
+                "action_state": {},
+                "resource_link": f"/letters/{letter_id}/approval",
+                "data": {"title": "Approval assigned"},
+            }
+        ],
+        letters=[
+            {
+                "_id": letter_id,
+                "title": "Letter for approval",
+                "recipient": "Owner",
+                "subject": "Subject",
+                "content": "",
+                "status": "Approval",
+                "created_by": "submitter",
+                "assigned_to": "approver",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
+                "createdAt": datetime.now(timezone.utc),
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        ],
+    )
+    service = NotificationService(db, manager=StubManager())
+
+    result = await service.execute_action(
+        str(notification_id),
+        "approver",
+        "approve",
+        current_user=SimpleNamespace(
+            id="approver",
+            roles=["superadmin"],
+            organization_id=None,
+            organizations=[],
+            projects=[],
+        ),
+    )
+
+    assert result["status"] == "completed"
+    assert result["result"]["new_status"] == "Approved"
+    assert db.letters.docs[0]["status"] == "Approved"
+    assert db.notifications.docs[0]["action_state"]["approve"]["status"] == "completed"
+    assert db.notifications.docs[0]["read_by"] == ["approver"]
+    assert db.notification_action_logs.docs[0]["action"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_notification_action_rejects_non_recipient():
+    notification_id = ObjectId()
+    db = FakeDatabase(
+        notifications=[
+            {
+                "_id": notification_id,
+                "type": NotificationType.APPROVAL_ASSIGNED.value,
+                "category": NotificationCategory.APPROVALS.value,
+                "resource_id": str(ObjectId()),
+                "resource_type": "letter",
+                "recipients": ["approver"],
+                "read_by": [],
+                "created_at": datetime.now(timezone.utc),
+                "actions": [{"key": "approve", "label": "Approve", "method": "post"}],
+                "data": {},
+            }
+        ]
+    )
+    service = NotificationService(db, manager=StubManager())
+
+    with pytest.raises(Exception) as exc_info:
+        await service.execute_action(
+            str(notification_id),
+            "other-user",
+            "approve",
+            current_user=SimpleNamespace(id="other-user", roles=["superadmin"]),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 404
 
 
 @pytest.mark.asyncio

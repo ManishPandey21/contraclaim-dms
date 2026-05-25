@@ -1,15 +1,39 @@
 import logging
 import re
+from datetime import date, datetime, time
 from typing import Any, Dict, Optional
+from bson import ObjectId
 from ..utils.error_handler import AuthorizationError
 from ..core.security import (
     validate_role_assignment as core_validate_role_assignment,
     authorize_scope,
 )
+from ..core.database import get_database
 from ..services.permission_service import PermissionService
 from ..utils.audit_logger import get_audit_logger
 
 logger = logging.getLogger(__name__)
+
+ROLE_ALIASES = {
+    "super-admin": "superadmin",
+    "super admin": "superadmin",
+    "superadministrator": "superadmin",
+    "organization-admin": "orgadmin",
+    "organization admin": "orgadmin",
+    "organizationadmin": "orgadmin",
+    "organization-user": "orguser",
+    "organization user": "orguser",
+    "organizationuser": "orguser",
+    "project-admin": "projectadmin",
+    "project admin": "projectadmin",
+    "project-user": "projectuser",
+    "project user": "projectuser",
+}
+
+
+def _normalize_role_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return ROLE_ALIASES.get(text, ROLE_ALIASES.get(re.sub(r"[^a-z0-9]", "", text), text))
 
 
 class AuthorizationService:
@@ -35,11 +59,11 @@ class AuthorizationService:
         roles = getattr(current_user, "roles", []) or []
         for role in roles:
             if isinstance(role, str):
-                role_names.add(role.lower())
+                role_names.add(_normalize_role_name(role))
             elif isinstance(role, dict):
                 name = role.get("name") or role.get("role") or role.get("slug")
                 if isinstance(name, str):
-                    role_names.add(name.lower())
+                    role_names.add(_normalize_role_name(name))
             else:
                 name = (
                     getattr(role, "name", None)
@@ -47,7 +71,7 @@ class AuthorizationService:
                     or getattr(role, "slug", None)
                 )
                 if isinstance(name, str):
-                    role_names.add(name.lower())
+                    role_names.add(_normalize_role_name(name))
         return role_names
 
     def _collect_user_org_ids(self, current_user: Any) -> set[str]:
@@ -83,6 +107,11 @@ class AuthorizationService:
             value = filters.get(key)
             if value:
                 query[key] = value
+        role_names = self._extract_role_names(current_user)
+        if self._is_contract_letter_drafter(role_names):
+            user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
+            if user_id:
+                query["assigned_to"] = str(user_id)
         return query
 
     async def check_letter_access(
@@ -99,6 +128,14 @@ class AuthorizationService:
             proj_id = letter.get("project_id") or letter.get("projectId")
 
         authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
+        role_names = self._extract_role_names(current_user)
+        if self._is_contract_letter_drafter(role_names):
+            assigned_to = getattr(letter, "assigned_to", None)
+            if assigned_to is None and isinstance(letter, dict):
+                assigned_to = letter.get("assigned_to") or letter.get("assignedTo")
+            user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
+            if str(assigned_to or "") != str(user_id or ""):
+                raise AuthorizationError("Contract drafters can access only assigned letters", 403)
 
         action_normalized = (action or "read").lower()
         perm_map = {
@@ -113,6 +150,28 @@ class AuthorizationService:
         }
         perm = perm_map.get(action_normalized, "documents:read")
         await self.require_permission(current_user, perm)
+
+    @staticmethod
+    def _is_contract_letter_drafter(role_names: set[str]) -> bool:
+        drafter_roles = {
+            "contraclaim_expert_drafter",
+            "contract_letter_drafter",
+            "contract letter drafter",
+            "letter_drafter",
+            "letter drafter",
+            "contract_drafter",
+            "contract drafter",
+        }
+        manager_roles = {
+            "superadmin",
+            "contraclaim_drafting_manager",
+            "contract_manager",
+            "contract manager",
+            "headcontract",
+            "contractmgr_org",
+            "contractmgr_proj",
+        }
+        return bool(role_names & drafter_roles) and not bool(role_names & manager_roles)
 
     async def check_letter_creation_permission(
         self, current_user: Any, letter_data: Any
@@ -443,6 +502,82 @@ class AuthorizationService:
                 return
             raise AuthorizationError(f"Access denied to {action_normalized} document", 403)
 
+    async def _expand_lookup_filter_values(
+        self, collection_name: str, values: Any
+    ) -> list[str]:
+        raw_values = (
+            list(values)
+            if isinstance(values, (list, tuple, set))
+            else [values]
+        )
+        normalized = {
+            str(value).strip()
+            for value in raw_values
+            if value is not None and str(value).strip()
+        }
+        if not normalized:
+            return []
+
+        try:
+            db = await get_database()
+            collection = getattr(db, collection_name)
+            object_ids = []
+            names = []
+            for value in normalized:
+                try:
+                    object_ids.append(ObjectId(value))
+                except Exception:
+                    names.append(value)
+
+            if object_ids:
+                async for record in collection.find({"_id": {"$in": object_ids}}):
+                    record_id = record.get("_id")
+                    record_name = record.get("name")
+                    if record_id is not None:
+                        normalized.add(str(record_id))
+                    if record_name:
+                        normalized.add(str(record_name))
+
+            if names:
+                async for record in collection.find({"name": {"$in": names}}):
+                    record_id = record.get("_id")
+                    record_name = record.get("name")
+                    if record_id is not None:
+                        normalized.add(str(record_id))
+                    if record_name:
+                        normalized.add(str(record_name))
+        except Exception:
+            logger.debug(
+                "Unable to expand %s filter values for document query",
+                collection_name,
+                exc_info=True,
+            )
+
+        return sorted(normalized)
+
+    def _coerce_document_date_boundary(
+        self, value: Any, *, end_of_day: bool = False
+    ) -> Optional[datetime]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.max if end_of_day else time.min)
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.time() == time.min:
+                return datetime.combine(
+                    parsed.date(), time.max if end_of_day else time.min
+                )
+            return parsed
+        except Exception:
+            logger.debug("Ignoring invalid document date filter value: %r", value)
+            return None
+
     async def build_document_query(
         self, current_user: Any, filters: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -458,6 +593,30 @@ class AuthorizationService:
             value = filters.get(key)
             if value:
                 query[key] = value
+
+        search = str(filters.get("search") or "").strip()
+        if search:
+            pattern = re.escape(search)
+            query["$or"] = [
+                {"filename": {"$regex": pattern, "$options": "i"}},
+                {"subject": {"$regex": pattern, "$options": "i"}},
+                {"letterNo": {"$regex": pattern, "$options": "i"}},
+                {"from": {"$regex": pattern, "$options": "i"}},
+                {"from_": {"$regex": pattern, "$options": "i"}},
+                {"to": {"$regex": pattern, "$options": "i"}},
+            ]
+
+        date_query: Dict[str, datetime] = {}
+        date_from = self._coerce_document_date_boundary(filters.get("date_from"))
+        date_to = self._coerce_document_date_boundary(
+            filters.get("date_to"), end_of_day=True
+        )
+        if date_from:
+            date_query["$gte"] = date_from
+        if date_to:
+            date_query["$lte"] = date_to
+        if date_query:
+            query["date"] = date_query
 
         # Support search by letter number (exact or list)
         letter_no = filters.get("letterNo")
@@ -485,12 +644,16 @@ class AuthorizationService:
         # Tags and SubTags inclusion
         tags = filters.get("tags")
         if tags:
-            query["tags"] = {"$in": list(tags)} if isinstance(tags, (list, tuple, set)) else tags
+            expanded_tags = await self._expand_lookup_filter_values("tags", tags)
+            if expanded_tags:
+                query["tags"] = {"$in": expanded_tags}
         sub_tags = filters.get("subTags")
         if sub_tags:
-            query["subTags"] = {
-                "$in": list(sub_tags)
-            } if isinstance(sub_tags, (list, tuple, set)) else sub_tags
+            expanded_sub_tags = await self._expand_lookup_filter_values(
+                "subtags", sub_tags
+            )
+            if expanded_sub_tags:
+                query["subTags"] = {"$in": expanded_sub_tags}
 
         allowed_orgs = self._collect_user_org_ids(current_user)
         allowed_projects = self._collect_user_project_ids(current_user)
@@ -1050,16 +1213,16 @@ class AuthorizationService:
         if color:
             query["color"] = color
 
-        if search:
-            try:
-                pattern = str(search)
-                query["$or"] = [
+        search_clause: Optional[Dict[str, Any]] = None
+        search_text = str(search or "").strip()
+        if search_text:
+            pattern = re.escape(search_text)
+            search_clause = {
+                "$or": [
                     {"name": {"$regex": pattern, "$options": "i"}},
                     {"description": {"$regex": pattern, "$options": "i"}},
                 ]
-            except Exception:
-                # ignore invalid regex patterns
-                pass
+            }
 
         # Visibility and scope enforcement
         if "superadmin" in role_names:
@@ -1068,6 +1231,8 @@ class AuthorizationService:
                 query["organization_id"] = str(org_id)
             if proj_id:
                 query["project_id"] = str(proj_id)
+            if search_clause:
+                query["$and"] = [search_clause]
             return query
 
         allowed_orgs = self._collect_user_org_ids(current_user)
@@ -1111,10 +1276,19 @@ class AuthorizationService:
             )
 
         if visibility_conditions:
-            query["$or"] = visibility_conditions
+            visibility_clause: Dict[str, Any] = {"$or": visibility_conditions}
         else:
             # If no visibility conditions, restrict to empty result
-            query["visibility"] = "__none__"
+            visibility_clause = {"visibility": "__none__"}
+
+        and_clauses = [visibility_clause]
+        if search_clause:
+            and_clauses.append(search_clause)
+
+        if len(and_clauses) == 1:
+            query.update(and_clauses[0])
+        else:
+            query["$and"] = and_clauses
 
         # Additional filters for org_id and proj_id if provided
         if org_id:

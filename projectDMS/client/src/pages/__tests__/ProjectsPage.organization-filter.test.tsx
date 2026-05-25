@@ -35,7 +35,20 @@ vi.mock("@/hooks/useHasPermission", () => {
 vi.mock("@/services/auth", () => {
   return {
     __esModule: true,
-    logoutAndRedirect: vi.fn(),
+    redirectToLoginAfterSessionExpiry: vi.fn(),
+  };
+});
+
+vi.mock("@/services/session-api", () => {
+  return {
+    __esModule: true,
+    getCurrentUserProfile: vi.fn().mockResolvedValue({
+      id: "superadmin-id",
+      email: "superadmin@example.com",
+      roles: ["superadmin"],
+      organization_id: null,
+      projects: [],
+    }),
   };
 });
 

@@ -54,6 +54,13 @@ type SavedSearch = {
   query: string;
   categories: ContractCategoryKey[];
   summarize: boolean;
+  exact_phrase?: boolean;
+  clause_number?: string;
+  clause_title?: string;
+  section_heading?: string;
+  clause_tag?: string;
+  page_from?: string;
+  page_to?: string;
   organization_id?: string;
   project_id?: string;
   document_id?: string;
@@ -64,6 +71,13 @@ type HistoryEntry = {
   query: string;
   categories: ContractCategoryKey[];
   summarize: boolean;
+  exact_phrase?: boolean;
+  clause_number?: string;
+  clause_title?: string;
+  section_heading?: string;
+  clause_tag?: string;
+  page_from?: string;
+  page_to?: string;
   organization_id?: string;
   project_id?: string;
   document_id?: string;
@@ -494,6 +508,13 @@ const ContractsSearchPage: React.FC = () => {
   });
   const [summarize, setSummarize] = useState<boolean>(true);
   const [selectedCats, setSelectedCats] = useState<ContractCategoryKey[]>([]);
+  const [exactPhrase, setExactPhrase] = useState<boolean>(false);
+  const [clauseNumber, setClauseNumber] = useState<string>("");
+  const [clauseTitle, setClauseTitle] = useState<string>("");
+  const [sectionHeading, setSectionHeading] = useState<string>("");
+  const [clauseTag, setClauseTag] = useState<string>("");
+  const [pageFrom, setPageFrom] = useState<string>("");
+  const [pageTo, setPageTo] = useState<string>("");
   const [searching, setSearching] = useState<boolean>(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchResult, setSearchResult] =
@@ -687,21 +708,22 @@ const ContractsSearchPage: React.FC = () => {
     setPage(1);
   }, [orgId, projId, docId]);
 
-  // Derived: expanded query with category keywords
+  // Derived: preserve the user's query and send category keywords separately
   const expandedQuery = useMemo(() => {
     const baseQuery = query.trim();
-    const phraseQuery =
+    return exactPhrase &&
       /\s/.test(baseQuery) &&
       !(baseQuery.startsWith('"') && baseQuery.endsWith('"'))
         ? `"${baseQuery}"`
         : baseQuery;
-    if (selectedCats.length === 0) return phraseQuery;
+  }, [query, exactPhrase]);
+
+  const categoryTerms = useMemo(() => {
     const keywords = selectedCats.flatMap(
       (k) => CONTRACT_CATEGORIES[k].keywords
     );
-    const unique = Array.from(new Set(keywords));
-    return [phraseQuery, unique.join(" ")].filter(Boolean).join(" ");
-  }, [query, selectedCats]);
+    return Array.from(new Set(keywords));
+  }, [selectedCats]);
 
   const onToggleCategory = useCallback((key: ContractCategoryKey) => {
     setSelectedCats((prev) =>
@@ -741,6 +763,14 @@ const ContractsSearchPage: React.FC = () => {
           top_docs: 6,
           chunks_per_doc: 2,
           summarize,
+          exact_phrase: exactPhrase,
+          clause_number: clauseNumber.trim() || undefined,
+          clause_title: clauseTitle.trim() || undefined,
+          section_heading: sectionHeading.trim() || undefined,
+          clause_tags: clauseTag.trim() ? [clauseTag.trim()] : undefined,
+          category_terms: categoryTerms,
+          page_from: pageFrom.trim() ? Number(pageFrom) : undefined,
+          page_to: pageTo.trim() ? Number(pageTo) : undefined,
           signal: controller.signal,
         });
 
@@ -764,7 +794,21 @@ const ContractsSearchPage: React.FC = () => {
         }
       }
     },
-    [orgId, projId, docId, limit, summarize]
+    [
+      orgId,
+      projId,
+      docId,
+      limit,
+      summarize,
+      exactPhrase,
+      clauseNumber,
+      clauseTitle,
+      sectionHeading,
+      clauseTag,
+      categoryTerms,
+      pageFrom,
+      pageTo,
+    ]
   );
 
   useEffect(() => {
@@ -799,6 +843,13 @@ const ContractsSearchPage: React.FC = () => {
       query,
       categories: selectedCats,
       summarize,
+      exact_phrase: exactPhrase,
+      clause_number: clauseNumber,
+      clause_title: clauseTitle,
+      section_heading: sectionHeading,
+      clause_tag: clauseTag,
+      page_from: pageFrom,
+      page_to: pageTo,
       organization_id: orgId || undefined,
       project_id: projId || undefined,
       document_id: docId || undefined,
@@ -813,6 +864,13 @@ const ContractsSearchPage: React.FC = () => {
     docId,
     summarize,
     selectedCats,
+    exactPhrase,
+    clauseNumber,
+    clauseTitle,
+    sectionHeading,
+    clauseTag,
+    pageFrom,
+    pageTo,
     pushHistory,
     doSearch,
   ]);
@@ -828,18 +886,32 @@ const ContractsSearchPage: React.FC = () => {
       query,
       categories: selectedCats,
       summarize,
+      exact_phrase: exactPhrase,
+      clause_number: clauseNumber,
+      clause_title: clauseTitle,
+      section_heading: sectionHeading,
+      clause_tag: clauseTag,
+      page_from: pageFrom,
+      page_to: pageTo,
       organization_id: orgId || undefined,
       project_id: projId || undefined,
       document_id: docId || undefined,
       createdAt: new Date().toISOString(),
     };
     setSavedSearches((prev) => [item, ...prev]);
-  }, [query, selectedCats, summarize, orgId, projId, docId]);
+  }, [query, selectedCats, summarize, exactPhrase, clauseNumber, clauseTitle, sectionHeading, clauseTag, pageFrom, pageTo, orgId, projId, docId]);
 
   const loadSavedSearch = useCallback((s: SavedSearch) => {
     setQuery(s.query);
     setSelectedCats(s.categories || []);
     setSummarize(!!s.summarize);
+    setExactPhrase(!!s.exact_phrase);
+    setClauseNumber(s.clause_number || "");
+    setClauseTitle(s.clause_title || "");
+    setSectionHeading(s.section_heading || "");
+    setClauseTag(s.clause_tag || "");
+    setPageFrom(s.page_from || "");
+    setPageTo(s.page_to || "");
     if (s.organization_id) setOrgId(s.organization_id);
     if (s.project_id) setProjId(s.project_id);
     if (s.document_id) setDocId(s.document_id);
@@ -856,6 +928,13 @@ const ContractsSearchPage: React.FC = () => {
     setQuery(h.query);
     setSelectedCats(h.categories || []);
     setSummarize(!!h.summarize);
+    setExactPhrase(!!h.exact_phrase);
+    setClauseNumber(h.clause_number || "");
+    setClauseTitle(h.clause_title || "");
+    setSectionHeading(h.section_heading || "");
+    setClauseTag(h.clause_tag || "");
+    setPageFrom(h.page_from || "");
+    setPageTo(h.page_to || "");
     if (h.organization_id) setOrgId(h.organization_id);
     if (h.project_id) setProjId(h.project_id);
     if (h.document_id) setDocId(h.document_id);
@@ -952,8 +1031,7 @@ const ContractsSearchPage: React.FC = () => {
             Categories
           </CardTitle>
           <CardDescription>
-            Select categories to bias the search toward related clauses. Their
-            keywords will be appended to your query.
+            Select categories to bias reranking toward related legal concepts.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -1077,16 +1155,127 @@ const ContractsSearchPage: React.FC = () => {
                 />
                 <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
               </div>
-              {selectedCats.length > 0 && (
+              {(selectedCats.length > 0 || exactPhrase) && (
                 <div className="text-xs text-gray-600">
                   <p className="font-medium">
-                    Expanded with category keywords:
+                    Search modifiers:
                   </p>
-                  <div className="mt-1 p-2 bg-gray-50 border rounded text-xs font-mono break-words">
-                    {expandedQuery}
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {exactPhrase && (
+                      <Badge variant="neutral" className="text-xs">
+                        Exact phrase
+                      </Badge>
+                    )}
+                    {selectedCats.map((key) => (
+                      <Badge key={key} variant="neutral" className="text-xs">
+                        {key}
+                      </Badge>
+                    ))}
                   </div>
                 </div>
               )}
+            </div>
+
+            <div className="space-y-3 rounded-md border border-gray-200 bg-gray-50 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-gray-700">
+                    Legal filters
+                  </p>
+                  <p className="text-xs text-gray-500">
+                    Narrow by contract structure before semantic reranking.
+                  </p>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={exactPhrase}
+                    onChange={(e) => setExactPhrase(e.target.checked)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  Exact phrase
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Clause number
+                  </label>
+                  <input
+                    type="text"
+                    value={clauseNumber}
+                    onChange={(e) => setClauseNumber(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="e.g., 5.1"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Clause title
+                  </label>
+                  <input
+                    type="text"
+                    value={clauseTitle}
+                    onChange={(e) => setClauseTitle(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="e.g., Termination"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Section heading
+                  </label>
+                  <input
+                    type="text"
+                    value={sectionHeading}
+                    onChange={(e) => setSectionHeading(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="e.g., General Conditions"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Clause tag
+                  </label>
+                  <input
+                    type="text"
+                    value={clauseTag}
+                    onChange={(e) => setClauseTag(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="e.g., risk"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Page from
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={pageFrom}
+                    onChange={(e) => setPageFrom(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="1"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs font-medium text-gray-600">
+                    Page to
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={pageTo}
+                    onChange={(e) => setPageTo(e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    placeholder="10"
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="flex items-center justify-between">

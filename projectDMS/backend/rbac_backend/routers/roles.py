@@ -4,18 +4,31 @@ Simplified roles router with basic functionality to get the UI working.
 This removes complex dependencies and focuses on core CRUD operations.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from typing import List, Optional, Dict, Any
+import logging
+
 from typing import List, Optional, Dict, Any
 import logging
 
 from ..core.security import get_current_user, CurrentUser, require_permission
 from ..services.role_service import RoleService, RoleServiceError
 from ..services.permission_service import PermissionService
+from ..services.audit_event_service import AuditEventService
+from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
 from ..models.role import Role, RoleCreate, RoleUpdate
 from ..models.permission import Permission
+from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Rate limiter for role mutations (strict limits for security)
+role_mutation_limiter = RateLimiter(requests_per_minute=20, window_seconds=60)
+
+async def check_role_mutation_rate_limit(current_user: CurrentUser = Depends(get_current_user)):
+    await role_mutation_limiter.check_user_limit(current_user.id)
 
 # Simple dependency injection
 def get_role_service() -> RoleService:
@@ -23,6 +36,9 @@ def get_role_service() -> RoleService:
 
 def get_permission_service() -> PermissionService:
     return PermissionService()
+
+def get_policy_service() -> PolicyService:
+    return PolicyService()
 
 @router.get("/roles", response_model=List[Role])
 async def get_roles(
@@ -91,13 +107,25 @@ async def get_role(
 @router.post("/roles", response_model=Role)
 async def create_role(
     role_data: RoleCreate,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:create")),
+    __: None = Depends(check_role_mutation_rate_limit),
 ):
     """Create new role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role")
     try:
         role = await role_service.create_role(role_data, current_user)
+        await AuditEventService().emit(
+            action="role.created",
+            actor_id=current_user.id,
+            resource_type="role",
+            resource_id=str(getattr(role, "id", None) or getattr(role, "_id", "") or role_data.name),
+            after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
+        )
         return role
         
     except RoleServiceError as e:
@@ -113,13 +141,27 @@ async def create_role(
 async def update_role(
     role_id: str,
     update_data: RoleUpdate,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:update")),
+    __: None = Depends(check_role_mutation_rate_limit),
 ):
     """Update role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
+        before = await role_service.get_role_by_id(role_id)
         role = await role_service.update_role(role_id, update_data, current_user)
+        await AuditEventService().emit(
+            action="role.updated",
+            actor_id=current_user.id,
+            resource_type="role",
+            resource_id=role_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+            after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
+        )
         return role
         
     except RoleServiceError as e:
@@ -134,18 +176,31 @@ async def update_role(
 @router.delete("/roles/{role_id}")
 async def delete_role(
     role_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:delete")),
+    __: None = Depends(check_role_mutation_rate_limit),
 ):
     """Delete role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
+        before = await role_service.get_role_by_id(role_id)
         success = await role_service.delete_role(role_id, current_user)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Role not found"
             )
+        await AuditEventService().emit(
+            action="role.deleted",
+            actor_id=current_user.id,
+            resource_type="role",
+            resource_id=role_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+        )
         return {"message": "Role deleted successfully"}
         
     except HTTPException:
@@ -190,13 +245,28 @@ async def get_role_permissions(
 async def add_role_permission(
     role_id: str,
     permission_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:assign")),
+    __: None = Depends(check_role_mutation_rate_limit),
 ):
     """Add permission to role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
+        before = await role_service.get_role_by_id(role_id)
         role = await role_service.add_permission_to_role(role_id, permission_id, current_user)
+        await AuditEventService().emit(
+            action="role.permission_added",
+            actor_id=current_user.id,
+            resource_type="role",
+            resource_id=role_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+            after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
+            metadata={"permission_id": permission_id},
+        )
         return role
         
     except RoleServiceError as e:
@@ -212,13 +282,28 @@ async def add_role_permission(
 async def remove_role_permission(
     role_id: str,
     permission_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:assign")),
+    __: None = Depends(check_role_mutation_rate_limit),
 ):
     """Remove permission from role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
+        before = await role_service.get_role_by_id(role_id)
         role = await role_service.remove_permission_from_role(role_id, permission_id, current_user)
+        await AuditEventService().emit(
+            action="role.permission_removed",
+            actor_id=current_user.id,
+            resource_type="role",
+            resource_id=role_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+            after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
+            metadata={"permission_id": permission_id},
+        )
         return role
         
     except RoleServiceError as e:

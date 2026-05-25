@@ -75,7 +75,7 @@ const UploadPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [pathStructure, setPathStructure] = useState<string>(""); // Add state for pathStructure
   const getToken = () => {
-    return localStorage.getItem("accessToken");
+    return null;
   };
   // Add this utility function near the top of the file
   const shortenName = (name: string, maxLength: number = 10): string => {
@@ -103,7 +103,6 @@ const UploadPage = () => {
         // Updated API endpoints
         const orgResponse = await fetch("/api/organizations", {
           headers: {
-            Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
         });
@@ -124,7 +123,6 @@ const UploadPage = () => {
         // Updated API endpoints
         const projResponse = await fetch("/api/projects", {
           headers: {
-            Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
           },
         });
@@ -275,7 +273,6 @@ const UploadPage = () => {
         //baddoapi in endpoint
         dy: formData,
         aders: {
-        Authorization: `Bearer ${token}`,
         },
          Do NOT set Content-Type header when using FormData, the browser will set it
       })

@@ -4,7 +4,12 @@
  */
 
 import { API_BASE_URL } from "../config/api";
-import { ensureValidToken, refreshToken, logoutAndRedirect } from "./auth";
+import {
+  ensureValidToken,
+  refreshToken,
+  redirectToLoginAfterSessionExpiry,
+} from "./auth";
+import { authenticatedFetch } from "./http";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -92,25 +97,9 @@ export async function getDashboardStats(params?: {
 }): Promise<DashboardStats> {
   await ensureValidToken(120);
 
-  let token = window.localStorage.getItem("accessToken") || "";
-
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  } else {
-    // Fallback dev headers
-    const userId = window.localStorage.getItem("user_id") || "user_demo";
-    const userRoles = window.localStorage.getItem("user_roles") || "";
-    const orgId = window.localStorage.getItem("org_id");
-    const projId = window.localStorage.getItem("proj_id");
-    headers["X-User-Id"] = userId;
-    if (userRoles) headers["X-User-Role"] = userRoles;
-    if (orgId) headers["X-Org-Id"] = orgId;
-    if (projId) headers["X-Proj-Id"] = projId;
-  }
 
   // Build query string
   const searchParams = new URLSearchParams();
@@ -121,21 +110,18 @@ export async function getDashboardStats(params?: {
 
   const url = `${API_BASE_URL}/dashboard/stats${qs ? `?${qs}` : ""}`;
 
-  const doFetch = async () => fetch(url, { method: "GET", headers });
+  const doFetch = async () =>
+    authenticatedFetch(url, { method: "GET", headers });
 
   let response = await doFetch();
 
   // If unauthorized, attempt a single refresh then retry
-  if (response.status === 401 && token) {
+  if (response.status === 401) {
     try {
       await refreshToken();
-      token = window.localStorage.getItem("accessToken") || "";
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
-      }
       response = await doFetch();
     } catch {
-      logoutAndRedirect("/");
+      redirectToLoginAfterSessionExpiry();
       throw new Error("Session expired. Redirecting to login.");
     }
   }

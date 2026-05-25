@@ -13,6 +13,8 @@ from ..core.security import get_current_user, CurrentUser
 from ..core.database import get_db
 from ..services.tag_service import TagService
 from ..services.authorization_service import AuthorizationService
+from ..services.audit_event_service import AuditEventService
+from ..services.policy_service import PolicyService
 from ..models.tag import (
     Tag, TagCreate, TagUpdate, TagResponse, TagListResponse,
     Subtag, SubtagCreate, SubtagUpdate, SubtagListResponse
@@ -744,6 +746,13 @@ async def get_tags(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get tags with filtering and pagination."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="tag",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        audit=False,
+    )
     filters = {
         'search': search,
         'organization_id': organization_id
@@ -761,7 +770,23 @@ async def create_tag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Create new tag with validation."""
-    return await controller.create_tag(tag_data, current_user)
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.edit_metadata",
+        resource_type="tag",
+        organization_id=tag_data.organization_id or getattr(current_user, "organization_id", None),
+    )
+    tag = await controller.create_tag(tag_data, current_user)
+    await AuditEventService().emit(
+        action="tag.created",
+        actor_id=current_user.id,
+        resource_type="tag",
+        resource_id=str(getattr(tag, "id", "") or ""),
+        organization_id=getattr(tag, "organization_id", None),
+        project_id=getattr(tag, "project_id", None),
+        after=tag.model_dump(mode="json") if hasattr(tag, "model_dump") else None,
+    )
+    return tag
 
 
 @router.get("/tags/{tag_id}", response_model=Tag)
@@ -772,7 +797,17 @@ async def get_tag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get specific tag by ID."""
-    return await controller.get_tag(tag_id, current_user)
+    tag = await controller.get_tag(tag_id, current_user)
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="tag",
+        resource_id=tag_id,
+        organization_id=getattr(tag, "organization_id", None),
+        project_id=getattr(tag, "project_id", None),
+        audit=False,
+    )
+    return tag
 
 
 @router.put("/tags/{tag_id}", response_model=Tag)
@@ -784,7 +819,27 @@ async def update_tag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Update tag with validation."""
-    return await controller.update_tag(tag_id, update_data, current_user)
+    before = await controller.tag_service.get_tag_by_id(tag_id)
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.edit_metadata",
+        resource_type="tag",
+        resource_id=tag_id,
+        organization_id=getattr(before, "organization_id", None),
+        project_id=getattr(before, "project_id", None),
+    )
+    tag = await controller.update_tag(tag_id, update_data, current_user)
+    await AuditEventService().emit(
+        action="tag.updated",
+        actor_id=current_user.id,
+        resource_type="tag",
+        resource_id=tag_id,
+        organization_id=getattr(tag, "organization_id", None),
+        project_id=getattr(tag, "project_id", None),
+        before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+        after=tag.model_dump(mode="json") if hasattr(tag, "model_dump") else None,
+    )
+    return tag
 
 
 @router.delete("/tags/{tag_id}")
@@ -795,7 +850,26 @@ async def delete_tag(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Delete tag with cascade deletion of subtags."""
-    return await controller.delete_tag(tag_id, current_user)
+    before = await controller.tag_service.get_tag_by_id(tag_id)
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.edit_metadata",
+        resource_type="tag",
+        resource_id=tag_id,
+        organization_id=getattr(before, "organization_id", None),
+        project_id=getattr(before, "project_id", None),
+    )
+    result = await controller.delete_tag(tag_id, current_user)
+    await AuditEventService().emit(
+        action="tag.deleted",
+        actor_id=current_user.id,
+        resource_type="tag",
+        resource_id=tag_id,
+        organization_id=getattr(before, "organization_id", None),
+        project_id=getattr(before, "project_id", None),
+        before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+    )
+    return result
 
 
 # API Endpoints - Subtags

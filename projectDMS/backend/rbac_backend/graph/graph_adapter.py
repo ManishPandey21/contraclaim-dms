@@ -75,10 +75,17 @@ class GraphConfig:
     def from_settings(cls) -> "GraphConfig":
         base_url: Optional[str] = None
         api_key: Optional[str] = None
+        provider = "direct_falkor"
+        graphiti_enabled = False
         if settings is not None:
-            base_url = getattr(settings, "GRAPHITI_BASE_URL", None)
+            provider = str(getattr(settings, "GRAPH_PROVIDER", "direct_falkor") or "direct_falkor").lower()
+            graphiti_enabled = bool(getattr(settings, "GRAPHITI_ENABLED", False))
+            base_url = (
+                getattr(settings, "GRAPHITI_BASE_URL", None)
+                or getattr(settings, "GRAPHITI_API_URL", None)
+            )
             api_key = getattr(settings, "GRAPHITI_API_KEY", None)
-        enabled = bool(base_url and api_key)
+        enabled = provider == "graphiti" and graphiti_enabled and bool(base_url)
         return cls(base_url=base_url, api_key=api_key, enabled=enabled)
 
 

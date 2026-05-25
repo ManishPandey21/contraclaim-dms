@@ -5,58 +5,83 @@ import logging
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
+from fastapi import HTTPException, status
+
+from ..services.runtime_state import get_runtime_state
+
 logger = logging.getLogger(__name__)
 
 class RateLimiter:
     """Simple rate limiter implementation."""
 
+    _shared_lock = asyncio.Lock()
+    _shared_user_requests: Dict[str, list] = {}
+    _shared_buckets: Dict[str, Dict[str, Any]] = {}
+
     def __init__(self, requests_per_minute: int = 100, window_seconds: int = 3600):
         self.requests_per_minute = requests_per_minute
         self.window_seconds = window_seconds
-        self.user_requests: Dict[str, list] = {}
-        self._lock = asyncio.Lock()
-        self._buckets: Dict[str, Dict[str, Any]] = {}
+        self.user_requests = self._shared_user_requests
+        self._lock = self._shared_lock
+        self._buckets = self._shared_buckets
+        self._runtime_state = get_runtime_state()
 
     def _now(self) -> float:
         """Get current timestamp"""
         return datetime.utcnow().timestamp()
 
     async def check_user_limit(self, user_id: str, cost: int = 1) -> bool:
-        """
-        Check if user is within rate limits.
-        For now, this is a simple implementation that allows all requests.
-        """
+        """Check and enforce a per-user fixed-window limit."""
+        if not user_id:
+            return True
+        try:
+            await self._check_key(f"user:{user_id}", cost, self.window_seconds, self.requests_per_minute)
+            return True
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Rate limiter error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Rate limiter unavailable",
+            ) from e
+
+    async def _check_user_limit_local(self, user_id: str, cost: int = 1) -> bool:
         try:
             current_time = datetime.utcnow()
 
-            # Initialize user tracking if not exists
-            if user_id not in self.user_requests:
-                self.user_requests[user_id] = []
+            async with self._lock:
+                self.user_requests.setdefault(user_id, [])
+                cutoff_time = current_time - timedelta(seconds=self.window_seconds)
+                self.user_requests[user_id] = [
+                    req_time for req_time in self.user_requests[user_id]
+                    if req_time > cutoff_time
+                ]
 
-            # Clean old requests (older than window)
-            cutoff_time = current_time - timedelta(seconds=self.window_seconds)
-            self.user_requests[user_id] = [
-                req_time for req_time in self.user_requests[user_id]
-                if req_time > cutoff_time
-            ]  # Fixed: Added missing closing bracket
+                current_requests = len(self.user_requests[user_id])
+                if current_requests + cost > self.requests_per_minute:
+                    logger.warning(
+                        "Rate limit exceeded for user %s: %s/%s",
+                        user_id,
+                        current_requests,
+                        self.requests_per_minute,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail="Rate limit exceeded",
+                    )
 
-            # Check if user is within limits
-            current_requests = len(self.user_requests[user_id])
-            if current_requests + cost > self.requests_per_minute:
-                logger.warning(f"Rate limit exceeded for user {user_id}: {current_requests} requests")
-                # For now, don't actually block - just log
-                # raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-            # Add current request
-            for _ in range(cost):
-                self.user_requests[user_id].append(current_time)
+                for _ in range(cost):
+                    self.user_requests[user_id].append(current_time)
 
             return True
 
         except Exception as e:
             logger.error(f"Rate limiter error: {str(e)}")
-            return False  # Fixed: Return False instead of commented raise
-            # raise Exception("Rate limit exceeded")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Rate limiter unavailable",
+            ) from e
 
     # --- Compatibility helpers used by routers/auth.py and routers/users.py ---
 
@@ -68,15 +93,13 @@ class RateLimiter:
         max_requests: Optional[int] = None,
     ) -> None:
         """
-        Track rate usage by client IP. Parameters window_seconds and max_requests are
-        accepted for compatibility but not strictly enforced in this simple in-memory
-        implementation (counts are tracked; enforcement can be enabled if needed).
+        Track and enforce rate usage by client IP.
         """
         if not ip_address:
             return
 
         key = f"ip:{ip_address}"
-        await self._check_key(key, cost, window_seconds)
+        await self._check_key(key, cost, window_seconds, max_requests)
 
     async def check_email_limit(
         self,
@@ -92,18 +115,49 @@ class RateLimiter:
             return
 
         key = f"email:{email.lower()}"
-        await self._check_key(key, cost, window_seconds)
+        await self._check_key(key, cost, window_seconds, max_requests)
 
-    async def _check_key(self, key: str, cost: int = 1, window_override: Optional[int] = None) -> None:
+    async def check_client_limit(
+        self,
+        client_id: Optional[str],
+        cost: int = 1,
+        window_seconds: Optional[int] = None,
+        max_requests: Optional[int] = None,
+    ) -> None:
+        if not client_id:
+            return
+        await self._check_key(f"client:{client_id}", cost, window_seconds, max_requests)
+
+    async def _check_key(
+        self,
+        key: str,
+        cost: int = 1,
+        window_override: Optional[int] = None,
+        max_requests: Optional[int] = None,
+    ) -> None:
         """
         Internal helper to update a bucket keyed by an arbitrary identifier.
         If window_override is provided, that window is applied for the reset logic;
         otherwise, the instance's window_seconds is used.
         """
         window = int(window_override) if window_override and window_override > 0 else self.window_seconds
+        limit = int(max_requests) if max_requests and max_requests > 0 else self.requests_per_minute
         now = self._now()
+        redis = await self._runtime_state.get_redis()
+        if redis is not None:
+            redis_key = f"rate:{key}"
+            count = await redis.incrby(redis_key, int(cost))
+            if int(count) == int(cost):
+                await redis.expire(redis_key, window)
+            if int(count) > limit:
+                logger.warning("Rate limit exceeded for %s: %s/%s", key, count, limit)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Rate limit exceeded",
+                )
+            return
 
-        async with self._lock:  # Fixed: Use async with for asyncio.Lock
+        async with self._lock:
             bucket = self._buckets.setdefault(key, {"window_start": now, "count": 0})
 
             # Reset if window elapsed (respect override)
@@ -112,4 +166,12 @@ class RateLimiter:
                 bucket["window_start"] = now
                 bucket["count"] = 0
 
-            bucket["count"] = float(bucket.get("count", 0)) + float(cost)
+            current_count = float(bucket.get("count", 0))
+            if current_count + float(cost) > limit:
+                logger.warning("Rate limit exceeded for %s: %s/%s", key, current_count, limit)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Rate limit exceeded",
+                )
+
+            bucket["count"] = current_count + float(cost)

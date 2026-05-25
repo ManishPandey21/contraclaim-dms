@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/services/api";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 
 export type LetterStatus =
   | "Draft"
@@ -105,34 +106,12 @@ export const useLetterWorkflow = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Build authorization headers for org/project-scoped endpoints
+  // Backend derives user and tenant scope from the HttpOnly session cookie.
   const headerFor = useCallback(
-    (letterId?: string, orgIdOverride?: string, projIdOverride?: string) => {
-      const target = letterId
-        ? letters.find((l) => l.id === letterId)
-        : selectedLetter;
-
-      const orgId =
-        orgIdOverride ??
-        target?.organization_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("org_id") ?? undefined
-          : undefined);
-      const projId =
-        projIdOverride ??
-        target?.project_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("proj_id") ?? undefined
-          : undefined);
-
-      return {
-        headers: {
-          "X-Org-Id": orgId ?? "",
-          "X-Proj-Id": projId ?? "",
-        },
-      };
+    (_letterId?: string, _orgIdOverride?: string, _projIdOverride?: string) => {
+      return {};
     },
-    [letters, selectedLetter]
+    []
   );
 
   // Normalize backend letter payload to hook shape (ensures .id exists)
@@ -278,25 +257,8 @@ export const useLetterWorkflow = () => {
         // Fallback fetch when the primary axios call fails or returns no records.
         if (normalizedOrgs.length === 0 && typeof window !== "undefined") {
           try {
-            const headers: Record<string, string> = {
-              Accept: "application/json",
-            };
-            const token = window.localStorage.getItem("accessToken");
-            if (token) headers["Authorization"] = `Bearer ${token}`;
-
-            const userId = window.localStorage.getItem("user_id") || "user_demo";
-            const userRoles =
-              window.localStorage.getItem("user_roles") || "superadmin";
-            headers["X-User-Id"] = userId;
-            headers["X-User-Role"] = userRoles;
-
-            const orgId = window.localStorage.getItem("org_id");
-            const projId = window.localStorage.getItem("proj_id");
-            if (orgId) headers["X-Org-Id"] = orgId;
-            if (projId) headers["X-Proj-Id"] = projId;
-
-            const resp = await fetch(joinApiUrl("/organizations"), {
-              headers,
+            const resp = await authenticatedFetch(joinApiUrl("/organizations"), {
+              headers: { Accept: "application/json" },
             });
             if (resp.ok) {
               const json = await resp.json();
@@ -353,84 +315,6 @@ export const useLetterWorkflow = () => {
     fetchInitialData();
   }, []);
 
-  // Fetch letters when tab changes
-  useEffect(() => {
-    fetchLetters();
-  }, [activeTab]);
-
-  // Ensure scoping headers (org_id/proj_id) based on roles and available data,
-  // so backend returns scoped letters for non-superadmin users.
-  useEffect(() => {
-    try {
-      if (typeof window === "undefined") return;
-      const rawRoles = window.localStorage.getItem("user_roles");
-      const parseRoles = (raw: string | null): string[] => {
-        if (!raw) return [];
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed))
-            return parsed.map((r) => String(r).toLowerCase());
-        } catch {
-          // not JSON, treat as comma-separated
-        }
-        return String(raw)
-          .split(",")
-          .map((r) => r.trim().toLowerCase())
-          .filter(Boolean);
-      };
-      const roles = parseRoles(rawRoles);
-
-      // If superadmin, allow full visibility without forcing org/project scope
-      if (roles.includes("superadmin")) return;
-
-      const hasOrgRole = roles.some((r) => r === "orgadmin" || r === "orguser");
-      const hasProjRole = roles.some(
-        (r) =>
-          r === "projectadmin" ||
-          r === "projectuser" ||
-          r === "projadmin" ||
-          r === "projuser"
-      );
-
-      let updated = false;
-      let orgId = window.localStorage.getItem("org_id") || undefined;
-      let projId = window.localStorage.getItem("proj_id") || undefined;
-
-      if (hasOrgRole && !orgId && organizations.length > 0) {
-        orgId = String(organizations[0].id);
-        window.localStorage.setItem("org_id", orgId);
-        updated = true;
-      }
-
-      if (hasProjRole && !projId && projects.length > 0) {
-        // Prefer a project under the selected org if available
-        const preferredOrgId = orgId;
-        let chosen = projects[0];
-        if (preferredOrgId) {
-          const underOrg = projects.find(
-            (p) => String(p.organizationId) === String(preferredOrgId)
-          );
-          if (underOrg) chosen = underOrg;
-        }
-        projId = String(chosen.id);
-        window.localStorage.setItem("proj_id", projId);
-        // Ensure org_id aligns with the chosen project if still missing
-        if (!orgId && chosen.organizationId) {
-          orgId = String(chosen.organizationId);
-          window.localStorage.setItem("org_id", orgId);
-        }
-        updated = true;
-      }
-
-      if (updated) {
-        // Re-fetch letters with new scoping headers applied by Axios interceptor
-        fetchLetters();
-      }
-    } catch {
-      // Non-fatal
-    }
-  }, [organizations, projects]);
-
   const fetchLetters = useCallback(async () => {
     try {
       setIsLoading(true);
@@ -448,7 +332,12 @@ export const useLetterWorkflow = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [activeTab]);
+  }, [activeTab, normalizeLetter]);
+
+  // Fetch letters when tab changes
+  useEffect(() => {
+    fetchLetters();
+  }, [fetchLetters]);
 
   const handleLetterInitiation = useCallback(
     async (payload: CreateLetterInput): Promise<Letter> => {
@@ -473,7 +362,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    []
+    [headerFor, normalizeLetter]
   );
 
   const handleLetterUpdate = useCallback(
@@ -504,7 +393,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    [selectedLetter]
+    [headerFor, normalizeLetter, selectedLetter]
   );
 
   const handleInputRequest = useCallback(
@@ -536,7 +425,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    []
+    [headerFor]
   );
 
   // Letter workflow actions
@@ -545,7 +434,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/submit`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const approveLetter = useCallback(
@@ -553,7 +442,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/approve`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const completeLetter = useCallback(
@@ -561,7 +450,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/complete`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const addComment = useCallback(
@@ -569,7 +458,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/comment`, { comment }, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const reassign = useCallback(
@@ -577,7 +466,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/assign/${userId}`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   // Input request actions

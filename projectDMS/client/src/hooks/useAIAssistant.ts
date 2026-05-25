@@ -74,12 +74,8 @@ export const useAIAssistant = () => {
       setIsLoading(true);
       setError(null);
       try {
-        const orgId = window.localStorage.getItem("org_id") || undefined;
-        const projId = window.localStorage.getItem("proj_id") || undefined;
         const payload: GenerateEnhancedDraftRequest = {
           ...request,
-          organization_id: request.organization_id ?? orgId,
-          project_id: request.project_id ?? projId,
         };
         const { data } = await api.post<GenerateEnhancedDraftResponse>(
           "/ai-assistant/generate-enhanced-draft",

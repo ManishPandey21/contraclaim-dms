@@ -3,13 +3,15 @@ Secure authentication API with comprehensive security measures including rate li
 account lockout, and proper session management. Addresses all security vulnerabilities.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Header
 from typing import Optional
 import logging
 from datetime import timedelta, datetime
 from jose import jwt
+from pydantic import BaseModel, Field
 
 from ..core.security import get_current_user, CurrentUser, create_access_token
+from ..core.csrf import clear_csrf_cookie, create_csrf_token, set_csrf_cookie
 from ..core.database import get_db
 from ..core.config import settings
 from ..services.authentication_service import AuthenticationService
@@ -22,9 +24,48 @@ from ..utils.validation import validate_email, validate_input
 from ..utils.error_handler import handle_exceptions, AuthenticationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
+from ..services.step_up_service import StepUpService, STEP_UP_TTL_MINUTES
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _set_auth_cookie(response: Response, token: str, max_age: int) -> None:
+    response.set_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        value=token,
+        max_age=max_age,
+        httponly=True,
+        secure=bool(settings.AUTH_COOKIE_SECURE),
+        samesite=str(settings.AUTH_COOKIE_SAMESITE or "lax").lower(),
+        domain=settings.AUTH_COOKIE_DOMAIN,
+        path="/",
+    )
+    set_csrf_cookie(response, max_age=max_age)
+
+
+def _clear_auth_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        domain=settings.AUTH_COOKIE_DOMAIN,
+        path="/",
+    )
+    clear_csrf_cookie(response)
+
+
+class StepUpRequest(BaseModel):
+    password: str = Field(..., min_length=1, max_length=200)
+    action: str = Field(default="*", max_length=120)
+
+
+class StepUpResponse(BaseModel):
+    step_up_token: str
+    token_type: str = "step_up"
+    expires_in: int = STEP_UP_TTL_MINUTES * 60
+
+
+class CsrfTokenResponse(BaseModel):
+    csrf_token: str
 
 
 class AuthController:
@@ -69,17 +110,17 @@ class AuthController:
             # Rate limiting for login attempts (prevent brute force)
             await self.rate_limiter.check_ip_limit(
                 client_ip,
-                cost=5,
-                window_seconds=900,  # 15 minutes
-                max_requests=5  # Max 5 attempts per IP per 15 min
+                cost=1,
+                window_seconds=settings.LOGIN_IP_RATE_LIMIT_WINDOW,
+                max_requests=settings.LOGIN_IP_RATE_LIMIT_REQUESTS,
             )
             
             # Email-based rate limiting
             await self.rate_limiter.check_email_limit(
                 login_data.email,
-                cost=3,
-                window_seconds=3600,  # 1 hour
-                max_requests=10  # Max 10 attempts per email per hour
+                cost=1,
+                window_seconds=settings.LOGIN_EMAIL_RATE_LIMIT_WINDOW,
+                max_requests=settings.LOGIN_EMAIL_RATE_LIMIT_REQUESTS,
             )
             
             # Validate input
@@ -279,12 +320,11 @@ class AuthController:
     async def get_current_user_info(self, current_user: CurrentUser) -> CurrentUser:
         """Get current user information with validation."""
         try:
-            # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id)
-            
-            # Validate user is still active
-            user = await self.user_service.get_user_by_id(current_user.id)
-            if not user or user.disabled:
+            # get_current_user already validates the JWT/cookie and reloads the
+            # user document from MongoDB. Avoid a second service lookup here:
+            # /me is called on app load/focus and must not fail just because an
+            # auxiliary user-service/rate-limit dependency is temporarily noisy.
+            if current_user.disabled:
                 raise AuthenticationError(
                     "User account is no longer active",
                     status.HTTP_401_UNAUTHORIZED
@@ -346,6 +386,7 @@ class AuthController:
             "organizations": [str(o) for o in organizations],
             "projects": [str(pid) for pid in (getattr(user, "projects", []) or [])],
             "permissions": [str(p) for p in permissions],
+            "account_type": getattr(user, "account_type", "client_user") or "client_user",
             "is_active": is_active,
             "is_verified": is_verified,
             "preferences": preferences,
@@ -377,37 +418,60 @@ async def get_auth_controller(db = Depends(get_db)) -> AuthController:
 async def login(
     login_data: LoginRequest,
     request: Request,
+    response: Response,
     controller: AuthController = Depends(get_auth_controller)
 ):
     """Login user with comprehensive security validation."""
     client_ip = request.client.host
     user_agent = request.headers.get("user-agent", "unknown")
     
-    return await controller.login_user(login_data, client_ip, user_agent)
+    login_response = await controller.login_user(login_data, client_ip, user_agent)
+    _set_auth_cookie(response, login_response.access_token, login_response.expires_in)
+    return login_response
 
 
 @router.post("/refresh", response_model=TokenResponse)
 @handle_exceptions
 async def refresh_token(
+    request: Request,
+    response: Response,
     authorization: str = Header(default=""),
     controller: AuthController = Depends(get_auth_controller),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Refresh access token with proper validation."""
     token = authorization.replace("Bearer ", "").strip()
-    return await controller.refresh_token(current_user, token)
+    if not token:
+        token = request.cookies.get(settings.AUTH_COOKIE_NAME, "")
+    token_response = await controller.refresh_token(current_user, token)
+    _set_auth_cookie(response, token_response.access_token, token_response.expires_in)
+    return token_response
 
 
 @router.post("/logout")
 @handle_exceptions
 async def logout(
+    request: Request,
+    response: Response,
     authorization: str = Header(default=""),
     controller: AuthController = Depends(get_auth_controller),
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Logout user and invalidate session."""
     token = authorization.replace("Bearer ", "").strip()
-    return await controller.logout_user(current_user, token)
+    if not token:
+        token = request.cookies.get(settings.AUTH_COOKIE_NAME, "")
+    result = await controller.logout_user(current_user, token)
+    _clear_auth_cookie(response)
+    return result
+
+
+@router.get("/csrf-token", response_model=CsrfTokenResponse)
+async def get_csrf_token(response: Response):
+    """Issue a signed CSRF token cookie for browser clients."""
+    token = create_csrf_token()
+    set_csrf_cookie(response, token=token)
+    return CsrfTokenResponse(csrf_token=token)
 
 
 @router.get("/me", response_model=CurrentUser)
@@ -418,3 +482,19 @@ async def get_current_user_info(
 ):
     """Get current user information."""
     return await controller.get_current_user_info(current_user)
+
+
+@router.post("/step-up", response_model=StepUpResponse)
+@handle_exceptions
+async def issue_step_up_token(
+    payload: StepUpRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Verify password and return a short-lived token for dangerous actions."""
+    token = await StepUpService(db).issue_after_password(
+        current_user=current_user,
+        password=payload.password,
+        action=payload.action,
+    )
+    return StepUpResponse(step_up_token=token)

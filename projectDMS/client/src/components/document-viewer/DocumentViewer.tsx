@@ -9,13 +9,14 @@ import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout";
 import { searchPlugin } from "@react-pdf-viewer/search";
 import { zoomPlugin } from "@react-pdf-viewer/zoom";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 
 import "@react-pdf-viewer/core/lib/styles/index.css";
 import "@react-pdf-viewer/default-layout/lib/styles/index.css";
 import "@react-pdf-viewer/search/lib/styles/index.css";
 import "@react-pdf-viewer/zoom/lib/styles/index.css";
 
-import { LocalDocument as Document } from "../../pages/DocumentViewerPage";
+import type { LocalDocument as Document } from "../../pages/DocumentViewerPage";
 
 interface DocumentViewerProps {
   document: Document;
@@ -79,18 +80,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
       setError(null);
       try {
         if (id) {
-          const token = localStorage.getItem("accessToken");
-          if (!token) {
-            console.warn("No authentication token found, loading local PDF");
-            setPdfUrl(localPdfPath);
-            return;
-          }
-
-          const response = await fetch(joinApiUrl(`/documents/${id}`), {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          });
+          const response = await authenticatedFetch(joinApiUrl(`/documents/${id}`));
 
           if (!response.ok) {
             const errorText = await response.text();
@@ -163,9 +153,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
           } else {
             // Fetch via authenticated backend endpoint, then serve as a Blob URL to the viewer
             try {
-              const fileResp = await fetch(downloadApi, {
-                headers: { Authorization: `Bearer ${token}` },
-              });
+              const fileResp = await authenticatedFetch(downloadApi);
               if (fileResp.ok) {
                 const blob = await fileResp.blob();
                 const objectUrl = URL.createObjectURL(blob);

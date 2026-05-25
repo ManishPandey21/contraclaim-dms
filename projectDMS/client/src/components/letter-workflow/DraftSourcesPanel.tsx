@@ -203,7 +203,7 @@ const DraftSourcesPanel: React.FC<DraftSourcesPanelProps> = ({
           })
         ) : (
           <p className="text-sm text-muted-foreground">
-            Sources will appear after LangGraph runs with retrieval enabled.
+            Sources will appear after drafting runs with retrieval enabled.
           </p>
         )}
       </CardContent>

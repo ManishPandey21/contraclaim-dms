@@ -70,6 +70,24 @@ class DraftVersion(BaseModel):
     sources: List[dict] = Field(default_factory=list)
     reviewer_findings: List[dict] = Field(default_factory=list)
     run_id: Optional[str] = None
+    locked: bool = False
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=now_utc)
+    created_by: Optional[str] = None
+
+
+class StrategyVersion(BaseModel):
+    """Immutable snapshot of each generated or accepted strategic plan."""
+
+    version: int
+    status: str
+    plan: str
+    planning_sheet: Optional[dict] = None
+    reply_matrix: List[dict] = Field(default_factory=list)
+    incoming_analysis: Optional[dict] = None
+    source_ids: List[str] = Field(default_factory=list)
+    run_id: Optional[str] = None
     created_at: datetime = Field(default_factory=now_utc)
     created_by: Optional[str] = None
 
@@ -121,6 +139,9 @@ class Letter(BaseModel):
     summary_points: List[str] = Field(default_factory=list)
     strategy_plan_approved_by: Optional[str] = Field(default=None)
     strategy_plan_approved_at: Optional[datetime] = Field(default=None)
+    strategy_versions: List[StrategyVersion] = Field(default_factory=list)
+    current_strategy_version: Optional[int] = None
+    accepted_strategy_version: Optional[int] = None
     strategy_role: Optional[str] = Field(
         default=None,
         description="Perspective selected for the current strategy plan (contractor/engineer/employer)",
@@ -145,6 +166,12 @@ class Letter(BaseModel):
     parties_involved: List[str] = Field(default_factory=list)
     draft_plan: Optional[str] = Field(default=None)
     draft_output: Optional[str] = Field(default=None)
+    drafting_profile: Optional[str] = Field(
+        default=None,
+        description="Assigned drafting profile: contractor, engineer_representation, or employer_contract_review",
+    )
+    drafting_assigned_by: Optional[str] = Field(default=None)
+    drafting_assigned_at: Optional[datetime] = Field(default=None)
     draft_trace: List[dict] = Field(default_factory=list)
     graph_status: Optional[str] = Field(default=None)
     graph_started_at: Optional[datetime] = Field(default=None)
@@ -164,6 +191,11 @@ class Letter(BaseModel):
     reviewer_blocking: Optional[bool] = None
     draft_versions: List[DraftVersion] = Field(default_factory=list)
     current_draft_version: Optional[int] = None
+    approved_draft_version: Optional[int] = None
+    approved_run_id: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    approved_version_locked: bool = False
 
     @field_validator("comments", mode="before")
     @classmethod
@@ -232,6 +264,9 @@ class LetterUpdate(BaseModel):
     strategy_recipient: Optional[str] = None
     strategy_plan_approved_by: Optional[str] = None
     strategy_plan_approved_at: Optional[datetime] = None
+    strategy_versions: Optional[List[StrategyVersion]] = None
+    current_strategy_version: Optional[int] = None
+    accepted_strategy_version: Optional[int] = None
     strategy_run_id: Optional[str] = None
     strategy_graph_status: Optional[str] = None
     strategy_graph_trace: Optional[List[dict]] = None
@@ -249,6 +284,9 @@ class LetterUpdate(BaseModel):
     parties_involved: Optional[List[str]] = None
     draft_plan: Optional[str] = None
     draft_output: Optional[str] = None
+    drafting_profile: Optional[str] = None
+    drafting_assigned_by: Optional[str] = None
+    drafting_assigned_at: Optional[datetime] = None
     draft_trace: Optional[List[dict]] = None
     graph_status: Optional[str] = None
     graph_started_at: Optional[datetime] = None
@@ -268,6 +306,11 @@ class LetterUpdate(BaseModel):
     reviewer_blocking: Optional[bool] = None
     draft_versions: Optional[List[DraftVersion]] = None
     current_draft_version: Optional[int] = None
+    approved_draft_version: Optional[int] = None
+    approved_run_id: Optional[str] = None
+    approved_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    approved_version_locked: Optional[bool] = None
 
 
 class ConversationTree(BaseModel):

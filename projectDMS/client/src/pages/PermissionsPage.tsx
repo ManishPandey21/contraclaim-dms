@@ -47,6 +47,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
+import { useStepUp } from "@/hooks/useStepUp";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
 
@@ -67,6 +68,7 @@ const PermissionsPage = () => {
   const [editRoleOpen, setEditRoleOpen] = useState(false);
   const [editRole, setEditRole] = useState<any | null>(null);
   const { toast } = useToast();
+  const { requestToken, StepUpDialog } = useStepUp();
 
   // Helper to normalize role id across potential API variations
   const getRoleId = (role: any) =>
@@ -156,7 +158,12 @@ const PermissionsPage = () => {
         level: newRole.level || "basic",
         permissions: newRole.permissions || [],
       };
-      await api.createRole(payload as any);
+      const stepUpToken = await requestToken(
+        "platform.role.manage",
+        "Confirm role creation",
+        "Enter your password to create a role."
+      );
+      await api.createRole(payload as any, { stepUpToken });
       toast({
         title: "Role created",
         description: `${payload.name} was created.`,
@@ -197,7 +204,12 @@ const PermissionsPage = () => {
         description: editRole.description,
         level: editRole.level,
       };
-      await api.updateRole(roleId, payload);
+      const stepUpToken = await requestToken(
+        "platform.role.manage",
+        "Confirm role update",
+        "Enter your password to update this role."
+      );
+      await api.updateRole(roleId, payload, { stepUpToken });
       toast({
         title: "Role updated",
         description: `${payload.name || roleId} was updated.`,
@@ -216,7 +228,12 @@ const PermissionsPage = () => {
 
   const handleDeleteRole = async (roleId: string) => {
     try {
-      await api.deleteRole(roleId);
+      const stepUpToken = await requestToken(
+        "platform.role.manage",
+        "Confirm role deletion",
+        "Enter your password to delete this role."
+      );
+      await api.deleteRole(roleId, { stepUpToken });
       toast({
         title: "Role deleted",
         description: `Role ${roleId} deleted.`,
@@ -240,6 +257,8 @@ const PermissionsPage = () => {
     };
 
     fetchData();
+    // Initial RBAC bootstrap intentionally runs once; mutations refresh roles explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -251,8 +270,63 @@ const PermissionsPage = () => {
 
   const permissionGroups = [
     {
-      id: "documents",
-      name: "Documents",
+      id: "client-dms",
+      name: "Client DMS",
+      icon: FileText,
+      permissions: [
+        { id: "dms.document.view", name: "View Documents" },
+        { id: "dms.document.upload", name: "Upload Documents" },
+        { id: "dms.document.edit_metadata", name: "Edit Document Metadata" },
+        { id: "dms.document.delete", name: "Delete Documents" },
+        { id: "dms.document.download", name: "Download Documents" },
+        { id: "dms.document.bulk_download", name: "Bulk Download Documents" },
+        { id: "dms.document.link_reference", name: "Link References" },
+        { id: "dms.status.update", name: "Update Status" },
+        { id: "dms.comment.add", name: "Add Comments" },
+        { id: "dms.dashboard.view", name: "View Dashboard" },
+        { id: "dms.report.view", name: "View Reports" },
+        { id: "dms.user.manage", name: "Manage Client Users" },
+        { id: "dms.project.manage", name: "Manage Projects" },
+        { id: "dms.audit.view", name: "View Audit Trail" },
+        { id: "dms.admin", name: "DMS Admin" },
+      ],
+    },
+    {
+      id: "drafting",
+      name: "ContraClaim Expert Drafting",
+      icon: Shield,
+      permissions: [
+        { id: "drafting.request.view", name: "View Drafting Requests" },
+        { id: "drafting.request.create", name: "Create Drafting Requests" },
+        { id: "drafting.request.accept", name: "Accept Drafting Requests" },
+        { id: "drafting.request.assign", name: "Assign Drafting Work" },
+        { id: "drafting.draft.create", name: "Create Drafts" },
+        { id: "drafting.draft.edit", name: "Edit Drafts" },
+        { id: "drafting.draft.submit_for_review", name: "Submit Draft for Review" },
+        { id: "drafting.review.perform", name: "Perform Review" },
+        { id: "drafting.review.approve", name: "Approve Review" },
+        { id: "drafting.review.return_for_revision", name: "Return for Revision" },
+        { id: "drafting.final.view", name: "View Final Drafts" },
+        { id: "drafting.audit.view", name: "View Drafting Audit" },
+        { id: "drafting.admin", name: "Drafting Admin" },
+      ],
+    },
+    {
+      id: "billing",
+      name: "Billing & Entitlements",
+      icon: Lock,
+      permissions: [
+        { id: "billing.plan.view", name: "View Plans" },
+        { id: "billing.plan.manage", name: "Manage Plans" },
+        { id: "subscription.entitlement.manage", name: "Manage Entitlements" },
+        { id: "subscription.usage.view", name: "View Usage" },
+        { id: "subscription.archive_access", name: "Archive Access" },
+        { id: "subscription.offboarding_export", name: "Offboarding Export" },
+      ],
+    },
+    {
+      id: "legacy-documents",
+      name: "Legacy Document Permissions",
       icon: FileText,
       permissions: [
         { id: "documents:read", name: "View Documents" },
@@ -262,6 +336,7 @@ const PermissionsPage = () => {
         { id: "documents:approve", name: "Approve Documents" },
         { id: "documents:share", name: "Share Documents" },
         { id: "documents:upload", name: "Upload Documents" },
+        { id: "documents:download_all", name: "Download Complete Project Documents" },
         { id: "documents:comment", name: "Add Inputs/Comments" },
       ],
     },
@@ -322,12 +397,19 @@ const PermissionsPage = () => {
         selectedRole === "all"
           ? roles
           : roles.filter((r) => getRoleId(r) === selectedRole);
+      const stepUpToken = await requestToken(
+        "platform.role.manage",
+        "Confirm permission changes",
+        "Enter your password to save role permission changes."
+      );
 
       await Promise.all(
         targets.map((role) => {
           const roleId = getRoleId(role);
           const perms = permissionsMatrix[roleId] || [];
-          return api.updateRole(roleId, { permissions: perms } as any);
+          return api.updateRole(roleId, { permissions: perms } as any, {
+            stepUpToken,
+          });
         })
       );
 
@@ -365,6 +447,7 @@ const PermissionsPage = () => {
 
   return (
     <div className="container mx-auto py-8 animate-fade-in">
+      {StepUpDialog}
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Permissions Management</h1>
         <Button onClick={handleSaveChanges} disabled={saving}>

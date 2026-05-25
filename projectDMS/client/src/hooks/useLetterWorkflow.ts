@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/services/api";
+import { getCurrentUserProfile, SessionProfile } from "@/services/session-api";
 
 export type LetterStatus =
   | "Draft"
@@ -35,6 +36,50 @@ export interface Project {
 }
 
 const ORGANIZATION_FETCH_LIMIT = 50;
+
+const normalizeEntityId = (value: any): string => {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    if (typeof value.$oid === "string") return value.$oid;
+    if (typeof value.id === "string") return value.id;
+    if (typeof value._id === "string") return value._id;
+  }
+  return String(value);
+};
+
+const cleanNamePart = (value: any): string => {
+  const text = String(value ?? "").trim();
+  return text && text !== "-" ? text : "";
+};
+
+const buildPersonName = (value: any): string => {
+  const firstName = cleanNamePart(value?.first_name ?? value?.firstName);
+  const lastName = cleanNamePart(value?.last_name ?? value?.lastName);
+  const fullName = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (fullName) return fullName;
+
+  return (
+    cleanNamePart(value?.full_name) ||
+    cleanNamePart(value?.fullName) ||
+    cleanNamePart(value?.name) ||
+    "Unknown user"
+  );
+};
+
+const normalizeWorkflowUser = (value: any): User => ({
+  id: normalizeEntityId(value?.id ?? value?._id ?? value?.user_id ?? value?.email ?? value?.username),
+  name: buildPersonName(value),
+  email: value?.email ?? "",
+  avatar: value?.avatar ?? undefined,
+  roles: Array.isArray(value?.roles) ? value.roles : [],
+  organizationId:
+    normalizeEntityId(value?.organization_id ?? value?.organizationId) || null,
+  projects: Array.isArray(value?.projects)
+    ? value.projects.map((projectId: any) => normalizeEntityId(projectId)).filter(Boolean)
+    : [],
+});
 
 const parseOrganizationsResponse = (payload: any): Organization[] => {
   // Handle nested response structure from backend: { organizations: [...], total, page, limit }
@@ -145,6 +190,9 @@ export interface Letter {
   reviewer_blocking?: boolean;
   draft_versions?: Record<string, unknown>[];
   current_draft_version?: number;
+  drafting_profile?: string;
+  drafting_assigned_by?: string;
+  drafting_assigned_at?: string;
 }
 
 export interface CreateLetterInput {
@@ -181,6 +229,7 @@ export const useLetterWorkflow = () => {
   const [selectedLetter, setSelectedLetter] = useState<Letter | null>(null);
 
   const [users, setUsers] = useState<User[]>([]);
+  const [currentUser, setCurrentUser] = useState<SessionProfile | null>(null);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [letters, setLetters] = useState<Letter[]>([]);
@@ -188,34 +237,12 @@ export const useLetterWorkflow = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Build authorization headers for org/project-scoped endpoints
+  // Backend derives user and tenant scope from the HttpOnly session cookie.
   const headerFor = useCallback(
-    (letterId?: string, orgIdOverride?: string, projIdOverride?: string) => {
-      const target = letterId
-        ? letters.find((l) => l.id === letterId)
-        : selectedLetter;
-
-      const orgId =
-        orgIdOverride ??
-        target?.organization_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("org_id") ?? undefined
-          : undefined);
-      const projId =
-        projIdOverride ??
-        target?.project_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("proj_id") ?? undefined
-          : undefined);
-
-      return {
-        headers: {
-          "X-Org-Id": orgId ?? "",
-          "X-Proj-Id": projId ?? "",
-        },
-      };
+    (_letterId?: string, _orgIdOverride?: string, _projIdOverride?: string) => {
+      return {};
     },
-    [letters, selectedLetter]
+    []
   );
 
   // Normalize backend letter payload to hook shape (ensures .id exists)
@@ -241,6 +268,9 @@ export const useLetterWorkflow = () => {
       reviewer_blocking: l?.reviewer_blocking ?? false,
       draft_versions: l?.draft_versions ?? [],
       current_draft_version: l?.current_draft_version,
+      drafting_profile: l?.drafting_profile,
+      drafting_assigned_by: l?.drafting_assigned_by,
+      drafting_assigned_at: l?.drafting_assigned_at,
     };
   }, []);
 
@@ -250,13 +280,20 @@ export const useLetterWorkflow = () => {
       try {
         setIsLoading(true);
         setError(null);
-        const [usersRes, orgsRes, projectsRes] = await Promise.allSettled([
+        const [profileRes, usersRes, orgsRes, projectsRes] = await Promise.allSettled([
+          getCurrentUserProfile(),
           api.get<User[]>("/users"),
           api.get("/organizations", {
             params: { limit: ORGANIZATION_FETCH_LIMIT },
           }),
           api.get<any[]>("/projects"),
         ]);
+
+        if (profileRes.status === "fulfilled") {
+          setCurrentUser(profileRes.value);
+        } else {
+          setCurrentUser(null);
+        }
 
         if (usersRes.status === "fulfilled") {
           // Normalize users and filter to those with drafting capability (role-based)
@@ -285,6 +322,10 @@ export const useLetterWorkflow = () => {
             "contractmgr_org",
             "contractmgr_proj",
             "headcontract",
+            "contraclaim_drafting_manager",
+            "contraclaim_expert_drafter",
+            "contract_letter_drafter",
+            "contract_drafter",
           ]);
           const filtered = sourceUsers.filter((u: any) => {
             const roles: string[] = Array.isArray(u?.roles) ? u.roles : [];
@@ -292,30 +333,15 @@ export const useLetterWorkflow = () => {
             if (roles.length === 0) return true;
             return roles.some((r) => draftingRoles.has(String(r)));
           });
-          const normalized = filtered.map((u: any) => ({
-            id: u.id ?? u._id ?? String(u._id ?? u.email ?? u.username ?? ""),
-            name: u.username ?? u.name ?? u.full_name ?? u.email ?? "User",
-            email: u.email ?? "",
-            avatar: u.avatar ?? undefined,
-            roles: Array.isArray(u?.roles) ? u.roles : [],
-            organizationId:
-              (typeof u.organization_id === "string"
-                ? u.organization_id
-                : u.organization_id
-                ? String(u.organization_id)
-                : undefined) ??
-              (typeof u.organizationId === "string"
-                ? u.organizationId
-                : undefined) ??
-              null,
-            projects: Array.isArray(u?.projects)
-              ? u.projects.map((p: any) => String(p))
-              : [],
-          }));
+          const normalized = filtered.map(normalizeWorkflowUser);
           setUsers(normalized);
         } else {
           console.warn("Failed to load users:", usersRes.reason);
-          setUsers([]);
+          setUsers(
+            profileRes.status === "fulfilled"
+              ? [normalizeWorkflowUser(profileRes.value)]
+              : []
+          );
         }
 
         if (orgsRes.status === "fulfilled") {
@@ -380,84 +406,6 @@ export const useLetterWorkflow = () => {
     fetchInitialData();
   }, []);
 
-  // Fetch letters when tab changes
-  useEffect(() => {
-    fetchLetters();
-  }, [activeTab]);
-
-  // Ensure scoping headers (org_id/proj_id) based on roles and available data,
-  // so backend returns scoped letters for non-superadmin users.
-  useEffect(() => {
-    try {
-      if (typeof window === "undefined") return;
-      const rawRoles = window.localStorage.getItem("user_roles");
-      const parseRoles = (raw: string | null): string[] => {
-        if (!raw) return [];
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed))
-            return parsed.map((r) => String(r).toLowerCase());
-        } catch {
-          // not JSON, treat as comma-separated
-        }
-        return String(raw)
-          .split(",")
-          .map((r) => r.trim().toLowerCase())
-          .filter(Boolean);
-      };
-      const roles = parseRoles(rawRoles);
-
-      // If superadmin, allow full visibility without forcing org/project scope
-      if (roles.includes("superadmin")) return;
-
-      const hasOrgRole = roles.some((r) => r === "orgadmin" || r === "orguser");
-      const hasProjRole = roles.some(
-        (r) =>
-          r === "projectadmin" ||
-          r === "projectuser" ||
-          r === "projadmin" ||
-          r === "projuser"
-      );
-
-      let updated = false;
-      let orgId = window.localStorage.getItem("org_id") || undefined;
-      let projId = window.localStorage.getItem("proj_id") || undefined;
-
-      if (hasOrgRole && !orgId && organizations.length > 0) {
-        orgId = String(organizations[0].id);
-        window.localStorage.setItem("org_id", orgId);
-        updated = true;
-      }
-
-      if (hasProjRole && !projId && projects.length > 0) {
-        // Prefer a project under the selected org if available
-        const preferredOrgId = orgId;
-        let chosen = projects[0];
-        if (preferredOrgId) {
-          const underOrg = projects.find(
-            (p) => String(p.organizationId) === String(preferredOrgId)
-          );
-          if (underOrg) chosen = underOrg;
-        }
-        projId = String(chosen.id);
-        window.localStorage.setItem("proj_id", projId);
-        // Ensure org_id aligns with the chosen project if still missing
-        if (!orgId && chosen.organizationId) {
-          orgId = String(chosen.organizationId);
-          window.localStorage.setItem("org_id", orgId);
-        }
-        updated = true;
-      }
-
-      if (updated) {
-        // Re-fetch letters with new scoping headers applied by Axios interceptor
-        fetchLetters();
-      }
-    } catch {
-      // Non-fatal
-    }
-  }, [organizations, projects]);
-
   const fetchLetters = useCallback(async () => {
     try {
       setIsLoading(true);
@@ -475,7 +423,12 @@ export const useLetterWorkflow = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [activeTab]);
+  }, [activeTab, normalizeLetter]);
+
+  // Fetch letters when tab changes. Backend derives tenant scope from /me/session.
+  useEffect(() => {
+    fetchLetters();
+  }, [fetchLetters]);
 
   const handleLetterInitiation = useCallback(
     async (payload: CreateLetterInput): Promise<Letter> => {
@@ -500,7 +453,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    []
+    [headerFor, normalizeLetter]
   );
 
   const handleLetterUpdate = useCallback(
@@ -531,7 +484,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    [selectedLetter]
+    [headerFor, normalizeLetter, selectedLetter]
   );
 
   const handleInputRequest = useCallback(
@@ -563,7 +516,7 @@ export const useLetterWorkflow = () => {
         setIsLoading(false);
       }
     },
-    []
+    [headerFor]
   );
 
   // Letter workflow actions
@@ -578,7 +531,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/submit`, payload ?? {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const approveLetter = useCallback(
@@ -586,7 +539,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/approve`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const completeLetter = useCallback(
@@ -594,7 +547,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/complete`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const moveLetterToStrategy = useCallback(
@@ -602,7 +555,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/move-to-strategy`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const addComment = useCallback(
@@ -610,7 +563,7 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/comment`, { comment }, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
   );
 
   const reassign = useCallback(
@@ -618,7 +571,56 @@ export const useLetterWorkflow = () => {
       await api.post(`/letters/${id}/assign/${userId}`, {}, headerFor(id));
       await fetchLetters();
     },
-    [fetchLetters]
+    [fetchLetters, headerFor]
+  );
+
+  const assignContractDrafter = useCallback(
+    async (
+      id: string,
+      payload: {
+        user_id: string;
+        drafting_profile:
+          | "contractor"
+          | "engineer_representation"
+          | "employer_contract_review";
+      }
+    ) => {
+      const { data } = await api.post<Letter>(
+        `/letters/${id}/assign-drafter`,
+        payload,
+        headerFor(id)
+      );
+      const updated = normalizeLetter(data as any);
+      setLetters((prev) =>
+        prev.map((letter) => (letter.id === id ? (updated as any) : letter))
+      );
+      if (selectedLetter?.id === id) {
+        setSelectedLetter(updated as any);
+      }
+      return updated as any;
+    },
+    [headerFor, normalizeLetter, selectedLetter]
+  );
+
+  const assignReviewer = useCallback(
+    async (
+      letterId: string,
+      runId: string,
+      payload: {
+        reviewer_user_id: string;
+        due_at?: string;
+        note?: string;
+      }
+    ) => {
+      const { data } = await api.post(
+        `/letters/${letterId}/drafting/runs/${runId}/assign-reviewer`,
+        payload,
+        headerFor(letterId)
+      );
+      await fetchLetters();
+      return data;
+    },
+    [headerFor, fetchLetters]
   );
 
   // Input request actions
@@ -628,7 +630,7 @@ export const useLetterWorkflow = () => {
         `/input-requests/letter/${letterId}`,
         headerFor(letterId)
       );
-      return data;
+      return Array.isArray(data) ? data : data?.requests ?? [];
     },
     [headerFor]
   );
@@ -670,6 +672,7 @@ export const useLetterWorkflow = () => {
 
     // Data
     users,
+    currentUser,
     organizations,
     projects,
     letters,
@@ -686,6 +689,8 @@ export const useLetterWorkflow = () => {
     moveLetterToStrategy,
     addComment,
     reassign,
+    assignContractDrafter,
+    assignReviewer,
 
     // Input requests
     listInputRequests,

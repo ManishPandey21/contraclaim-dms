@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _require_platform_admin(current_user: CurrentUser) -> None:
+    roles = {str(role).lower() for role in (current_user.roles or [])}
+    if "superadmin" in roles:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Platform administrator role required",
+    )
+
+
 class AIAssistantController:
     """Clean controller with proper dependency injection."""
     
@@ -208,7 +218,7 @@ class AIAssistantController:
         current_user: CurrentUser,
     ) -> LangGraphLLMConfig:
         """Return current LangGraph LLM configuration (superadmin only)."""
-        authorize_scope(current_user, "admin:read")
+        _require_platform_admin(current_user)
         return await self.llm_config_service.get_config()
 
     async def update_langgraph_config(
@@ -217,7 +227,7 @@ class AIAssistantController:
         current_user: CurrentUser,
     ) -> LangGraphLLMConfig:
         """Update LangGraph LLM configuration (superadmin only)."""
-        authorize_scope(current_user, "admin:write")
+        _require_platform_admin(current_user)
         return await self.llm_config_service.update_config(payload)
 
     async def _sanitize_draft_request(
@@ -236,6 +246,7 @@ class AIAssistantController:
             "document_ids": request.document_ids,
             "use_vector_store": request.use_vector_store,
             "letter_id": request.letter_id,
+            "analysis_only": getattr(request, "analysis_only", False),
             "plan_override": sanitize_text(request.plan_override)
             if getattr(request, "plan_override", None)
             else None,
@@ -321,7 +332,7 @@ async def get_ai_assistant_stats(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get AI assistant usage statistics."""
-    authorize_scope(current_user, "admin:read")
+    _require_platform_admin(current_user)
     return await controller.ai_service.get_stats(current_user)
 
 
@@ -332,7 +343,7 @@ async def clear_cache(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Clear AI assistant caches."""
-    authorize_scope(current_user, "admin:write")
+    _require_platform_admin(current_user)
     await controller.cache_service.clear_all()
     return {"status": "success", "timestamp": datetime.utcnow().isoformat()}
 
@@ -376,3 +387,112 @@ async def get_langgraph_run(
 ):
     """Fetch the latest LangGraph run for the specified letter."""
     return await controller.get_langgraph_run(letter_id, current_user)
+
+
+from pydantic import BaseModel
+
+class PromptTemplateUpdateRequest(BaseModel):
+    template: str
+
+
+@router.get("/ai-assistant/prompts")
+@handle_exceptions
+async def get_prompts(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """List letter drafting prompt keys and metadata (superadmin only)."""
+    _require_platform_admin(current_user)
+    
+    from ..services.letter_drafting.prompts import (
+        PromptRegistry,
+        STRATEGY_PROMPT_KEY,
+        DRAFT_PROMPT_KEY,
+    )
+    from ..core.database import get_database
+    
+    db = await get_database()
+    registry = PromptRegistry(db)
+    
+    strategy = await registry.get_enabled(STRATEGY_PROMPT_KEY)
+    draft = await registry.get_enabled(DRAFT_PROMPT_KEY)
+    
+    return [
+        {
+            "prompt_key": STRATEGY_PROMPT_KEY,
+            "label": "Strategic Plan Prompt Template",
+            "description": "Guides the generation of reply strategy plans and roadmaps.",
+            "version": strategy.version,
+            "supported_payload_schema": strategy.supported_payload_schema,
+            "template": strategy.template,
+        },
+        {
+            "prompt_key": DRAFT_PROMPT_KEY,
+            "label": "Letter Drafting Prompt Template",
+            "description": "Guides the generation of the actual formal reply letter draft.",
+            "version": draft.version,
+            "supported_payload_schema": draft.supported_payload_schema,
+            "template": draft.template,
+        }
+    ]
+
+
+@router.get("/ai-assistant/prompts/{prompt_key}")
+@handle_exceptions
+async def get_prompt_by_key(
+    prompt_key: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Fetch the latest enabled prompt template configuration (superadmin only)."""
+    _require_platform_admin(current_user)
+    
+    from ..services.letter_drafting.prompts import PromptRegistry
+    from ..core.database import get_database
+    
+    db = await get_database()
+    registry = PromptRegistry(db)
+    
+    record = await registry.get_enabled(prompt_key)
+    return record
+
+
+@router.put("/ai-assistant/prompts/{prompt_key}")
+@handle_exceptions
+async def update_prompt_template(
+    prompt_key: str,
+    payload: PromptTemplateUpdateRequest,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Modify/create a new enabled version of a prompt template (superadmin only)."""
+    _require_platform_admin(current_user)
+    
+    from ..services.letter_drafting.prompts import (
+        PromptRegistry,
+        STRATEGY_PROMPT_KEY,
+        DRAFT_PROMPT_KEY,
+    )
+    from ..core.database import get_database
+    
+    required_variables = set()
+    if prompt_key == STRATEGY_PROMPT_KEY:
+        required_variables = {"active_workspace", "role", "recipient", "subject", "recipient_focus", "current_materials", "sources"}
+    elif prompt_key == DRAFT_PROMPT_KEY:
+        required_variables = {"role", "active_workspace", "recipient", "subject", "recipient_focus", "current_materials", "plan", "sources", "profile_pattern"}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid prompt key: {prompt_key}"
+        )
+        
+    missing = PromptRegistry.validate_template(payload.template, required_variables)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required template placeholder variables: {', '.join(missing)}"
+        )
+        
+    db = await get_database()
+    registry = PromptRegistry(db)
+    
+    user_id = getattr(current_user, "id", None) or getattr(current_user, "email", None) or "superadmin"
+    record = await registry.update_prompt(prompt_key, payload.template, user_id)
+    return record

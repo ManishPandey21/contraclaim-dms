@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -24,6 +25,7 @@ from .models import (
     SearchResult,
     SearchStrategy,
 )
+from .source_metadata import normalize_source_payload
 from .vector_client import VectorClient
 
 logger = logging.getLogger(__name__)
@@ -79,7 +81,10 @@ class RetrievalService:
         backend_used = await self._resolve_backend(request.backend)
 
         if backend_used == SearchBackend.MONGO:
-            retrievals = [(queries[0], await self._search_mongo(request))]
+            if self._is_contract_request(request):
+                retrievals = [(queries[0], await self._search_contract_mongo(request))]
+            else:
+                retrievals = [(queries[0], await self._search_mongo(request))]
         else:
             for q_vector, q in zip(query_vectors, queries):
                 results = await self.vector_client.search(
@@ -100,7 +105,7 @@ class RetrievalService:
         doc_meta = await self._fetch_documents_meta([str(item["payload"].get("document_id")) for item in fused])
         search_results = []
         for item in fused:
-            payload = item["payload"]
+            payload = normalize_source_payload(item["payload"])
             doc_id = str(payload.get("document_id"))
             meta = doc_meta.get(doc_id, {})
             search_results.append(
@@ -329,14 +334,103 @@ class RetrievalService:
             scored.append(
                 {
                     "score": score,
-                    "payload": {
+                    "payload": normalize_source_payload({
                         "document_id": str(doc.get("document_id")),
                         "chunk_id": str(doc.get("chunk_id")),
                         "page": doc.get("page_start"),
                         "text": text or "",
                         "text_enriched": doc.get("text_enriched"),
                         "tags": doc.get("tags", []),
-                    },
+                    }),
+                }
+            )
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[: request.limit]
+
+    def _is_contract_request(self, request: SearchRequest) -> bool:
+        metadata = request.filters.metadata or {}
+        return (
+            str(metadata.get("uploadType") or "").lower() == "contract"
+            or str(metadata.get("document_type") or "").lower() == "contract"
+            or str(request.filters.doc_type or "").lower() == "contract"
+        )
+
+    async def _search_contract_mongo(self, request: SearchRequest) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {
+            "uploadType": "contract",
+            "organization_id": request.filters.org_id,
+            "project_id": request.filters.project_id,
+        }
+        if request.filters.document_id:
+            query["$or"] = [
+                {"document_id": request.filters.document_id},
+                {"upload_id": request.filters.document_id},
+            ]
+        if request.filters.tags:
+            query["tags"] = {"$all": request.filters.tags}
+        for key, value in (request.filters.metadata or {}).items():
+            if key in {"uploadType", "document_type"}:
+                continue
+            query[key] = value
+
+        cursor = self.db.document_vectors.find(query).limit(max(request.limit * 8, 20))
+        docs = [doc async for doc in cursor]
+        terms = [
+            term.lower()
+            for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}", request.query or "")
+        ]
+        unique_terms = set(terms)
+        scored: List[Dict[str, Any]] = []
+        for doc in docs:
+            text = doc.get("text_enriched") if request.use_enriched_text else doc.get("text")
+            text = str(text or doc.get("text") or "")
+            haystack = " ".join(
+                str(part or "")
+                for part in (
+                    text,
+                    doc.get("clause_title"),
+                    doc.get("section_heading"),
+                    " ".join(doc.get("clause_tags") or []),
+                )
+            ).lower()
+            exact = 1.0 if request.query.lower() in haystack else 0.0
+            term_hits = sum(1 for term in unique_terms if term in haystack)
+            score = exact + (term_hits / max(len(unique_terms), 1) if unique_terms else 0.2)
+            chunk_id = str(
+                doc.get("chunk_id")
+                or doc.get("embedding_id")
+                or f"{doc.get('document_id')}:{doc.get('clause_number')}:{doc.get('chunk_index', 0)}"
+            )
+            scored.append(
+                {
+                    "score": float(score),
+                    "payload": normalize_source_payload({
+                        "document_id": str(doc.get("document_id") or ""),
+                        "upload_id": doc.get("upload_id"),
+                        "chunk_id": chunk_id,
+                        "page": doc.get("page") or doc.get("page_number"),
+                        "page_number": doc.get("page_number") or doc.get("page"),
+                        "page_numbers": doc.get("page_numbers") or [],
+                        "text": doc.get("text") or "",
+                        "text_enriched": doc.get("text_enriched"),
+                        "tags": doc.get("tags", []),
+                        "uploadType": "contract",
+                        "document_type": "contract",
+                        "clause_id": doc.get("clause_id"),
+                        "clause_number": doc.get("clause_number"),
+                        "clause_title": doc.get("clause_title"),
+                        "clause_type": doc.get("clause_type"),
+                        "clause_level": doc.get("clause_level"),
+                        "parent_clause_number": doc.get("parent_clause_number"),
+                        "clause_start_position": doc.get("clause_start_position"),
+                        "clause_end_position": doc.get("clause_end_position"),
+                        "clause_tags": doc.get("clause_tags") or [],
+                        "toc_path": doc.get("toc_path") or [],
+                        "section": doc.get("section"),
+                        "section_heading": doc.get("section_heading"),
+                        "file_name": doc.get("file_name") or doc.get("filename") or doc.get("source_filename"),
+                        "source_filename": doc.get("source_filename") or doc.get("filename"),
+                    }),
                 }
             )
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -420,9 +514,125 @@ class RetrievalService:
                     all_results[key] = res
 
         merged = list(all_results.values())
+        merged = await self._expand_contract_clause_results(merged, limit=max(limit, 1))
         clause_hints = self._extract_clause_hints(request.query, request.metadata_filters)
         reranked = self._rerank_contract_results(merged, clause_hints, request.metadata_filters)
         return reranked[:limit]
+
+    async def _expand_contract_clause_results(
+        self,
+        results: List[SearchResult],
+        limit: int,
+    ) -> List[SearchResult]:
+        if not results:
+            return results
+
+        def _clause_key(payload: Dict[str, Any]) -> Optional[Tuple[str, str, Any]]:
+            if str(payload.get("uploadType") or payload.get("document_type") or "").lower() != "contract":
+                return None
+            document_id = str(payload.get("document_id") or "")
+            clause_number = payload.get("clause_number")
+            if not document_id or not clause_number:
+                return None
+            return (document_id, str(clause_number), payload.get("clause_start_position"))
+
+        best_by_key: Dict[Tuple[str, str, Any], SearchResult] = {}
+        passthrough: List[SearchResult] = []
+        for result in results:
+            key = _clause_key(result.payload or {})
+            if key is None:
+                passthrough.append(result)
+                continue
+            existing = best_by_key.get(key)
+            if existing is None or result.score > existing.score:
+                best_by_key[key] = result
+
+        if not best_by_key:
+            return results
+
+        filters = []
+        for document_id, clause_number, clause_start in best_by_key.keys():
+            item: Dict[str, Any] = {
+                "uploadType": "contract",
+                "document_id": document_id,
+                "clause_number": clause_number,
+            }
+            if clause_start is not None:
+                item["clause_start_position"] = clause_start
+            filters.append(item)
+
+        docs = [
+            doc
+            async for doc in self.db.document_vectors.find({"$or": filters}).sort([("chunk_index", 1)])
+        ]
+        grouped: Dict[Tuple[str, str, Any], List[Dict[str, Any]]] = {}
+        for doc in docs:
+            key = (
+                str(doc.get("document_id") or ""),
+                str(doc.get("clause_number") or ""),
+                doc.get("clause_start_position"),
+            )
+            grouped.setdefault(key, []).append(doc)
+
+        expanded: List[SearchResult] = []
+        for key, result in best_by_key.items():
+            chunks = grouped.get(key) or []
+            if not chunks:
+                expanded.append(result)
+                continue
+            chunks.sort(key=lambda chunk: chunk.get("chunk_index") or 0)
+            full_text = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks if chunk.get("text")).strip()
+            if not full_text:
+                expanded.append(result)
+                continue
+
+            first = chunks[0]
+            page_numbers = sorted(
+                {
+                    int(page)
+                    for chunk in chunks
+                    for page in (
+                        chunk.get("page_numbers")
+                        or ([chunk.get("page_number")] if chunk.get("page_number") else [])
+                    )
+                    if isinstance(page, (int, float)) or str(page).isdigit()
+                }
+            )
+            prompt_text = full_text if len(full_text) <= 6000 else f"{full_text[:6000].rstrip()}..."
+            payload = dict(result.payload or {})
+            payload.update(
+                {
+                    "text": full_text,
+                    "text_enriched": first.get("text_enriched") or payload.get("text_enriched"),
+                    "full_clause_text": full_text,
+                    "chunk_ids": [
+                        str(chunk.get("chunk_id") or chunk.get("embedding_id") or "")
+                        for chunk in chunks
+                        if chunk.get("chunk_id") or chunk.get("embedding_id")
+                    ],
+                    "page_numbers": page_numbers,
+                    "page": page_numbers[0] if page_numbers else payload.get("page"),
+                    "page_number": page_numbers[0] if page_numbers else payload.get("page_number"),
+                    "clause_title": first.get("clause_title") or payload.get("clause_title"),
+                    "section_heading": first.get("section_heading") or payload.get("section_heading"),
+                    "file_name": first.get("file_name") or first.get("filename") or payload.get("file_name"),
+                    "source_filename": first.get("source_filename") or first.get("filename") or payload.get("source_filename"),
+                }
+            )
+            expanded.append(
+                SearchResult(
+                    document_id=result.document_id,
+                    chunk_id=result.chunk_id,
+                    score=result.score,
+                    page=payload.get("page"),
+                    snippet=prompt_text,
+                    payload=payload,
+                )
+            )
+
+        expanded.extend(passthrough)
+        expanded.sort(key=lambda item: item.score, reverse=True)
+        return expanded[: max(limit * 2, limit)]
 
     def _dedupe_queries(self, queries: List[str]) -> List[str]:
         seen: set[str] = set()
@@ -552,11 +762,20 @@ class RetrievalService:
             f"Question: {question}\n"
             f"Draft: {draft}\n"
             "Top evidence:\n- " + "\n- ".join(top_evidence) + "\n"
-            "List missing key clauses, weak evidence, or contradictions in 2-4 short bullets.\n"
-            "Then propose up to 3 refined search queries (short phrases) focusing on missed concepts, parties, SCC/GCC modifications, or clause numbers.\n"
-            "Format:\nIssues:\n- item\nRefinements:\n- query\nIf sufficient, write 'Issues: sufficient' and leave Refinements empty."
+            "Return JSON only with this schema: "
+            "{\"issues\":[\"2-4 short critique items or sufficient\"],\"refinements\":[\"up to 3 short search queries\"]}\n"
+            "Focus refinements on missed concepts, parties, SCC/GCC modifications, dates, or clause numbers.\n"
+            "If sufficient, return {\"issues\":[\"sufficient\"],\"refinements\":[]}."
         )
         critique = await self.llm_generator.generate(critique_prompt, max_tokens=220)
+        issues, json_refinements = self._parse_refinement_json(critique)
+        if issues or json_refinements:
+            if any(issue.strip().lower() == "sufficient" for issue in issues):
+                return critique, []
+            refinements = json_refinements
+            if not refinements and clause_hints:
+                refinements = clause_hints[:2]
+            return critique, self._dedupe_queries(refinements)[:3]
         refinements: List[str] = []
         for line in critique.splitlines():
             stripped = line.strip(" -•")
@@ -567,8 +786,7 @@ class RetrievalService:
             if stripped.lower().startswith("issues"):
                 continue
             if stripped.lower() in ("sufficient", "issues: sufficient"):
-                refinements = []
-                break
+                return critique, []
             # treat as refinement if it looks like a query fragment
             if len(stripped.split()) <= 12:
                 refinements.append(stripped)
@@ -576,6 +794,38 @@ class RetrievalService:
         if not refinements and clause_hints:
             refinements = clause_hints[:2]
         return critique, self._dedupe_queries(refinements)[:3]
+
+    def _parse_refinement_json(self, raw: str) -> Tuple[List[str], List[str]]:
+        if not raw:
+            return [], []
+        candidate = raw.strip()
+        fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", candidate, flags=re.DOTALL | re.IGNORECASE)
+        if fenced:
+            candidate = fenced.group(1)
+        else:
+            start = candidate.find("{")
+            end = candidate.rfind("}")
+            if start >= 0 and end > start:
+                candidate = candidate[start : end + 1]
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return [], []
+        if not isinstance(parsed, dict):
+            return [], []
+        issues_raw = parsed.get("issues") or []
+        refinements_raw = parsed.get("refinements") or []
+        if isinstance(issues_raw, str):
+            issues_raw = [issues_raw]
+        if isinstance(refinements_raw, str):
+            refinements_raw = [refinements_raw]
+        issues = [str(item).strip() for item in issues_raw if str(item).strip()] if isinstance(issues_raw, list) else []
+        refinements = [
+            str(item).strip()
+            for item in refinements_raw
+            if str(item).strip() and len(str(item).split()) <= 14
+        ] if isinstance(refinements_raw, list) else []
+        return issues, refinements
 
     def _rerank_contract_results(
         self,
@@ -653,15 +903,29 @@ class RetrievalService:
         citations: List[Citation] = []
         for res in results:
             meta = doc_meta.get(res.document_id, {})
+            snippet = res.snippet or ""
+            if len(snippet) > 1200:
+                snippet = f"{snippet[:1200].rstrip()}..."
+            payload = res.payload or {}
+            page_numbers = payload.get("page_numbers") or []
             citations.append(
                 Citation(
                     document_id=res.document_id,
                     chunk_id=res.chunk_id,
                     page=res.page,
                     score=res.score,
-                    snippet=res.snippet,
+                    snippet=snippet,
                     document_title=meta.get("title"),
                     letter_no=meta.get("letterNo"),
+                    file_name=payload.get("file_name") or payload.get("source_filename"),
+                    clause_number=payload.get("clause_number"),
+                    clause_title=payload.get("clause_title"),
+                    section_heading=payload.get("section_heading") or payload.get("section"),
+                    page_numbers=[
+                        int(page)
+                        for page in page_numbers
+                        if isinstance(page, (int, float)) or str(page).isdigit()
+                    ],
                 )
             )
         return citations

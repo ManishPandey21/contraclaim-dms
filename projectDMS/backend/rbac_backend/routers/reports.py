@@ -5,6 +5,7 @@ from fastapi.responses import Response
 
 from ..core.security import CurrentUser, get_current_user
 from ..models.report import ReportDefinition, ReportPreview, ReportRequest
+from ..services.policy_service import PolicyService
 from ..services.report_service import ReportService, ReportServiceError
 
 router = APIRouter()
@@ -20,6 +21,13 @@ async def list_reports(
     report_service: ReportService = Depends(get_report_service),
 ) -> List[ReportDefinition]:
     """Return the catalog of available reports."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.report.view",
+        resource_type="report",
+        organization_id=getattr(current_user, "organization_id", None),
+        audit=False,
+    )
     try:
         return await report_service.list_available_reports()
     except ReportServiceError as exc:  # pragma: no cover - defensive
@@ -33,6 +41,14 @@ async def preview_report(
     report_service: ReportService = Depends(get_report_service),
 ) -> ReportPreview:
     """Generate a preview (JSON rows and metrics) for the selected report."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.report.view",
+        resource_type="report",
+        resource_id=request.report_id,
+        organization_id=request.organization_id or getattr(current_user, "organization_id", None),
+        project_id=request.project_id,
+    )
     try:
         return await report_service.generate_preview(request, current_user)
     except ReportServiceError as exc:
@@ -48,6 +64,14 @@ async def download_report(
     report_service: ReportService = Depends(get_report_service),
 ) -> Response:
     """Download the report as a CSV file."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.report.view",
+        resource_type="report",
+        resource_id=request.report_id,
+        organization_id=request.organization_id or getattr(current_user, "organization_id", None),
+        project_id=request.project_id,
+    )
     try:
         content, filename = await report_service.generate_download(request, current_user)
         return Response(

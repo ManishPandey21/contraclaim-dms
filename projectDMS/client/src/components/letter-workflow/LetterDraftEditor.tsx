@@ -36,6 +36,9 @@ interface LetterReference {
 interface LetterDraftEditorProps {
   letter: Letter;
   referenceLetters?: ReferenceLetterOption[];
+  onGenerateAiDraft?: (instructions: string) => Promise<string | null | undefined>;
+  aiDraftDisabled?: boolean;
+  aiDraftDisabledReason?: string;
   onSave: (updatedLetter: Letter) => void;
   onCancel: () => void;
 }
@@ -86,6 +89,9 @@ interface ReferenceLetterOption {
 const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
   letter,
   referenceLetters = [],
+  onGenerateAiDraft,
+  aiDraftDisabled,
+  aiDraftDisabledReason,
   onSave,
   onCancel,
 }) => {
@@ -342,6 +348,9 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
             <AIAssistant
               letterContent={content}
               onContentSuggestion={setContent}
+              onGenerateDraft={onGenerateAiDraft}
+              disabled={aiDraftDisabled}
+              disabledReason={aiDraftDisabledReason}
               letterContext={{
                 title: letter.title,
                 recipient: letter.recipient,

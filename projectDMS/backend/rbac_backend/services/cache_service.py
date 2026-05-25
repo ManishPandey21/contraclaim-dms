@@ -2,9 +2,12 @@ import asyncio
 import hashlib
 import json
 import logging
+import pickle
 from typing import Any, Dict, Optional
 from datetime import datetime, timedelta
 from functools import wraps
+
+from .runtime_state import get_runtime_state
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ class InMemoryCache:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._runtime_state = get_runtime_state()
 
     def start(self) -> None:
         """Start cache cleanup background task."""
@@ -64,6 +68,17 @@ class InMemoryCache:
 
     async def get(self, key: str) -> Optional[Any]:
         """Retrieve key from cache if not expired. Does NOT renew TTL on get."""
+        redis = await self._runtime_state.get_redis()
+        if redis is not None:
+            raw = await redis.get(self._redis_key(key))
+            if raw is None:
+                return None
+            try:
+                return pickle.loads(raw)
+            except Exception:
+                logger.warning("Failed to deserialize Redis cache entry %s", key, exc_info=True)
+                await redis.delete(self._redis_key(key))
+                return None
         async with self._lock:
             entry = self._cache.get(key)
             if not entry:
@@ -76,6 +91,10 @@ class InMemoryCache:
 
     async def set(self, key: str, value: Any, ttl_seconds: int = 300) -> None:
         """Store key with TTL."""
+        redis = await self._runtime_state.get_redis()
+        if redis is not None:
+            await redis.setex(self._redis_key(key), max(1, int(ttl_seconds)), pickle.dumps(value))
+            return
         expires_at = datetime.utcnow() + timedelta(seconds=ttl_seconds)
         async with self._lock:
             self._cache[key] = {
@@ -87,6 +106,9 @@ class InMemoryCache:
 
     async def delete(self, key: str) -> bool:
         """Delete key; return True if existed."""
+        redis = await self._runtime_state.get_redis()
+        if redis is not None:
+            return bool(await redis.delete(self._redis_key(key)))
         async with self._lock:
             if key in self._cache:
                 del self._cache[key]
@@ -95,6 +117,12 @@ class InMemoryCache:
 
     async def clear(self) -> None:
         """Clear cache completely."""
+        redis = await self._runtime_state.get_redis()
+        if redis is not None:
+            keys = [key async for key in redis.scan_iter(match="cache:*", count=500)]
+            if keys:
+                await redis.delete(*keys)
+            return
         async with self._lock:
             self._cache.clear()
 
@@ -109,6 +137,10 @@ class InMemoryCache:
             'expired_entries': expired_entries,
             'memory_usage_mb': self._estimate_memory_usage(),
         }
+
+    @staticmethod
+    def _redis_key(key: str) -> str:
+        return f"cache:{key}"
 
     def _estimate_memory_usage(self) -> float:
         """Estimate approximate memory in megabytes used by cache entries."""
@@ -162,6 +194,17 @@ async def cache_invalidate_pattern(pattern: str):
     Note: this simplistic substring match can lead to unintended clears.
     For production, use redis with native pattern delete support.
     """
+    redis = await cache._runtime_state.get_redis()
+    if redis is not None:
+        matched = [
+            key
+            async for key in redis.scan_iter(match=f"cache:*{pattern}*", count=500)
+        ]
+        if matched:
+            await redis.delete(*matched)
+        logger.info("Invalidated %s Redis cache entries matching pattern: %s", len(matched), pattern)
+        return
+
     keys_to_delete = []
     # Lock while iterating keys
     async with cache._lock:

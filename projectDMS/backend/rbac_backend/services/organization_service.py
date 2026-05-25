@@ -1,4 +1,4 @@
-﻿# services/organization_service.py
+# services/organization_service.py
 
 import logging
 from datetime import datetime
@@ -38,7 +38,7 @@ class OrganizationService:
         org_data: OrganizationCreate,
         created_by: Any
     ) -> Organization:
-        """Create a new organization."""
+        """Create a new organization and provision its initial subscription."""
         try:
             db = await self._get_db()
             
@@ -73,6 +73,15 @@ class OrganizationService:
             result = await db.organizations.insert_one(org_doc)
             org_id = str(result.inserted_id)
             
+            # --- Provision initial subscription ---
+            await self._provision_initial_subscription(
+                org_id=org_id,
+                plan_code=getattr(org_data, "plan_code", None),
+                subscription_status=getattr(org_data, "subscription_status", None),
+                trial_days=getattr(org_data, "trial_days", None),
+                created_by=created_by,
+            )
+            
             # Return created organization
             org_doc["id"] = org_id
             org_doc.pop("_id", None)
@@ -84,6 +93,54 @@ class OrganizationService:
         except Exception as e:
             logger.error(f"Failed to create organization: {str(e)}")
             raise OrganizationServiceError("Organization creation failed")
+
+    async def _provision_initial_subscription(
+        self,
+        org_id: str,
+        plan_code: str | None,
+        subscription_status: str | None,
+        trial_days: int | None,
+        created_by: Any,
+    ) -> None:
+        """Provision the initial subscription for a newly created organization."""
+        from .monetization_service import MonetizationService
+        from ..models.rbac_monetization import SubscriptionCreate
+
+        effective_plan = plan_code or "no_service_override"
+        effective_status = subscription_status or ("trial" if plan_code else "active")
+
+        now = datetime.utcnow()
+        starts_at = now
+        ends_at = None
+        is_trial = effective_status == "trial"
+        is_pilot = effective_status == "pilot"
+
+        if is_trial and trial_days:
+            from datetime import timedelta
+            ends_at = now + timedelta(days=trial_days)
+        elif is_pilot and trial_days:
+            from datetime import timedelta
+            ends_at = now + timedelta(days=trial_days)
+
+        payload = SubscriptionCreate(
+            organization_id=org_id,
+            plan_code=effective_plan,
+            status=effective_status,
+            billing_status="active",
+            starts_at=starts_at,
+            ends_at=ends_at,
+            trial=is_trial,
+            pilot=is_pilot,
+        )
+
+        try:
+            monetization = MonetizationService()
+            await monetization.create_subscription(payload, created_by)
+            logger.info(f"Provisioned subscription '{effective_plan}' ({effective_status}) for org {org_id}")
+        except Exception as e:
+            # Log but don't fail org creation — subscription can be assigned manually
+            logger.error(f"Failed to provision subscription for org {org_id}: {e}")
+
     
     async def get_organization_by_id(self, org_id: str) -> Optional[Organization]:
         """Get organization by ID."""

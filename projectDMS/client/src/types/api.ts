@@ -121,6 +121,8 @@ export interface Project {
   teamSize?: number;
 }
 
+export type DocumentBulkDownloadType = "letters" | "contracts" | "complete";
+
 export interface Organization {
   _id: string;
   name: string;
@@ -158,13 +160,38 @@ export type NotificationCategory =
   | "drafting"
   | "approvals"
   | "uploads"
-  | "comments";
+  | "comments"
+  | "reminders"
+  | "system"
+  | "security";
+
+export type NotificationPriority = "low" | "normal" | "high" | "urgent";
+export type NotificationSeverity = "info" | "warning" | "error" | "critical";
+
+export interface NotificationAction {
+  key: string;
+  label: string;
+  method?: "navigate" | "post" | string;
+  href?: string | null;
+  payload?: Record<string, any>;
+}
 
 export interface NotificationItem {
   id: string;
   type: string;
   created_at: string;
   unread: boolean;
+  archived?: boolean;
+  priority?: NotificationPriority;
+  severity?: NotificationSeverity;
+  title?: string | null;
+  message?: string | null;
+  actions?: NotificationAction[];
+  resource_link?: string | null;
+  channels_requested?: string[];
+  delivery_summary?: Record<string, any>;
+  dedupe_key?: string | null;
+  expires_at?: string | null;
   resource_type?: string;
   resource_id?: string;
   category?: NotificationCategory;
@@ -191,4 +218,40 @@ export interface NotificationListResponse {
   total: number;
   unread_count: number;
   has_more: boolean;
+}
+
+export interface NotificationPreference {
+  user_id: string;
+  organization_id?: string | null;
+  default_channels: string[];
+  event_settings: Record<string, { enabled?: boolean; channels?: string[]; digest_only?: boolean }>;
+  quiet_hours: Record<string, any>;
+  digest_enabled: boolean;
+  browser_notifications_enabled: boolean;
+  email_notifications_enabled: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type NotificationPreferenceUpdate = Partial<
+  Pick<
+    NotificationPreference,
+    | "default_channels"
+    | "event_settings"
+    | "quiet_hours"
+    | "digest_enabled"
+    | "browser_notifications_enabled"
+    | "email_notifications_enabled"
+  >
+>;
+
+export interface ProjectNotificationSubscription {
+  project_id: string;
+  organization_id?: string | null;
+  user_id: string;
+  subscribed: boolean;
+  event_settings: Record<string, { enabled?: boolean; channels?: string[]; digest_only?: boolean }>;
+  role_default_source?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }

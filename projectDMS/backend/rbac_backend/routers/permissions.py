@@ -4,13 +4,16 @@ Simplified permissions router with basic functionality to get the UI working.
 This removes complex dependencies and focuses on core CRUD operations.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import List, Optional, Dict, Any
 import logging
 
 from ..core.security import get_current_user, CurrentUser, require_permission
 from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService, RoleServiceError
+from ..services.audit_event_service import AuditEventService
+from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
 from ..models.permission import Permission, PermissionCreate, PermissionUpdate
 from ..models.role import Role, RoleCreate, RoleUpdate
 
@@ -23,6 +26,9 @@ def get_permission_service() -> PermissionService:
 
 def get_role_service() -> RoleService:
     return RoleService()
+
+def get_policy_service() -> PolicyService:
+    return PolicyService()
 
 @router.post("/permissions/check", response_model=Dict[str, Any])
 async def check_permission_endpoint(
@@ -105,13 +111,24 @@ async def get_permission(
 @router.post("/permissions", response_model=Permission)
 async def create_permission(
     permission_data: PermissionCreate,
+    request: Request,
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:superuser")),
 ):
     """Create new permission."""
+    await require_step_up(request, current_user, action="platform.permission.manage")
+    await policy.authorize(current_user, "platform.permission.manage", resource_type="permission")
     try:
         permission = await permission_service.create_permission(permission_data, current_user)
+        await AuditEventService().emit(
+            action="permission.created",
+            actor_id=current_user.id,
+            resource_type="permission",
+            resource_id=str(getattr(permission, "id", None) or getattr(permission, "name", "")),
+            after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
+        )
         return permission
         
     except Exception as e:
@@ -125,13 +142,26 @@ async def create_permission(
 async def update_permission(
     permission_id: str,
     update_data: PermissionUpdate,
+    request: Request,
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:superuser")),
 ):
     """Update existing permission."""
+    await require_step_up(request, current_user, action="platform.permission.manage")
+    await policy.authorize(current_user, "platform.permission.manage", resource_type="permission", resource_id=permission_id)
     try:
+        before = await permission_service.get_permission_by_id(permission_id)
         permission = await permission_service.update_permission(permission_id, update_data, current_user)
+        await AuditEventService().emit(
+            action="permission.updated",
+            actor_id=current_user.id,
+            resource_type="permission",
+            resource_id=permission_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+            after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
+        )
         return permission
         
     except Exception as e:
@@ -144,18 +174,30 @@ async def update_permission(
 @router.delete("/permissions/{permission_id}")
 async def delete_permission(
     permission_id: str,
+    request: Request,
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:superuser")),
 ):
     """Delete permission."""
+    await require_step_up(request, current_user, action="platform.permission.manage")
+    await policy.authorize(current_user, "platform.permission.manage", resource_type="permission", resource_id=permission_id)
     try:
+        before = await permission_service.get_permission_by_id(permission_id)
         success = await permission_service.delete_permission(permission_id, current_user)
         if not success:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Permission not found"
             )
+        await AuditEventService().emit(
+            action="permission.deleted",
+            actor_id=current_user.id,
+            resource_type="permission",
+            resource_id=permission_id,
+            before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
+        )
         return {"message": "Permission deleted successfully"}
         
     except HTTPException:
@@ -231,11 +273,15 @@ async def get_role(
 @router.post("/roles", response_model=Role)
 async def create_role(
     role_data: RoleCreate,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:create")),
 ):
     """Create new role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role")
     try:
         role = await role_service.create_role(role_data, current_user)
         return role
@@ -253,11 +299,15 @@ async def create_role(
 async def update_role(
     role_id: str,
     update_data: RoleUpdate,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:update")),
 ):
     """Update role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         role = await role_service.update_role(role_id, update_data, current_user)
         return role
@@ -274,11 +324,15 @@ async def update_role(
 @router.delete("/roles/{role_id}")
 async def delete_role(
     role_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:delete")),
 ):
     """Delete role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         success = await role_service.delete_role(role_id, current_user)
         if not success:
@@ -331,11 +385,15 @@ async def get_role_permissions(
 async def add_role_permission(
     role_id: str,
     permission_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:assign")),
 ):
     """Add permission to role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         role = await role_service.add_permission_to_role(role_id, permission_id, current_user)
         return role
@@ -353,11 +411,15 @@ async def add_role_permission(
 async def remove_role_permission(
     role_id: str,
     permission_id: str,
+    request: Request,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:assign")),
 ):
     """Remove permission from role."""
+    await require_step_up(request, current_user, action="platform.role.manage")
+    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         role = await role_service.remove_permission_from_role(role_id, permission_id, current_user)
         return role

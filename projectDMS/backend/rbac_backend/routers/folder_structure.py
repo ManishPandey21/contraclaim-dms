@@ -18,6 +18,8 @@ from ..core.config import settings
 from ..services.folder_service import FolderService
 from ..services.s3_service import S3Service
 from ..services.authorization_service import AuthorizationService
+from ..services.audit_event_service import AuditEventService
+from ..services.policy_service import PolicyService
 from ..models.folder_models import (
     FolderItem, CreateFolderRequest, FolderResponse, 
     UploadFileRequest, UploadFileResponse
@@ -205,8 +207,10 @@ class FolderController:
                 )
             
             # Upload to S3 asynchronously
-            s3_key = await self.s3_service.upload_file(
-                content, str(file_path), validation_result.mime_type
+            s3_key = await self.s3_service.upload_bytes(
+                str(file_path),
+                content,
+                validation_result.mime_type,
             )
             
             # Create file record
@@ -311,17 +315,26 @@ class FolderController:
         self, content: bytes, filename: str, extension: str
     ) -> Any:
         """Comprehensive file content validation."""
-        from ..utils.validation import validate_file, ValidationResult
+        from ..models.document import FileValidationResult
+        from ..utils.validation import validate_file
         
         # Size check
-        if len(content) > settings.storage.MAX_FILE_SIZE:
-            return ValidationResult(
-                False, f"File too large (max {settings.storage.MAX_FILE_SIZE // (1024*1024)}MB)"
+        max_size = max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+        if len(content) > max_size:
+            return FileValidationResult(
+                is_valid=False,
+                filename=sanitize_filename(filename),
+                file_size=len(content),
+                file_type=extension.lstrip("."),
+                mime_type="application/octet-stream",
+                error=f"File too large (max {max_size // (1024 * 1024)}MB)",
             )
         
         # MIME type validation
         return await validate_file(
-            content, filename, settings.storage.ALLOWED_FOLDER_UPLOAD_MIME
+            content,
+            filename,
+            settings.ALLOWED_DOCUMENT_MIMES,
         )
 
     async def _build_folder_tree(
@@ -368,8 +381,8 @@ async def get_folder_controller() -> FolderController:
     s3_service = S3Service()
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(
-        requests_per_minute=settings.security.USER_RATE_LIMIT_REQUESTS,
-        window_seconds=settings.security.USER_RATE_LIMIT_WINDOW
+        requests_per_minute=settings.USER_RATE_LIMIT_REQUESTS,
+        window_seconds=settings.USER_RATE_LIMIT_WINDOW,
     )
     return FolderController(folder_service, s3_service, auth_service, rate_limiter)
 
@@ -383,7 +396,23 @@ async def create_folder_structure(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Create folder structure with security validation."""
-    return await controller.create_folder_structure(folder_data, current_user)
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.upload",
+        resource_type="folder",
+        organization_id=folder_data.organization_id,
+        project_id=folder_data.project_id,
+    )
+    result = await controller.create_folder_structure(folder_data, current_user)
+    await AuditEventService().emit(
+        action="folder.created",
+        actor_id=current_user.id,
+        resource_type="folder",
+        organization_id=folder_data.organization_id,
+        project_id=folder_data.project_id,
+        after=result.model_dump(mode="json") if hasattr(result, "model_dump") else None,
+    )
+    return result
 
 
 @router.get("/folder-structure", response_model=List[FolderItem])
@@ -395,6 +424,14 @@ async def get_root_folder_structure(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get root folder structure with efficient caching."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="folder",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id,
+        audit=False,
+    )
     return await controller.get_folder_structure(organization_id, project_id, current_user)
 
 
@@ -408,6 +445,15 @@ async def get_folder_by_path(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get specific folder by path with security validation."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="folder",
+        resource_id=path,
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id,
+        audit=False,
+    )
     return await controller.folder_service.get_folder_with_children(
         path, organization_id or str(current_user.organization_id), project_id
     )
@@ -427,6 +473,13 @@ async def upload_file(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Secure file upload with validation."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.upload",
+        resource_type="folder_file",
+        organization_id=organization_id,
+        project_id=project_id,
+    )
     return await controller.upload_file(
         background_tasks, file, name, path, file_extension,
         organization_id, project_id, current_user
@@ -441,7 +494,21 @@ async def delete_folder(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Secure folder/file deletion."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.delete",
+        resource_type="folder",
+        resource_id=path,
+        organization_id=getattr(current_user, "organization_id", None),
+    )
     await controller.delete_folder(path, current_user)
+    await AuditEventService().emit(
+        action="folder.deleted",
+        actor_id=current_user.id,
+        resource_type="folder",
+        resource_id=path,
+        organization_id=getattr(current_user, "organization_id", None),
+    )
 
 
 @router.get("/folder-structure/open-file")
@@ -452,6 +519,14 @@ async def open_file(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Generate secure presigned URL for file access."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.download",
+        resource_type="folder_file",
+        resource_id=file_path,
+        organization_id=getattr(current_user, "organization_id", None),
+        audit=False,
+    )
     return await controller.s3_service.generate_presigned_url(
         file_path, current_user, expire_minutes=60
     )

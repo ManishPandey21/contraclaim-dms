@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from bson import ObjectId
@@ -136,26 +137,29 @@ class TagService:
         tags, subtags, documents = await self._get_handles()
         criteria: Dict[str, Any] = {"is_active": True}
 
-        # Merge authorized filters ($or, organization_id, project_id, visibility, color)
-        for key in ("organization_id", "project_id", "visibility", "color"):
-            if key in filters:
-                criteria[key] = filters[key]
-        if "$or" in filters:
-            criteria["$or"] = filters["$or"]
+        # Merge authorized filters, including compound $and/$or visibility/search clauses.
+        for key, value in (filters or {}).items():
+            if key == "search" or value is None:
+                continue
+            criteria[key] = value
 
         # Optional free-text search if provided (augment existing $or)
         if search := filters.get("search"):
             try:
-                pattern = str(search)
-                ors = criteria.get("$or", [])
-                ors.extend(
-                    [
+                pattern = re.escape(str(search).strip())
+                if pattern:
+                    search_clause = {
+                        "$or": [
                         {"name": {"$regex": pattern, "$options": "i"}},
                         {"description": {"$regex": pattern, "$options": "i"}},
-                    ]
-                )
-                if ors:
-                    criteria["$or"] = ors
+                        ]
+                    }
+                    if "$and" in criteria:
+                        criteria["$and"].append(search_clause)
+                    elif "$or" in criteria:
+                        criteria["$and"] = [{"$or": criteria.pop("$or")}, search_clause]
+                    else:
+                        criteria.update(search_clause)
             except Exception:
                 pass
 
@@ -214,7 +218,9 @@ class TagService:
         responses: List[TagResponse] = []
         for tag in tag_models:
             sub_count = await subtags.count_documents({"tag_id": tag.id, "is_active": True})
-            usage = await documents.count_documents({"tags": tag.id})
+            usage = await documents.count_documents(
+                self._document_tag_usage_query(tag.id or "", tag.name)
+            )
 
             org_name = org_name_map.get(str(tag.organization_id or ""), None)
             proj_name = proj_name_map.get(str(tag.project_id or ""), None)
@@ -271,7 +277,10 @@ class TagService:
 
     async def count_tag_usage(self, tag_id: str) -> int:
         _, _, documents = await self._get_handles()
-        return await documents.count_documents({"tags": tag_id})
+        tag = await self.get_tag_by_id(tag_id)
+        return await documents.count_documents(
+            self._document_tag_usage_query(tag_id, getattr(tag, "name", None))
+        )
 
     async def delete_tag_with_subtags(self, tag_id: str, current_user: Any) -> int:
         tags, subtags, _ = await self._get_handles()
@@ -288,14 +297,23 @@ class TagService:
         )
         if result.matched_count == 0:
             raise TagError("Tag not found", 404)
+        tag_id_values = self._document_lookup_values(tag_id)
         subtag_result = await subtags.update_many(
-            {"tag_id": tag_id}, {"$set": {"is_active": False, "updated_at": datetime.utcnow()}}
+            {"tag_id": {"$in": tag_id_values}},
+            {"$set": {"is_active": False, "updated_at": datetime.utcnow()}},
         )
         return subtag_result.modified_count
 
     async def get_subtag_by_name_and_tag(self, name: str, tag_id: str) -> Optional[Subtag]:
         _, subtags, _ = await self._get_handles()
-        doc = await subtags.find_one({"tag_id": tag_id, "name": name, "is_active": True})
+        pattern = f"^{re.escape(name.strip())}$"
+        doc = await subtags.find_one(
+            {
+                "tag_id": {"$in": self._document_lookup_values(tag_id)},
+                "name": {"$regex": pattern, "$options": "i"},
+                "is_active": True,
+            }
+        )
         return self._to_subtag(doc) if doc else None
 
     async def create_subtag(
@@ -377,7 +395,9 @@ class TagService:
         responses: List[SubtagResponse] = []
         for doc in docs:
             sub = self._to_subtag(doc)
-            usage = await documents.count_documents({"subtags": sub.id})
+            usage = await documents.count_documents(
+                self._document_subtag_usage_query(sub.id or "", sub.name)
+            )
 
             # Determine created_by_label based on parent tag visibility
             created_by_label: Optional[str] = None
@@ -432,7 +452,12 @@ class TagService:
 
     async def count_subtag_usage(self, subtag_id: str) -> int:
         _, _, documents = await self._get_handles()
-        return await documents.count_documents({"subtags": subtag_id})
+        subtag = await self.get_subtag_by_id(subtag_id)
+        return await documents.count_documents(
+            self._document_subtag_usage_query(
+                subtag_id, getattr(subtag, "name", None)
+            )
+        )
 
     async def delete_subtag(self, subtag_id: str, current_user: Any) -> None:
         _, subtags, _ = await self._get_handles()
@@ -455,6 +480,50 @@ class TagService:
             return ObjectId(value)
         except Exception:
             return value
+
+    def _document_lookup_values(self, *values: Optional[str]) -> List[Any]:
+        lookup_values: List[Any] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            lookup_values.append(text)
+            try:
+                object_id = ObjectId(text)
+                lookup_values.append(object_id)
+            except Exception:
+                pass
+        return lookup_values or ["__none__"]
+
+    def _document_tag_usage_query(
+        self, tag_id: str, tag_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        values = self._document_lookup_values(tag_id, tag_name)
+        return {
+            "$or": [
+                {"tags": {"$in": values}},
+                {"tag": {"$in": values}},
+                {"tag": {"$in": [str(value) for value in values]}},
+            ]
+        }
+
+    def _document_subtag_usage_query(
+        self, subtag_id: str, subtag_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        values = self._document_lookup_values(subtag_id, subtag_name)
+        string_values = [str(value) for value in values]
+        return {
+            "$or": [
+                {"subTags": {"$in": values}},
+                {"subtags": {"$in": values}},
+                {"subTag": {"$in": values}},
+                {"sub_tag": {"$in": values}},
+                {"subTag": {"$in": string_values}},
+                {"sub_tag": {"$in": string_values}},
+            ]
+        }
 
     def _to_tag(self, doc: Optional[Dict[str, Any]]) -> Tag:
         if not doc:

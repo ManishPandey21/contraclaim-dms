@@ -82,15 +82,7 @@ const LetterInitiationForm: React.FC<LetterInitiationFormProps> = ({
   const normalizeString = (value?: string | null) =>
     typeof value === "string" ? value.toLowerCase().trim() : undefined;
 
-  const storedUserId =
-    typeof window !== "undefined"
-      ? window.localStorage.getItem("user_id") ?? undefined
-      : undefined;
-
-  const currentUser =
-    normalizedUsers.find((user) => user.id === storedUserId) ??
-    normalizedUsers[0] ??
-    undefined;
+  const currentUser = normalizedUsers[0] ?? undefined;
 
   type FormValues = {
     title: string;

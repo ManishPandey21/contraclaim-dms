@@ -9,6 +9,9 @@ import { toast } from 'sonner';
 interface AIAssistantProps {
   letterContent: string;
   onContentSuggestion: (suggestion: string) => void;
+  onGenerateDraft?: (instructions: string) => Promise<string | null | undefined>;
+  disabled?: boolean;
+  disabledReason?: string;
   letterContext?: {
     title: string;
     recipient: string;
@@ -20,6 +23,9 @@ interface AIAssistantProps {
 const AIAssistant: React.FC<AIAssistantProps> = ({ 
   letterContent, 
   onContentSuggestion, 
+  onGenerateDraft,
+  disabled = false,
+  disabledReason,
   letterContext 
 }) => {
   const [userPrompt, setUserPrompt] = useState('');
@@ -33,33 +39,24 @@ const AIAssistant: React.FC<AIAssistantProps> = ({
     }
 
     setIsGenerating(true);
-    
-    // Simulate AI generation delay
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Mock AI-generated content based on context
-    const contextInfo = letterContext?.inputInfo ? `\n\nBased on the input provided: ${letterContext.inputInfo}` : '';
-    
-    const generatedContent = `Dear ${letterContext?.recipient || '[Recipient]'},
+    try {
+      if (onGenerateDraft) {
+        const generatedContent = await onGenerateDraft(userPrompt.trim());
+        if (generatedContent) {
+          setLastSuggestion(generatedContent);
+          toast.success("AI draft generated successfully");
+        }
+        return;
+      }
 
-${userPrompt.includes('formal') ? 'I am writing to formally address' : 'I hope this letter finds you well. I am writing to'} the matter regarding ${letterContext?.subject || '[Subject]'}.${contextInfo}
-
-${userPrompt.includes('urgent') ? 'This matter requires immediate attention and' : 'I would like to'} ${userPrompt.toLowerCase().includes('request') ? 'request your consideration for' : 'inform you about'} the following:
-
-[Please elaborate on the specific details and requirements based on your input and context]
-
-${userPrompt.includes('meeting') ? 'I would welcome the opportunity to discuss this matter further in a meeting at your convenience.' : 'I look forward to your response and any guidance you may provide.'}
-
-Thank you for your time and consideration.
-
-Sincerely,
-[Your Name]
-[Your Title]`;
-
-    setLastSuggestion(generatedContent);
-    setIsGenerating(false);
-    
-    toast.success("AI draft generated successfully");
+      toast.error("AI drafting workflow is not available for this letter");
+    } catch (error: any) {
+      toast.error("AI draft generation failed", {
+        description: error?.message ?? "Unable to generate a draft from the approved strategy.",
+      });
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
   const handleSearchSimilar = () => {
@@ -76,21 +73,32 @@ Sincerely,
     }
   };
 
-  const improveDraft = () => {
+  const improveDraft = async () => {
     if (!letterContent.trim()) {
       toast.error("Please add some content to improve");
       return;
     }
+    if (!onGenerateDraft) {
+      toast.error("AI drafting workflow is not available for this letter");
+      return;
+    }
 
     setIsGenerating(true);
-    
-    // Simulate improvement delay
-    setTimeout(() => {
-      const improvedContent = letterContent + "\n\n[AI Enhancement: Added formal closing and improved clarity]";
-      setLastSuggestion(improvedContent);
+    const instruction =
+      "Improve the current draft using the approved strategy while preserving the contractual position and source support.";
+    try {
+      const improvedContent = await onGenerateDraft(instruction);
+      if (improvedContent) {
+        setLastSuggestion(improvedContent);
+        toast.success("Draft improvements generated");
+      }
+    } catch (error: any) {
+      toast.error("Draft improvement failed", {
+        description: error?.message ?? "Unable to improve this draft.",
+      });
+    } finally {
       setIsGenerating(false);
-      toast.success("Draft improvements generated");
-    }, 1500);
+    }
   };
 
   return (
@@ -121,8 +129,9 @@ Sincerely,
           <div className="flex flex-wrap gap-2">
             <Button 
               onClick={handleGenerateDraft} 
-              disabled={isGenerating}
+              disabled={isGenerating || disabled}
               className="gap-2"
+              title={disabled ? disabledReason : undefined}
             >
               {isGenerating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
               Generate AI Draft
@@ -141,8 +150,9 @@ Sincerely,
               <Button 
                 variant="outline" 
                 onClick={improveDraft}
-                disabled={isGenerating}
+                disabled={isGenerating || disabled || !onGenerateDraft}
                 className="gap-2"
+                title={disabled ? disabledReason : undefined}
               >
                 <Wand2 className="h-4 w-4" />
                 Improve Current Draft

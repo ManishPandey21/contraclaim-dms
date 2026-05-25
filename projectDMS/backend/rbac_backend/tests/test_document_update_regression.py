@@ -125,4 +125,7 @@ async def test_update_document_strips_identifier_fields_from_update_payload() ->
     assert "_id" not in set_payload
     assert "id" not in set_payload
 
-    assert collection.last_update_filter == {"_id": document_id}
+    assert collection.last_update_filter == {
+        "_id": document_id,
+        "lifecycle_state": {"$ne": "deleted"},
+    }

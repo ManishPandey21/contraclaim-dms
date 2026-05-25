@@ -1,4 +1,4 @@
-﻿# services/role_service.py
+# services/role_service.py
 
 import logging
 import re
@@ -253,6 +253,37 @@ class RoleService:
         if self.db is None:
             self.db = await get_database()
         return self.db
+        
+    async def _invalidate_role_caches(self, role_id: str) -> None:
+        """Invalidate permission caches and JWTs for all users with this role."""
+        try:
+            from .runtime_state import get_runtime_state
+            runtime = get_runtime_state()
+            redis = await runtime.get_redis()
+            if not redis:
+                return
+                
+            db = await self._get_db()
+            
+            # Find all users with this role ID (handle both string and ObjectId references)
+            try:
+                role_oid = ObjectId(role_id)
+            except:
+                role_oid = role_id
+                
+            cursor = db.users.find(
+                {"roles": {"$in": [role_id, role_oid, str(role_id)]}},
+                {"_id": 1}
+            )
+            users = await cursor.to_list(length=None)
+            
+            now_ts = int(datetime.utcnow().timestamp())
+            for user in users:
+                uid_str = str(user["_id"])
+                await redis.delete(f"user_perms:{uid_str}")
+                await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
+        except Exception as e:
+            logger.error(f"Failed to invalidate cache for role {role_id}: {e}")
     
     async def create_role(
         self, 
@@ -523,6 +554,7 @@ class RoleService:
             
             # Return updated role
             updated_role = await self.get_role_by_id(role_id)
+            await self._invalidate_role_caches(role_id)
             return updated_role
             
         except RoleServiceError:
@@ -702,6 +734,7 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
             
             # Return updated role
+            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
             
         except RoleServiceError:
@@ -748,6 +781,7 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
             
             # Return updated role
+            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
             
         except RoleServiceError:
@@ -794,6 +828,7 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
             
             # Return updated role
+            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
             
         except RoleServiceError:

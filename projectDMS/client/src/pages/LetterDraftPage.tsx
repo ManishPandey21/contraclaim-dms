@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, RefreshCw, Sparkles } from "lucide-react";
+import { ArrowLeft, CheckCircle2, FileDown, RefreshCw, Send, Sparkles } from "lucide-react";
 import { useLetterWorkflow } from "@/hooks/useLetterWorkflow";
 import { useLetterGraphRuns } from "@/hooks/useLetterGraphRuns";
 import { useLanggraphDraft } from "@/hooks/useLanggraphDraft";
+import { useLetterDrafting } from "@/hooks/useLetterDrafting";
+import { LANGGRAPH_ENABLED } from "@/config/features";
 import LetterDraftEditor from "@/components/letter-workflow/LetterDraftEditor";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +15,7 @@ import GraphStatusBadge from "@/components/langgraph/GraphStatusBadge";
 import { LinkedDocumentSelector } from "@/components/letter-workflow/LinkedDocumentSelector";
 import BackgroundSummary from "@/components/letter-workflow/BackgroundSummary";
 import DraftSourcesPanel from "@/components/letter-workflow/DraftSourcesPanel";
+import { DraftEvidencePanel } from "@/components/letter-workflow/DraftEvidencePanel";
 import type { ContextDocumentSummary } from "@/services/letter-workflow-api";
 import type {
   LanggraphBackgroundItem,
@@ -25,11 +28,48 @@ import { formatDateTime } from "@/utils/dateFormat";
 import { mapLetterToUi, UILetter } from "@/utils/letterWorkflowMapping";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertTriangle } from "lucide-react";
+import type { DraftRunResponse, DraftType, LetterCategory, SourceEvidence } from "@/types/letterDrafting";
 
 type DocumentSummarySource =
   | LanggraphContextDocument
   | ContextDocumentSummary
   | Record<string, unknown>;
+
+const backgroundItemsFromDraftRun = (
+  run: DraftRunResponse
+): LanggraphBackgroundItem[] => {
+  const entries: LanggraphBackgroundItem[] = [];
+  const currentMaterials = Array.isArray(run.context_bundle?.current_materials)
+    ? run.context_bundle.current_materials
+    : [];
+  currentMaterials.slice(0, 4).forEach((text, index) => {
+    if (typeof text !== "string" || !text.trim()) return;
+    entries.push({
+      id: `current-${index}`,
+      type: "summary",
+      text,
+      generated_at: run.completed_at,
+    });
+  });
+  (run.sources ?? []).slice(0, 12).forEach((source: SourceEvidence, index) => {
+    entries.push({
+      id: source.source_id || `source-${index}`,
+      type:
+        source.source_type === "contract_clause"
+          ? "clause"
+          : source.source_type === "prior_correspondence" ||
+              source.source_type === "graph_thread"
+            ? "letter"
+            : source.source_type === "comment"
+              ? "comment"
+              : "document",
+      text: source.snippet || source.text || source.label,
+      documents: source.document_id ? [source.document_id] : undefined,
+      generated_at: run.completed_at,
+    });
+  });
+  return entries;
+};
 
 const LetterDraftPage = () => {
   const { id } = useParams<{ id: string }>();
@@ -44,7 +84,18 @@ const LetterDraftPage = () => {
     loading: fetchingRun,
   } = useLetterGraphRuns();
 
-  const { runDraft, loading: langgraphLoading } = useLanggraphDraft();
+  const { loading: langgraphLoading } = useLanggraphDraft();
+  const {
+    run: runDraftingWorkflow,
+    generateDraft,
+    reviseRun,
+    validateRun,
+    critiqueRun,
+    approveRun,
+    exportRun,
+    issueRun,
+    loading: draftingV2Loading,
+  } = useLetterDrafting();
 
   const letter = useMemo(
     () => letters.find((entry) => entry.id === id),
@@ -56,15 +107,17 @@ const LetterDraftPage = () => {
     [letter, users]
   );
 
+  const [v2DraftBody, setV2DraftBody] = useState<string | null>(null);
+
   const editorLetter = useMemo(() => {
     if (!uiLetter) return null;
     const content =
-      graphRun?.draft?.body ?? uiLetter.draftBody ?? uiLetter.content;
+      v2DraftBody ?? graphRun?.draft?.body ?? uiLetter.draftBody ?? uiLetter.content;
     return {
       ...uiLetter,
       content,
     };
-  }, [uiLetter, graphRun]);
+  }, [uiLetter, graphRun, v2DraftBody]);
 
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
   const [selectedDocs, setSelectedDocs] = useState<ContextDocumentSummary[]>(
@@ -78,6 +131,12 @@ const LetterDraftPage = () => {
   const [planOverride, setPlanOverride] = useState<string>("");
   const [linkedLetterCodes, setLinkedLetterCodes] = useState<string[]>([]);
   const [manualLinkedCode, setManualLinkedCode] = useState("");
+  const [draftType, setDraftType] = useState<DraftType>("reply");
+  const [letterCategory, setLetterCategory] = useState<LetterCategory>("general");
+  const [draftPurpose, setDraftPurpose] = useState("");
+  const [requiredAction, setRequiredAction] = useState("");
+  const [triggerEvent, setTriggerEvent] = useState("");
+  const [v2Run, setV2Run] = useState<DraftRunResponse | null>(null);
 
   useEffect(() => {
     if (id && uiLetter) {
@@ -101,7 +160,7 @@ const LetterDraftPage = () => {
 
   useEffect(() => {
     if (!uiLetter) return;
-    if (uiLetter.status === "Strategy" || !uiLetter.strategicPlan) {
+    if (uiLetter.status === "Strategy") {
       navigate(`/letters/${id}/strategy`, { replace: true });
     }
   }, [uiLetter, id, navigate]);
@@ -193,21 +252,24 @@ const LetterDraftPage = () => {
 
   const draftSources = useMemo(
     () =>
+      (v2Run?.sources as LanggraphDraftSource[] | undefined) ??
       (graphRun?.sources as LanggraphDraftSource[] | undefined) ??
       (uiLetter?.draftSources as LanggraphDraftSource[] | undefined) ??
       [],
-    [graphRun?.sources, uiLetter?.draftSources]
+    [graphRun?.sources, uiLetter?.draftSources, v2Run?.sources]
   );
 
   const reviewerFindings = useMemo(
     () =>
+      (v2Run?.validation_report?.findings as LanggraphDraftReviewFinding[] | undefined) ??
       (graphRun?.reviewer_findings as LanggraphDraftReviewFinding[] | undefined) ??
       (uiLetter?.reviewerFindings as LanggraphDraftReviewFinding[] | undefined) ??
       [],
-    [graphRun?.reviewer_findings, uiLetter?.reviewerFindings]
+    [graphRun?.reviewer_findings, uiLetter?.reviewerFindings, v2Run?.validation_report?.findings]
   );
 
   const reviewerBlocking =
+    v2Run?.validation_report?.blocking ??
     graphRun?.reviewer_blocking ??
     (uiLetter as any)?.reviewerBlocking ??
     reviewerFindings.some((f) => f.level === "error");
@@ -250,6 +312,14 @@ const LetterDraftPage = () => {
       });
   }, [letters, id]);
 
+  const hasSavedStrategicPlan = Boolean(uiLetter?.strategicPlan?.trim());
+  const hasApprovedStrategicPlan =
+    hasSavedStrategicPlan &&
+    Boolean(
+      uiLetter?.strategyPlanApprovedAt ||
+        ["Draft", "Review", "Approval", "Completed"].includes(uiLetter?.status ?? "")
+    );
+
   // All useCallback hooks must be defined before any conditional returns
   const handleContextSelection = useCallback(
     (ids: string[], docs: ContextDocumentSummary[]) => {
@@ -285,20 +355,24 @@ const LetterDraftPage = () => {
       setRunningBackground(true);
       const summaryLines =
         graphRun?.summary_points ?? uiLetter.summaryPoints ?? [];
-      const response = await runDraft({
-        letterId: id,
+      const response = await runDraftingWorkflow(id, {
+        mode: "background",
+        draft_type: draftType,
+        letter_category: letterCategory,
+        role: (uiLetter as any).strategyRole ?? "contractor",
         subject: uiLetter.subject,
         recipient: uiLetter.recipient,
-        context: editorLetter.content,
+        requirements: editorLetter.content,
         points: summaryLines.length > 0 ? summaryLines.join("\n") : undefined,
-        documentIds: selectedDocIds,
-        analysisOnly: true,
+        document_ids: selectedDocIds,
+        include_letter_codes: linkedLetterCodes,
+        exclude_letter_codes: graphThreadCodes.filter(
+          (code) => code && !linkedLetterCodes.includes(code)
+        ),
       });
-      setBackgroundItems(
-        (response.background_summary as LanggraphBackgroundItem[]) ?? []
-      );
+      setV2Run(response);
+      setBackgroundItems(backgroundItemsFromDraftRun(response));
       await fetchLetters();
-      await fetchRun(id);
       toast({
         title: "Background generated",
         description: "AI background summary refreshed successfully.",
@@ -307,7 +381,7 @@ const LetterDraftPage = () => {
       const description =
         error?.response?.data?.detail ??
         error?.message ??
-        "LangGraph background generation failed.";
+        "Drafting engine background generation failed.";
       toast({
         title: "Unable to generate background",
         description,
@@ -318,68 +392,205 @@ const LetterDraftPage = () => {
     }
   }, [
     id,
-    runDraft,
+    runDraftingWorkflow,
     graphRun,
     uiLetter,
     editorLetter,
     selectedDocIds,
+    linkedLetterCodes,
+    graphThreadCodes,
+    draftType,
+    letterCategory,
     fetchLetters,
-    fetchRun,
     toast,
   ]);
 
-  const handleRunDraft = useCallback(async () => {
+  const handleRunDraft = useCallback(async (assistantInstructions?: string) => {
     if (!id || !uiLetter || !editorLetter) return;
+    if (!uiLetter.strategicPlan?.trim()) {
+      toast({
+        title: "Strategic plan required",
+        description:
+          "Save the strategic plan before generating the response draft.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (!hasApprovedStrategicPlan) {
+      toast({
+        title: "Strategy approval required",
+        description:
+          "Approve the strategic plan before generating the response draft.",
+        variant: "destructive",
+      });
+      return;
+    }
     try {
       const summaryLines =
         graphRun?.summary_points ?? uiLetter.summaryPoints ?? [];
-      const response = await runDraft({
-        letterId: id,
+      const currentInstructions = [
+        editorLetter.content,
+        assistantInstructions ? `Drafter instruction: ${assistantInstructions}` : "",
+      ]
+        .filter((value) => value && value.trim())
+        .join("\n\n");
+      const response = await generateDraft(id, {
+        draft_type: draftType,
+        letter_category: letterCategory,
+        role: (uiLetter as any).strategyRole ?? "contractor",
         subject: uiLetter.subject,
         recipient: uiLetter.recipient,
-        context: editorLetter.content,
+        requirements: currentInstructions,
+        purpose: draftPurpose || assistantInstructions || undefined,
+        required_action: requiredAction || undefined,
+        trigger_event: triggerEvent || undefined,
         points: summaryLines.length > 0 ? summaryLines.join("\n") : undefined,
-        documentIds: selectedDocIds,
-        planOverride: planOverride || undefined,
-        includeLetterCodes: linkedLetterCodes,
-        excludeLetterCodes: graphThreadCodes.filter(
+        document_ids: selectedDocIds,
+        incoming_document_id:
+          draftType === "reply"
+            ? selectedDocIds[0] ?? uiLetter.contextDocumentIds?.[0]
+            : undefined,
+        incoming_letter_id:
+          draftType === "reply" ? uiLetter.reference?.id : undefined,
+        plan_override: planOverride || undefined,
+        include_letter_codes: linkedLetterCodes,
+        exclude_letter_codes: graphThreadCodes.filter(
           (code) => code && !linkedLetterCodes.includes(code)
         ),
       });
+      setV2Run(response);
+      setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
       setBackgroundItems(
-        (response.background_summary as LanggraphBackgroundItem[]) ?? []
+        (graphRun?.background_summary as LanggraphBackgroundItem[]) ?? []
       );
       await fetchLetters();
       await fetchRun(id);
       toast({
         title: "Draft updated",
-        description: "LangGraph generated a new draft version.",
+        description: "Structured drafting workflow generated a new draft.",
       });
+      return response.draft_artifact?.draft_letter ?? null;
     } catch (error: any) {
       const description =
         error?.response?.data?.detail ??
         error?.message ??
-        "LangGraph drafting failed.";
+        "Structured drafting workflow failed.";
       toast({
         title: "Unable to generate draft",
         description,
         variant: "destructive",
       });
+      throw error;
     }
   }, [
     id,
     uiLetter,
     editorLetter,
-    runDraft,
+    generateDraft,
     graphRun,
     selectedDocIds,
     planOverride,
     linkedLetterCodes,
     graphThreadCodes,
+    draftType,
+    letterCategory,
+    draftPurpose,
+    requiredAction,
+    triggerEvent,
     fetchLetters,
     fetchRun,
+    hasApprovedStrategicPlan,
     toast,
   ]);
+
+  const handleReviseDraft = useCallback(
+    async (revisionAction: "make_firmer" | "make_more_polite" | "make_detailed") => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response = await reviseRun(id, v2Run.run_id, {
+          revision_action: revisionAction,
+        });
+        setV2Run(response);
+        setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
+        toast({
+          title: "Draft revised",
+          description: "A revised draft run was created.",
+        });
+      } catch (error: any) {
+        toast({
+          title: "Unable to revise draft",
+          description: error?.message ?? "Draft revision failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [id, reviseRun, toast, v2Run]
+  );
+
+  const handleQualityAction = useCallback(
+    async (action: "validate" | "critique") => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response =
+          action === "validate"
+            ? await validateRun(id, v2Run.run_id)
+            : await critiqueRun(id, v2Run.run_id);
+        setV2Run(response);
+        toast({
+          title: action === "validate" ? "Draft validated" : "Draft critiqued",
+          description:
+            action === "validate"
+              ? "Source and clause validation was refreshed."
+              : "Contractual red-flag critique was refreshed.",
+        });
+      } catch (error: any) {
+        toast({
+          title:
+            action === "validate"
+              ? "Unable to validate draft"
+              : "Unable to critique draft",
+          description: error?.message ?? "Draft quality check failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [critiqueRun, id, toast, validateRun, v2Run]
+  );
+
+  const handleLifecycleAction = useCallback(
+    async (action: "approve" | "export" | "issue") => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response =
+          action === "approve"
+            ? await approveRun(id, v2Run.run_id)
+            : action === "export"
+              ? await exportRun(id, v2Run.run_id)
+              : await issueRun(id, v2Run.run_id);
+        setV2Run(response);
+        if (response.draft_artifact?.draft_letter) {
+          setV2DraftBody(response.draft_artifact.draft_letter);
+        }
+        await fetchLetters();
+        toast({
+          title:
+            action === "approve"
+              ? "Draft approved"
+              : action === "export"
+                ? "Draft exported"
+                : "Draft issued",
+          description: "Draft run status was updated.",
+        });
+      } catch (error: any) {
+        toast({
+          title: "Unable to update draft",
+          description: error?.message ?? "Draft workflow action failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [approveRun, exportRun, fetchLetters, id, issueRun, toast, v2Run]
+  );
 
   const handleEditorUpdate = useCallback(
     async (updatedLetter: any) => {
@@ -534,6 +745,52 @@ const LetterDraftPage = () => {
         </div>
       )}
 
+      {!hasSavedStrategicPlan && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-700 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-900">
+                Strategic plan required before AI drafting
+              </p>
+              <p className="text-amber-900/80">
+                This draft page is available, but draft generation is blocked until the plan is saved.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => navigate(`/letters/${id}/strategy`)}
+          >
+            Open Strategy Plan
+          </Button>
+        </div>
+      )}
+
+      {hasSavedStrategicPlan && !hasApprovedStrategicPlan && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-700 mt-0.5" />
+            <div>
+              <p className="font-semibold text-amber-900">
+                Strategy approval required before AI drafting
+              </p>
+              <p className="text-amber-900/80">
+                Return to the strategy page and approve the saved plan before generating the response draft.
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => navigate(`/letters/${id}/strategy`)}
+          >
+            Approve Strategy
+          </Button>
+        </div>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-2">
         <LinkedDocumentSelector
           letterId={id ?? ""}
@@ -556,7 +813,7 @@ const LetterDraftPage = () => {
               variant="outline"
               className="gap-2"
               onClick={handleRunBackground}
-              disabled={runningBackground || langgraphLoading}
+              disabled={runningBackground || draftingV2Loading || (LANGGRAPH_ENABLED && langgraphLoading)}
             >
               {runningBackground ? (
                 <>
@@ -577,7 +834,7 @@ const LetterDraftPage = () => {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-lg font-semibold">
-            LangGraph Strategic Plan
+            Drafting Engine Strategic Plan
           </CardTitle>
           <div className="flex gap-2">
             <Button
@@ -593,18 +850,189 @@ const LetterDraftPage = () => {
             </Button>
             <Button
               variant="outline"
-              onClick={handleRunDraft}
-              disabled={langgraphLoading}
+              onClick={() => handleRunDraft()}
+              disabled={!hasApprovedStrategicPlan || draftingV2Loading || (LANGGRAPH_ENABLED && langgraphLoading)}
               className="gap-2"
             >
               <Sparkles
-                className={`h-4 w-4 ${langgraphLoading ? "animate-spin" : ""}`}
+                className={`h-4 w-4 ${
+                  draftingV2Loading || (LANGGRAPH_ENABLED && langgraphLoading) ? "animate-spin" : ""
+                }`}
               />
-              {langgraphLoading ? "Generating..." : "Regenerate Draft"}
+              {draftingV2Loading || (LANGGRAPH_ENABLED && langgraphLoading)
+                ? "Generating..."
+                : "Regenerate Draft"}
             </Button>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Draft type</span>
+              <select
+                value={draftType}
+                onChange={(event) => setDraftType(event.target.value as DraftType)}
+                className="w-full rounded-md border bg-background px-3 py-2"
+              >
+                <option value="reply">Reply</option>
+                <option value="fresh">Fresh</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Category</span>
+              <select
+                value={letterCategory}
+                onChange={(event) =>
+                  setLetterCategory(event.target.value as LetterCategory)
+                }
+                className="w-full rounded-md border bg-background px-3 py-2"
+              >
+                <option value="general">General</option>
+                <option value="claim_reply">Claim reply</option>
+                <option value="eot_reply">EOT reply</option>
+                <option value="variation">Variation</option>
+                <option value="payment_ipc">Payment / IPC</option>
+                <option value="advance_recovery">Advance recovery</option>
+                <option value="completion">Completion</option>
+                <option value="ncr_quality">NCR / quality</option>
+                <option value="delay_progress">Delay / progress</option>
+                <option value="records_request">Records request</option>
+                <option value="dispute">Dispute</option>
+              </select>
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Trigger event</span>
+              <input
+                value={triggerEvent}
+                onChange={(event) => setTriggerEvent(event.target.value)}
+                placeholder="Event, notice, or issue"
+                className="w-full rounded-md border bg-background px-3 py-2"
+              />
+            </label>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Purpose</span>
+              <input
+                value={draftPurpose}
+                onChange={(event) => setDraftPurpose(event.target.value)}
+                placeholder="What this letter must achieve"
+                className="w-full rounded-md border bg-background px-3 py-2"
+              />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Required action</span>
+              <input
+                value={requiredAction}
+                onChange={(event) => setRequiredAction(event.target.value)}
+                placeholder="Action expected from the recipient"
+                className="w-full rounded-md border bg-background px-3 py-2"
+              />
+            </label>
+          </div>
+          {v2Run && (
+            <div className="rounded-md border p-3 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="font-medium">
+                    V2 run: {v2Run.status} ({v2Run.run_id.slice(0, 8)})
+                  </p>
+                  <p className="text-muted-foreground">
+                    {v2Run.validation_report?.findings?.length ?? 0} validation finding(s)
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleReviseDraft("make_firmer")}
+                    disabled={draftingV2Loading}
+                  >
+                    Firmer
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleReviseDraft("make_more_polite")}
+                    disabled={draftingV2Loading}
+                  >
+                    Politer
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleReviseDraft("make_detailed")}
+                    disabled={draftingV2Loading}
+                  >
+                    Detailed
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1"
+                    onClick={() => handleQualityAction("validate")}
+                    disabled={draftingV2Loading}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Validate
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1"
+                    onClick={() => handleQualityAction("critique")}
+                    disabled={draftingV2Loading}
+                  >
+                    <AlertTriangle className="h-4 w-4" />
+                    Critique
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1"
+                    onClick={() => handleLifecycleAction("approve")}
+                    disabled={
+                      draftingV2Loading ||
+                      v2Run.status === "blocked" ||
+                      Boolean(v2Run.validation_report?.blocking)
+                    }
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    Approve
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1"
+                    onClick={() => handleLifecycleAction("export")}
+                    disabled={draftingV2Loading}
+                  >
+                    <FileDown className="h-4 w-4" />
+                    Export
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1"
+                    onClick={() => handleLifecycleAction("issue")}
+                    disabled={draftingV2Loading}
+                  >
+                    <Send className="h-4 w-4" />
+                    Issue
+                  </Button>
+                </div>
+              </div>
+              {(v2Run.validation_report?.findings ?? []).length > 0 && (
+                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                  {(v2Run.validation_report?.findings ?? []).slice(0, 4).map((finding) => (
+                    <p key={`${finding.code}-${finding.message}`}>
+                      {finding.level.toUpperCase()}: {finding.message}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <PlanViewer
             plan={uiLetter.strategicPlan}
             summaryPoints={summaryPoints}
@@ -635,6 +1063,13 @@ const LetterDraftPage = () => {
             <LetterDraftEditor
               letter={editorLetter}
               referenceLetters={referenceLetters}
+              onGenerateAiDraft={handleRunDraft}
+              aiDraftDisabled={!hasApprovedStrategicPlan || draftingV2Loading || (LANGGRAPH_ENABLED && langgraphLoading)}
+              aiDraftDisabledReason={
+                !hasApprovedStrategicPlan
+                  ? "Approve the saved strategy plan before AI drafting."
+                  : undefined
+              }
               onSave={handleEditorUpdate}
               onCancel={handleCancel}
             />
@@ -650,6 +1085,8 @@ const LetterDraftPage = () => {
             sources={draftSources}
             reviewerFindings={reviewerFindings}
           />
+
+          <DraftEvidencePanel letterId={id} runId={v2Run?.run_id} run={v2Run} />
 
           <Card>
             <CardHeader>

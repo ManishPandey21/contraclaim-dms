@@ -20,10 +20,11 @@ async def websocket_notifications(
     """WebSocket endpoint for real-time notifications.
 
     Authentication strategy:
-      * Preferred: 	oken query parameter containing the JWT access token
-      * Fallback: user_id query parameter (development/testing only)
+      * Preferred: token query parameter containing the JWT access token
+      * Production: HttpOnly auth cookie set by the API login flow
+      * Development only: user_id query parameter when ALLOW_DEV_HEADERS=True
     """
-    token = websocket.query_params.get("token")
+    token = websocket.query_params.get("token") or websocket.cookies.get(settings.AUTH_COOKIE_NAME)
     user_id: Optional[str] = None
 
     if token:
@@ -32,7 +33,7 @@ async def websocket_notifications(
             user_id = str(payload.get("user_id") or payload.get("sub"))
         except JWTError as exc:
             logger.warning("WebSocket auth failed: %s", exc)
-    if not user_id:
+    if not user_id and settings.ALLOW_DEV_HEADERS:
         user_id = websocket.query_params.get("user_id")
 
     if not user_id:

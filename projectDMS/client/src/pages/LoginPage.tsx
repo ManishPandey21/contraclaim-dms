@@ -43,32 +43,32 @@ const loginSchema = z.object({
 
 type LoginFormValues = z.infer<typeof loginSchema>;
 
-const syncSessionContext = (profile: SessionProfile) => {
-  if (profile?.roles) {
-    try {
-      localStorage.setItem("user_roles", JSON.stringify(profile.roles));
-    } catch {
-      localStorage.setItem("user_roles", String(profile.roles));
-    }
-  }
+const BACKGROUND_SOURCES = [
+  "/1.png",
+  "/2.jpg",
+  "/3.jpeg",
+  "/4.jpg",
+  "/New folder/acquisition-contract-management-services.png",
+  "/New folder/automated-contracts.jpg",
+  "/New folder/Contract-Management.jpeg",
+  "/New folder/enhance-business-efficiency-esign-concept-600nw-2491258749.webp",
+  "/New folder/what-is-contract-automation-and-why-you-need-i.jpg",
+];
 
-  if (profile?.email) {
-    localStorage.setItem("user_id", profile.email);
-  } else if (profile?.id) {
-    localStorage.setItem("user_id", profile.id);
-  }
+const LOGIN_BACKGROUNDS = BACKGROUND_SOURCES.map((p) => encodeURI(p));
 
-  if (profile?.organization_id) {
-    localStorage.setItem("org_id", String(profile.organization_id));
-  } else {
-    localStorage.removeItem("org_id");
-  }
+const clearLegacyAuthStorage = () => {
+  localStorage.removeItem("accessToken");
+  localStorage.removeItem("user_id");
+  localStorage.removeItem("user_roles");
+  localStorage.removeItem("org_id");
+  localStorage.removeItem("proj_id");
+};
 
-  if (Array.isArray(profile?.projects) && profile.projects.length > 0) {
-    localStorage.setItem("proj_id", String(profile.projects[0]));
-  } else {
-    localStorage.removeItem("proj_id");
-  }
+const syncSessionContext = (_profile: SessionProfile) => {
+  clearLegacyAuthStorage();
+
+  window.dispatchEvent(new Event("auth-state-changed"));
 };
 
 const LoginPage = () => {
@@ -76,40 +76,30 @@ const LoginPage = () => {
   const [loginError, setLoginError] = useState("");
   const { toast } = useToast();
   const navigate = useNavigate();
-
-  // Background images from public/ folder; rotates automatically
-  const BACKGROUND_SOURCES = [
-    "/1.png",
-    "/2.jpg",
-    "/3.jpeg",
-    "/4.jpg",
-    "/New folder/acquisition-contract-management-services.png",
-    "/New folder/automated-contracts.jpg",
-    "/New folder/Contract-Management.jpeg",
-    "/New folder/enhance-business-efficiency-esign-concept-600nw-2491258749.webp",
-    "/New folder/what-is-contract-automation-and-why-you-need-i.jpg",
-  ];
-  const backgrounds = BACKGROUND_SOURCES.map((p) => encodeURI(p));
   const [bgIndex, setBgIndex] = useState(0);
 
   useEffect(() => {
     // Preload images
-    backgrounds.forEach((src) => {
+    LOGIN_BACKGROUNDS.forEach((src) => {
       const img = new Image();
       img.src = src;
     });
     const interval = setInterval(() => {
-      setBgIndex((prev) => (prev + 1) % backgrounds.length);
+      setBgIndex((prev) => (prev + 1) % LOGIN_BACKGROUNDS.length);
     }, 12000); // change every 12s
     return () => clearInterval(interval);
   }, []);
 
   // If already authenticated, redirect away from /login to /overview
   useEffect(() => {
-    const token = localStorage.getItem("accessToken");
-    if (token) {
-      navigate("/overview", { replace: true });
-    }
+    getCurrentUserProfile()
+      .then((profile) => {
+        syncSessionContext(profile);
+        navigate("/overview", { replace: true });
+      })
+      .catch(() => {
+        clearLegacyAuthStorage();
+      });
   }, [navigate]);
 
   const form = useForm<LoginFormValues>({
@@ -123,8 +113,9 @@ const LoginPage = () => {
 
   const onSubmit = async (data: LoginFormValues) => {
     setLoginError(""); // Clear previous errors
+    let tokenData: Awaited<ReturnType<typeof loginWithPassword>>;
     try {
-      const tokenData = await loginWithPassword({
+      tokenData = await loginWithPassword({
         email: data.email,
         password: data.password,
       });
@@ -132,25 +123,6 @@ const LoginPage = () => {
       if (!tokenData?.access_token) {
         throw new Error("Login failed: missing access token.");
       }
-
-      localStorage.setItem("accessToken", tokenData.access_token);
-
-      // Fetch current user profile to synchronize session context and RBAC roles
-      try {
-        const me = await getCurrentUserProfile(tokenData.access_token);
-        syncSessionContext(me);
-      } catch (error) {
-        logError(error, {
-          scope: "LoginPage",
-          action: "getCurrentUserProfile",
-        });
-      }
-
-      toast({
-        title: "Login successful",
-        description: "Welcome back!",
-      });
-      navigate("/overview"); // Redirect to Overview page
     } catch (error: unknown) {
       logError(error, {
         scope: "LoginPage",
@@ -167,6 +139,44 @@ const LoginPage = () => {
       }
 
       setLoginError(message);
+      return;
+    }
+
+    try {
+      // Fetch current user profile to synchronize session context and RBAC roles.
+      // Authentication is carried by the HttpOnly cookie set by the backend.
+      const me = await getCurrentUserProfile();
+      syncSessionContext(me);
+
+      if (!me?.roles || (Array.isArray(me.roles) && me.roles.length === 0)) {
+        throw new Error("Login succeeded but no roles were returned for this user.");
+      }
+
+      toast({
+        title: "Login successful",
+        description: "Welcome back!",
+      });
+      navigate("/overview"); // Redirect to Overview page
+    } catch (error: unknown) {
+      logError(error, {
+        scope: "LoginPage",
+        action: "getCurrentUserProfile",
+      });
+
+      let message = extractErrorMessage(
+        error,
+        "Login succeeded, but the session could not be verified. Please clear site data for localhost and try again."
+      );
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 401) {
+          message =
+            "Login succeeded, but the browser did not send the session cookie. Clear site data for localhost, then reload and try again.";
+        } else if (error.response?.status === 404) {
+          message = "Server endpoint not found";
+        }
+      }
+
+      setLoginError(message);
     }
   };
 
@@ -177,7 +187,7 @@ const LoginPage = () => {
   return (
     <div
       className="relative flex items-center justify-center min-h-screen bg-cover bg-center p-4"
-      style={{ backgroundImage: `url(${backgrounds[bgIndex]})` }}
+      style={{ backgroundImage: `url(${LOGIN_BACKGROUNDS[bgIndex]})` }}
     >
       <div className="absolute inset-0 bg-black/40" aria-hidden="true"></div>
       <Card className="w-full max-w-md relative z-10">

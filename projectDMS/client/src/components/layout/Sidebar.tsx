@@ -25,30 +25,41 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { joinApiUrl } from "@/config/api";
 import { enhancedApi as api } from "@/services/enhanced-api";
+import { getCurrentUserProfile } from "@/services/session-api";
 import useRBAC from "@/hooks/useRBAC";
-import { isRouteAllowed } from "@/config/rolePermissions";
+import { isRouteAllowedByPermission } from "@/config/rolePermissions";
 
 const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
-  const { roles } = useRBAC();
+  const { roles, can } = useRBAC();
 
   // Dynamic user identity shown in the sidebar footer
   const [displayName, setDisplayName] = useState<string>("User Name");
-  const [roleLabel, setRoleLabel] = useState<string>("User");
   const [initials, setInitials] = useState<string>("US");
   const [profilePhotoUrl, setProfilePhotoUrl] = useState<string>("");
+
+  const roleLabel = useMemo(() => {
+    const norm = roles.map((r) => String(r).toLowerCase());
+    return norm.includes("superadmin")
+      ? "Super Admin"
+      : norm.includes("orgadmin")
+        ? "Organization Admin"
+        : norm.includes("orguser")
+          ? "Organization User"
+          : norm.includes("projectadmin")
+            ? "Project Admin"
+            : norm.includes("projectuser")
+              ? "Project User"
+              : norm[0]
+                ? norm[0].replace(/\b\w/g, (c) => c.toUpperCase())
+                : "User";
+  }, [roles]);
 
   useEffect(() => {
     const load = async () => {
       try {
-        const token =
-          typeof window !== "undefined"
-            ? window.localStorage.getItem("accessToken")
-            : null;
-
         let name = "User Name";
         let photo = "";
 
@@ -67,26 +78,15 @@ const Sidebar = () => {
           // ignore
         }
 
-        // Fallback to /me (username/email) or local id only when full name is unavailable
-        if ((!name || name === "User Name") && token) {
+        // Fallback to /me when full profile data is unavailable.
+        if (!name || name === "User Name") {
           try {
-            const meRes = await fetch(joinApiUrl("/me"), {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            if (meRes.ok) {
-              const me = await meRes.json();
-              const candidate = me?.username || me?.email;
-              if (candidate) name = candidate;
-            }
+            const me = await getCurrentUserProfile();
+            const candidate = me?.email || me?.id;
+            if (candidate) name = candidate;
           } catch {
             // ignore
           }
-        } else if (!name || name === "User Name") {
-          const localId =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem("user_id")
-              : "";
-          if (localId) name = localId;
         }
 
         // Local cache override from profile save flow
@@ -113,53 +113,6 @@ const Sidebar = () => {
         setDisplayName(name);
         setInitials(init);
         setProfilePhotoUrl(photo || "");
-
-        // Resolve role label
-        let roles: string[] = [];
-        try {
-          const raw =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem("user_roles") || ""
-              : "";
-          if (raw) {
-            try {
-              const arr = JSON.parse(raw);
-              if (Array.isArray(arr)) roles = arr as string[];
-            } catch {
-              roles = raw
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-            }
-          }
-          if (!roles.length && token) {
-            const meRes2 = await fetch(joinApiUrl("/me"), {
-              headers: { Authorization: `Bearer ${token}` },
-            }).catch(() => null as any);
-            if (meRes2 && (meRes2 as any).ok) {
-              const me2 = await (meRes2 as Response).json();
-              roles = me2?.roles || [];
-            }
-          }
-        } catch {
-          // ignore
-        }
-
-        const norm = roles.map((r) => String(r).toLowerCase());
-        const label = norm.includes("superadmin")
-          ? "Super Admin"
-          : norm.includes("orgadmin")
-            ? "Organization Admin"
-            : norm.includes("orguser")
-              ? "Organization User"
-              : norm.includes("projectadmin")
-                ? "Project Admin"
-                : norm.includes("projectuser")
-                  ? "Project User"
-                  : norm[0]
-                    ? norm[0].replace(/\b\w/g, (c) => c.toUpperCase())
-                    : "User";
-        setRoleLabel(label);
       } catch {
         // ignore
       }
@@ -171,7 +124,7 @@ const Sidebar = () => {
     setCollapsed(!collapsed);
   };
 
-  const sidebarLinks = [
+  const sidebarLinks = useMemo(() => [
     { path: "/overview", icon: <Home size={20} />, label: "Overview" },
     {
       path: "/dashboard",
@@ -208,6 +161,11 @@ const Sidebar = () => {
     //  label: "Doc Viewer",
     // },
     { path: "/letters", icon: <Mail size={20} />, label: "Letter Drafting" },
+    {
+      path: "/letter-quality",
+      icon: <BarChart size={20} />,
+      label: "Letter Quality",
+    },
     {
       path: "/letter-templates",
       icon: <Text size={20} />,
@@ -256,12 +214,25 @@ const Sidebar = () => {
     },
     { path: "/users", icon: <Users size={20} />, label: "Users" },
     { path: "/permissions", icon: <UserCog size={20} />, label: "Permissions" },
+    {
+      path: "/plan-settings",
+      icon: <Settings size={20} />,
+      label: "Plan Settings",
+      permission: "subscription.entitlement.manage",
+    },
     { path: "/settings", icon: <Settings size={20} />, label: "Settings" },
-  ];
+  ], []);
 
   const visibleLinks = useMemo(
-    () => sidebarLinks.filter((link) => isRouteAllowed(roles, link.path)),
-    [roles.join(","), location.pathname],
+    () =>
+      sidebarLinks.filter((link) => {
+        if (!isRouteAllowedByPermission(can, link.path)) return false;
+        if ("permission" in link && link.permission) {
+          return roles.includes("superadmin") || can(link.permission);
+        }
+        return true;
+      }),
+    [roles, sidebarLinks, can],
   );
 
   return (

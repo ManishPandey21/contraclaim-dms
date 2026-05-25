@@ -5,6 +5,7 @@
 import { navigateTo } from "../lib/router";
 import { extractErrorMessage, logError } from "../lib/error-logger";
 import { publicApi } from "./http";
+import { clearSessionProfileCache } from "./session-api";
 
 let refreshInFlight: Promise<string> | null = null;
 
@@ -31,23 +32,19 @@ export async function refreshToken(): Promise<string> {
   }
 
   refreshInFlight = (async () => {
-    const token = window.localStorage.getItem("accessToken") || "";
-    if (!token) throw new Error("No token to refresh");
-
     const { data } = await publicApi.post<{ access_token?: string }>(
       "/refresh",
       undefined,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
+      { withCredentials: true }
     );
 
     const newToken = data?.access_token;
     if (!newToken) throw new Error("No access_token in refresh response");
 
-    window.localStorage.setItem("accessToken", newToken);
+    // The backend refreshes the HttpOnly auth cookie. Keep the returned token
+    // out of localStorage to avoid turning XSS into session theft. Refreshing
+    // the same session must not dispatch auth-state-changed, otherwise every
+    // authenticated API call can fan out into /me refresh loops.
     return newToken;
   })();
 
@@ -62,6 +59,7 @@ export async function refreshToken(): Promise<string> {
 
 export function clearSession() {
   try {
+    clearSessionProfileCache();
     window.localStorage.removeItem("accessToken");
     // Also clear demo headers if they were set
     window.localStorage.removeItem("user_id");
@@ -82,22 +80,13 @@ export function logoutAndRedirect(redirectPath: string = "/") {
   }
 }
 
+export function redirectToLoginAfterSessionExpiry() {
+  logoutAndRedirect("/login");
+}
+
 export async function logout(): Promise<void> {
-  const token = window.localStorage.getItem("accessToken") || "";
   try {
-    if (token) {
-      await publicApi.post(
-        "/logout",
-        undefined,
-        token
-          ? {
-              headers: {
-                Authorization: `Bearer ${token}`,
-              },
-            }
-          : undefined
-      );
-    }
+    await publicApi.post("/logout", undefined, { withCredentials: true });
   } catch (error) {
     logError(error, {
       scope: "auth",
@@ -115,20 +104,9 @@ export async function logout(): Promise<void> {
 export async function ensureValidToken(
   thresholdSec: number = 120
 ): Promise<void> {
-  const token = window.localStorage.getItem("accessToken");
-  if (!token) return;
-
-  const secsLeft = secondsUntilExpiry(token);
-  if (secsLeft > thresholdSec) return;
-
-  try {
-    await refreshToken();
-  } catch (error) {
-    logError(error, {
-      scope: "auth",
-      action: "ensureValidToken",
-      metadata: { thresholdSec, secsLeft },
-    });
-    logoutAndRedirect("/");
-  }
+  void thresholdSec;
+  // With HttpOnly cookie auth the client cannot safely inspect token expiry.
+  // Authenticated API wrappers handle expiry by refreshing once after a 401.
+  // Proactive refresh here would run before every API call and can create
+  // /refresh -> auth-state -> /me request storms.
 }

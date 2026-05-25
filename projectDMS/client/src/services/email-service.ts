@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "../config/api";
+import { authenticatedFetch } from "./http";
 
 export interface EmailSuggestion {
   email: string;
@@ -16,6 +17,8 @@ export interface ShareDocumentRequest {
   document_id: string;
   include_linked_documents?: boolean;
   include_letter_link?: boolean;
+  share_via_link?: boolean;
+  attach_file_to_email?: boolean;
   include_refs?: boolean;
   reference_ids?: string[];
   group_ids?: string[];
@@ -29,6 +32,8 @@ export interface ShareDocumentResponse {
   message: string;
   document_name: string;
   attachments_count: number;
+  public_download_url?: string;
+  delivery_methods?: Record<string, boolean>;
 }
 
 class EmailService {
@@ -45,16 +50,8 @@ class EmailService {
         params.append("query", query);
       }
 
-      // Prefer explicit org/project passed by caller (e.g., from current letter)
-      // Fallback to values from localStorage (current app context)
-      const orgId =
-        (organizationId ?? "").toString() ||
-        window.localStorage.getItem("org_id") ||
-        "";
-      const projId =
-        (projectId ?? "").toString() ||
-        window.localStorage.getItem("proj_id") ||
-        "";
+      const orgId = (organizationId ?? "").toString();
+      const projId = (projectId ?? "").toString();
 
       if (orgId) params.append("organization_id", orgId);
       if (projId) params.append("project_id", projId);
@@ -62,9 +59,8 @@ class EmailService {
       const qs = params.toString();
       const url = `${this.baseUrl}/email/suggestions${qs ? `?${qs}` : ""}`;
 
-      const response = await fetch(url, {
+      const response = await authenticatedFetch(url, {
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
           "Content-Type": "application/json",
         },
       });
@@ -91,10 +87,9 @@ class EmailService {
   }): Promise<EmailSuggestion[]> {
     try {
       const url = `${this.baseUrl}/email/resolve-recipients`;
-      const resp = await fetch(url, {
+      const resp = await authenticatedFetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
@@ -132,10 +127,9 @@ class EmailService {
     request: ShareDocumentRequest
   ): Promise<ShareDocumentResponse> {
     try {
-      const response = await fetch(`${this.baseUrl}/email/share-document`, {
+      const response = await authenticatedFetch(`${this.baseUrl}/email/share-document`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(request),

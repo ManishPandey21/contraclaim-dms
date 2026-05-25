@@ -392,6 +392,20 @@ class UserService:
                 logger.info(f"User not modified (no changes): {user_id}")
             else:
                 logger.info(f"Updated user: {user_id}")
+                
+                # If roles were modified, invalidate permission cache and force JWT refresh
+                if "roles" in update_dict:
+                    try:
+                        from .runtime_state import get_runtime_state
+                        runtime = get_runtime_state()
+                        redis = await runtime.get_redis()
+                        if redis:
+                            uid_str = str(user_oid)
+                            now_ts = int(datetime.utcnow().timestamp())
+                            await redis.delete(f"user_perms:{uid_str}")
+                            await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
+                    except Exception as e:
+                        logger.warning(f"Failed to invalidate cache for updated user {user_id}: {e}")
 
             # Return the updated user (lightweight object to avoid strict Pydantic validation)
             return await self.get_user_by_id(user_id)

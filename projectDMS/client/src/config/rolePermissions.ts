@@ -1,6 +1,6 @@
 /**
  * Central RBAC configuration for routes and sidebar.
- * Extend Roles and ROUTE_RULES to evolve permissions easily.
+ * Frontend checks are UX only; backend policy remains authoritative.
  */
 
 export const Roles = {
@@ -9,67 +9,109 @@ export const Roles = {
   OrgUser: "orguser",
   ProjectAdmin: "projectadmin",
   ProjectUser: "projectuser",
+  DocumentController: "doccontroller",
+  Reporter: "reporter",
+  SettingsManager: "settings_manager",
+  LimitedUser: "limited_user",
+  ContractManagerOrg: "contractmgr_org",
+  DraftingManager: "contraclaim_drafting_manager",
+  ExpertDrafter: "contraclaim_expert_drafter",
+  ExpertReviewer: "contraclaim_expert_reviewer",
+  BillingAdmin: "contraclaim_billing_admin",
 } as const;
 
 export type Role = (typeof Roles)[keyof typeof Roles];
 
-/**
- * Route-level rules.
- * - If a path is listed here, access is limited to the "allow" roles.
- * - If a path is not listed, it is accessible to all authenticated roles by default.
- */
-export const ROUTE_RULES: Record<
-  string,
-  {
-    allow: Role[];
-  }
-> = {
-  "/register": { allow: [Roles.SuperAdmin] },
-  // Letter drafting should be available to all authenticated roles by default.
-  "/letters": {
-    allow: [
-      Roles.SuperAdmin,
-      Roles.OrgAdmin,
-      Roles.OrgUser,
-      Roles.ProjectAdmin,
-      Roles.ProjectUser,
-    ],
-  },
-  "/health": { allow: [Roles.SuperAdmin] },
+const ALL_APP_ROLES: Role[] = Object.values(Roles);
+const ORG_PROJECT_ROLES: Role[] = [
+  Roles.OrgAdmin,
+  Roles.OrgUser,
+  Roles.ProjectAdmin,
+  Roles.ProjectUser,
+  Roles.DocumentController,
+  Roles.Reporter,
+  Roles.SettingsManager,
+  Roles.LimitedUser,
+  Roles.ContractManagerOrg,
+];
+const DMS_ROLES: Role[] = [
+  Roles.SuperAdmin,
+  Roles.OrgAdmin,
+  Roles.OrgUser,
+  Roles.ProjectAdmin,
+  Roles.ProjectUser,
+  Roles.DocumentController,
+  Roles.LimitedUser,
+  Roles.ContractManagerOrg,
+];
+const DRAFTING_ROLES: Role[] = [
+  Roles.SuperAdmin,
+  Roles.OrgAdmin,
+  Roles.OrgUser,
+  Roles.ProjectAdmin,
+  Roles.ProjectUser,
+  Roles.DocumentController,
+  Roles.ContractManagerOrg,
+  Roles.DraftingManager,
+  Roles.ExpertDrafter,
+  Roles.ExpertReviewer,
+];
+
+export const ROUTE_PERMISSIONS: Record<string, string[]> = {
+  "/overview": [], // Open to all authenticated users
+  "/dashboard": ["dms.dashboard.view"],
+  "/register": ["admin.user.create"],
+  "/organizations": ["organizations:read"],
+  "/projects": ["projects:read"],
+  "/parties": ["parties:read"],
+  "/representatives": ["representatives:read"],
+  "/email-groups": ["email_groups:read"],
+  "/upload": ["dms.document.upload"],
+  "/documents": ["dms.document.view"],
+  "/documentsearch": ["dms.document.view"],
+  "/documentviewer": ["dms.document.view"],
+  "/reference": ["dms.document.view"],
+  "/share": ["dms.document.share"],
+  "/letters": ["draft.request.view"],
+  "/letter-quality": ["draft.request.view"],
+  "/letter-templates": ["letter_templates:read"],
+  "/contracts": ["dms.document.view"],
+  "/folders": ["dms.folder.view"],
+  "/reports": ["reports:view"],
+  "/health": ["system:admin"],
+  "/users": ["users:read"],
+  "/permissions": ["roles:read"],
+  "/plan-settings": ["subscription.entitlement.manage"],
+  "/settings": ["settings:view"],
+  "/notifications": [],
+  "/profile": ["profile:read"],
+  "/tags": ["tags:read"],
+  "/tasks": ["tasks:read"],
 };
 
-/**
- * Returns true if any of userRoles is in allowed set or the user is super-admin/user.
- */
-export function hasAnyRole(userRoles: string[], allowed: Role[]): boolean {
-  const normalized = userRoles.map((r) => String(r).toLowerCase());
-  if (normalized.includes(Roles.SuperAdmin)) {
-    return true; // supers can access everything
-  }
-  const allowSet = new Set(allowed);
-  return normalized.some((r) => allowSet.has(r as Role));
-}
-
-/**
- * Check if the given roles are allowed to access a path.
- * Default allow when no rule exists.
- */
-export function isRouteAllowed(userRoles: string[], path: string): boolean {
-  const normalized = userRoles.map((r) => String(r).toLowerCase());
-
-  // Health dashboard is restricted to superadmin only
-  if (path === "/health" || path.startsWith("/health")) {
-    return normalized.includes(Roles.SuperAdmin);
+export function isRouteAllowedByPermission(
+  can: (perm: string) => boolean,
+  path: string
+): boolean {
+  const normalizedPath = path.split("?")[0].replace(/\/+$/, "") || "/overview";
+  
+  if (normalizedPath === "/overview" || normalizedPath === "/profile" || normalizedPath === "/notifications") {
+    return true; // Universally allowed authenticated routes
   }
 
-  // Exact match first
-  const exact = ROUTE_RULES[path];
-  if (exact) return hasAnyRole(normalized, exact.allow);
+  const exact = ROUTE_PERMISSIONS[normalizedPath];
+  if (exact) {
+    if (exact.length === 0) return true;
+    return exact.some((p) => can(p));
+  }
 
-  // Prefix match for nested routes (e.g., "/letters/123")
-  const matchedKey = Object.keys(ROUTE_RULES).find(
-    (base) => path === base || path.startsWith(base + "/")
-  );
-  if (!matchedKey) return true; // unrestricted when no rules match
-  return hasAnyRole(normalized, ROUTE_RULES[matchedKey].allow);
+  const matchedKey = Object.keys(ROUTE_PERMISSIONS)
+    .sort((a, b) => b.length - a.length)
+    .find((base) => normalizedPath === base || normalizedPath.startsWith(base + "/"));
+
+  if (!matchedKey) return false;
+  
+  const required = ROUTE_PERMISSIONS[matchedKey];
+  if (required.length === 0) return true;
+  return required.some((p) => can(p));
 }

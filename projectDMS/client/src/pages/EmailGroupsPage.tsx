@@ -112,7 +112,7 @@ const EmailGroupsPage: React.FC = () => {
       }
     };
     run();
-  }, [selectedOrgId]);
+  }, [selectedOrgId, selectedProjectId]);
 
   // Load groups when scope/org/project selection changes
   React.useEffect(() => {

@@ -17,7 +17,15 @@ import { emailService, EmailSuggestion } from "@/services/email-service";
 import { emailGroupsApi, EmailGroup } from "@/services/email-groups-api";
 import enhancedApi, { Document as ApiDocument } from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
-import { X, ArrowLeft, Loader2, Mail } from "lucide-react";
+import { authenticatedFetch } from "@/services/http";
+import {
+  X,
+  ArrowLeft,
+  Loader2,
+  Mail,
+  AlertTriangle,
+  RefreshCw,
+} from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { useForm } from "react-hook-form";
 
@@ -25,7 +33,8 @@ type ShareFormValues = {
   subject: string;
   message: string;
   includeLinkedDocs: boolean;
-  includeLetterLink: boolean;
+  shareViaLink: boolean;
+  attachFileToEmail: boolean;
   includeRefs: boolean;
   messageFormat: "text" | "html";
   registeredBy: string;
@@ -40,6 +49,8 @@ const ShareDocumentPage = () => {
 
   const [document, setDocument] = React.useState<ApiDocument | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [retryCounter, setRetryCounter] = React.useState(0);
   const [isSending, setIsSending] = React.useState(false);
 
   // Recipient source selector (persist in localStorage)
@@ -82,21 +93,20 @@ const ShareDocumentPage = () => {
   React.useEffect(() => {
     const load = async () => {
       if (!documentId) {
+        setDocument(null);
+        setLoadError("Document ID is missing.");
         setIsLoading(false);
         return;
       }
       try {
+        setLoadError(null);
         const doc = await enhancedApi.getDocument(documentId);
         setDocument(doc);
         // Preload references meta for picker when enabled
         try {
-          const refsRes = await fetch(
+          const refsRes = await authenticatedFetch(
             joinApiUrl(`/documents/${documentId}/references`),
-            {
-              headers: {
-                Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-              },
-            }
+            {}
           );
           if (refsRes.ok) {
             const refs = await refsRes.json();
@@ -132,16 +142,21 @@ const ShareDocumentPage = () => {
         }
       } catch (e) {
         console.error("Failed to load document", e);
+        setDocument(null);
+        setLoadError(e instanceof Error ? e.message : "Failed to load document");
         toast.error("Failed to load document");
       } finally {
         setIsLoading(false);
       }
     };
     load();
-  }, [documentId]);
+  }, [documentId, retryCounter]);
 
   const buildDefaultMessage = React.useCallback(
     (name?: string, docData?: any) => {
+      return `Please review the shared document: ${
+        name || "the requested document"
+      }.`;
       const safeName = name || "the requested file";
       const letterNo = docData?.letterNo || docData?.letter_no || "";
       const date = docData?.date
@@ -305,7 +320,8 @@ const ShareDocumentPage = () => {
       subject: "Sharing document",
       message: buildDefaultMessage(),
       includeLinkedDocs: false,
-      includeLetterLink: true,
+      shareViaLink: true,
+      attachFileToEmail: false,
       includeRefs: false,
       messageFormat: "html",
       registeredBy: "",
@@ -313,6 +329,8 @@ const ShareDocumentPage = () => {
     },
   });
   const includeRefsEnabled = shareForm.watch("includeRefs");
+  const shareViaLinkEnabled = shareForm.watch("shareViaLink");
+  const attachFileEnabled = shareForm.watch("attachFileToEmail");
   const [formPrefilled, setFormPrefilled] = React.useState(false);
 
   React.useEffect(() => {
@@ -337,7 +355,7 @@ const ShareDocumentPage = () => {
       shareForm.reset({
         ...currentValues,
         subject: `Sharing document: ${docLabel}`,
-        message: buildDefaultMessage(docLabel, document),
+        message: buildDefaultMessage(docLabel),
         messageFormat: "html",
         registeredBy: docRegisteredBy,
         distributionFor: distributionValue,
@@ -439,16 +457,20 @@ const ShareDocumentPage = () => {
           setLoading(false);
         }
       },
-      [recipientSource, document?.organization_id, document?.project_id]
+      // RecipientEditor is declared inside ShareDocumentPage, so the hook
+      // linter cannot classify parent-scope values correctly here.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [document, recipientSource]
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
     React.useEffect(() => {
       initialLoadRef.current = false;
       if (open) {
         loadSuggestions(inputValue);
         initialLoadRef.current = true;
       }
-    }, [recipientSource]);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [inputValue, loadSuggestions, open, recipientSource]);
 
     return (
       <div>
@@ -591,6 +613,26 @@ const ShareDocumentPage = () => {
     try {
       setIsSending(true);
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!values.shareViaLink && !values.attachFileToEmail) {
+        toast.error("Choose Share via link, Attach file to email, or both");
+        return;
+      }
+
+      const rawEmails = [
+        ...toRecipients,
+        toInput,
+        ...ccRecipients,
+        ccInput,
+        ...bccRecipients,
+        bccInput,
+      ]
+        .map((e) => (e || "").trim().toLowerCase())
+        .filter(Boolean);
+      const invalid = rawEmails.filter((e) => !emailRegex.test(e));
+      if (invalid.length) {
+        toast.error(`Invalid email(s): ${invalid.join(", ")}`);
+        return;
+      }
 
       const uniqueTo = Array.from(
         new Set(
@@ -619,13 +661,6 @@ const ShareDocumentPage = () => {
         return;
       }
 
-      const all = [...uniqueTo, ...uniqueCc, ...uniqueBcc];
-      const invalid = all.filter((e) => !emailRegex.test(e));
-      if (invalid.length) {
-        toast.error(`Invalid email(s): ${invalid.join(", ")}`);
-        return;
-      }
-
       const activeRefIds = values.includeRefs
         ? selectedRefIds.length
           ? selectedRefIds
@@ -640,10 +675,10 @@ const ShareDocumentPage = () => {
         message: values.message,
         document_id: document._id!,
         include_linked_documents: values.includeLinkedDocs,
-        include_letter_link: values.includeLetterLink,
+        share_via_link: values.shareViaLink,
+        attach_file_to_email: values.attachFileToEmail,
         include_refs: values.includeRefs,
         reference_ids: activeRefIds,
-        group_ids: selectedGroupIds.length ? selectedGroupIds : undefined,
         email_format: values.messageFormat,
         registered_by: values.registeredBy?.trim() || undefined,
         distribution_for: values.distributionFor,
@@ -654,8 +689,8 @@ const ShareDocumentPage = () => {
         description: `Recipients: ${uniqueTo.length}${
           uniqueCc.length ? ` (+CC ${uniqueCc.length})` : ""
         }. ${
-          response.attachments_count
-        } file(s) attached. Returning to document...`,
+          response.delivery_methods?.share_via_link ? "Link shared" : "No link"
+        }; ${response.attachments_count} file(s) attached. Returning to document...`,
       });
 
       // Reset and navigate back
@@ -682,7 +717,17 @@ const ShareDocumentPage = () => {
   if (isLoading) {
     return (
       <div className="p-6">
-        <div className="max-w-5xl mx-auto">Loading...</div>
+        <div className="max-w-5xl mx-auto space-y-4">
+          <div className="h-9 w-48 rounded bg-muted animate-pulse" />
+          <div className="rounded-lg border bg-white p-6">
+            <div className="h-5 w-64 rounded bg-muted animate-pulse" />
+            <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <div className="h-10 rounded bg-muted animate-pulse" />
+              <div className="h-10 rounded bg-muted animate-pulse" />
+              <div className="h-28 rounded bg-muted animate-pulse md:col-span-2" />
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
@@ -690,7 +735,22 @@ const ShareDocumentPage = () => {
   if (!document) {
     return (
       <div className="p-6">
-        <div className="max-w-5xl mx-auto">Document not found.</div>
+        <div className="max-w-5xl mx-auto rounded-lg border bg-white p-8 text-center">
+          <AlertTriangle className="mx-auto mb-3 h-8 w-8 text-red-600" />
+          <h1 className="text-lg font-semibold">Document not available</h1>
+          <p className="mx-auto mt-2 max-w-md text-sm text-muted-foreground">
+            {loadError || "The document could not be found or you do not have access."}
+          </p>
+          <div className="mt-6 flex justify-center gap-3">
+            <Button variant="outline" onClick={() => navigate(-1)}>
+              Back
+            </Button>
+            <Button onClick={() => setRetryCounter((value) => value + 1)}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -943,28 +1003,64 @@ const ShareDocumentPage = () => {
                   Recipients selected: {recipientsCount}
                 </div>
 
-                {/* Include letter link */}
-                <FormField
-                  control={shareFormInstance.control}
-                  name="includeLetterLink"
-                  render={({ field }) => (
-                    <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
-                      <FormControl>
-                        <Checkbox
-                          checked={field.value}
-                          onCheckedChange={field.onChange}
-                        />
-                      </FormControl>
-                      <div className="space-y-1 leading-none">
-                        <FormLabel>Include letter link</FormLabel>
-                        <p className="text-sm text-muted-foreground">
-                          Prepend the primary document permalink above the
-                          message.
-                        </p>
-                      </div>
-                    </FormItem>
+                {/* Delivery options */}
+                <div className="space-y-3">
+                  <div>
+                    <FormLabel>Delivery options</FormLabel>
+                    <p className="text-sm text-muted-foreground">
+                      Select one or both delivery methods for this share.
+                    </p>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <FormField
+                      control={shareFormInstance.control}
+                      name="shareViaLink"
+                      render={({ field }) => (
+                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
+                          <FormControl>
+                            <Checkbox
+                              checked={field.value}
+                              onCheckedChange={field.onChange}
+                            />
+                          </FormControl>
+                          <div className="space-y-1 leading-none">
+                            <FormLabel>Share via link</FormLabel>
+                            <p className="text-sm text-muted-foreground">
+                              Email a secure public download link that does not
+                              require recipient login.
+                            </p>
+                          </div>
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={shareFormInstance.control}
+                      name="attachFileToEmail"
+                      render={({ field }) => (
+                        <FormItem className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-4">
+                          <FormControl>
+                            <Checkbox
+                              checked={field.value}
+                              onCheckedChange={field.onChange}
+                            />
+                          </FormControl>
+                          <div className="space-y-1 leading-none">
+                            <FormLabel>Attach file to email</FormLabel>
+                            <p className="text-sm text-muted-foreground">
+                              Attach the primary document. Large files may need
+                              the link option instead.
+                            </p>
+                          </div>
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                  {!shareViaLinkEnabled && !attachFileEnabled && (
+                    <p className="text-sm text-destructive">
+                      Choose at least one delivery option.
+                    </p>
                   )}
-                />
+                </div>
 
                 {/* Include refs */}
                 <FormField

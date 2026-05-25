@@ -20,6 +20,7 @@ import {
   Tag,
   Link,
   PenSquare,
+  RefreshCw,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -71,6 +72,7 @@ import {
   Project as WorkflowProject,
 } from "@/components/letter-workflow/types";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import enhancedApi from "@/services/enhanced-api";
 import {
   searchInDocument,
@@ -201,10 +203,6 @@ const DocumentsPage = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const documentsPerPage = 25;
 
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
-
   const fetchDocuments = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -231,11 +229,7 @@ const DocumentsPage = () => {
     const url = `${joinApiUrl("/documents")}?${params.toString()}`;
 
     try {
-      const response = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-        },
-      });
+      const response = await authenticatedFetch(url);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -322,6 +316,10 @@ const DocumentsPage = () => {
       setLoading(false);
     }
   }, [currentPage, searchTerm, statusFilter, tagFilter, directionFilter]);
+
+  useEffect(() => {
+    fetchDocuments();
+  }, [fetchDocuments]);
 
   useEffect(() => {
     fetchDocuments();
@@ -477,13 +475,8 @@ const DocumentsPage = () => {
   // Fetch organizations and projects for LetterInitiationForm
   const fetchOrgsAndProjects = useCallback(async () => {
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-
       // Organizations
-      const orgRes = await fetch(joinApiUrl("/organizations"), { headers });
+      const orgRes = await authenticatedFetch(joinApiUrl("/organizations"));
       if (orgRes.ok) {
         const orgData = await orgRes.json();
         const mapped = Array.isArray(orgData)
@@ -500,7 +493,7 @@ const DocumentsPage = () => {
       }
 
       // Projects
-      const projRes = await fetch(joinApiUrl("/projects"), { headers });
+      const projRes = await authenticatedFetch(joinApiUrl("/projects"));
       if (projRes.ok) {
         const projData = await projRes.json();
         const mapped = Array.isArray(projData)
@@ -524,12 +517,7 @@ const DocumentsPage = () => {
 
   const fetchUsers = useCallback(async () => {
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-
-      const res = await fetch(joinApiUrl("/users"), { headers });
+      const res = await authenticatedFetch(joinApiUrl("/users"));
       if (res.ok) {
         const data = await res.json();
         const rawUsers: any[] = Array.isArray(data)
@@ -762,11 +750,8 @@ const DocumentsPage = () => {
       }
 
       try {
-        const response = await fetch(joinApiUrl(`/documents/${docId}`), {
+        const response = await authenticatedFetch(joinApiUrl(`/documents/${docId}`), {
           method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
         });
 
         if (!response.ok) {
@@ -792,11 +777,7 @@ const DocumentsPage = () => {
   const handleDownloadDocument = useCallback(
     async (docId: string, docName: string) => {
       try {
-        const response = await fetch(joinApiUrl(`/documents/${docId}`), {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        });
+        const response = await authenticatedFetch(joinApiUrl(`/documents/${docId}`));
 
         if (!response.ok) {
           const errorText = await response.text();
@@ -878,17 +859,11 @@ const DocumentsPage = () => {
           return;
         }
 
-        const token = localStorage.getItem("accessToken") || "";
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (token) headers.Authorization = `Bearer ${token}`;
-        if (payload.organization_id)
-          headers["X-Org-Id"] = String(payload.organization_id);
-        if (payload.project_id)
-          headers["X-Proj-Id"] = String(payload.project_id);
 
-        const res = await fetch(joinApiUrl("/letters"), {
+        const res = await authenticatedFetch(joinApiUrl("/letters"), {
           method: "POST",
           headers,
           body: JSON.stringify(payload),
@@ -1256,6 +1231,14 @@ const DocumentsPage = () => {
                 <p className="text-sm text-gray-500 mt-1 max-w-md mx-auto">
                   {error}
                 </p>
+                <Button
+                  variant="outline"
+                  className="mt-4"
+                  onClick={() => void fetchDocuments()}
+                >
+                  <RefreshCw size={14} className="mr-2" />
+                  Retry
+                </Button>
               </div>
             ) : filteredDocuments.length === 0 ? (
               <div className="text-center py-12">

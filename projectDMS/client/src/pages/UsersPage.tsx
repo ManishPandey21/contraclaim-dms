@@ -185,7 +185,7 @@ const UsersPage = () => {
       }
     };
     fetchOrganizationsAndProjects();
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     const fetchUsers = async () => {
@@ -213,7 +213,7 @@ const UsersPage = () => {
     };
 
     fetchUsers();
-  }, []);
+  }, [toast]);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const filteredUsers = users.filter((user) => {

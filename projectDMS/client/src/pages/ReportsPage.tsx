@@ -176,9 +176,9 @@ const ReportsAnalyticsPage = () => {
     setTimeout(() => {
       // Sample data - in a real app, this would come from an API
       const sampleData: ReportData[] = Array.from({ length: 10 }, (_, i) => ({
-        id: doc-${i+1},
-        documentId: DOC-2023-${1000 + i},
-        name: Sample Document ${i+1},
+        id: `doc-${i + 1}`,
+        documentId: `DOC-2023-${1000 + i}`,
+        name: `Sample Document ${i + 1}`,
         status: ['Draft', 'Under Review', 'Approved', 'Sent', 'Archived'][Math.floor(Math.random() * 5)],
         createdAt: new Date(2023, Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString(),
         updatedAt: new Date(2023, Math.floor(Math.random() * 12), Math.floor(Math.random() * 28) + 1).toISOString(),
@@ -201,11 +201,11 @@ const ReportsAnalyticsPage = () => {
       return;
     }
     
-    toast.success(Downloading report in ${format.toUpperCase()} format);
+    toast.success(`Downloading report in ${format.toUpperCase()} format`);
     
     // In a real app, this would call an API endpoint to generate and download the file
-    console.log(Downloading ${format} report with columns: ${selectedColumns.join(', ')});
-    console.log(Date range: ${startDate?.toISOString()} to ${endDate?.toISOString()});
+    console.log(`Downloading ${format} report with columns: ${selectedColumns.join(', ')}`);
+    console.log(`Date range: ${startDate?.toISOString()} to ${endDate?.toISOString()}`);
   };
 
   // Format date for display
@@ -239,7 +239,7 @@ const ReportsAnalyticsPage = () => {
                   {reports.map(report => (
                     <li key={report.id}>
                       <button
-                        className={w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-slate-50 transition-colors ${selectedReport?.id === report.id ? 'bg-blue-50 text-blue-700' : ''}}
+                        className={`w-full px-4 py-3 text-left flex items-center gap-3 hover:bg-slate-50 transition-colors ${selectedReport?.id === report.id ? 'bg-blue-50 text-blue-700' : ''}`}
                         onClick={() => setSelectedReport(report)}
                       >
                         <div className="flex-shrink-0 rounded-md bg-blue-100 p-2">
@@ -345,12 +345,12 @@ const ReportsAnalyticsPage = () => {
                         {availableColumns.map(column => (
                           <div key={column.id} className="flex items-center space-x-2">
                             <Checkbox 
-                              id={column-${column.id}} 
+                              id={`column-${column.id}`} 
                               checked={selectedColumns.includes(column.id)}
                               onCheckedChange={() => handleColumnToggle(column.id)}
                             />
                             <label 
-                              htmlFor={column-${column.id}}
+                              htmlFor={`column-${column.id}`}
                               className="text-sm cursor-pointer"
                             >
                               {column.label}

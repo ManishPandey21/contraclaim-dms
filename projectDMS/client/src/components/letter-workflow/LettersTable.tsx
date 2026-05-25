@@ -19,7 +19,7 @@ export const LettersTable: React.FC<LettersTableProps> = ({
   letters, 
   formatDate,
   onSelectLetter,
-  selectedLetterId
+  selectedLetterId,
 }) => {
   const navigate = useNavigate();
 
@@ -35,9 +35,7 @@ export const LettersTable: React.FC<LettersTableProps> = ({
           case 'Strategy':
             return `/letters/${letter.id}/strategy`;
           case 'Draft':
-            return letter.strategicPlan
-              ? `/letters/${letter.id}/draft`
-              : `/letters/${letter.id}/strategy`;
+            return `/letters/${letter.id}/draft`;
           case 'Review':
             return `/letters/${letter.id}/review`;
           case 'Approval':
@@ -114,15 +112,17 @@ export const LettersTable: React.FC<LettersTableProps> = ({
               )}
             </TableCell>
             <TableCell className="text-right">
-              <Button 
-                variant="outline" 
-                onClick={(event) => {
-                  event.stopPropagation();
-                  navigate(getLetterRoute(letter));
-                }}
-              >
-                Manage
-              </Button>
+              <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                <Button
+                  variant="outline"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    navigate(getLetterRoute(letter));
+                  }}
+                >
+                  Manage
+                </Button>
+              </div>
             </TableCell>
           </TableRow>
         ))}

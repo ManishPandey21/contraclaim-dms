@@ -47,6 +47,7 @@ class UserBase(BaseModel):
     organizations: List[str] = Field(default_factory=list)
     projects: List[str] = Field(default_factory=list)
     permissions: Optional[List[str]] = Field(default_factory=list)
+    account_type: str = Field(default="client_user")
     preferences: Preferences = Field(default_factory=Preferences)
 
 
@@ -127,6 +128,7 @@ class UserResponse(BaseModel):
     organizations: List[str]
     projects: List[str]
     permissions: List[str]
+    account_type: str = "client_user"
     is_active: bool
     is_verified: bool
     preferences: Preferences
@@ -153,6 +155,7 @@ class UserUpdate(BaseModel):
     last_name: Optional[str] = Field(None, min_length=1, max_length=50)
     roles: Optional[List[str]] = None
     permissions: Optional[List[str]] = None
+    account_type: Optional[str] = None
     disabled: Optional[bool] = None
     organization_id: Optional[str] = None
     organizations: Optional[List[str]] = None

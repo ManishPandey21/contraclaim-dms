@@ -3,10 +3,13 @@ Secure input request management API with comprehensive validation, proper author
 and clean architecture. Addresses ObjectId handling and performance issues.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 import logging
+import html
 from datetime import datetime
+from datetime import timezone
+from bson import ObjectId
 
 from ..core.security import get_current_user, CurrentUser
 from ..core.database import get_database
@@ -19,9 +22,10 @@ from ..models.input_request import (
     InputRequestResponse, InputRequestListResponse, SuggestedKeyPoints
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, InputRequestError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, InputRequestError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
+from ..utils.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["input_requests"])
@@ -36,13 +40,15 @@ class InputRequestController:
         letter_service: LetterService,
         auth_service: AuthorizationService,
         rate_limiter: RateLimiter,
-        audit_logger: AuditLogger
+        audit_logger: AuditLogger,
+        notification_service: Optional[NotificationService] = None,
     ):
         self.input_request_service = input_request_service
         self.letter_service = letter_service
         self.auth_service = auth_service
         self.rate_limiter = rate_limiter
         self.audit_logger = audit_logger
+        self.notification_service = notification_service
 
     async def get_input_requests_for_letter(
         self,
@@ -84,7 +90,9 @@ class InputRequestController:
                 limit=pagination["limit"]
             )
             
-        except InputRequestError:
+        except (BaseDomainError, HTTPException):
+            raise
+        except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to get input requests for letter {letter_id}: {str(e)}")
@@ -128,15 +136,33 @@ class InputRequestController:
             input_request = await self.input_request_service.create_request(
                 validated_letter_id, validated_data, current_user
             )
+
+            await self._move_letter_to_input_status(validated_letter_id, letter, current_user)
             
             # Audit log
             await self.audit_logger.log_input_request_created(
                 current_user.id, input_request.id, validated_letter_id
             )
+
+            try:
+                await self._send_input_request_email(
+                    letter=letter,
+                    input_request=input_request,
+                    current_user=current_user,
+                )
+            except Exception:
+                logger.warning(
+                    "Input request created but email notification failed request_id=%s letter_id=%s",
+                    input_request.id,
+                    validated_letter_id,
+                    exc_info=True,
+                )
             
             return input_request
             
-        except InputRequestError:
+        except (BaseDomainError, HTTPException):
+            raise
+        except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to create input request: {str(e)}")
@@ -198,7 +224,9 @@ class InputRequestController:
             
             return updated_request
             
-        except InputRequestError:
+        except (BaseDomainError, HTTPException):
+            raise
+        except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to respond to request {request_id}: {str(e)}")
@@ -253,7 +281,9 @@ class InputRequestController:
             
             return closed_request
             
-        except InputRequestError:
+        except (BaseDomainError, HTTPException):
+            raise
+        except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to close request {request_id}: {str(e)}")
@@ -290,17 +320,19 @@ class InputRequestController:
             await self.auth_service.check_letter_access(current_user, letter, "read")
             
             # Get suggested key points (with caching)
-            key_points = await self.input_request_service.generate_key_points(
-                validated_letter_id, letter
+            generated = await self.input_request_service.generate_key_points(
+                validated_letter_id
             )
             
             return SuggestedKeyPoints(
                 letter_id=validated_letter_id,
-                key_points=key_points,
+                key_points=generated.key_points,
                 generated_at=datetime.utcnow()
             )
             
-        except InputRequestError:
+        except (BaseDomainError, HTTPException):
+            raise
+        except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to get key points for {letter_id}: {str(e)}")
@@ -338,6 +370,164 @@ class InputRequestController:
             )
         )
 
+    async def _move_letter_to_input_status(
+        self,
+        letter_id: str,
+        letter: Any,
+        current_user: CurrentUser,
+    ) -> None:
+        if (getattr(letter, "status", "") or "").lower() == "input":
+            return
+
+        now = datetime.now(timezone.utc)
+        letter_query: Dict[str, Any] = {"_id": self._coerce_user_id(letter_id)}
+        if letter_query["_id"] != letter_id:
+            letter_query = {"$or": [letter_query, {"_id": letter_id}]}
+
+        try:
+            await self.letter_service.db.letters.update_one(
+                letter_query,
+                {
+                    "$set": {
+                        "status": "Input",
+                        "statusStartDate": now,
+                        "status_start_date": now,
+                        "updatedAt": now,
+                        "updated_at": now,
+                    },
+                    "$push": {
+                        "status_history": {
+                            "status": "Input",
+                            "changed_at": now,
+                            "actor_id": getattr(current_user, "id", None),
+                            "comment": "Input requested",
+                        }
+                    },
+                },
+            )
+        except Exception:
+            logger.warning(
+                "Input request created but failed to move letter to Input status letter_id=%s",
+                letter_id,
+                exc_info=True,
+            )
+
+    async def _send_input_request_email(
+        self,
+        *,
+        letter: Any,
+        input_request: InputRequest,
+        current_user: CurrentUser,
+    ) -> None:
+        """Email the selected input provider with drafter contact details."""
+
+        email_service = getattr(self.notification_service, "email_service", None)
+        db = getattr(self.notification_service, "db", None)
+        if not email_service or db is None:
+            return
+
+        requested_user = await self._find_user_by_reference(db, input_request.requested_from)
+        if not requested_user or not requested_user.get("email"):
+            logger.info(
+                "Input request email skipped; selected user has no email user_id=%s",
+                input_request.requested_from,
+            )
+            return
+
+        drafter_user = None
+        if getattr(letter, "assigned_to", None):
+            drafter_user = await self._find_user_by_reference(db, str(letter.assigned_to))
+
+        drafter_name = self._user_display_name(drafter_user) if drafter_user else "Not assigned"
+        drafter_email = str(drafter_user.get("email")) if drafter_user and drafter_user.get("email") else "Not available"
+        requester_name = getattr(current_user, "username", None) or getattr(current_user, "email", None) or "Contract manager"
+        due_text = input_request.due_date.isoformat() if input_request.due_date else "Not specified"
+        input_url = f"{email_service.app_url.rstrip('/')}/letters/{letter.id}/input"
+        subject = f"Input requested for letter: {letter.title}"
+        text_body = "\n".join(
+            [
+                f"Dear {self._user_display_name(requested_user)},",
+                "",
+                f"{requester_name} has requested your input for the following contract letter.",
+                "",
+                f"Letter: {letter.title}",
+                f"Subject: {letter.subject}",
+                f"Recipient: {letter.recipient}",
+                f"Due date: {due_text}",
+                "",
+                "Requested input details:",
+                input_request.details,
+                "",
+                "Contract drafter contact for response/clarification:",
+                f"{drafter_name} <{drafter_email}>",
+                "",
+                f"Open request: {input_url}",
+                "",
+                "Best regards,",
+                "ContraClaim DMS",
+            ]
+        )
+        html_body = f"""
+        <p>Dear {html.escape(self._user_display_name(requested_user))},</p>
+        <p>{html.escape(requester_name)} has requested your input for the following contract letter.</p>
+        <dl>
+          <dt>Letter</dt><dd>{html.escape(str(letter.title))}</dd>
+          <dt>Subject</dt><dd>{html.escape(str(letter.subject))}</dd>
+          <dt>Recipient</dt><dd>{html.escape(str(letter.recipient))}</dd>
+          <dt>Due date</dt><dd>{html.escape(due_text)}</dd>
+        </dl>
+        <p><strong>Requested input details</strong></p>
+        <p>{html.escape(input_request.details).replace(chr(10), '<br>')}</p>
+        <p><strong>Contract drafter contact for response/clarification</strong><br>
+        {html.escape(drafter_name)} &lt;{html.escape(drafter_email)}&gt;</p>
+        <p><a href="{html.escape(input_url)}">Open input request</a></p>
+        <p>Best regards,<br>ContraClaim DMS</p>
+        """
+        sent = await email_service.send_share_email(
+            to=[str(requested_user.get("email"))],
+            subject=subject,
+            html_body=html_body,
+            text_body=text_body,
+            organization_id=getattr(letter, "organization_id", None),
+            project_id=getattr(letter, "project_id", None),
+        )
+        if not sent:
+            logger.info(
+                "Input request email was not sent by configured mail service request_id=%s",
+                input_request.id,
+            )
+
+    @staticmethod
+    def _coerce_user_id(value: str) -> ObjectId | str:
+        try:
+            return ObjectId(value)
+        except Exception:
+            return value
+
+    async def _find_user_by_reference(self, db: Any, value: str) -> Optional[Dict[str, Any]]:
+        reference = str(value)
+        query_parts: List[Dict[str, Any]] = [
+            {"_id": self._coerce_user_id(reference)},
+            {"id": reference},
+            {"email": reference},
+            {"username": reference},
+        ]
+        if query_parts[0]["_id"] != reference:
+            query_parts.append({"_id": reference})
+        return await db.users.find_one({"$or": query_parts})
+
+    @staticmethod
+    def _user_display_name(user: Optional[Dict[str, Any]]) -> str:
+        if not user:
+            return "User"
+        return str(
+            user.get("full_name")
+            or user.get("name")
+            or user.get("username")
+            or user.get("email")
+            or "User"
+        )
+
 
 # Dependency injection
 async def get_input_request_controller() -> InputRequestController:
@@ -352,7 +542,7 @@ async def get_input_request_controller() -> InputRequestController:
     
     return InputRequestController(
         input_request_service, letter_service, auth_service,
-        rate_limiter, audit_logger
+        rate_limiter, audit_logger, notification_service
     )
 
 

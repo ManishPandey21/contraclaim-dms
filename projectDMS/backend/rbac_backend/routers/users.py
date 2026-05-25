@@ -5,7 +5,7 @@ rate limiting, and enhanced security. Addresses authentication vulnerabilities
 and implements proper session management.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, Request, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from typing import List, Optional, Dict, Any
 from datetime import timedelta, datetime
@@ -19,6 +19,7 @@ from ..core.security import (
 )
 from ..core.config import settings
 from ..core.database import get_db
+from ..services.step_up_service import require_step_up
 from ..services.user_service import UserService, UserServiceError
 from ..services.authentication_service import AuthenticationService
 from ..services.authorization_service import AuthorizationService
@@ -31,7 +32,7 @@ from ..models.user import Preferences
 from ..utils.validation import (
     validate_input, sanitize_text, validate_email, validate_password_strength, validate_object_id
 )
-from ..utils.error_handler import handle_exceptions, UserError, AuthenticationError
+from ..utils.error_handler import handle_exceptions, BaseDomainError, UserError, AuthenticationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 from ..utils.notification_service import NotificationService
@@ -41,6 +42,14 @@ router = APIRouter()
 
 ROLE_KEYS_ORGADMIN = {"orgadmin", "organizationadmin"}
 ROLE_KEYS_PROJECTADMIN = {"projectadmin", "projectadministrator"}
+
+LEGACY_AUTH_SUNSET = "2026-08-19"
+
+
+def _mark_legacy_auth_response(response: Response, successor_path: str) -> None:
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = LEGACY_AUTH_SUNSET
+    response.headers["Link"] = f"<{successor_path}>; rel=\"successor-version\""
 
 def _normalize_role_key(value: Any) -> str:
     raw = str(value or "").strip().lower()
@@ -117,17 +126,17 @@ class UserController:
             # Rate limiting for login attempts (prevent brute force)
             await self.rate_limiter.check_ip_limit(
                 client_ip,
-                cost=5,  # High cost for login attempts
-                window_seconds=900,  # 15 minute window
-                max_requests=5  # Max 5 failed attempts per 15 minutes
+                cost=1,
+                window_seconds=settings.LOGIN_IP_RATE_LIMIT_WINDOW,
+                max_requests=settings.LOGIN_IP_RATE_LIMIT_REQUESTS,
             )
             
             # Additional email-based rate limiting
             await self.rate_limiter.check_email_limit(
                 login_data.email,
-                cost=3,
-                window_seconds=3600,  # 1 hour window
-                max_requests=10  # Max 10 attempts per hour per email
+                cost=1,
+                window_seconds=settings.LOGIN_EMAIL_RATE_LIMIT_WINDOW,
+                max_requests=settings.LOGIN_EMAIL_RATE_LIMIT_REQUESTS,
             )
             
             # Validate input
@@ -325,6 +334,8 @@ class UserController:
                 limit=pagination["limit"]
             )
             
+        except (BaseDomainError, HTTPException, ValueError):
+            raise
         except Exception as e:
             logger.error(f"Failed to get users: {str(e)}")
             raise HTTPException(
@@ -361,7 +372,7 @@ class UserController:
             
             return user_response
             
-        except UserError:
+        except (BaseDomainError, HTTPException, ValueError):
             raise
         except Exception as e:
             logger.error(f"Failed to get user {user_id}: {str(e)}")
@@ -863,6 +874,7 @@ class UserController:
             organizations=[str(o) for o in organizations],
             projects=[str(pid) for pid in (getattr(user, "projects", []) or [])],
             permissions=[str(p) for p in permissions],
+            account_type=getattr(user, "account_type", "client_user") or "client_user",
             is_active=is_active,
             is_verified=is_verified,
             preferences=preferences,
@@ -906,15 +918,17 @@ async def get_user_controller(db = Depends(get_db)) -> UserController:
 
 
 # API Endpoints
-@router.post("/token", response_model=LoginResponse)
+@router.post("/token", response_model=LoginResponse, deprecated=True)
 @handle_exceptions
 async def login_for_access_token(
     login_data: LoginRequest,
+    response: Response,
     client_ip: str = Depends(_client_ip_dep),
     user_agent: str = Depends(_user_agent_dep),
     controller: UserController = Depends(get_user_controller)
 ):
     """Authenticate user and return access token."""
+    _mark_legacy_auth_response(response, "/api/login")
     return await controller.authenticate_user(login_data, client_ip, user_agent)
 
 
@@ -955,6 +969,16 @@ async def get_users(
     return await controller.get_users(pagination, filters, current_user)
 
 
+@router.get("/users/me", response_model=UserResponse)
+@handle_exceptions
+async def get_current_user_profile(
+    controller: UserController = Depends(get_user_controller),
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """Get current user's profile."""
+    return await controller.get_user(str(current_user.id), current_user)
+
+
 @router.get("/users/{user_id}", response_model=UserResponse)
 @handle_exceptions
 async def get_user(
@@ -984,45 +1008,44 @@ async def update_user(
 @handle_exceptions
 async def delete_user(
     user_id: str,
+    request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("users:delete")),
 ):
     """Delete user with dependency checks."""
+    await require_step_up(request, current_user, action="users.delete")
     return await controller.delete_user(user_id, current_user)
 
 
-@router.post("/logout")
+@router.post("/logout", deprecated=True)
 @handle_exceptions
 async def logout_user(
-    session_token: str = Depends(lambda request: request.headers.get("authorization", "").replace("Bearer ", "")),
+    request: Request,
+    response: Response,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Logout current user and invalidate session."""
+    _mark_legacy_auth_response(response, "/api/logout")
+    session_token = request.headers.get("authorization", "").replace("Bearer ", "")
+    if not session_token:
+        session_token = request.cookies.get(settings.AUTH_COOKIE_NAME, "")
     return await controller.logout_user(current_user, session_token)
 
 
 # Additional security endpoints
-@router.get("/users/me", response_model=UserResponse)
-@handle_exceptions
-async def get_current_user_profile(
-    controller: UserController = Depends(get_user_controller),
-    current_user: CurrentUser = Depends(get_current_user)
-):
-    """Get current user's profile."""
-    return await controller.get_user(str(current_user.id), current_user)
-
-
 @router.post("/users/{user_id}/lock")
 @handle_exceptions
 async def lock_user_account(
     user_id: str,
+    request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("users:update")),
 ):
     """Lock user account for security purposes."""
+    await require_step_up(request, current_user, action="users.lock")
     await controller.auth_service.require_permission(current_user, "users:lock")
     
     validated_user_id = validate_object_id(user_id)
@@ -1036,11 +1059,13 @@ async def lock_user_account(
 @handle_exceptions
 async def unlock_user_account(
     user_id: str,
+    request: Request,
     controller: UserController = Depends(get_user_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("users:update")),
 ):
     """Unlock user account."""
+    await require_step_up(request, current_user, action="users.unlock")
     await controller.auth_service.require_permission(current_user, "users:unlock")
     
     validated_user_id = validate_object_id(user_id)

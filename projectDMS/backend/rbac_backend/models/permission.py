@@ -15,6 +15,9 @@ class PermissionCategory(str, Enum):
     SYSTEM_ADMINISTRATION = "system_administration"
     EMAIL_MANAGEMENT = "email_management"
     AUDIT_MANAGEMENT = "audit_management"
+    DRAFTING_MANAGEMENT = "drafting_management"
+    BILLING_MANAGEMENT = "billing_management"
+    SUBSCRIPTION_MANAGEMENT = "subscription_management"
 
 
 class PermissionLevel(str, Enum):
@@ -38,9 +41,12 @@ class PermissionBase(BaseModel):
         stripped = value.strip()
         if not stripped:
             raise ValueError("Permission name cannot be empty")
-        parts = stripped.split(":")
-        if len(parts) != 2 or not all(part.strip() for part in parts):
-            raise ValueError("Permission name must follow format 'resource:action'")
+        colon_parts = stripped.split(":")
+        dot_parts = stripped.split(".")
+        valid_legacy = len(colon_parts) == 2 and all(part.strip() for part in colon_parts)
+        valid_canonical = len(dot_parts) >= 3 and all(part.strip() for part in dot_parts)
+        if not valid_legacy and not valid_canonical:
+            raise ValueError("Permission name must follow 'resource:action' or canonical dotted format")
         return stripped
 
 
@@ -130,6 +136,10 @@ DEFAULT_PERMISSIONS = [
     {"name": "users:lock", "description": "Lock user accounts", "category": "user_management", "resource": "users", "action": "admin", "is_system": True},
     {"name": "users:unlock", "description": "Unlock user accounts", "category": "user_management", "resource": "users", "action": "admin", "is_system": True},
     {"name": "permissions:read", "description": "View permissions", "category": "role_management", "resource": "permissions", "action": "read", "is_system": True},
+    {"name": "dms.document.view", "description": "View DMS documents", "category": "document_management", "resource": "dms.document", "action": "read", "is_system": True},
+    {"name": "dms.document.upload", "description": "Upload DMS documents", "category": "document_management", "resource": "dms.document", "action": "create", "is_system": True},
+    {"name": "dms.dashboard.view", "description": "View DMS dashboard", "category": "document_management", "resource": "dms.dashboard", "action": "read", "is_system": True},
+    {"name": "draft.request.view", "description": "View drafting requests", "category": "drafting_management", "resource": "draft.request", "action": "read", "is_system": True},
     {"name": "documents:read", "description": "View documents", "category": "document_management", "resource": "documents", "action": "read", "is_system": True},
     {"name": "documents:create", "description": "Create documents", "category": "document_management", "resource": "documents", "action": "create", "is_system": True},
     {"name": "documents:update", "description": "Update documents", "category": "document_management", "resource": "documents", "action": "update", "is_system": True},
@@ -185,6 +195,7 @@ DEFAULT_PERMISSIONS = [
     {"name": "input_requests:update", "description": "Update input requests", "category": "document_management", "resource": "input_requests", "action": "update", "is_system": True},
     {"name": "input_requests:respond", "description": "Respond to input requests", "category": "document_management", "resource": "input_requests", "action": "update", "is_system": True},
     {"name": "input_requests:admin", "description": "Administer input requests", "category": "document_management", "resource": "input_requests", "action": "admin", "is_system": True},
+    {"name": "drafting.request.create", "description": "Create drafting requests", "category": "drafting_management", "resource": "drafting.request", "action": "create", "is_system": True},
     {"name": "performance:admin", "description": "Access performance admin data", "category": "system_administration", "resource": "performance", "action": "admin", "is_system": True},
     {"name": "performance:superadmin", "description": "Access performance superadmin data", "category": "system_administration", "resource": "performance", "action": "admin", "is_system": True},
     {"name": "representatives:read", "description": "View representatives", "category": "project_management", "resource": "representatives", "action": "read", "is_system": True},

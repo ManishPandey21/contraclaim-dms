@@ -14,7 +14,8 @@ import redis
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel, BaseSettings, Field
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 try:
@@ -25,18 +26,17 @@ except Exception as exc:  # pragma: no cover - required dependency
 
 
 class Settings(BaseSettings):
-    redis_url: str = Field("redis://redis:6379/0", env="LANGGRAPH_REDIS_URL")
-    graphiti_url: str = Field("http://graphiti:8080", env="LANGGRAPH_GRAPHITI_URL")
-    qdrant_url: str = Field("http://qdrant:6333", env="LANGGRAPH_QDRANT_URL")
-    backend_url: str = Field("http://backend:8000", env="LANGGRAPH_BACKEND_URL")
-    api_token: str = Field("", env="LANGGRAPH_API_TOKEN")
-    log_dir: Path = Field(Path("/app/logs"), env="LANGGRAPH_LOG_DIR")
-    workflow_queue: str = Field("workflow:ingest", env="LANGGRAPH_INGEST_QUEUE")
-    ws_keepalive_interval: int = Field(15, env="LANGGRAPH_WS_KEEPALIVE")
+    redis_url: str = Field("redis://redis:6379/0", alias="LANGGRAPH_REDIS_URL")
+    graphiti_url: str = Field("http://graphiti:8080", alias="LANGGRAPH_GRAPHITI_URL")
+    qdrant_url: str = Field("http://qdrant:6333", alias="LANGGRAPH_QDRANT_URL")
+    qdrant_api_key: str = Field("", alias="LANGGRAPH_QDRANT_API_KEY")
+    backend_url: str = Field("http://backend:8000", alias="LANGGRAPH_BACKEND_URL")
+    api_token: str = Field("", alias="LANGGRAPH_API_TOKEN")
+    log_dir: Path = Field(Path("/app/logs"), alias="LANGGRAPH_LOG_DIR")
+    workflow_queue: str = Field("workflow:ingest", alias="LANGGRAPH_INGEST_QUEUE")
+    ws_keepalive_interval: int = Field(15, alias="LANGGRAPH_WS_KEEPALIVE")
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
 settings = Settings()
@@ -182,7 +182,7 @@ class ContractGraph:
             response = await client.post(
                 f"{settings.graphiti_url}/graph/query",
                 json={
-                    "query": "MATCH (d:Document) WHERE d.id IN  RETURN d",
+                    "query": "MATCH (d:Document) WHERE d.id IN $ids RETURN d",
                     "parameters": {"ids": docs},
                 },
             )
@@ -194,7 +194,7 @@ class ContractGraph:
             response = await client.post(
                 f"{settings.graphiti_url}/graph/query",
                 json={
-                    "query": "MATCH (d:Document)-[:HAS_ISSUE]->(i:Issue {type: }) WHERE d.id IN  RETURN d, i",
+                    "query": "MATCH (d:Document)-[:HAS_ISSUE]->(i:Issue {type: $rule}) WHERE d.id IN $ids RETURN d, i",
                     "parameters": {"ids": docs, "rule": rule},
                 },
             )
@@ -288,7 +288,8 @@ async def websocket_endpoint(ws: WebSocket, job_id: str) -> None:
 @app.get("/agents/collections", dependencies=[Depends(require_token)])
 async def collections() -> Any:
     async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(f"{settings.graphiti_url}/vector/collections")
+        headers = {"api-key": settings.qdrant_api_key} if settings.qdrant_api_key else None
+        response = await client.get(f"{settings.qdrant_url}/collections", headers=headers)
         response.raise_for_status()
         return response.json()
 

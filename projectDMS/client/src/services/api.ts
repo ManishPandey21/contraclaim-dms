@@ -1,5 +1,5 @@
 import { createHttpClient } from "./http";
-import { ensureValidToken, refreshToken, logoutAndRedirect } from "./auth";
+import { redirectToLoginAfterSessionExpiry } from "./auth";
 
 type ApiRequestConfig = {
   _retry?: boolean;
@@ -7,21 +7,11 @@ type ApiRequestConfig = {
 
 export const api = createHttpClient();
 
-// Proactively ensure token validity before every request
 api.interceptors.request.use(
-  async (config) => {
-    await ensureValidToken(120); // silently refresh when <= 2 minutes remain
-    const token = window.localStorage.getItem("accessToken");
-
-    // Work on a mutable, loosely-typed headers object to satisfy TS
-    const headers: any = config.headers || {};
-
-    // Always attach Authorization if available; keep dev headers for compatibility.
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    config.headers = headers as any;
+  (config) => {
+    // HttpOnly auth cookies are sent via withCredentials. Do not mirror access
+    // tokens from localStorage into headers; stale browser storage must not be
+    // treated as an authentication source.
     return config;
   },
   (error) => Promise.reject(error)
@@ -36,15 +26,11 @@ api.interceptors.response.use(
     if (status === 401 && !originalRequest._retry) {
       originalRequest._retry = true;
       try {
+        const { refreshToken } = await import("./auth");
         await refreshToken();
-        const newToken = window.localStorage.getItem("accessToken");
-        if (newToken) {
-          originalRequest.headers = originalRequest.headers || {};
-          originalRequest.headers["Authorization"] = `Bearer ${newToken}`;
-        }
         return api(originalRequest);
       } catch {
-        logoutAndRedirect("/");
+        redirectToLoginAfterSessionExpiry();
       }
     }
     return Promise.reject(error);

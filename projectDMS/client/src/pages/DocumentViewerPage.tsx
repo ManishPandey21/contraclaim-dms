@@ -1,24 +1,31 @@
 // DocumentViewerPage.tsx
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Button } from "@/components/ui/button";
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
 import { toast } from "sonner";
+import { AlertTriangle, FileText, RefreshCw } from "lucide-react";
 import { enhancedApi, Document } from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
+import RouteSkeleton from "@/components/layout/RouteSkeleton";
 
 // Import our new components
 import DocumentHeader from "@/components/document-viewer/DocumentHeader";
-import DocumentViewer from "@/components/document-viewer/DocumentViewer";
 import MetadataEditor from "@/components/document-viewer/MetadataEditor";
 import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
+
+const DocumentViewer = React.lazy(
+  () => import("@/components/document-viewer/DocumentViewer")
+);
 
 // Define interfaces and types
 interface DocumentReference {
@@ -102,6 +109,7 @@ const DocumentViewerPage: React.FC = () => {
   const [document, setDocument] = useState<LocalDocument | null>(null); // Use LocalDocument
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [createdByName, setCreatedByName] = useState<string>("");
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
   const [isLoadingReferences, setIsLoadingReferences] = useState(false);
@@ -124,6 +132,20 @@ const DocumentViewerPage: React.FC = () => {
   // Track the currently selected tag to update subtag options dynamically
   const [currentSelectedTag, setCurrentSelectedTag] = useState<string>("");
 
+  const resolveOptionValue = useCallback(
+    (
+      value: string | undefined,
+      options: { value: string; label: string }[]
+    ): string => {
+      if (!value) return "";
+      return (
+        options.find((option) => option.value === value || option.label === value)
+          ?.value || value
+      );
+    },
+    []
+  );
+
   const fetchDocument = useCallback(async () => {
     if (!documentId) {
       setIsLoading(false);
@@ -131,6 +153,7 @@ const DocumentViewerPage: React.FC = () => {
     }
     setIsLoading(true);
     setIsError(false);
+    setErrorMessage(null);
     try {
       const data: Document = await enhancedApi.getDocument(documentId);
       // Map to LocalDocument and normalize uploadType casing
@@ -151,6 +174,9 @@ const DocumentViewerPage: React.FC = () => {
     } catch (error) {
       console.error("Error fetching document:", error);
       setIsError(true);
+      setErrorMessage(
+        error instanceof Error ? error.message : "Failed to fetch document"
+      );
       toast.error("Failed to fetch document", {
         description: "Please try again later",
       });
@@ -164,13 +190,9 @@ const DocumentViewerPage: React.FC = () => {
     setIsLoadingAvailableDocuments(true);
     setIsLoadingReferences(true);
     try {
-      const linkedResponse = await fetch(
+      const linkedResponse = await authenticatedFetch(
         joinApiUrl(`/documents/${documentId}/references`),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!linkedResponse.ok) {
         const errorData = await linkedResponse.json();
@@ -182,17 +204,13 @@ const DocumentViewerPage: React.FC = () => {
       // Use lowercase for API calls
       const oppositeDirection =
         uploadType === "incoming" ? "outgoing" : "incoming";
-      const availableResponse = await fetch(
+      const availableResponse = await authenticatedFetch(
         joinApiUrl(
           `/documents?uploadType=${oppositeDirection}&excludeIds=${linkedDocumentIds.join(
             ","
           )}&project_id=${document?.project_id || ""}`
         ),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!availableResponse.ok) {
         const errorData = await availableResponse.json();
@@ -218,11 +236,7 @@ const DocumentViewerPage: React.FC = () => {
       setAvailableDocuments(formattedAvailableData);
 
       const linkedDocumentsDetailsPromises = linkedData.map((ref: any) =>
-        fetch(joinApiUrl(`/documents/${ref.documentId}`), {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }).then(async (docResponse) => {
+        authenticatedFetch(joinApiUrl(`/documents/${ref.documentId}`)).then(async (docResponse) => {
           if (!docResponse.ok) {
             const errorData = await docResponse.json();
             throw new Error(
@@ -268,11 +282,7 @@ const DocumentViewerPage: React.FC = () => {
 
     setIsLoadingSubtags(true);
     try {
-      const response = await fetch(joinApiUrl(`/tags/${tagId}/subtags`), {
-        headers: {
-          Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-        },
-      });
+      const response = await authenticatedFetch(joinApiUrl(`/tags/${tagId}/subtags`));
       if (!response.ok) {
         throw new Error("Failed to fetch subtags");
       }
@@ -319,18 +329,15 @@ const DocumentViewerPage: React.FC = () => {
   }, []);
 
   const getSubtagOptions = useCallback(
-    (selectedTagLabel: string | undefined): string[] => {
-      if (!selectedTagLabel) return [];
-      const tagId = availableTags.find(
-        (tag) => tag.label === selectedTagLabel
-      )?.value;
+    (selectedTagValue: string | undefined): string[] => {
+      const tagId = resolveOptionValue(selectedTagValue, availableTags);
       if (!tagId) return [];
       const options = availableSubtags
         .filter((subtag) => subtag.tagId === tagId)
         .map((subtag) => subtag.label);
       return options;
     },
-    [availableTags, availableSubtags]
+    [availableTags, availableSubtags, resolveOptionValue]
   );
 
   useEffect(() => {
@@ -388,13 +395,7 @@ const DocumentViewerPage: React.FC = () => {
   useEffect(() => {
     const fetchTags = async () => {
       try {
-        const token = localStorage.getItem("accessToken") || "";
-        const headers: Record<string, string> = token
-          ? { Authorization: `Bearer ${token}` }
-          : {};
-        const tagsResponse = await fetch(joinApiUrl("/tags"), {
-          headers,
-        });
+        const tagsResponse = await authenticatedFetch(joinApiUrl("/tags"));
         if (!tagsResponse.ok) {
           throw new Error("Failed to fetch tags");
         }
@@ -424,18 +425,15 @@ const DocumentViewerPage: React.FC = () => {
   // Effect to initialize metadataFields when document or tags/subtags change
   useEffect(() => {
     if (document) {
-      // Convert tag ID to label
-      const currentTagId = document.tags?.[0] || "";
-      const currentTagLabel = currentTagId
-        ? availableTags.find((tag) => tag.value === currentTagId)?.label || ""
-        : "";
+      const currentTagValue = resolveOptionValue(
+        document.tags?.[0],
+        availableTags
+      );
 
-      // Convert subtag ID to label
-      const currentSubTagId = document.subTags?.[0] || "";
-      const currentSubTagLabel = currentSubTagId
-        ? availableSubtags.find((subtag) => subtag.value === currentSubTagId)
-            ?.label || ""
-        : "";
+      const currentSubTagValue = resolveOptionValue(
+        document.subTags?.[0],
+        availableSubtags
+      );
 
       // Format date for HTML date input (YYYY-MM-DD)
       const formatDateForInput = (dateString: string) => {
@@ -490,16 +488,16 @@ const DocumentViewerPage: React.FC = () => {
         {
           id: "tag",
           label: "Tag",
-          value: currentTagLabel,
+          value: currentTagValue,
           type: "select",
           options: availableTags.map((tag) => tag.label),
         },
         {
           id: "subTag",
           label: "Sub-Tag",
-          value: currentSubTagLabel,
+          value: currentSubTagValue,
           type: "select",
-          options: getSubtagOptions(currentTagLabel), // Use the memoized getter
+          options: getSubtagOptions(currentTagValue), // Use the memoized getter
         },
         {
           id: "status",
@@ -530,19 +528,28 @@ const DocumentViewerPage: React.FC = () => {
         },
       ]);
     }
-  }, [document, availableTags, availableSubtags, getSubtagOptions]);
+  }, [
+    document,
+    availableTags,
+    availableSubtags,
+    getSubtagOptions,
+    resolveOptionValue,
+  ]);
+
+  useEffect(() => {
+    if (!document?.tags?.[0]) return;
+    const resolvedTag = resolveOptionValue(document.tags[0], availableTags);
+    if (resolvedTag && resolvedTag !== currentSelectedTag) {
+      setCurrentSelectedTag(resolvedTag);
+    }
+  }, [availableTags, currentSelectedTag, document?.tags, resolveOptionValue]);
 
   // Effect to fetch subtags when the selected tag changes
   useEffect(() => {
     if (currentSelectedTag) {
-      const tagId = availableTags.find(
-        (tag) => tag.label === currentSelectedTag
-      )?.value;
-      if (tagId) {
-        fetchSubtags(tagId);
-      }
+      fetchSubtags(currentSelectedTag);
     }
-  }, [currentSelectedTag, availableTags, fetchSubtags]);
+  }, [currentSelectedTag, fetchSubtags]);
 
   // Effect to update subtag options in metadataFields when availableSubtags changes
   useEffect(() => {
@@ -554,99 +561,69 @@ const DocumentViewerPage: React.FC = () => {
     });
   }, [availableSubtags, getSubtagOptions, currentSelectedTag]);
 
-  const updateMetadata = async (updatedFields: Partial<LocalDocument>) => {
-    if (!documentId) return;
-    try {
-      await enhancedApi.updateDocument(documentId, updatedFields);
-      toast.success("Metadata updated successfully", {
-        description: "All changes have been saved.",
-      });
-    } catch (error) {
-      console.error("Error updating metadata:", error);
-      toast.error("Failed to update metadata");
-    }
-  };
-
   const handleMetadataChange = useCallback(
     (id: MetadataFieldName, value: string) => {
       setDocument((prevDoc) => {
         if (!prevDoc) return null;
 
         const updatedDoc = { ...prevDoc };
-        let backendUpdate: Partial<LocalDocument> = {};
 
         switch (id) {
           case "uploadType":
             updatedDoc.uploadType = value.toLowerCase() as
               | "incoming"
               | "outgoing";
-            backendUpdate.uploadType = value.toLowerCase() as
-              | "incoming"
-              | "outgoing";
             setUploadType(value.toLowerCase() as "incoming" | "outgoing");
             break;
           case "date":
             updatedDoc.date = value;
-            backendUpdate.date = value;
             break;
           case "letterNo":
             updatedDoc.letterNo = value;
-            backendUpdate.letterNo = value;
             break;
           case "subject":
             updatedDoc.subject = value;
-            backendUpdate.subject = value;
             break;
           case "from_":
             updatedDoc.from_ = value;
-            // Backend expects the alias key "from" (Pydantic Field(alias="from"))
-            // so send "from" instead of "from_"
-            (backendUpdate as any).from = value;
             break;
           case "to":
             updatedDoc.to = value;
-            backendUpdate.to = value;
             break;
-          case "tag":
+          case "tag": {
             const selectedTag = availableTags.find(
-              (tag) => tag.label === value
+              (tag) => tag.value === value || tag.label === value
             );
             if (selectedTag) {
               updatedDoc.tags = [selectedTag.value];
-              backendUpdate.tags = [selectedTag.value];
               // Clear subtag when tag changes
               updatedDoc.subTags = [];
-              backendUpdate.subTags = [];
-              setCurrentSelectedTag(value);
+              setCurrentSelectedTag(selectedTag.value);
             } else {
               setAvailableSubtags([]);
             }
             break;
-          case "subTag":
+          }
+          case "subTag": {
             const selectedSubTag = availableSubtags.find(
-              (subtag) => subtag.label === value
+              (subtag) => subtag.value === value || subtag.label === value
             );
             if (selectedSubTag) {
               updatedDoc.subTags = [selectedSubTag.value];
-              backendUpdate.subTags = [selectedSubTag.value];
             }
             break;
+          }
           case "status":
             updatedDoc.status = value;
-            backendUpdate.status = value;
             break;
           default:
             break;
         }
 
-        if (Object.keys(backendUpdate).length > 0) {
-          updateMetadata(backendUpdate);
-        }
-
         return updatedDoc;
       });
     },
-    [availableTags, availableSubtags, documentId]
+    [availableTags, availableSubtags]
   );
 
   // Build lightweight activity timeline for Details tab
@@ -715,11 +692,32 @@ const DocumentViewerPage: React.FC = () => {
   ];
 
   if (isLoading) {
-    return <div>Loading...</div>;
+    return <RouteSkeleton />;
   }
 
   if (isError || !document) {
-    return <div>Error loading document.</div>;
+    return (
+      <div className="min-h-screen bg-gray-50 p-6">
+        <div className="mx-auto flex max-w-xl flex-col items-center justify-center rounded-lg border bg-white p-8 text-center shadow-sm">
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-50">
+            <AlertTriangle className="h-6 w-6 text-red-600" />
+          </div>
+          <h1 className="text-lg font-semibold">Unable to load document</h1>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {errorMessage || "The document could not be loaded. Check your access or retry."}
+          </p>
+          <div className="mt-6 flex gap-3">
+            <Button variant="outline" onClick={() => window.history.back()}>
+              Back
+            </Button>
+            <Button onClick={() => void fetchDocument()}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              Retry
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -737,7 +735,16 @@ const DocumentViewerPage: React.FC = () => {
       <div className="flex-1 overflow-hidden">
         <ResizablePanelGroup direction="horizontal">
           <ResizablePanel defaultSize={75} minSize={50}>
-            <DocumentViewer document={document} />
+            <Suspense
+              fallback={
+                <div className="flex h-full min-h-[480px] flex-col items-center justify-center bg-white text-muted-foreground">
+                  <FileText className="mb-3 h-8 w-8" />
+                  <p className="text-sm">Loading document preview...</p>
+                </div>
+              }
+            >
+              <DocumentViewer document={document} />
+            </Suspense>
           </ResizablePanel>
 
           {showMetadata && <ResizableHandle withHandle />}

@@ -209,6 +209,131 @@ def get_background_processor() -> BackgroundJobProcessor:
         _background_processor = BackgroundJobProcessor()
     return _background_processor
 
+async def scan_and_alert_assignments(db):
+    """
+    Scans the database collections:
+    1. letters: Trigger email alerts for new/reassigned drafters.
+    2. letter_draft_assignments: Trigger email alerts for reviewers and overdue assignments.
+    """
+    from ..services.email_service import EmailService
+    from email.message import EmailMessage
+    from datetime import datetime, timezone
+    from bson import ObjectId
+    
+    email_service = EmailService(db)
+    if not email_service._smtp_enabled:
+        return
+        
+    now = datetime.now(timezone.utc)
+        
+    # Phase 1: Scan for new/reassigned drafters in 'letters' collection
+    try:
+        cursor = db.letters.find({})
+        letters = await cursor.to_list(length=None)
+        for letter in letters:
+            assigned_to = letter.get("assigned_to")
+            if not assigned_to:
+                continue
+            last_notified = letter.get("last_notified_drafter")
+            if assigned_to != last_notified:
+                user = await db.users.find_one({"_id": ObjectId(assigned_to) if ObjectId.is_valid(assigned_to) else assigned_to})
+                if user and user.get("email"):
+                    msg = EmailMessage()
+                    msg["Subject"] = f"Assignment Alert: You have been assigned to draft letter: {letter.get('title') or letter.get('subject')}"
+                    msg["From"] = email_service.from_email
+                    msg["To"] = user.get("email")
+                    
+                    body = (
+                        f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
+                        f"You have been assigned to draft a contractual reply letter.\n\n"
+                        f"Letter ID: {letter.get('_id')}\n"
+                        f"Subject: {letter.get('subject')}\n"
+                        f"Recipient: {letter.get('recipient')}\n\n"
+                        f"Please log in to ContraClaim DMS to begin drafting.\n\n"
+                        f"Best regards,\nContraClaim DMS"
+                    )
+                    msg.set_content(body)
+                    sent = await email_service._send(msg)
+                    if sent:
+                        await db.letters.update_one(
+                            {"_id": letter["_id"]},
+                            {"$set": {"last_notified_drafter": assigned_to}}
+                        )
+    except Exception as e:
+        logger.error(f"Error in scan_and_alert_assignments Phase 1 (drafters): {e}")
+
+    # Phase 2: Scan for reviewer assignments in 'letter_draft_assignments' collection
+    try:
+        cursor = db.letter_draft_assignments.find({
+            "status": "assigned",
+        })
+        assignments = await cursor.to_list(length=None)
+        for assignment in assignments:
+            reviewer_id = assignment.get("reviewer_user_id")
+            
+            # Scenario 2a: Send reviewer assignment alert
+            if not assignment.get("notified"):
+                user = await db.users.find_one({"_id": ObjectId(reviewer_id) if ObjectId.is_valid(reviewer_id) else reviewer_id})
+                if user and user.get("email"):
+                    msg = EmailMessage()
+                    msg["Subject"] = f"Review Assignment: You have been assigned to review draft run"
+                    msg["From"] = email_service.from_email
+                    msg["To"] = user.get("email")
+                    
+                    note_str = f"Note from assigner: {assignment.get('note')}\n\n" if assignment.get("note") else ""
+                    due_str = f"Due Date: {assignment.get('due_at').strftime('%Y-%m-%d %H:%M')}\n\n" if assignment.get("due_at") else ""
+                    
+                    body = (
+                        f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
+                        f"You have been assigned to review a generated draft run.\n\n"
+                        f"Letter ID: {assignment.get('letter_id')}\n"
+                        f"Run ID: {assignment.get('run_id')}\n"
+                        f"{due_str}"
+                        f"{note_str}"
+                        f"Please log in to ContraClaim DMS to conduct the governance review.\n\n"
+                        f"Best regards,\nContraClaim DMS"
+                    )
+                    msg.set_content(body)
+                    sent = await email_service._send(msg)
+                    if sent:
+                        await db.letter_draft_assignments.update_one(
+                            {"_id": assignment["_id"]},
+                            {"$set": {"notified": True, "updated_at": now}}
+                        )
+            
+            # Scenario 2b: Overdue assignments alert
+            due_at = assignment.get("due_at")
+            if due_at and not assignment.get("overdue_notified"):
+                if due_at.tzinfo is None:
+                    due_at = due_at.replace(tzinfo=timezone.utc)
+                if now > due_at:
+                    user = await db.users.find_one({"_id": ObjectId(reviewer_id) if ObjectId.is_valid(reviewer_id) else reviewer_id})
+                    if user and user.get("email"):
+                        msg = EmailMessage()
+                        msg["Subject"] = f"URGENT: Review Assignment OVERDUE"
+                        msg["From"] = email_service.from_email
+                        msg["To"] = user.get("email")
+                        
+                        body = (
+                            f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
+                            f"Your review assignment is OVERDUE.\n\n"
+                            f"Letter ID: {assignment.get('letter_id')}\n"
+                            f"Run ID: {assignment.get('run_id')}\n"
+                            f"Deadline: {due_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+                            f"Please complete this review immediately.\n\n"
+                            f"Best regards,\nContraClaim DMS"
+                        )
+                        msg.set_content(body)
+                        sent = await email_service._send(msg)
+                        if sent:
+                            await db.letter_draft_assignments.update_one(
+                                {"_id": assignment["_id"]},
+                                {"$set": {"overdue_notified": True, "updated_at": now}}
+                            )
+    except Exception as e:
+        logger.error(f"Error in scan_and_alert_assignments Phase 2 (reviewers): {e}")
+
+
 async def start_background_services():
     """Start background services."""
     try:
@@ -228,9 +353,25 @@ async def start_background_services():
                     break
                 except Exception as e:
                     logger.error(f"Error in periodic cleanup: {e}")
+                    
+        # Schedule periodic assignment alerts
+        async def periodic_assignment_alerts():
+            from ..core.database import get_database
+            while processor.running:
+                try:
+                    await asyncio.sleep(30)  # Run every 30 seconds
+                    db = await get_database()
+                    if db is not None:
+                        await scan_and_alert_assignments(db)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error in periodic assignment alerts: {e}")
         
         # Start cleanup task
         asyncio.create_task(periodic_cleanup())
+        # Start assignment alerts task
+        asyncio.create_task(periodic_assignment_alerts())
         
         logger.info("Background services started successfully")
         

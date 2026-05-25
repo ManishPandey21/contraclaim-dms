@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import type {
   StrategyPlanResponse,
   StrategyRole,
@@ -32,13 +33,9 @@ export const useLanggraphStrategyPlan = () => {
       setLoading(true);
       setError(null);
       try {
-        const token = localStorage.getItem("accessToken") || "";
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
-        if (token) {
-          headers.Authorization = `Bearer ${token}`;
-        }
 
         const body = {
           letter_id: payload.letterId,
@@ -57,7 +54,7 @@ export const useLanggraphStrategyPlan = () => {
           project_id: payload.projectId,
         };
 
-        const response = await fetch(
+        const response = await authenticatedFetch(
           joinApiUrl("/ai-assistant/langgraph/strategy-plan"),
           {
             method: "POST",

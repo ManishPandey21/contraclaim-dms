@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback, useRef, useState } from "react";
+import React, { useEffect, useCallback, useMemo, useRef, useState } from "react";
 
 // Simple debounce implementation
 const debounce = <T extends (...args: any[]) => any>(
@@ -45,7 +45,7 @@ export const useDebouncedCallback = <T extends (...args: any[]) => any>(
   callback: T,
   delay: number = 300
 ): T => {
-  const debouncedCallback = useCallback(debounce(callback, delay), [
+  const debouncedCallback = useMemo(() => debounce(callback, delay), [
     callback,
     delay,
   ]);

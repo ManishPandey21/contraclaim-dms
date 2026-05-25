@@ -1,5 +1,5 @@
 import React, { Suspense, lazy } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route } from "react-router-dom";
 import MainLayout from "./components/layout/MainLayout";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import RouteSkeleton from "./components/layout/RouteSkeleton";
@@ -21,6 +21,10 @@ const ProfilePage = lazy(() =>
 const UsersPage = lazy(() => import("./pages/UsersPage"));
 const PermissionsPage = lazy(() => import("./pages/PermissionsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const PlanSettingsPage = lazy(() => import("./pages/PlanSettingsPage"));
+const NotificationCenterPage = lazy(
+  () => import("./pages/NotificationCenterPage"),
+);
 const UploadPage = lazy(() => import("./pages/UploadPage"));
 const DocumentViewerPage = lazy(() => import("./pages/DocumentViewerPage"));
 const RegisterPage = lazy(() => import("./pages/RegisterPage"));
@@ -37,6 +41,9 @@ const LetterDraftPage = lazy(() => import("./pages/LetterDraftPage"));
 const LetterReviewPage = lazy(() => import("./pages/LetterReviewPage"));
 const LetterApprovalPage = lazy(() => import("./pages/LetterApprovalPage"));
 const LetterCompletedPage = lazy(() => import("./pages/LetterCompletedPage"));
+const LetterQualityDashboardPage = lazy(
+  () => import("./pages/LetterQualityDashboardPage"),
+);
 const LetterSummaryPage = lazy(() => import("./pages/LetterSummaryPage"));
 const ReportsAnalyticsPage = lazy(() => import("./pages/ReportsAnalyticsPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
@@ -53,19 +60,22 @@ const ShareDocumentPage = lazy(() => import("./pages/ShareDocumentPage"));
 const EmailGroupsPage = lazy(() => import("./pages/EmailGroupsPage"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 const HealthPage = lazy(() => import("./pages/HealthPage"));
+const LandingPage = lazy(() => import("./pages/LandingPage"));
 
 const AppRoutes = () => (
   <Suspense fallback={<RouteSkeleton />}>
     <Routes>
       <Route
         path="/"
+        element={<LandingPage />}
+      />
+      <Route
         element={
           <ProtectedRoute>
             <MainLayout />
           </ProtectedRoute>
         }
       >
-        <Route index element={<Navigate to="overview" replace />} />
         <Route path="overview" element={<Overview />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="organizations" element={<OrganizationsPage />} />
@@ -78,6 +88,8 @@ const AppRoutes = () => (
         <Route path="users" element={<UsersPage />} />
         <Route path="permissions" element={<PermissionsPage />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="plan-settings" element={<PlanSettingsPage />} />
+        <Route path="notifications" element={<NotificationCenterPage />} />
         <Route path="upload" element={<UploadPage />} />
         <Route path="/documentviewer/:id" element={<DocumentViewerPage />} />
         <Route path="share/:id" element={<ShareDocumentPage />} />
@@ -115,6 +127,7 @@ const AppRoutes = () => (
         <Route path="letters/:id/review" element={<LetterReviewPage />} />
         <Route path="letters/:id/approval" element={<LetterApprovalPage />} />
         <Route path="letters/:id/completed" element={<LetterCompletedPage />} />
+        <Route path="letter-quality" element={<LetterQualityDashboardPage />} />
         <Route path="reports" element={<ReportsAnalyticsPage />} />
         <Route path="letter-templates" element={<LetterTemplatePage />} />
         <Route

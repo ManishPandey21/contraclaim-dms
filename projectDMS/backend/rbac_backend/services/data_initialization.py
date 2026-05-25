@@ -81,6 +81,13 @@ class DataInitializer:
                         created_count += 1
                         logger.debug(f"Created permission: {perm_data['_id']}")
                     else:
+                        permission = perm_service._build_permission_from_doc(perm_data)  # type: ignore[attr-defined]
+                        desired = permission.model_dump(by_alias=True, exclude_none=True)
+                        desired.pop("_id", None)
+                        await self.database.permissions.update_one(
+                            {"_id": perm_data["_id"]},
+                            {"$set": desired},
+                        )
                         logger.debug(f"Permission already exists: {perm_data['_id']}")
                         
                 except Exception as e:
@@ -122,6 +129,27 @@ class DataInitializer:
                         created_count += 1
                         logger.debug(f"Created role: {role_data['_id']}")
                     else:
+                        default_permissions = [
+                            str(permission)
+                            for permission in (role_data.get("permissions") or [])
+                            if permission
+                        ]
+                        if default_permissions:
+                            await self.database.roles.update_one(
+                                {"_id": role_data["_id"]},
+                                {
+                                    "$set": {
+                                        "name": role_data.get("name", existing.get("name")),
+                                        "is_system": role_data.get("is_system", True),
+                                        "scope": role_data.get("scope", existing.get("scope", "system")),
+                                        "is_active": role_data.get("is_active", existing.get("is_active", True)),
+                                        "updated_at": role_data.get("updated_at"),
+                                    },
+                                    "$addToSet": {
+                                        "permissions": {"$each": default_permissions}
+                                    },
+                                },
+                            )
                         logger.debug(f"Role already exists: {role_data['_id']}")
                         
                 except Exception as e:

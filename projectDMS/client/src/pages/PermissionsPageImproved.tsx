@@ -276,6 +276,8 @@ const PermissionsPage = () => {
 
   useEffect(() => {
     fetchData();
+    // Initial RBAC bootstrap intentionally runs once; refresh actions call fetchData directly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -284,6 +286,8 @@ const PermissionsPage = () => {
       console.log("🔄 Fetching permissions for all roles...");
       roles.forEach((role) => fetchRolePermissions(getRoleId(role)));
     }
+    // Role permission loading depends on role IDs only; helper identities are stable enough here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roles]);
 
   const permissionGroups = [

@@ -4,7 +4,7 @@ Secure organization management with comprehensive validation, proper authorizati
 and clean architecture. Addresses security vulnerabilities and performance issues.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
@@ -14,6 +14,7 @@ from ..core.security import get_current_user, CurrentUser, authorize_scope, requ
 from ..core.database import get_db
 from ..services.organization_service import OrganizationService
 from ..services.authorization_service import AuthorizationService
+from ..services.step_up_service import require_step_up
 from ..models.organization import (
     Organization, OrganizationCreate, OrganizationUpdate, 
     OrganizationResponse, OrganizationListResponse
@@ -483,11 +484,13 @@ async def update_organization(
 @handle_exceptions
 async def delete_organization(
     organization_id: str,
+    request: Request,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("organizations:delete")),
 ):
     """Delete organization with dependency checks."""
+    await require_step_up(request, current_user, action="organizations.delete")
     return await controller.delete_organization(organization_id, current_user)
 
 

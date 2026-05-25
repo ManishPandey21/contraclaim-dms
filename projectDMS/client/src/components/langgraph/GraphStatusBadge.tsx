@@ -16,7 +16,7 @@ const STATUS_LABELS: Record<string, { label: string; variant: "default" | "secon
 
 export const GraphStatusBadge = ({ status }: GraphStatusBadgeProps) => {
   if (!status) {
-    return <Badge variant="outline">No LangGraph Run</Badge>;
+    return <Badge variant="outline">No Drafting Run</Badge>;
   }
   const key = status.toLowerCase();
   const config = STATUS_LABELS[key] ?? {

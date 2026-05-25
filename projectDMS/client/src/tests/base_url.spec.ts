@@ -16,19 +16,33 @@ async function importAuthModule() {
   return mod;
 }
 
+async function importHttpModule() {
+  vi.doUnmock("../services/http");
+  const mod = await import("../services/http");
+  return mod;
+}
+
 async function importEnhancedApiModule() {
+  vi.doUnmock("../services/http");
   // Mock auth helpers used by enhanced-api to avoid token prompts/refresh logic interfering
   vi.doMock("../services/auth", () => ({
     ensureValidToken: vi.fn().mockResolvedValue(undefined),
     refreshToken: vi.fn().mockResolvedValue("new-token"),
     logoutAndRedirect: vi.fn(),
+    redirectToLoginAfterSessionExpiry: vi.fn(),
   }));
   const mod = await import("../services/enhanced-api");
   return mod;
 }
 
 async function importEmailServiceModule() {
+  vi.doUnmock("../services/http");
   const mod = await import("../services/email-service");
+  return mod;
+}
+
+async function importSessionApiModule() {
+  const mod = await import("../services/session-api");
   return mod;
 }
 
@@ -88,9 +102,20 @@ describe("API base URL configuration", () => {
   });
 
   it("axios API instance uses API_BASE_URL", async () => {
-    window.__API_BASE_URL__ = "http://localhost:8000/api";
+    window.__API_BASE_URL__ = "https://api.example.com/api";
     const { api } = await importAxiosApiModule();
-    expect(api.defaults.baseURL).toBe("http://localhost:8000/api");
+    expect(api.defaults.baseURL).toBe("https://api.example.com/api");
+  });
+
+  it("uses the same-origin dev proxy for loopback API overrides to preserve auth cookies", async () => {
+    window.__API_BASE_URL__ = "http://127.0.0.1:8000/api";
+
+    const { API_BASE_URL, joinApiUrl, resolveApiBaseUrl } =
+      await importConfigModule();
+
+    expect(resolveApiBaseUrl()).toBe("/api");
+    expect(API_BASE_URL).toBe("/api");
+    expect(joinApiUrl("/me")).toBe("/api/me");
   });
 
   it("auth.refreshToken posts to {API_BASE_URL}/refresh via joinApiUrl", async () => {
@@ -121,17 +146,8 @@ describe("API base URL configuration", () => {
     expect(url).toBe("/refresh");
   });
 
-  it("auth.ensureValidToken refreshes silently without prompting", async () => {
+  it("auth.ensureValidToken is a no-op for HttpOnly cookie sessions", async () => {
     window.__API_BASE_URL__ = "https://runtime.example.com/api";
-
-    const exp = Math.floor(Date.now() / 1000) + 30;
-    const payload = btoa(JSON.stringify({ exp }))
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
-    const token = `header.${payload}.signature`;
-
-    window.localStorage.setItem("accessToken", token);
 
     const postSpy = vi.fn().mockResolvedValue({
       data: { access_token: "tok2" },
@@ -146,15 +162,84 @@ describe("API base URL configuration", () => {
     await ensureValidToken(120);
 
     expect(window.confirm).not.toHaveBeenCalled();
-    expect(postSpy).toHaveBeenCalledWith(
-      "/refresh",
-      undefined,
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: `Bearer ${token}`,
-        }),
-      })
-    );
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it("authenticatedFetch strips stale bearer headers and includes cookies", async () => {
+    window.__API_BASE_URL__ = "https://runtime.example.com/api";
+
+    const baseFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ ok: true }),
+    } as any);
+    window.fetch = baseFetch as any;
+    (globalThis as any).fetch = baseFetch;
+
+    const { authenticatedFetch } = await importHttpModule();
+    (globalThis as any).fetch = window.fetch;
+
+    await authenticatedFetch("https://runtime.example.com/api/users", {
+      headers: {
+        Authorization: "Bearer stale",
+        "Content-Type": "application/json",
+      },
+    });
+
+    expect(baseFetch).toHaveBeenCalledTimes(1);
+    const [, init] = baseFetch.mock.calls[0] as [string, RequestInit];
+    expect(init.credentials).toBe("include");
+    const headers = new Headers(init.headers);
+    expect(headers.get("Authorization")).toBeNull();
+    expect(headers.get("Content-Type")).toBe("application/json");
+  });
+
+  it("axios clients strip stale bearer headers during cookie-authenticated session checks", async () => {
+    window.__API_BASE_URL__ = "https://runtime.example.com/api";
+
+    const { publicApi } = await importHttpModule();
+    const adapter = vi.fn().mockResolvedValue({
+      data: { email: "superadmin@example.com", roles: ["superadmin"] },
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config: {},
+    });
+
+    publicApi.defaults.headers.common.Authorization = "Bearer stale";
+    publicApi.defaults.adapter = adapter;
+
+    await publicApi.get("/me", { withCredentials: true });
+
+    expect(adapter).toHaveBeenCalledTimes(1);
+    const config = adapter.mock.calls[0][0];
+    const headers = new Headers(config.headers);
+    expect(headers.get("Authorization")).toBeNull();
+    expect(config.withCredentials).toBe(true);
+  });
+
+  it("deduplicates concurrent /me session profile requests", async () => {
+    const getSpy = vi.fn().mockResolvedValue({
+      data: { email: "superadmin@example.com", roles: ["superadmin"] },
+    });
+    vi.doMock("../services/http", () => ({
+      publicApi: {
+        get: getSpy,
+        post: vi.fn(),
+      },
+    }));
+
+    const { getCurrentUserProfile } = await importSessionApiModule();
+    const [first, second, third] = await Promise.all([
+      getCurrentUserProfile(),
+      getCurrentUserProfile(),
+      getCurrentUserProfile(),
+    ]);
+
+    expect(getSpy).toHaveBeenCalledTimes(1);
+    expect(first.email).toBe("superadmin@example.com");
+    expect(second).toEqual(first);
+    expect(third).toEqual(first);
   });
 
   it("EnhancedApiService request() prefixes endpoints with API_BASE_URL", async () => {
@@ -173,6 +258,92 @@ describe("API base URL configuration", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const url = (mockFetch.mock.calls[0] || [])[0];
     expect(url).toBe("https://runtime.example.com/api/users");
+  });
+
+  it("EnhancedApiService sends step-up tokens on role mutations", async () => {
+    window.__API_BASE_URL__ = "https://runtime.example.com/api";
+
+    const mockFetch = vi.spyOn(globalThis, "fetch" as any).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ id: "role-1", name: "Role" }),
+    } as any);
+
+    const { enhancedApi } = await importEnhancedApiModule();
+    await enhancedApi.updateRole(
+      "role-1",
+      { permissions: ["dms.document.view"] } as any,
+      { stepUpToken: "step-token" }
+    );
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.get("X-Step-Up-Token")).toBe("step-token");
+  });
+
+  it("plan settings updates send step-up tokens", async () => {
+    window.__API_BASE_URL__ = "https://runtime.example.com/api";
+
+    const adapter = vi.fn().mockResolvedValue({
+      data: { organizations: [], projects: [], plans: [], subscriptions: [], effective: { organizations: {}, projects: {} } },
+      status: 200,
+      statusText: "OK",
+      headers: {},
+      config: {},
+    });
+
+    const { api } = await importAxiosApiModule();
+    api.defaults.adapter = adapter;
+
+    const { updatePlanSettingsScope } = await import("../services/plan-settings-api");
+    await updatePlanSettingsScope(
+      {
+        organization_id: "org-1",
+        project_id: null,
+        mode: "plan",
+        plan_code: "dms",
+        status: "active",
+      },
+      { stepUpToken: "step-token" }
+    );
+
+    const config = adapter.mock.calls[0][0];
+    const headers = new Headers(config.headers);
+    expect(headers.get("X-Step-Up-Token")).toBe("step-token");
+  });
+
+  it("redirects expired user creation sessions to login instead of the public landing page", async () => {
+    window.__API_BASE_URL__ = "https://runtime.example.com/api";
+
+    const redirectToLoginAfterSessionExpiry = vi.fn();
+    vi.doMock("../services/auth", () => ({
+      ensureValidToken: vi.fn().mockResolvedValue(undefined),
+      refreshToken: vi.fn().mockRejectedValue(new Error("expired")),
+      redirectToLoginAfterSessionExpiry,
+    }));
+
+    vi.spyOn(globalThis, "fetch" as any).mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: vi.fn().mockResolvedValue('{"detail":"Could not validate credentials"}'),
+    } as any);
+
+    const { enhancedApi } = await import("../services/enhanced-api");
+
+    await expect(
+      enhancedApi.createUser({
+        username: "new.user",
+        first_name: "New",
+        last_name: "User",
+        email: "new.user@example.com",
+        password: "TempPass123!",
+        roles: ["projectuser"],
+        projects: ["project-1"],
+        permissions: [],
+      })
+    ).rejects.toThrow("Session expired. Redirecting to login.");
+
+    expect(redirectToLoginAfterSessionExpiry).toHaveBeenCalledTimes(1);
   });
 
   it("EmailService uses API_BASE_URL for suggestions and share", async () => {

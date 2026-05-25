@@ -34,6 +34,9 @@ export interface ChunkUploadResponse {
   received: boolean;
   merged: boolean;
   scheduled: boolean;
+  received_chunks?: number[];
+  missing_chunks?: number[];
+  upload_complete?: boolean;
 }
 
 export interface StatusResponse {
@@ -49,6 +52,9 @@ export interface StatusResponse {
   size?: number | null;
   queue_job_id?: string | null;
   updatedAt?: string | null;
+  processing_stage?: string | null;
+  stage_label?: string | null;
+  progress?: number | null;
 }
 
 export interface HighlightOffset {
@@ -171,8 +177,12 @@ export async function uploadContractInChunks(
     received: false,
     merged: false,
     scheduled: false,
+    received_chunks: [],
+    missing_chunks: Array.from({ length: totalChunks }, (_, idx) => idx),
+    upload_complete: false,
   };
 
+  const uploaded = new Set<number>();
   for (let i = 0; i < totalChunks; i++) {
     if (opts?.signal?.aborted) {
       throw new Error("Upload canceled");
@@ -198,10 +208,14 @@ export async function uploadContractInChunks(
       signal: opts?.signal,
     });
     lastResp = data;
+    (data.received_chunks || []).forEach((idx: number) => uploaded.add(idx));
 
     if (opts?.onProgress) {
-      const progress = Math.round(((i + 1) / totalChunks) * 100);
+      const progress = Math.round(((uploaded.size || i + 1) / totalChunks) * 100);
       opts.onProgress(progress);
+    }
+    if (data.upload_complete || data.merged) {
+      break;
     }
   }
 
@@ -228,6 +242,14 @@ export async function searchContracts(payload: {
   chunks_per_doc?: number;
   summarize?: boolean;
   tags?: string[];
+  exact_phrase?: boolean;
+  clause_number?: string;
+  clause_title?: string;
+  section_heading?: string;
+  clause_tags?: string[];
+  category_terms?: string[];
+  page_from?: number;
+  page_to?: number;
   signal?: AbortSignal;
 }): Promise<ContractSearchResponse> {
   const { signal, ...body } = payload;
@@ -266,6 +288,11 @@ export type ContractCitation = {
   snippet: string;
   document_title?: string | null;
   letter_no?: string | null;
+  file_name?: string | null;
+  clause_number?: string | null;
+  clause_title?: string | null;
+  section_heading?: string | null;
+  page_numbers?: number[] | null;
 };
 
 export type ContractRagResponse = {

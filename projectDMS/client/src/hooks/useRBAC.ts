@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { enhancedApi as api, Role } from "@/services/enhanced-api";
-import { joinApiUrl } from "@/config/api";
+import { getCurrentUserProfile } from "@/services/session-api";
 
 // Normalize role id strings similar to backend ROLE_ALIASES in core/security.py
 const ROLE_ALIASES: Record<string, string> = {
@@ -29,6 +29,34 @@ const ROLE_ALIASES: Record<string, string> = {
   "super user": "superuser",
   superuser: "superuser",
   superadmin: "superadmin",
+  "document-controller": "doccontroller",
+  "document controller": "doccontroller",
+  documentcontroller: "doccontroller",
+  doccontroller: "doccontroller",
+  reporter: "reporter",
+  auditor: "reporter",
+  "settings-manager": "settings_manager",
+  "settings manager": "settings_manager",
+  settingsmanager: "settings_manager",
+  settings_manager: "settings_manager",
+  "limited-user": "limited_user",
+  "limited user": "limited_user",
+  limiteduser: "limited_user",
+  limited_user: "limited_user",
+  "contract-manager-organization": "contractmgr_org",
+  "contract manager organization": "contractmgr_org",
+  "contract manager - organization": "contractmgr_org",
+  contractmgr_org: "contractmgr_org",
+  "contraclaim drafting manager": "contraclaim_drafting_manager",
+  contraclaim_drafting_manager: "contraclaim_drafting_manager",
+  "contraclaim expert drafter": "contraclaim_expert_drafter",
+  "contraclaim contract expert - drafter": "contraclaim_expert_drafter",
+  contraclaim_expert_drafter: "contraclaim_expert_drafter",
+  "contraclaim expert reviewer": "contraclaim_expert_reviewer",
+  "contraclaim contract expert - reviewer": "contraclaim_expert_reviewer",
+  contraclaim_expert_reviewer: "contraclaim_expert_reviewer",
+  "contraclaim billing admin": "contraclaim_billing_admin",
+  contraclaim_billing_admin: "contraclaim_billing_admin",
 };
 
 function normalizeRoleId(r: string): string {
@@ -48,6 +76,17 @@ const PERMISSION_ALIASES: Record<string, string> = {
   "docs:share": "documents:share",
   "docs:upload": "documents:upload",
   "docs:comment": "documents:comment",
+  "docs:download_all": "documents:download_all",
+  "docs:download-all": "documents:download_all",
+  "docs:download": "dms.document.download",
+  "documents:download": "dms.document.download",
+  "dms.document.view": "dms.document.view",
+  "dms.document.upload": "dms.document.upload",
+  "dms.document.edit_metadata": "dms.document.edit_metadata",
+  "dms.document.delete": "dms.document.delete",
+  "dms.document.download": "dms.document.download",
+  "dms.document.bulk_download": "dms.document.bulk_download",
+  "drafting.request.create": "drafting.request.create",
   "letters:view": "documents:read",
   "letters:create": "documents:create",
   "letters:edit": "documents:update",
@@ -69,24 +108,31 @@ function normalizePermissionId(p: string): string {
   return PERMISSION_ALIASES[key] || key;
 }
 
-function parseLocalRoles(): string[] {
-  const raw = window.localStorage.getItem("user_roles") || "";
-  if (!raw) return [];
-  try {
-    const asJson = JSON.parse(raw);
-    if (Array.isArray(asJson))
-      return asJson.map((x) => normalizeRoleId(String(x)));
-  } catch {
-    // not JSON, fall through
-  }
-  return raw
-    .split(",")
-    .map((x) => normalizeRoleId(x))
-    .filter(Boolean);
+function expandPermissionAliases(permission: string): string[] {
+  const legacyToCanonical: Record<string, string[]> = {
+    "documents:read": ["dms.document.view"],
+    "documents:create": ["dms.document.upload"],
+    "documents:upload": ["dms.document.upload"],
+    "documents:update": ["dms.document.edit_metadata", "dms.status.update"],
+    "documents:delete": ["dms.document.delete"],
+    "documents:download_all": ["dms.document.bulk_download"],
+    "documents:comment": ["dms.comment.add"],
+    "reports:view": ["dms.report.view"],
+    "dms.document.view": ["documents:read"],
+    "dms.document.upload": ["documents:create", "documents:upload"],
+    "dms.document.edit_metadata": ["documents:update"],
+    "dms.document.delete": ["documents:delete"],
+    "dms.document.bulk_download": ["documents:download_all"],
+    "dms.comment.add": ["documents:comment"],
+    "dms.report.view": ["reports:view"],
+  };
+  return [permission, ...(legacyToCanonical[permission] || [])];
 }
 
-let cachedPermissions: Set<string> | null = null;
-let cachedAt = 0;
+const permissionCache = new Map<
+  string,
+  { permissions: Set<string>; cachedAt: number }
+>();
 
 export interface UseRBACResult {
   roles: string[];
@@ -100,37 +146,37 @@ export function useRBAC(): UseRBACResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [perms, setPerms] = useState<Set<string>>(new Set());
-  // Keep roles in state so we can populate from /me after JWT login if localStorage is empty
-  const [roles, setRoles] = useState<string[]>(() => parseLocalRoles());
+  const [roles, setRoles] = useState<string[]>([]);
 
-  // If roles are empty but we have a JWT, fetch /me to synchronize roles and update localStorage
   useEffect(() => {
-    (async () => {
+    let mounted = true;
+    const refreshRoles = async () => {
       try {
-        if (roles.length > 0) return;
-        const token = window.localStorage.getItem("accessToken");
-        if (!token) return;
-        const res = await fetch(joinApiUrl("/me"), {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return;
-        const me = await res.json();
+        const me = await getCurrentUserProfile();
         const fetched = Array.isArray(me?.roles)
           ? (me.roles as string[]).map((r) => normalizeRoleId(String(r)))
-          : [];
-        if (fetched.length > 0) {
-          setRoles(fetched);
-          try {
-            window.localStorage.setItem("user_roles", JSON.stringify(fetched));
-          } catch {
-            window.localStorage.setItem("user_roles", fetched.join(","));
-          }
-        }
+          : typeof me?.roles === "string"
+            ? me.roles
+                .split(",")
+                .map((r) => normalizeRoleId(r))
+                .filter(Boolean)
+            : [];
+        if (mounted) setRoles(fetched);
       } catch {
-        // Non-fatal; fall back to existing local roles
+        if (mounted) setRoles([]);
       }
-    })();
+    };
+
+    void refreshRoles();
+    const listener = () => void refreshRoles();
+    window.addEventListener("auth-state-changed", listener);
+    return () => {
+      mounted = false;
+      window.removeEventListener("auth-state-changed", listener);
+    };
   }, []);
+
+  const roleKey = useMemo(() => roles.join(","), [roles]);
 
   useEffect(() => {
     let mounted = true;
@@ -142,12 +188,9 @@ export function useRBAC(): UseRBACResult {
 
         // If roles are not yet resolved but we have a JWT, wait for the /me sync effect
         // to populate roles. This prevents premature "access denied" UI.
-        if (
-          roles.length === 0 &&
-          typeof window !== "undefined" &&
-          window.localStorage.getItem("accessToken")
-        ) {
-          return; // keep loading=true; effect above will set roles then re-run
+        if (roles.length === 0) {
+          if (mounted) setLoading(false);
+          return;
         }
 
         // Superadmin short-circuit
@@ -155,17 +198,20 @@ export function useRBAC(): UseRBACResult {
           const superSet = new Set<string>(["*"]);
           if (mounted) {
             setPerms(superSet);
-            cachedPermissions = superSet;
-            cachedAt = Date.now();
+            permissionCache.set(roleKey, {
+              permissions: superSet,
+              cachedAt: Date.now(),
+            });
             setLoading(false);
           }
           return;
         }
 
         // Use simple in-memory cache (5 minutes)
-        if (cachedPermissions && Date.now() - cachedAt < 5 * 60 * 1000) {
+        const cached = permissionCache.get(roleKey);
+        if (cached && Date.now() - cached.cachedAt < 5 * 60 * 1000) {
           if (mounted) {
-            setPerms(new Set(cachedPermissions));
+            setPerms(new Set(cached.permissions));
             setLoading(false);
           }
           return;
@@ -178,16 +224,21 @@ export function useRBAC(): UseRBACResult {
         for (const role of allRoles) {
           const rid = normalizeRoleId(role._id);
           if (wanted.has(rid)) {
-            (role.permissions || []).forEach((p) =>
-              collected.add(normalizePermissionId(p))
-            );
+            (role.permissions || []).forEach((p) => {
+              const normalized = normalizePermissionId(p);
+              expandPermissionAliases(normalized).forEach((candidate) =>
+                collected.add(candidate)
+              );
+            });
           }
         }
 
         if (mounted) {
           setPerms(collected);
-          cachedPermissions = new Set(collected);
-          cachedAt = Date.now();
+          permissionCache.set(roleKey, {
+            permissions: new Set(collected),
+            cachedAt: Date.now(),
+          });
           setLoading(false);
         }
       } catch (e: any) {
@@ -202,7 +253,7 @@ export function useRBAC(): UseRBACResult {
     return () => {
       mounted = false;
     };
-  }, [roles.join(",")]);
+  }, [roleKey, roles]);
 
   const can = (permId: string) => {
     if (!permId) return false;

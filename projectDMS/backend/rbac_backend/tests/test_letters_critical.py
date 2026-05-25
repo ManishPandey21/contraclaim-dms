@@ -11,9 +11,12 @@ from fastapi import HTTPException
 from rbac_backend.core.security import CurrentUser
 from rbac_backend.main import app
 from rbac_backend.models.ai_models import LangGraphDraftRequest
-from rbac_backend.models.letter import ConversationTree, Letter, LetterCreate
+from rbac_backend.models.input_request import InputRequest, InputRequestCreate
+from rbac_backend.models.letter import ConversationTree, Letter, LetterCreate, LetterUpdate
 from rbac_backend.routers.ai_assistant import AIAssistantController
-from rbac_backend.routers.letters import get_letter_controller
+from rbac_backend.routers.letters import LetterController, get_letter_controller
+from rbac_backend.routers.input_requests import InputRequestController
+from rbac_backend.utils.error_handler import AuthorizationError
 
 
 def _json_id(payload: dict) -> str:
@@ -32,9 +35,194 @@ def _make_user() -> CurrentUser:
     )
 
 
+class _FakeInputRequestService:
+    async def create_request(self, letter_id: str, data: InputRequestCreate, current_user: CurrentUser) -> InputRequest:
+        return InputRequest(
+            _id="507f1f77bcf86cd799439013",
+            letter_id=letter_id,
+            requested_by=current_user.id,
+            requested_from=data.requested_from,
+            details=data.details,
+            due_date=data.due_date,
+        )
+
+
+class _FakeLettersCollection:
+    def __init__(self) -> None:
+        self.last_filter = None
+        self.last_update = None
+
+    async def update_one(self, filter_doc, update_doc):
+        self.last_filter = filter_doc
+        self.last_update = update_doc
+        return SimpleNamespace(matched_count=1)
+
+
+class _FakeLetterServiceForInput:
+    def __init__(self, letter: Letter) -> None:
+        self.letter = letter
+        self.db = SimpleNamespace(letters=_FakeLettersCollection())
+
+    async def get_letter_by_id(self, _letter_id: str) -> Letter:
+        return self.letter
+
+
+class _FakeAuthService:
+    async def require_permission(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def check_letter_access(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _RejectingAuthService(_FakeAuthService):
+    async def require_permission(self, *_args, **_kwargs) -> None:
+        raise AuthorizationError("Forbidden")
+
+
+class _FakeRateLimiter:
+    async def check_user_limit(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _FakeAuditLogger:
+    async def log_input_request_created(self, *_args, **_kwargs) -> None:
+        return None
+
+
+class _FakeUsersCollection:
+    def __init__(self) -> None:
+        self.users = [
+            {"_id": "provider-user", "username": "provider", "email": "provider@example.com"},
+            {"_id": "drafter-user", "username": "drafter", "email": "drafter@example.com"},
+        ]
+
+    async def find_one(self, query):
+        candidates = query.get("$or", [query])
+        for candidate in candidates:
+            key, expected = next(iter(candidate.items()))
+            for user in self.users:
+                if str(user.get(key)) == str(expected):
+                    return user
+        return None
+
+
+class _FakeEmailService:
+    app_url = "http://localhost:5173"
+
+    def __init__(self) -> None:
+        self.sent = None
+
+    async def send_share_email(self, **kwargs) -> bool:
+        self.sent = kwargs
+        return True
+
+
+@pytest.mark.asyncio
+async def test_letter_update_validator_preserves_strategy_plan_and_draft_status():
+    controller = LetterController(None, None, None, None)
+
+    validated = await controller._validate_letter_update(
+        LetterUpdate(
+            strategy_plan="Strategic roadmap",
+            strategic_outline={"recommended_response_strategy": "Protect entitlement"},
+            summary_points=["Verify clause 20.1"],
+            strategy_role="contractor",
+            status="Draft",
+        )
+    )
+
+    assert validated.strategy_plan == "Strategic roadmap"
+    assert validated.strategic_outline == {
+        "recommended_response_strategy": "Protect entitlement"
+    }
+    assert validated.summary_points == ["Verify clause 20.1"]
+    assert validated.strategy_role == "contractor"
+    assert validated.status == "Draft"
+
+
 @dataclass
 class _StoredLetter:
     model: Letter
+
+
+@pytest.mark.asyncio
+async def test_input_request_creation_moves_letter_to_input_and_emails_drafter_contact():
+    letter_id = "507f1f77bcf86cd799439011"
+    letter = Letter(
+        _id=letter_id,
+        title="Delay Notice",
+        recipient="Engineer",
+        subject="Extension of time",
+        content="Incoming request",
+        created_by="creator-user",
+        assigned_to="drafter-user",
+        organization_id="org1",
+        project_id="proj1",
+    )
+    letter_service = _FakeLetterServiceForInput(letter)
+    email_service = _FakeEmailService()
+    notification_service = SimpleNamespace(
+        db=SimpleNamespace(users=_FakeUsersCollection()),
+        email_service=email_service,
+    )
+    controller = InputRequestController(
+        _FakeInputRequestService(),
+        letter_service,
+        _FakeAuthService(),
+        _FakeRateLimiter(),
+        _FakeAuditLogger(),
+        notification_service,
+    )
+
+    request = await controller.create_input_request(
+        letter_id,
+        InputRequestCreate(
+            requested_from="provider-user",
+            details="Confirm the actual delay events and supporting documents.",
+        ),
+        _make_user(),
+    )
+
+    assert request.id == "507f1f77bcf86cd799439013"
+    assert letter_service.db.letters.last_update["$set"]["status"] == "Input"
+    assert "status_history" in letter_service.db.letters.last_update["$push"]
+    assert email_service.sent["to"] == ["provider@example.com"]
+    assert "Confirm the actual delay events" in email_service.sent["text_body"]
+    assert "drafter@example.com" in email_service.sent["text_body"]
+
+
+@pytest.mark.asyncio
+async def test_input_request_creation_preserves_authorization_errors():
+    letter_id = "507f1f77bcf86cd799439011"
+    letter = Letter(
+        _id=letter_id,
+        title="Delay Notice",
+        recipient="Engineer",
+        subject="Extension of time",
+        content="Incoming request",
+        created_by="creator-user",
+        assigned_to="drafter-user",
+        organization_id="org1",
+        project_id="proj1",
+    )
+    controller = InputRequestController(
+        _FakeInputRequestService(),
+        _FakeLetterServiceForInput(letter),
+        _RejectingAuthService(),
+        _FakeRateLimiter(),
+        _FakeAuditLogger(),
+    )
+
+    with pytest.raises(AuthorizationError):
+        await controller.create_input_request(
+            letter_id,
+            InputRequestCreate(
+                requested_from="provider-user",
+                details="Confirm the actual delay events and supporting documents.",
+            ),
+            _make_user(),
+        )
 
 
 class _FakeConversationService:
@@ -336,3 +524,23 @@ async def test_langgraph_sanitize_preserves_letter_id() -> None:
 
     assert isinstance(sanitized, LangGraphDraftRequest)
     assert sanitized.letter_id == "letter-123"
+
+
+async def test_langgraph_sanitize_preserves_analysis_only() -> None:
+    controller = AIAssistantController(
+        ai_service=SimpleNamespace(),
+        cache_service=SimpleNamespace(),
+        rate_limiter=SimpleNamespace(),
+        llm_config_service=SimpleNamespace(),
+    )
+    request = LangGraphDraftRequest(
+        letter_id="letter-123",
+        subject="LangGraph Test",
+        recipient="Reviewer",
+        analysis_only=True,
+    )
+
+    sanitized = await controller._sanitize_draft_request(request)
+
+    assert isinstance(sanitized, LangGraphDraftRequest)
+    assert sanitized.analysis_only is True

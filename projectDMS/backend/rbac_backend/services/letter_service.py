@@ -276,6 +276,22 @@ class LetterService:
                 normalized_versions.append(item)
             data["draft_versions"] = normalized_versions
 
+        strategy_versions_raw = data.get("strategy_versions")
+        if isinstance(strategy_versions_raw, list):
+            normalized_strategy_versions: List[Dict[str, Any]] = []
+            for version in strategy_versions_raw:
+                if not isinstance(version, dict):
+                    continue
+                item = dict(version)
+                creator = item.get("created_by")
+                if creator is not None:
+                    item["created_by"] = _stringify_object_id(creator)
+                created_at = item.get("created_at")
+                if isinstance(created_at, datetime) and created_at.tzinfo is None:
+                    item["created_at"] = created_at.replace(tzinfo=timezone.utc)
+                normalized_strategy_versions.append(item)
+            data["strategy_versions"] = normalized_strategy_versions
+
         status_start = (
             data.get("statusStartDate")
             or data.get("status_start_date")
@@ -848,12 +864,16 @@ class LetterService:
         if not status:
             return None
         normalized = status.lower()
-        if normalized in {"draft", "review"}:
+        if normalized in {"input", "draft requested"}:
+            return NotificationType.DRAFT_REQUESTED
+        if normalized in {"draft", "review", "strategy"}:
             return NotificationType.DRAFT_SAVED
-        if normalized in {"approval", "approved"}:
-            return NotificationType.DRAFT_APPROVED
+        if normalized in {"approval", "pending approval", "awaiting approval"}:
+            return NotificationType.APPROVAL_ASSIGNED
+        if normalized in {"approved", "completed"}:
+            return NotificationType.APPROVAL_COMPLETED
         if normalized == "rejected":
-            return NotificationType.DRAFT_REJECTED
+            return NotificationType.APPROVAL_REJECTED
         return None
 
     @staticmethod
@@ -886,9 +906,11 @@ class LetterService:
         data = {
             "title": letter.title,
             "status": letter.status,
+            "letter_id": str(letter.id),
         }
         if extra:
             data.update({k: v for k, v in extra.items() if v is not None})
+        data.setdefault("message", self._workflow_message(letter, event, extra))
         include_users = []
         if getattr(letter, "assigned_to", None):
             include_users.append(str(letter.assigned_to))
@@ -905,7 +927,86 @@ class LetterService:
             actor_id=actor_id,
             data=data,
             include_users=include_users if include_users else None,
+            actions=self._workflow_actions(str(letter.id), event),
+            resource_link=self._workflow_link(str(letter.id), event),
         )
+
+    @staticmethod
+    def _workflow_link(letter_id: str, event: NotificationType) -> str:
+        if event in {
+            NotificationType.APPROVAL_ASSIGNED,
+            NotificationType.APPROVAL_COMPLETED,
+            NotificationType.APPROVAL_REJECTED,
+        }:
+            return f"/letters/{letter_id}/approval"
+        if event == NotificationType.DRAFT_REQUESTED:
+            return f"/letters/{letter_id}/draft"
+        return f"/letters/{letter_id}/input"
+
+    def _workflow_actions(self, letter_id: str, event: NotificationType) -> List[Dict[str, Any]]:
+        view_label = "View Letter"
+        link = self._workflow_link(letter_id, event)
+        actions: List[Dict[str, Any]] = [
+            {
+                "key": "view_letter",
+                "label": view_label,
+                "method": "navigate",
+                "href": link,
+            }
+        ]
+        if event == NotificationType.APPROVAL_ASSIGNED:
+            actions.extend(
+                [
+                    {
+                        "key": "approve",
+                        "label": "Approve",
+                        "method": "post",
+                        "href": None,
+                    },
+                    {
+                        "key": "reject",
+                        "label": "Reject",
+                        "method": "post",
+                        "href": None,
+                    },
+                ]
+            )
+        elif event == NotificationType.DRAFT_REQUESTED:
+            actions.append(
+                {
+                    "key": "start_draft",
+                    "label": "Start Draft",
+                    "method": "post",
+                    "href": None,
+                }
+            )
+        elif event in {NotificationType.APPROVAL_COMPLETED, NotificationType.APPROVAL_REJECTED}:
+            actions.append(
+                {
+                    "key": "mark_done",
+                    "label": "Mark Done",
+                    "method": "post",
+                    "href": None,
+                }
+            )
+        return actions
+
+    @staticmethod
+    def _workflow_message(
+        letter: Letter,
+        event: NotificationType,
+        extra: Optional[Dict[str, Any]],
+    ) -> str:
+        comment = (extra or {}).get("message")
+        if event == NotificationType.APPROVAL_ASSIGNED:
+            return "Letter is waiting for approval"
+        if event == NotificationType.APPROVAL_COMPLETED:
+            return f"Letter approved{f': {comment}' if comment else ''}"
+        if event == NotificationType.APPROVAL_REJECTED:
+            return f"Letter rejected{f': {comment}' if comment else ''}"
+        if event == NotificationType.DRAFT_REQUESTED:
+            return "Draft work has been requested"
+        return str(comment or f"Letter moved to {letter.status}")
 
     async def get_letters_paginated(self, authorized_query: Dict[str, Any], pagination: Dict[str, int]) -> List[Optional[Letter]]:
         """
@@ -954,7 +1055,7 @@ class LetterService:
         created = await self.create_letter(new_letter)
         await self._emit_letter_event(
             created,
-            NotificationType.DRAFT_SAVED,
+            NotificationType.DRAFT_REQUESTED,
             actor_id=self._resolve_user_id(user),
             extra={"message": "Draft created"},
         )

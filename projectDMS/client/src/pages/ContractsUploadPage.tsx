@@ -51,6 +51,8 @@ type UploadProgress = {
   status?: "queued" | "processing" | "completed" | "failed" | "unknown";
   categories?: string[] | null;
   error?: string | null;
+  processing_stage?: string | null;
+  stage_label?: string | null;
 };
 
 type Organization = { id: string; name: string; shortName?: string | null };
@@ -309,8 +311,16 @@ const [projId, setProjId] = useState<string>(
                     ...u,
                     document_id: st.document_id || u.document_id,
                     status: st.status,
+                    progress:
+                      typeof st.progress === "number"
+                        ? st.progress
+                        : st.status === "completed"
+                        ? 100
+                        : u.progress,
                     categories: st.categories || null,
                     error: st.error || null,
+                    processing_stage: st.processing_stage || null,
+                    stage_label: st.stage_label || null,
                   }
                 : u
             )
@@ -348,9 +358,10 @@ const [projId, setProjId] = useState<string>(
   );
 
   useEffect(() => {
+    const activePollTimers = pollTimers.current;
     return () => {
       uploadAbortRef.current?.abort();
-      Object.keys(pollTimers.current).forEach((uploadId) => stopPolling(uploadId));
+      Object.keys(activePollTimers).forEach((uploadId) => stopPolling(uploadId));
     };
   }, [stopPolling]);
 
@@ -983,6 +994,11 @@ const [projId, setProjId] = useState<string>(
                         <p className="text-xs text-gray-500">
                           {bytesToHuman(upload.file.size)} • {upload.mode}
                         </p>
+                        {upload.stage_label && (
+                          <p className="text-xs text-blue-600">
+                            {upload.stage_label}
+                          </p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">

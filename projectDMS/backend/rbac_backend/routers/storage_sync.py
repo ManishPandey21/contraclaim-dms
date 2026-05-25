@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple, List, Set
@@ -13,10 +14,12 @@ from typing import Any, Dict, Optional, Tuple, List, Set
 from bson import ObjectId
 from bson.errors import InvalidId
 
-from fastapi import APIRouter, HTTPException, Body, Query
+from fastapi import APIRouter, HTTPException, Body, Depends, Query, Request, status
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..core.database import get_database
+from ..core.security import CurrentUser, get_current_user
+from ..services.step_up_service import require_step_up
 from ..services.falkor_graph_service import FalkorGraphService, FalkorGraphError
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
@@ -39,6 +42,26 @@ QDRANT_HEALTH_BACKOFF_SECONDS = 0.5
 QDRANT_SLOW_THRESHOLD_MS = 2000.0
 
 _monitor_task: Optional[asyncio.Task] = None
+
+
+def _require_superadmin(current_user: CurrentUser) -> None:
+    roles = {str(role).strip().lower() for role in (current_user.roles or [])}
+    if "superadmin" not in roles:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin access required.",
+        )
+
+
+async def _require_superadmin_user(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    _require_superadmin(current_user)
+    return current_user
+
+
+def _user_id(current_user: Optional[CurrentUser]) -> Optional[str]:
+    return getattr(current_user, "id", None) if current_user else None
 
 
 async def _fetch_qdrant_total(
@@ -331,6 +354,38 @@ async def _fetch_falkor_stats(db=None) -> Dict[str, Any]:
     }
 
 
+async def _fetch_database_status(db) -> Dict[str, Any]:
+    started = time.perf_counter()
+    payload: Dict[str, Any] = {
+        "mongo": {
+            "available": False,
+            "latency_ms": None,
+            "database_name": getattr(db, "name", None),
+            "collections": {},
+            "error": None,
+        }
+    }
+    try:
+        await db.command("ping")
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        payload["mongo"].update(
+            {
+                "available": True,
+                "latency_ms": latency_ms,
+                "collections": {
+                    "documents": await db.documents.count_documents({}),
+                    "chunks": await db.chunks.count_documents({}),
+                    "document_vectors": await db.document_vectors.count_documents({}),
+                    "vector_sync_status": await db.vector_sync_status.count_documents({}),
+                    "storage_reconciliation_runs": await db.storage_reconciliation_runs.count_documents({}),
+                },
+            }
+        )
+    except Exception as exc:
+        payload["mongo"]["error"] = str(exc)
+    return payload
+
+
 async def _resync_document_vectors(
     document_id: str,
     db,
@@ -429,6 +484,7 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     qdrant_exact = bool(qdrant_stats.get("exact"))
     qdrant_error = qdrant_stats.get("last_error")
     falkor_stats = await _fetch_falkor_stats(db)
+    database_status = await _fetch_database_status(db)
 
     # Document totals
     mongo_documents = await db.documents.count_documents({})
@@ -450,6 +506,8 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
         issues.append(f"qdrant_slow ({int(qdrant_latency_ms)}ms)")
     if qdrant_retries:
         issues.append(f"qdrant_retries ({qdrant_retries})")
+    if not database_status.get("mongo", {}).get("available"):
+        issues.append("mongodb_unavailable")
 
     status_label = "healthy" if not issues else "degraded"
 
@@ -457,6 +515,7 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
         "status": status_label,
         "issues": issues,
         "timestamp": now.isoformat() + "Z",
+        "database": database_status,
         "vector_store": {
             "mongo_chunk_count": mongo_vectors,
             "qdrant_chunk_count": qdrant_total,
@@ -492,7 +551,8 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
 
 @router.get("/storage-sync/status", tags=["storage"])
 async def storage_sync_status(
-    method: str = Query("approx", pattern="^(approx|exact)$")
+    method: str = Query("approx", pattern="^(approx|exact)$"),
+    current_user: CurrentUser = Depends(_require_superadmin_user),
 ) -> Dict[str, Any]:
     """
     Return a summary of storage synchronisation health across MongoDB, Qdrant, and FalkorDB.
@@ -546,10 +606,15 @@ async def stop_storage_monitor() -> None:
 
 
 @router.post("/storage-sync/resync-doc")
-async def resync_document_vectors(document_id: str) -> Dict[str, Any]:
+async def resync_document_vectors(
+    document_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(_require_superadmin_user),
+) -> Dict[str, Any]:
     """
     Resync vectors for a single document from Mongo chunks into Qdrant and update sync status.
     """
+    await require_step_up(request, current_user, action="storage.repair")
     db = await get_database()
     config = DocumentProcessingConfig()
     return await _resync_document_vectors(document_id, db, config)
@@ -557,15 +622,18 @@ async def resync_document_vectors(document_id: str) -> Dict[str, Any]:
 
 @router.post("/storage-sync/resync-bulk")
 async def resync_bulk_vectors(
+    request: Request,
     org_id: Optional[str] = Body(None),
     project_id: Optional[str] = Body(None),
     limit: int = Body(25),
     include_synced: bool = Body(False),
+    current_user: CurrentUser = Depends(_require_superadmin_user),
 ) -> Dict[str, Any]:
     """
     Bulk repair: resync vectors for documents under an org/project.
     Defaults to only repairing stale/non-synced documents.
     """
+    await require_step_up(request, current_user, action="storage.repair")
     if not org_id and not project_id:
         raise HTTPException(
             status_code=400,
@@ -644,17 +712,41 @@ async def resync_bulk_vectors(
     }
 
 
+async def _persist_reconciliation_run(
+    db,
+    run_type: str,
+    result: Dict[str, Any],
+    current_user: Optional[CurrentUser],
+) -> str:
+    run = {
+        "run_type": run_type,
+        "status": "completed" if not result.get("failed") else "completed_with_failures",
+        "org_id": result.get("org_id"),
+        "project_id": result.get("project_id"),
+        "dry_run": bool(result.get("dry_run")),
+        "result": result,
+        "created_by": _user_id(current_user),
+        "created_at": datetime.utcnow(),
+    }
+    inserted = await db.storage_reconciliation_runs.insert_one(run)
+    return str(inserted.inserted_id)
+
+
 @router.post("/storage-sync/reconcile")
 async def reconcile_vectors(
+    request: Request,
     org_id: Optional[str] = Body(None),
     project_id: Optional[str] = Body(None),
     limit: int = Body(50),
+    dry_run: bool = Body(False),
+    current_user: CurrentUser = Depends(_require_superadmin_user),
 ) -> Dict[str, Any]:
     """
     Reconcile vector data between MongoDB chunks and Qdrant.
     - Detect missing or extra vectors in Qdrant for non-deleted documents.
-    - Re-embed and upsert vectors for documents with mismatches.
+    - Re-embed and upsert vectors for documents with mismatches unless dry_run is true.
     """
+    await require_step_up(request, current_user, action="storage.repair")
     if not org_id and not project_id:
         raise HTTPException(
             status_code=400,
@@ -726,6 +818,19 @@ async def reconcile_vectors(
             details.append({"document_id": doc_id, "status": "in_sync"})
             continue
 
+        if dry_run:
+            details.append(
+                {
+                    "document_id": doc_id,
+                    "status": "would_repair",
+                    "mongo_chunks": len(mongo_ids),
+                    "qdrant_chunks": len(qdrant_ids),
+                    "missing_qdrant": len(missing_in_qdrant),
+                    "extra_qdrant": len(extra_in_qdrant),
+                }
+            )
+            continue
+
         try:
             embedding_client = embedding_client or EmbeddingClient(config)
             result = await _resync_document_vectors(
@@ -752,7 +857,7 @@ async def reconcile_vectors(
                 }
             )
 
-    return {
+    result = {
         "requested": limit,
         "scanned": scanned,
         "repaired": repaired,
@@ -762,4 +867,146 @@ async def reconcile_vectors(
         "details": details,
         "org_id": org_id,
         "project_id": project_id,
+        "dry_run": dry_run,
     }
+    result["run_id"] = await _persist_reconciliation_run(
+        db, "vector", result, current_user
+    )
+    return result
+
+
+@router.post("/storage-sync/reconcile-files")
+async def reconcile_files(
+    request: Request,
+    org_id: Optional[str] = Body(None),
+    project_id: Optional[str] = Body(None),
+    limit: int = Body(100),
+    current_user: CurrentUser = Depends(_require_superadmin_user),
+) -> Dict[str, Any]:
+    """
+    Reconcile document/file metadata in MongoDB.
+    This endpoint is intentionally diagnostic: it does not delete records or
+    mutate storage. It reports DB/file integrity issues for superadmin review.
+    """
+    await require_step_up(request, current_user, action="storage.repair")
+    if not org_id and not project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide org_id or project_id to scope file reconciliation.",
+        )
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="Limit must be between 1 and 500.")
+
+    db = await get_database()
+    doc_filter: Dict[str, Any] = {"deleted": {"$ne": True}, "is_deleted": {"$ne": True}}
+    if org_id:
+        doc_filter["organization_id"] = org_id
+    if project_id:
+        doc_filter["project_id"] = project_id
+
+    details: List[Dict[str, Any]] = []
+    counters = {
+        "missing_local_files": 0,
+        "missing_storage_reference": 0,
+        "storage_location_errors": 0,
+        "documents_without_chunks": 0,
+        "stuck_processing": 0,
+        "missing_workspace_metadata": 0,
+        "duplicate_file_hash_candidates": 0,
+    }
+
+    seen_hashes: Dict[str, str] = {}
+    projection = {
+        "_id": 1,
+        "filename": 1,
+        "filepath_local": 1,
+        "filepath_s3": 1,
+        "storage_locations": 1,
+        "status": 1,
+        "organization_id": 1,
+        "project_id": 1,
+        "file_hash": 1,
+        "hash": 1,
+        "updatedAt": 1,
+    }
+    cursor = db.documents.find(doc_filter, projection).sort("updatedAt", -1).limit(limit)
+    scanned = 0
+    async for doc in cursor:
+        scanned += 1
+        doc_id = str(doc.get("_id") or "")
+        issues: List[str] = []
+        local_path = doc.get("filepath_local")
+        s3_path = doc.get("filepath_s3")
+        storage_locations = doc.get("storage_locations") or []
+        if local_path and not os.path.exists(str(local_path)):
+            counters["missing_local_files"] += 1
+            issues.append("missing_local_file")
+        if not local_path and not s3_path and not storage_locations:
+            counters["missing_storage_reference"] += 1
+            issues.append("missing_storage_reference")
+        if any(
+            isinstance(loc, dict)
+            and str(loc.get("status") or "").lower().startswith("error")
+            for loc in storage_locations
+        ):
+            counters["storage_location_errors"] += 1
+            issues.append("storage_location_error")
+        chunk_count = await db.chunks.count_documents({"document_id": doc_id})
+        if chunk_count == 0:
+            counters["documents_without_chunks"] += 1
+            issues.append("no_chunks")
+        if str(doc.get("status") or "").strip().lower() in {"under process", "processing"}:
+            counters["stuck_processing"] += 1
+            issues.append("processing_status")
+        if not doc.get("organization_id") or not doc.get("project_id"):
+            counters["missing_workspace_metadata"] += 1
+            issues.append("missing_workspace_metadata")
+        file_hash = doc.get("file_hash") or doc.get("hash")
+        if file_hash:
+            if str(file_hash) in seen_hashes:
+                counters["duplicate_file_hash_candidates"] += 1
+                issues.append("duplicate_file_hash_candidate")
+            else:
+                seen_hashes[str(file_hash)] = doc_id
+        if issues:
+            details.append(
+                {
+                    "document_id": doc_id,
+                    "filename": doc.get("filename"),
+                    "status": doc.get("status"),
+                    "issues": issues,
+                    "chunk_count": chunk_count,
+                    "filepath_local": local_path,
+                    "filepath_s3": s3_path,
+                    "storage_locations": storage_locations,
+                }
+            )
+
+    orphan_chunks = 0
+    chunk_cursor = db.chunks.find(
+        {},
+        {"document_id": 1},
+    ).limit(limit * 2)
+    async for chunk in chunk_cursor:
+        doc_id = str(chunk.get("document_id") or "")
+        if not doc_id:
+            orphan_chunks += 1
+            continue
+        if not await db.documents.find_one({"_id": doc_id}, {"_id": 1}):
+            orphan_chunks += 1
+    counters["orphan_chunks"] = orphan_chunks
+
+    result = {
+        "requested": limit,
+        "scanned": scanned,
+        "failed": 0,
+        "issue_counts": counters,
+        "details": details,
+        "org_id": org_id,
+        "project_id": project_id,
+        "dry_run": True,
+    }
+    result["run_id"] = await _persist_reconciliation_run(
+        db, "file", result, current_user
+    )
+    return result

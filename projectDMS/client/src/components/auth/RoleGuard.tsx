@@ -1,7 +1,7 @@
 import React, { PropsWithChildren } from "react";
 import { Navigate } from "react-router-dom";
 import useRBAC from "@/hooks/useRBAC";
-import { isRouteAllowed } from "@/config/rolePermissions";
+import { isRouteAllowedByPermission } from "@/config/rolePermissions";
 
 /**
  * Guards a given route element by checking user roles against ROUTE_RULES.
@@ -17,14 +17,14 @@ const RoleGuard: React.FC<PropsWithChildren<RoleGuardProps>> = ({
   fallback = "/overview",
   children,
 }) => {
-  const { roles, loading } = useRBAC();
+  const { can, loading } = useRBAC();
 
   if (loading) {
     // Avoid flicker/false-deny while roles are loading
     return null;
   }
 
-  const allowed = isRouteAllowed(roles, path);
+  const allowed = isRouteAllowedByPermission(can, path);
   if (!allowed) {
     return <Navigate to={fallback} replace />;
   }

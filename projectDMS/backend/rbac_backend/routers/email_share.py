@@ -6,10 +6,11 @@ import re
 from datetime import datetime
 from html import escape
 from typing import Any, Dict, List, Literal, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from bson import ObjectId
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from ..core.security import CurrentUser, get_current_user, require_permission
@@ -17,11 +18,19 @@ from ..dependencies import get_email_service
 from ..services.authorization_service import AuthorizationService
 from ..services.email_group_service import EmailGroupService
 from ..services.email_service import EmailService
-from ..utils.validation import sanitize_html
+from ..services.policy_service import PolicyService
+from ..utils.rate_limiter import RateLimiter
+from ..utils.validation import sanitize_filename, sanitize_html
 
 router = APIRouter()
 auth_service = AuthorizationService()
 group_service = EmailGroupService()
+public_share_limiter = RateLimiter(requests_per_minute=120, window_seconds=3600)
+
+
+def _fallback_project_id(current_user: CurrentUser) -> Optional[str]:
+    projects = getattr(current_user, "projects", None) or []
+    return projects[0] if projects else None
 
 
 class RecipientSuggestion(BaseModel):
@@ -50,7 +59,9 @@ class DocumentShareRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=10000)
     document_id: str = Field(..., min_length=1)
     include_linked_documents: bool = False
-    include_letter_link: bool = True
+    include_letter_link: Optional[bool] = None
+    share_via_link: Optional[bool] = None
+    attach_file_to_email: bool = False
     include_refs: bool = Field(default=False, alias="includeRefs")
     reference_ids: List[str] = Field(default_factory=list)
     group_ids: List[str] = Field(default_factory=list)
@@ -66,6 +77,14 @@ class DocumentShareRequest(BaseModel):
         total = len(values.to) + len(values.cc) + len(values.bcc)
         if total == 0 and not values.recipient_email:
             raise ValueError("At least one recipient is required")
+        share_via_link = (
+            values.share_via_link
+            if values.share_via_link is not None
+            else values.include_letter_link
+        )
+        share_via_link = True if share_via_link is None else bool(share_via_link)
+        if not share_via_link and not values.attach_file_to_email:
+            raise ValueError("Choose Share via link, Attach file to email, or both")
         return values
 
 
@@ -73,6 +92,8 @@ class DocumentShareResponse(BaseModel):
     message: str
     document_name: str
     attachments_count: int
+    public_download_url: Optional[str] = None
+    delivery_methods: Dict[str, bool] = Field(default_factory=dict)
 
 
 def _coerce_object_id(value: str):
@@ -458,6 +479,182 @@ def _build_share_metadata_text(
     return "\n".join(parts).strip()
 
 
+def _normalize_message_html(message: str, email_format: str) -> str:
+    if email_format == "html":
+        cleaned = sanitize_html(message)
+        return cleaned or "<p>A document has been shared with you.</p>"
+    escaped = escape(message.strip()).replace("\n", "<br/>")
+    return f"<p>{escaped}</p>"
+
+
+def _render_modern_share_email_html(
+    *,
+    document_title: str,
+    message_html: str,
+    public_download_url: Optional[str],
+    app_view_url: str,
+    metadata_rows_html: str,
+    registered_by: str,
+    distribution_label: str,
+    attached: bool,
+    reference_html: str,
+    enclosure_html: str,
+) -> str:
+    primary_button = ""
+    secondary_button = ""
+    if public_download_url:
+        safe_url = escape(public_download_url, quote=True)
+        primary_button = f"""
+            <a href="{safe_url}" class="button button-primary" style="background:#0b63ce;border-radius:7px;color:#ffffff;display:inline-block;font-size:15px;font-weight:700;line-height:20px;padding:13px 22px;text-decoration:none;">Download document</a>
+        """
+    if app_view_url:
+        safe_app_url = escape(app_view_url, quote=True)
+        secondary_button = f"""
+            <a href="{safe_app_url}" class="button button-secondary" style="background:#ffffff;border:1px solid #c8d4e6;border-radius:7px;color:#163b73;display:inline-block;font-size:15px;font-weight:700;line-height:20px;padding:12px 20px;text-decoration:none;">Open in DMS</a>
+        """
+
+    delivery_note = "A secure public download link is included below."
+    if attached and public_download_url:
+        delivery_note = "The document is attached and a secure public download link is included below."
+    elif attached:
+        delivery_note = "The document is attached to this email."
+
+    metadata_table = (
+        f"""
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-top:18px;">
+            {metadata_rows_html}
+        </table>
+        """
+        if metadata_rows_html
+        else ""
+    )
+    related_sections = (
+        f"""
+          <tr>
+            <td class="section" style="padding:0 34px 28px 34px;">
+              {reference_html}
+              {enclosure_html}
+            </td>
+          </tr>
+        """
+        if reference_html or enclosure_html
+        else ""
+    )
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Document shared - ContraClaim DMS</title>
+  <style>
+    @media only screen and (max-width: 620px) {{
+      .container {{ width: 100% !important; }}
+      .section {{ padding-left: 20px !important; padding-right: 20px !important; }}
+      .button {{ display: block !important; margin: 0 0 10px 0 !important; text-align: center !important; }}
+    }}
+  </style>
+</head>
+<body style="margin:0;padding:0;background:#eef3f8;color:#172033;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef3f8;border-collapse:collapse;padding:24px 0;">
+    <tr>
+      <td align="center" style="padding:24px 12px;">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" class="container" style="width:600px;max-width:600px;background:#ffffff;border-collapse:collapse;border:1px solid #d9e2ef;border-radius:10px;overflow:hidden;">
+          <tr>
+            <td class="section" style="background:#0b63ce;padding:26px 34px;">
+              <div style="color:#ffffff;font-size:14px;font-weight:700;letter-spacing:0;text-transform:uppercase;">ContraClaim DMS</div>
+              <h1 style="color:#ffffff;font-size:24px;line-height:31px;margin:8px 0 0 0;font-weight:700;">Document shared with you</h1>
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding:28px 34px 18px 34px;">
+              <p style="margin:0 0 8px 0;color:#68758a;font-size:13px;font-weight:700;text-transform:uppercase;">Document</p>
+              <h2 style="margin:0;color:#172033;font-size:21px;line-height:28px;font-weight:700;">{escape(document_title)}</h2>
+              <p style="margin:14px 0 0 0;color:#4b5b73;font-size:15px;line-height:23px;">{escape(delivery_note)}</p>
+              {metadata_table}
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding:0 34px 22px 34px;">
+              <div style="background:#f6f8fb;border:1px solid #dfe7f2;border-radius:8px;padding:18px;color:#24324a;font-size:15px;line-height:23px;">
+                {message_html}
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="section" style="padding:0 34px 28px 34px;">
+              {primary_button}
+              {secondary_button}
+              {f'<p style="margin:14px 0 0 0;color:#68758a;font-size:12px;line-height:18px;word-break:break-all;">Public download link: <a href="{escape(public_download_url, quote=True)}" style="color:#0b63ce;text-decoration:none;">{escape(public_download_url)}</a></p>' if public_download_url else ''}
+            </td>
+          </tr>
+          {related_sections}
+          <tr>
+            <td class="section" style="background:#f6f8fb;border-top:1px solid #dfe7f2;padding:20px 34px;">
+              <p style="margin:0;color:#68758a;font-size:12px;line-height:18px;">Shared by {escape(registered_by or 'ContraClaim DMS')} for {escape(distribution_label)}. This automated message was sent by ContraClaim DMS.</p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
+def _render_share_text(
+    *,
+    document_title: str,
+    message: str,
+    public_download_url: Optional[str],
+    app_view_url: str,
+    metadata_text: str,
+    attached: bool,
+    extra_sections: List[str],
+) -> str:
+    lines = [f"Document shared: {document_title}", ""]
+    if public_download_url:
+        lines.extend(["Download document:", public_download_url, ""])
+    if app_view_url:
+        lines.extend(["Open in ContraClaim DMS:", app_view_url, ""])
+    if attached:
+        lines.extend(["The document is attached to this email.", ""])
+    if metadata_text:
+        lines.extend([metadata_text, ""])
+    if message.strip():
+        lines.extend([message.strip(), ""])
+    for section in extra_sections:
+        if section:
+            lines.extend([section, ""])
+    return "\n".join(lines).strip()
+
+
+async def _build_primary_attachment(
+    email_service: EmailService,
+    document: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    attachment = await email_service.read_document_file(document)
+    if not attachment:
+        return None
+    max_bytes = max(1, email_service.share_attachment_max_mb) * 1024 * 1024
+    size = len(attachment.get("content") or b"")
+    if size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                "Document exceeds the configured email attachment limit "
+                f"({email_service.share_attachment_max_mb} MB). Use Share via link instead."
+            ),
+        )
+    return attachment
+
+
+def _content_disposition(filename: str) -> str:
+    safe_name = sanitize_filename(filename or "document")
+    quoted = quote(safe_name)
+    return f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{quoted}"
+
+
 async def _collect_suggestions(
     email_service: EmailService,
     payload: RecipientResolveRequest,
@@ -580,6 +777,13 @@ async def get_email_suggestions(
         organization_id=organization_id or current_user.organization_id,
         project_id=project_id,
     )
+    await PolicyService(email_service.db).authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="email_suggestions",
+        organization_id=payload.organization_id,
+        project_id=payload.project_id or _fallback_project_id(current_user),
+    )
     return await _collect_suggestions(email_service, payload)
 
 
@@ -592,6 +796,13 @@ async def resolve_recipients(
     """Resolve recipients across representatives/parties for autocomplete."""
     payload.organization_id = (
         payload.organization_id or current_user.organization_id
+    )
+    await PolicyService(email_service.db).authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="email_recipient_resolution",
+        organization_id=payload.organization_id,
+        project_id=payload.project_id or _fallback_project_id(current_user),
     )
     return await _collect_suggestions(email_service, payload)
 
@@ -628,6 +839,14 @@ async def share_document(
     await auth_service.check_document_access(
         current_user, organization_id, project_id, "share"
     )
+    await PolicyService(email_service.db).authorize(
+        current_user,
+        "dms.document.download",
+        resource_type="document_share",
+        resource_id=str(document.get("_id") or payload.document_id),
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
+    )
 
     if payload.group_ids:
         group_emails: List[str] = []
@@ -646,7 +865,7 @@ async def share_document(
         or payload.document_id
     )
 
-    doc_link = f"{email_service.app_url}/documentviewer/{document.get('_id')}"
+    doc_link = f"{email_service.app_url.rstrip('/')}/documentviewer/{document.get('_id')}"
     document_registered_by = document.get("registeredBy") or document.get(
         "registered_by"
     )
@@ -661,74 +880,36 @@ async def share_document(
     distribution_label = DISTRIBUTION_LABELS.get(
         distribution_choice, distribution_choice.title()
     )
+    share_via_link = (
+        payload.share_via_link
+        if payload.share_via_link is not None
+        else payload.include_letter_link
+    )
+    share_via_link = True if share_via_link is None else bool(share_via_link)
+    attach_file = bool(payload.attach_file_to_email)
 
-    if payload.email_format == "text":
-        escaped = sanitize_html(payload.message).replace("\n", "<br/>")
-        body_html = f"<p>{escaped}</p>"
-        plain_body = payload.message.strip()
-        metadata_text = _build_share_metadata_text(
-            registered_by_value, distribution_label
+    public_download_url: Optional[str] = None
+    if share_via_link:
+        public_token = await email_service.create_document_share_token(
+            document=document,
+            created_by=str(getattr(current_user, "id", None) or current_user.email or ""),
+            recipients=[*to_list, *cc_list, *bcc_list],
+            delivery_methods={
+                "share_via_link": share_via_link,
+                "attach_file_to_email": attach_file,
+            },
         )
-        if metadata_text:
-            plain_body = (
-                "\n\n".join(filter(None, [plain_body, metadata_text])).strip()
-            )
-    else:
-        # For HTML format, inject the View Document button link
-        body_html = payload.message
-        
-        if payload.include_letter_link:
-            # Replace the placeholder text with actual button
-            view_button_html = f'''<tr>
-                        <td style="padding: 0 40px 30px 40px;">
-                            <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                                <tr>
-                                    <td align="center">
-                                        <a href="{doc_link}" style="display: inline-block; background-color: #2874d8; color: #ffffff; text-decoration: none; padding: 14px 40px; border-radius: 6px; font-size: 15px; font-weight: 600; box-shadow: 0 2px 6px rgba(40,116,216,0.3);">
-                                            View Document
-                                        </a>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-                    <!-- Secondary Action -->
-                    <tr>
-                        <td style="padding: 0 40px 30px 40px;" align="center">
-                            <p style="margin: 0; color: #718096; font-size: 13px;">
-                                Or copy this link: 
-                                <a href="{doc_link}" style="color: #2874d8; text-decoration: none; font-weight: 500;">{doc_link}</a>
-                            </p>
-                        </td>
-                    </tr>'''
-            
-            # Replace the placeholder in the HTML template
-            body_html = body_html.replace(
-                '''<!-- Action Button Placeholder -->
-                    <tr>
-                        <td style="padding: 0 40px 30px 40px;">
-                            <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                                <tr>
-                                    <td align="center">
-                                        <p style="margin: 0; color: #718096; font-size: 14px;">
-                                            Click the "View Document" button below to access the document.
-                                        </p>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>''',
-                view_button_html
-            )
-        
-        metadata_rows_html = _build_share_metadata_rows_html(
-            registered_by_value, distribution_label
-        )
-        body_html = _inject_share_metadata_html(body_html, metadata_rows_html)
-        plain_body = _html_to_text(body_html)
+        public_download_url = email_service.build_public_download_url(public_token)
 
-        if payload.include_letter_link and doc_link not in plain_body:
-            plain_body = f"{plain_body}\n\nView document: {doc_link}".strip()
+    attachments: List[Dict[str, Any]] = []
+    if attach_file:
+        primary_attachment = await _build_primary_attachment(email_service, document)
+        if not primary_attachment:
+            raise HTTPException(
+                status_code=404,
+                detail="Document file is not available for attachment",
+            )
+        attachments.append(primary_attachment)
 
     reference_entries = await _build_reference_entries(
         email_service, document, payload
@@ -752,16 +933,34 @@ async def share_document(
         if enclosure_text:
             text_sections.append(enclosure_text)
 
-    if html_sections:
-        body_html = (body_html or "") + "".join(html_sections)
-
-    if text_sections:
-        text_block = "\n\n".join(text_sections).strip()
-        plain_body = (
-            "\n\n".join(filter(None, [plain_body, text_block])).strip()
-            if plain_body
-            else text_block
-        )
+    metadata_rows_html = _build_share_metadata_rows_html(
+        registered_by_value, distribution_label
+    )
+    metadata_text = _build_share_metadata_text(
+        registered_by_value, distribution_label
+    )
+    message_html = _normalize_message_html(payload.message, payload.email_format)
+    body_html = _render_modern_share_email_html(
+        document_title=str(doc_title),
+        message_html=message_html,
+        public_download_url=public_download_url,
+        app_view_url=doc_link,
+        metadata_rows_html=metadata_rows_html,
+        registered_by=registered_by_value,
+        distribution_label=distribution_label,
+        attached=attach_file,
+        reference_html="".join(html_sections),
+        enclosure_html="",
+    )
+    plain_body = _render_share_text(
+        document_title=str(doc_title),
+        message=_html_to_text(payload.message) if payload.email_format == "html" else payload.message,
+        public_download_url=public_download_url,
+        app_view_url=doc_link,
+        metadata_text=metadata_text,
+        attached=attach_file,
+        extra_sections=text_sections,
+    )
 
     background_tasks.add_task(
         email_service.send_share_email,
@@ -771,18 +970,73 @@ async def share_document(
         subject=payload.subject,
         html_body=body_html if payload.email_format == "html" else None,
         text_body=plain_body,
+        attachments=attachments,
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
     )
 
     reference_count = len(reference_entries)
     enclosure_count = len(enclosure_entries)
-    attachments_count = 1 + reference_count
-    if enclosure_count:
-        attachments_count += enclosure_count
-    if payload.include_letter_link:
-        attachments_count += 1
+    attachments_count = len(attachments)
 
     return DocumentShareResponse(
         message="Email queued for delivery",
         document_name=str(doc_title),
         attachments_count=attachments_count,
+        public_download_url=public_download_url,
+        delivery_methods={
+            "share_via_link": share_via_link,
+            "attach_file_to_email": attach_file,
+            "reference_links": reference_count > 0,
+            "enclosure_links": enclosure_count > 0,
+        },
+    )
+
+
+@router.get("/public-share/{token}/download")
+async def download_public_shared_document(
+    token: str,
+    request: Request,
+    email_service: EmailService = Depends(get_email_service),
+):
+    """Download a shared document using an opaque share token, without login."""
+    if not token or len(token) < 24:
+        raise HTTPException(status_code=404, detail="Share link not found")
+
+    client_ip = request.client.host if request.client else "unknown"
+    await public_share_limiter.check_ip_limit(
+        client_ip,
+        cost=1,
+        window_seconds=3600,
+        max_requests=120,
+    )
+    await public_share_limiter.check_client_limit(
+        f"share-token:{EmailService.share_token_hash(token)}",
+        cost=1,
+        window_seconds=300,
+        max_requests=30,
+    )
+
+    resolved = await email_service.resolve_public_share(token)
+    if not resolved:
+        raise HTTPException(status_code=404, detail="Share link not found or expired")
+
+    document = resolved["document"]
+    attachment = await email_service.read_document_file(document)
+    if not attachment:
+        presigned_url = document.get("presigned_url")
+        if isinstance(presigned_url, str) and presigned_url:
+            return Response(status_code=307, headers={"Location": presigned_url})
+        raise HTTPException(status_code=404, detail="File not available for download")
+
+    filename = str(attachment.get("filename") or document.get("filename") or "document")
+    content_type = str(attachment.get("content_type") or "application/octet-stream")
+    return Response(
+        content=attachment.get("content") or b"",
+        media_type=content_type,
+        headers={
+            "Content-Disposition": _content_disposition(filename),
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

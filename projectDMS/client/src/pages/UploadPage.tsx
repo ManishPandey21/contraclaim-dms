@@ -103,8 +103,6 @@ const UploadPage: React.FC = () => {
   const pollRef = useRef<number | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
 
-  const getToken = () => localStorage.getItem("accessToken") || "";
-
   // Normalize date for API (YYYY-MM-DD)
   const formatDateForApi = (d: string) => {
     if (!d) return new Date().toISOString().slice(0, 10);
@@ -133,7 +131,6 @@ const UploadPage: React.FC = () => {
     const fetchData = async () => {
       setIsLoading(true);
       try {
-        getToken(); // ensure token exists; enhancedApi handles auth headers
         const orgs = await enhancedApi.getOrganizations();
         // Map to local Organization interface
         const mappedOrgs: Organization[] = (orgs as OrgModel[]).map((o) => ({
@@ -161,7 +158,7 @@ const UploadPage: React.FC = () => {
       }
     };
     fetchData();
-  }, []);
+  }, [toast]);
 
   // Update pathStructure preview when org/project changes
   useEffect(() => {

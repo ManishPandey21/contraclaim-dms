@@ -110,6 +110,23 @@ class OrganizationBase(BaseModel):
 
 
 class OrganizationCreate(OrganizationBase):
+    # Subscription configuration at registration time (optional)
+    plan_code: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="Plan code to assign on creation. If omitted, 'no_service_override' is used.",
+    )
+    subscription_status: Optional[str] = Field(
+        None,
+        description="Initial subscription status (e.g. 'trial', 'active'). Defaults to 'trial' when plan_code is provided.",
+    )
+    trial_days: Optional[int] = Field(
+        None,
+        ge=0,
+        le=365,
+        description="Number of trial days. Only used when subscription_status is 'trial'.",
+    )
+
     @field_validator("name")
     @classmethod
     def _ensure_name(cls, value: str) -> str:

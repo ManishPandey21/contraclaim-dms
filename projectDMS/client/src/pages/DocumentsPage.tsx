@@ -23,7 +23,7 @@ import {
   BookOpen,
   Loader2,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Card,
   CardHeader,
@@ -80,7 +80,12 @@ import {
   refreshToken,
   logoutAndRedirect,
 } from "@/services/auth";
+import { authenticatedFetch } from "@/services/http";
 import enhancedApi from "@/services/enhanced-api";
+import {
+  getEffectivePlanServices,
+  EffectivePlanState,
+} from "@/services/plan-settings-api";
 import { create } from "zustand";
 import { LETTER_INITIATION_PREFILL_KEY } from "@/constants/storageKeys";
 import { string } from "zod";
@@ -126,6 +131,8 @@ interface Document {
     | "Pending Reply"
     | "Reply Not Required";
   project: string; // This will now hold the project name
+  organizationId?: string;
+  projectId?: string;
   createdAt: string | null;
   uploadDate: string | null;
   uploadDateTs: number;
@@ -162,8 +169,81 @@ interface BackendDocument {
   updated_at?: string;
 }
 
+type DocumentsFilterUrlState = {
+  searchTerm: string;
+  statusFilter: string;
+  tagFilter: string;
+  directionFilter: string;
+  projectFilter: string;
+  dateFrom: string;
+  dateTo: string;
+  currentPage: number;
+};
+
+const parseDocumentsPageParam = (value: string | null): number => {
+  const page = Number.parseInt(value || "", 10);
+  return Number.isFinite(page) && page > 0 ? page : 1;
+};
+
+const directionFromUploadType = (value: string | null): string => {
+  const normalized = (value || "").toLowerCase();
+  if (normalized === "incoming") return "Incoming";
+  if (normalized === "outgoing") return "Outgoing";
+  return "all";
+};
+
+const uploadTypeFromDirection = (value: string): string | null => {
+  if (value === "Incoming") return "incoming";
+  if (value === "Outgoing") return "outgoing";
+  return null;
+};
+
+const filtersFromSearchParams = (
+  params: URLSearchParams
+): DocumentsFilterUrlState => ({
+  searchTerm: params.get("search") || "",
+  statusFilter: params.get("status") || "all",
+  tagFilter: params.get("tags") || "all",
+  directionFilter: directionFromUploadType(params.get("uploadType")),
+  projectFilter: params.get("project_id") || "all",
+  dateFrom: params.get("date_from") || "",
+  dateTo: params.get("date_to") || "",
+  currentPage: parseDocumentsPageParam(params.get("page")),
+});
+
+const searchParamsFromFilters = (
+  filters: DocumentsFilterUrlState
+): URLSearchParams => {
+  const params = new URLSearchParams();
+  const search = filters.searchTerm.trim();
+  if (search) params.set("search", search);
+  if (filters.projectFilter !== "all") {
+    params.set("project_id", filters.projectFilter);
+  }
+  if (filters.statusFilter !== "all") {
+    params.set("status", filters.statusFilter);
+  }
+  if (filters.tagFilter !== "all") {
+    params.set("tags", filters.tagFilter);
+  }
+  if (filters.dateFrom) {
+    params.set("date_from", filters.dateFrom);
+  }
+  if (filters.dateTo) {
+    params.set("date_to", filters.dateTo);
+  }
+  const uploadType = uploadTypeFromDirection(filters.directionFilter);
+  if (uploadType) params.set("uploadType", uploadType);
+  if (filters.currentPage > 1) {
+    params.set("page", String(filters.currentPage));
+  }
+  return params;
+};
+
 const DocumentsPage = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialFilters = filtersFromSearchParams(searchParams);
   const [isViewingReferences, setIsViewingReferences] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState<Document | null>(
     null
@@ -174,13 +254,26 @@ const DocumentsPage = () => {
   const [users, setUsers] = useState<User[]>([]);
   const [totalDocuments, setTotalDocuments] = useState(0);
   const [documents, setDocuments] = useState<Document[]>([]);
+  const [effectiveServices, setEffectiveServices] = useState<{
+    organizations: Record<string, EffectivePlanState>;
+    projects: Record<string, EffectivePlanState>;
+  }>({ organizations: {}, projects: {} });
+  const [entitlementsLoading, setEntitlementsLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
-  const [tagFilter, setTagFilter] = useState<string>("all");
-  const [directionFilter, setDirectionFilter] = useState<string>("all");
-  const [projectFilter, setProjectFilter] = useState<string>("all");
+  const [searchTerm, setSearchTerm] = useState(initialFilters.searchTerm);
+  const [statusFilter, setStatusFilter] = useState<string>(
+    initialFilters.statusFilter
+  );
+  const [tagFilter, setTagFilter] = useState<string>(initialFilters.tagFilter);
+  const [directionFilter, setDirectionFilter] = useState<string>(
+    initialFilters.directionFilter
+  );
+  const [projectFilter, setProjectFilter] = useState<string>(
+    initialFilters.projectFilter
+  );
+  const [dateFrom, setDateFrom] = useState(initialFilters.dateFrom);
+  const [dateTo, setDateTo] = useState(initialFilters.dateTo);
   const [availableTags, setAvailableTags] = useState<
     Array<{ id: string; name: string }>
   >([]);
@@ -195,13 +288,9 @@ const DocumentsPage = () => {
     direction: "descending",
   });
 
-  const [currentPage, setCurrentPage] = useState(1);
+  const [currentPage, setCurrentPage] = useState(initialFilters.currentPage);
   const documentsPerPage = 25;
   const [isExporting, setIsExporting] = useState(false);
-
-  useEffect(() => {
-    fetchDocuments();
-  }, []);
 
   const parseDateToTs = (input: any): number => {
     if (!input) return 0;
@@ -257,54 +346,186 @@ const DocumentsPage = () => {
     return "--";
   };
 
+  const resolveTagDisplay = useCallback(
+    (value?: string): string => {
+      const rawValue = typeof value === "string" ? value.trim() : "";
+      if (!rawValue) return "--";
+      return (
+        availableTags.find((tag) => String(tag.id) === rawValue)?.name ||
+        rawValue
+      );
+    },
+    [availableTags]
+  );
+
+  const resolveSubTagDisplay = useCallback(
+    (value?: string): string => {
+      const rawValue = typeof value === "string" ? value.trim() : "";
+      if (!rawValue) return "--";
+      return (
+        availableSubtags.find((subtag) => String(subtag.id) === rawValue)
+          ?.name || rawValue
+      );
+    },
+    [availableSubtags]
+  );
+
   const buildAuthHeaders = useCallback((): Record<string, string> => {
-    if (typeof window === "undefined") return {};
-
-    const headers: Record<string, string> = {};
-    const token = window.localStorage.getItem("accessToken");
-    if (token && token.trim() !== "") {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    const userId = window.localStorage.getItem("user_id");
-    headers["X-User-Id"] = userId && userId.trim() !== "" ? userId : "demo";
-
-    const rawRoles = window.localStorage.getItem("user_roles");
-    let rolesHeader = "superadmin";
-    if (rawRoles && rawRoles.trim() !== "") {
-      try {
-        const parsed = JSON.parse(rawRoles);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          rolesHeader = parsed.map((r: any) => String(r)).join(",");
-        } else {
-          rolesHeader = rawRoles;
-        }
-      } catch {
-        rolesHeader = rawRoles;
-      }
-    }
-    headers["X-User-Role"] = rolesHeader;
-    headers["X-User-Roles"] = rolesHeader;
-
-    const orgId = window.localStorage.getItem("org_id");
-    if (orgId && orgId.trim() !== "") {
-      headers["X-Org-Id"] = orgId;
-    }
-    const projId = window.localStorage.getItem("proj_id");
-    if (projId && projId.trim() !== "") {
-      headers["X-Proj-Id"] = projId;
-    }
-
-    return headers;
+    return {};
   }, []);
+
+  useEffect(() => {
+    const filters = filtersFromSearchParams(searchParams);
+    setSearchTerm((current) =>
+      current === filters.searchTerm ? current : filters.searchTerm
+    );
+    setStatusFilter((current) =>
+      current === filters.statusFilter ? current : filters.statusFilter
+    );
+    setTagFilter((current) =>
+      current === filters.tagFilter ? current : filters.tagFilter
+    );
+    setDirectionFilter((current) =>
+      current === filters.directionFilter ? current : filters.directionFilter
+    );
+    setProjectFilter((current) =>
+      current === filters.projectFilter ? current : filters.projectFilter
+    );
+    setDateFrom((current) =>
+      current === filters.dateFrom ? current : filters.dateFrom
+    );
+    setDateTo((current) =>
+      current === filters.dateTo ? current : filters.dateTo
+    );
+    setCurrentPage((current) =>
+      current === filters.currentPage ? current : filters.currentPage
+    );
+  }, [searchParams]);
+
+  const updateDocumentFilters = useCallback(
+    (
+      updates: Partial<DocumentsFilterUrlState>,
+      options: { resetPage?: boolean } = {}
+    ) => {
+      const nextFilters: DocumentsFilterUrlState = {
+        searchTerm,
+        statusFilter,
+        tagFilter,
+        directionFilter,
+        projectFilter,
+        dateFrom,
+        dateTo,
+        currentPage,
+        ...updates,
+      };
+
+      if (options.resetPage) {
+        nextFilters.currentPage = 1;
+      }
+
+      setSearchTerm(nextFilters.searchTerm);
+      setStatusFilter(nextFilters.statusFilter);
+      setTagFilter(nextFilters.tagFilter);
+      setDirectionFilter(nextFilters.directionFilter);
+      setProjectFilter(nextFilters.projectFilter);
+      setDateFrom(nextFilters.dateFrom);
+      setDateTo(nextFilters.dateTo);
+      setCurrentPage(nextFilters.currentPage);
+      setSearchParams(searchParamsFromFilters(nextFilters), { replace: true });
+    },
+    [
+      searchTerm,
+      statusFilter,
+      tagFilter,
+      directionFilter,
+      projectFilter,
+      dateFrom,
+      dateTo,
+      currentPage,
+      setSearchParams,
+    ]
+  );
+
+  const resetDocumentFilters = useCallback(() => {
+    const resetFilters: DocumentsFilterUrlState = {
+      searchTerm: "",
+      statusFilter: "all",
+      tagFilter: "all",
+      directionFilter: "all",
+      projectFilter: "all",
+      dateFrom: "",
+      dateTo: "",
+      currentPage: 1,
+    };
+
+    setSearchTerm(resetFilters.searchTerm);
+    setStatusFilter(resetFilters.statusFilter);
+    setTagFilter(resetFilters.tagFilter);
+    setDirectionFilter(resetFilters.directionFilter);
+    setProjectFilter(resetFilters.projectFilter);
+    setDateFrom(resetFilters.dateFrom);
+    setDateTo(resetFilters.dateTo);
+    setCurrentPage(resetFilters.currentPage);
+    setSearchParams(searchParamsFromFilters(resetFilters), { replace: true });
+  }, [setSearchParams]);
+
+  const hasActiveFilters =
+    searchTerm.trim() !== "" ||
+    statusFilter !== "all" ||
+    tagFilter !== "all" ||
+    directionFilter !== "all" ||
+    projectFilter !== "all" ||
+    dateFrom !== "" ||
+    dateTo !== "";
+
+  useEffect(() => {
+    let mounted = true;
+    const loadEffectiveServices = async () => {
+      try {
+        setEntitlementsLoading(true);
+        const response = await getEffectivePlanServices();
+        if (mounted) {
+          setEffectiveServices(response.effective || { organizations: {}, projects: {} });
+        }
+      } catch (error) {
+        console.warn("[DocumentsPage] Failed to load plan service entitlements", error);
+        if (mounted) {
+          setEffectiveServices({ organizations: {}, projects: {} });
+        }
+      } finally {
+        if (mounted) setEntitlementsLoading(false);
+      }
+    };
+
+    loadEffectiveServices();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  const isDraftingEnabledForDocument = useCallback(
+    (doc: Document): boolean => {
+      if (entitlementsLoading) return false;
+      if (doc.projectId && effectiveServices.projects[doc.projectId]) {
+        return Boolean(effectiveServices.projects[doc.projectId].drafting_enabled);
+      }
+      if (doc.organizationId && effectiveServices.organizations[doc.organizationId]) {
+        return Boolean(
+          effectiveServices.organizations[doc.organizationId].drafting_enabled
+        );
+      }
+      return false;
+    },
+    [effectiveServices, entitlementsLoading]
+  );
 
   const fetchDocuments = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     const params = new URLSearchParams();
-    if (searchTerm) {
-      params.append("search", searchTerm);
+    if (searchTerm.trim()) {
+      params.append("search", searchTerm.trim());
     }
     if (projectFilter && projectFilter !== "all") {
       params.append("project_id", projectFilter);
@@ -312,18 +533,20 @@ const DocumentsPage = () => {
     if (statusFilter !== "all") {
       params.append("status", statusFilter);
     }
-    // Tag filter is applied client-side to avoid backend mismatch of IDs vs names
-    // if (tagFilter !== "all") {
-    //   params.append("tags", tagFilter);
-    // }
+    if (tagFilter !== "all") {
+      params.append("tags", tagFilter);
+    }
+    if (dateFrom) {
+      params.append("date_from", dateFrom);
+    }
+    if (dateTo) {
+      params.append("date_to", dateTo);
+    }
     if (directionFilter !== "all") {
       params.append(
         "uploadType",
         directionFilter === "Incoming" ? "incoming" : "outgoing"
       );
-    }
-    if (projectFilter !== "all" && projectFilter) {
-      params.append("project_id", projectFilter);
     }
     const skip = (currentPage - 1) * documentsPerPage;
     params.append("skip", String(skip));
@@ -332,7 +555,7 @@ const DocumentsPage = () => {
 
     try {
       const headers = buildAuthHeaders();
-      const response = await fetch(url, {
+      const response = await authenticatedFetch(url, {
         headers,
       });
 
@@ -431,6 +654,8 @@ const DocumentsPage = () => {
             subTag: doc.subTags.length > 0 ? doc.subTags[0] : "",
             status: status as Document["status"],
             project: projectDisplay || "Unknown Project",
+            organizationId: doc.organization_id ? String(doc.organization_id) : undefined,
+            projectId: doc.project_id ? String(doc.project_id) : undefined,
             createdAt: uploadDateString || null,
             uploadDate: uploadDateString || null,
             uploadDateTs: parseDateToTs(uploadDateSource),
@@ -452,6 +677,8 @@ const DocumentsPage = () => {
     tagFilter,
     directionFilter,
     projectFilter,
+    dateFrom,
+    dateTo,
     buildAuthHeaders,
   ]);
 
@@ -465,7 +692,7 @@ const DocumentsPage = () => {
       const headers = buildAuthHeaders();
 
       // Organizations
-      const orgRes = await fetch(joinApiUrl("/organizations"), { headers });
+      const orgRes = await authenticatedFetch(joinApiUrl("/organizations"), { headers });
       if (orgRes.ok) {
         const orgData = await orgRes.json();
         const mapped = Array.isArray(orgData)
@@ -482,7 +709,7 @@ const DocumentsPage = () => {
       }
 
       // Projects
-      const projRes = await fetch(joinApiUrl("/projects"), { headers });
+      const projRes = await authenticatedFetch(joinApiUrl("/projects"), { headers });
       if (projRes.ok) {
         const projData = await projRes.json();
         const mapped = Array.isArray(projData)
@@ -508,7 +735,7 @@ const DocumentsPage = () => {
     try {
       const headers = buildAuthHeaders();
 
-      const res = await fetch(joinApiUrl("/users"), { headers });
+      const res = await authenticatedFetch(joinApiUrl("/users"), { headers });
       if (res.ok) {
         const data = await res.json();
         const rawUsers: any[] = Array.isArray(data)
@@ -566,7 +793,7 @@ const DocumentsPage = () => {
     const loadTags = async () => {
       try {
         const headers = buildAuthHeaders();
-        const res = await fetch(joinApiUrl("/tags"), { headers });
+        const res = await authenticatedFetch(joinApiUrl("/tags"), { headers });
         if (res.ok) {
           const data = await res.json();
           console.log("Tags API response:", data); // Debug log
@@ -586,7 +813,7 @@ const DocumentsPage = () => {
           const allSubtags: Array<{ id: string; name: string }> = [];
           for (const tag of tags) {
             try {
-              const subtagRes = await fetch(
+              const subtagRes = await authenticatedFetch(
                 joinApiUrl(`/tags/${tag.id}/subtags`),
                 { headers }
               );
@@ -796,41 +1023,12 @@ const DocumentsPage = () => {
     return sortConfig.direction === "ascending" ? cmp : -cmp;
   });
 
-  const filteredDocuments = sortedDocuments.filter((doc) => {
-    const search = searchTerm.toLowerCase();
-    const matchesSearch =
-      (doc.name || "").toLowerCase().includes(search) ||
-      (doc.subject || "").toLowerCase().includes(search) ||
-      (doc.letterNo || "").toLowerCase().includes(search);
-
-    const matchesStatus = statusFilter === "all" || doc.status === statusFilter;
-
-    // Client-side fallback for tag filtering:
-    // - If backend returned names in doc.tag, compare by selected tag's name
-    // - If backend expects IDs and returned ID-like tag in doc.tag, also compare by raw value
-    const selectedTagName =
-      tagFilter !== "all"
-        ? availableTags.find((t) => t.id === tagFilter)?.name ?? tagFilter
-        : null;
-    const matchesTag =
-      tagFilter === "all" ||
-      (selectedTagName !== null &&
-        (doc.tag || "").toString().trim().toLowerCase() ===
-          selectedTagName.toString().trim().toLowerCase()) ||
-      (doc.tag || "").toString().trim().toLowerCase() ===
-        tagFilter.toString().trim().toLowerCase();
-
-    const matchesDirection =
-      directionFilter === "all" || doc.direction === directionFilter;
-
-    return matchesSearch && matchesStatus && matchesTag && matchesDirection;
-  });
+  const filteredDocuments = sortedDocuments;
 
   const totalPages = Math.ceil(totalDocuments / documentsPerPage);
   const startIndex = (currentPage - 1) * documentsPerPage;
 
-  // Since we're getting paginated data from the backend, we don't need to slice again
-  // But apply client-side sorting/filtering on the current page result
+  // Backend applies filters before pagination; the frontend only sorts the current page.
   const paginatedDocuments = filteredDocuments;
 
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -858,7 +1056,7 @@ const DocumentsPage = () => {
 
       try {
         const headers = buildAuthHeaders();
-        const response = await fetch(joinApiUrl(`/documents/${docId}`), {
+        const response = await authenticatedFetch(joinApiUrl(`/documents/${docId}`), {
           method: "DELETE",
           headers,
         });
@@ -887,7 +1085,8 @@ const DocumentsPage = () => {
     try {
       setIsExporting(true);
       const params = new URLSearchParams();
-      if (searchTerm) params.append("search", searchTerm);
+      if (searchTerm.trim()) params.append("search", searchTerm.trim());
+      if (projectFilter !== "all") params.append("project_id", projectFilter);
       if (statusFilter !== "all") params.append("status", statusFilter);
       if (directionFilter !== "all") {
         params.append(
@@ -896,50 +1095,36 @@ const DocumentsPage = () => {
         );
       }
       if (tagFilter !== "all") {
-        // backend expects tags as ObjectIds (string), will ignore invalid gracefully
         params.append("tags", tagFilter);
+      }
+      if (dateFrom) {
+        params.append("date_from", dateFrom);
+      }
+      if (dateTo) {
+        params.append("date_to", dateTo);
       }
 
       const url = `${joinApiUrl("/documents/export")}?${params.toString()}`;
 
-      let token = localStorage.getItem("accessToken") || "";
-      if (!token) {
-        toast.error("Session expired", {
-          description: "Please log in again to export.",
-        });
-        logoutAndRedirect("/login");
-        return;
-      }
-
       // Ensure token not near expiry; ignore errors (we retry on 401 below)
       try {
         await ensureValidToken(120);
-        token = localStorage.getItem("accessToken") || token;
       } catch {
         // no-op
       }
 
-      let headers = buildAuthHeaders();
-      if (token && token.trim() !== "") {
-        headers = {
-          ...headers,
-          Authorization: `Bearer ${token}`,
-        };
-      }
+      const headers = buildAuthHeaders();
 
-      let resp = await fetch(url, {
+      let resp = await authenticatedFetch(url, {
         headers,
       });
 
       // If unauthorized, try a single refresh and retry once
       if (resp.status === 401) {
         try {
-          const newToken = await refreshToken();
+          await refreshToken();
           const retryHeaders = buildAuthHeaders();
-          if (newToken && newToken.trim() !== "") {
-            retryHeaders.Authorization = `Bearer ${newToken}`;
-          }
-          resp = await fetch(url, {
+          resp = await authenticatedFetch(url, {
             headers: retryHeaders,
           });
         } catch {
@@ -976,13 +1161,22 @@ const DocumentsPage = () => {
     } finally {
       setIsExporting(false);
     }
-  }, [searchTerm, statusFilter, directionFilter, tagFilter, buildAuthHeaders]);
+  }, [
+    searchTerm,
+    projectFilter,
+    statusFilter,
+    directionFilter,
+    tagFilter,
+    dateFrom,
+    dateTo,
+    buildAuthHeaders,
+  ]);
 
   const handleDownloadDocument = useCallback(
     async (docId: string, docName: string) => {
       try {
         const headers = buildAuthHeaders();
-        const response = await fetch(joinApiUrl(`/documents/${docId}`), {
+        const response = await authenticatedFetch(joinApiUrl(`/documents/${docId}`), {
           headers,
         });
 
@@ -1148,12 +1342,7 @@ const DocumentsPage = () => {
           ...buildAuthHeaders(),
           "Content-Type": "application/json",
         };
-        if (payload.organization_id)
-          headers["X-Org-Id"] = String(payload.organization_id);
-        if (payload.project_id)
-          headers["X-Proj-Id"] = String(payload.project_id);
-
-        const res = await fetch(joinApiUrl("/letters"), {
+        const res = await authenticatedFetch(joinApiUrl("/letters"), {
           method: "POST",
           headers,
           body: JSON.stringify(payload),
@@ -1247,16 +1436,55 @@ const DocumentsPage = () => {
                   placeholder="Search by name, subject, letter number..."
                   className="pl-10"
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) =>
+                    updateDocumentFilters(
+                      { searchTerm: e.target.value },
+                      { resetPage: true }
+                    )
+                  }
                 />
               </div>
 
               <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
                 <Filter size={18} className="text-gray-500 hidden md:block" />
 
+                <Input
+                  type="date"
+                  value={dateFrom}
+                  aria-label="Date from"
+                  title="Date from"
+                  onChange={(e) =>
+                    updateDocumentFilters(
+                      { dateFrom: e.target.value },
+                      { resetPage: true }
+                    )
+                  }
+                  className="w-full md:w-[150px]"
+                />
+
+                <Input
+                  type="date"
+                  value={dateTo}
+                  min={dateFrom || undefined}
+                  aria-label="Date to"
+                  title="Date to"
+                  onChange={(e) =>
+                    updateDocumentFilters(
+                      { dateTo: e.target.value },
+                      { resetPage: true }
+                    )
+                  }
+                  className="w-full md:w-[150px]"
+                />
+
                 <Select
                   value={directionFilter}
-                  onValueChange={setDirectionFilter}
+                  onValueChange={(value) =>
+                    updateDocumentFilters(
+                      { directionFilter: value },
+                      { resetPage: true }
+                    )
+                  }
                 >
                   <SelectTrigger className="w-full md:w-[150px]">
                     <SelectValue placeholder="Direction" />
@@ -1268,7 +1496,15 @@ const DocumentsPage = () => {
                   </SelectContent>
                 </Select>
 
-                <Select value={projectFilter} onValueChange={setProjectFilter}>
+                <Select
+                  value={projectFilter}
+                  onValueChange={(value) =>
+                    updateDocumentFilters(
+                      { projectFilter: value },
+                      { resetPage: true }
+                    )
+                  }
+                >
                   <SelectTrigger className="w-full md:w-[180px]">
                     <SelectValue placeholder="Project" />
                   </SelectTrigger>
@@ -1282,7 +1518,15 @@ const DocumentsPage = () => {
                   </SelectContent>
                 </Select>
 
-                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                <Select
+                  value={statusFilter}
+                  onValueChange={(value) =>
+                    updateDocumentFilters(
+                      { statusFilter: value },
+                      { resetPage: true }
+                    )
+                  }
+                >
                   <SelectTrigger className="w-full md:w-[150px]">
                     <SelectValue placeholder="Status" />
                   </SelectTrigger>
@@ -1341,7 +1585,15 @@ const DocumentsPage = () => {
                   </SelectContent>
                 </Select>
 
-                <Select value={tagFilter} onValueChange={setTagFilter}>
+                <Select
+                  value={tagFilter}
+                  onValueChange={(value) =>
+                    updateDocumentFilters(
+                      { tagFilter: value },
+                      { resetPage: true }
+                    )
+                  }
+                >
                   <SelectTrigger className="w-full md:w-[150px]">
                     <SelectValue placeholder="Tag" />
                   </SelectTrigger>
@@ -1354,6 +1606,18 @@ const DocumentsPage = () => {
                     ))}
                   </SelectContent>
                 </Select>
+
+                {hasActiveFilters && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full md:w-auto"
+                    onClick={resetDocumentFilters}
+                  >
+                    <X size={14} className="mr-2" />
+                    Reset
+                  </Button>
+                )}
               </div>
             </div>
 
@@ -1382,26 +1646,29 @@ const DocumentsPage = () => {
                 </div>
                 <h3 className="text-lg font-medium">No Documents Found</h3>
                 <p className="text-sm text-gray-500 mt-1 max-w-md mx-auto">
-                  {searchTerm ||
-                  statusFilter !== "all" ||
-                  tagFilter !== "all" ||
-                  directionFilter !== "all"
+                  {hasActiveFilters
                     ? "No documents match your current filters. Try adjusting your search criteria."
                     : "You haven't uploaded any documents yet. Start by uploading your first document."}
                 </p>
-                {!searchTerm &&
-                  statusFilter === "all" &&
-                  tagFilter === "all" &&
-                  directionFilter === "all" && (
-                    <Button
-                      onClick={() => navigate("/upload")}
-                      variant="outline"
-                      className="mt-4"
-                    >
-                      <Upload size={14} className="mr-2" />
-                      Upload Document
-                    </Button>
-                  )}
+                {hasActiveFilters ? (
+                  <Button
+                    onClick={resetDocumentFilters}
+                    variant="outline"
+                    className="mt-4"
+                  >
+                    <X size={14} className="mr-2" />
+                    Reset Filters
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => navigate("/upload")}
+                    variant="outline"
+                    className="mt-4"
+                  >
+                    <Upload size={14} className="mr-2" />
+                    Upload Document
+                  </Button>
+                )}
               </div>
             ) : (
               <>
@@ -1483,7 +1750,13 @@ const DocumentsPage = () => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {paginatedDocuments.map((doc) => (
+                      {paginatedDocuments.map((doc) => {
+                        const draftingEnabled = isDraftingEnabledForDocument(doc);
+                        const draftDisabledReason = entitlementsLoading
+                          ? "Checking drafting service availability..."
+                          : "Drafting service is not active for this project or organization";
+
+                        return (
                         <TableRow key={doc.id} className="text-sm">
                           <TableCell>
                             <div className="w-8 h-8 rounded-md bg-gray-100 flex items-center justify-center">
@@ -1512,42 +1785,17 @@ const DocumentsPage = () => {
                           <TableCell className="whitespace-pre-wrap break-words">
                             {doc.subject}
                           </TableCell>
-                          <TableCell>
-                            {(() => {
-                              const tagName =
-                                availableTags.find(
-                                  (t) => String(t.id) === String(doc.tag)
-                                )?.name ||
-                                availableSubtags.find(
-                                  (t) => String(t.id) === String(doc.tag)
-                                )?.name ||
-                                doc.tag;
-                              console.log("doc.tag:", doc.tag); // Raw value
-                              console.log("availableTags:", availableTags); // Array to search
-                              console.log(
-                                "availableSubtags:",
-                                availableSubtags
-                              );
-                              console.log(
-                                `Tag mapping for doc ${doc.id}: ${doc.tag} -> ${tagName}`
-                              );
-                              return tagName;
-                            })()}
+                          <TableCell
+                            className="max-w-[150px] truncate"
+                            title={resolveTagDisplay(doc.tag)}
+                          >
+                            {resolveTagDisplay(doc.tag)}
                           </TableCell>
-                          <TableCell className="max-w-[150px] truncate">
-                            {(() => {
-                              const subTagName =
-                                availableTags.find((t) => t.id === doc.subTag)
-                                  ?.name ||
-                                availableSubtags.find(
-                                  (t) => t.id === doc.subTag
-                                )?.name ||
-                                doc.subTag;
-                              console.log(
-                                `SubTag mapping for doc ${doc.id}: ${doc.subTag} -> ${subTagName}`
-                              );
-                              return subTagName;
-                            })()}
+                          <TableCell
+                            className="max-w-[150px] truncate"
+                            title={resolveSubTagDisplay(doc.subTag)}
+                          >
+                            {resolveSubTagDisplay(doc.subTag)}
                           </TableCell>
                           <TableCell>
                             <Badge
@@ -1642,6 +1890,17 @@ const DocumentsPage = () => {
                                         document
                                       </Badge>
                                     </DropdownMenuItem>
+                                  ) : !draftingEnabled ? (
+                                    <DropdownMenuItem disabled>
+                                      <PenSquare size={14} className="mr-2" />
+                                      Request Draft
+                                      <Badge
+                                        variant="outline"
+                                        className="ml-2 text-[10px]"
+                                      >
+                                        {draftDisabledReason}
+                                      </Badge>
+                                    </DropdownMenuItem>
                                   ) : (
                                     <DropdownMenuItem
                                       onClick={() => handleRequestDraft(doc.id)}
@@ -1702,7 +1961,8 @@ const DocumentsPage = () => {
                             </div>
                           </TableCell>
                         </TableRow>
-                      ))}
+                        );
+                      })}
                     </TableBody>
                   </Table>
                 </div>
@@ -1721,7 +1981,9 @@ const DocumentsPage = () => {
                         variant="outline"
                         size="sm"
                         onClick={() =>
-                          setCurrentPage((p) => Math.max(1, p - 1))
+                          updateDocumentFilters({
+                            currentPage: Math.max(1, currentPage - 1),
+                          })
                         }
                         disabled={currentPage === 1}
                       >
@@ -1737,7 +1999,9 @@ const DocumentsPage = () => {
                             }
                             size="sm"
                             className="w-8 h-8"
-                            onClick={() => setCurrentPage(i + 1)}
+                            onClick={() =>
+                              updateDocumentFilters({ currentPage: i + 1 })
+                            }
                           >
                             {i + 1}
                           </Button>
@@ -1748,7 +2012,9 @@ const DocumentsPage = () => {
                         variant="outline"
                         size="sm"
                         onClick={() =>
-                          setCurrentPage((p) => Math.min(totalPages, p + 1))
+                          updateDocumentFilters({
+                            currentPage: Math.min(totalPages, currentPage + 1),
+                          })
                         }
                         disabled={currentPage === totalPages}
                       >

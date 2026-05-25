@@ -13,12 +13,20 @@ import {
   ConcernCreateInput,
   ConcernUpdateInput,
   NotificationListResponse,
+  NotificationPreference,
+  NotificationPreferenceUpdate,
+  ProjectNotificationSubscription,
   PartyListResponse,
 } from "../types/api";
 
 import axios from "axios";
 import { API_BASE_URL, joinApiUrl } from "../config/api";
-import { ensureValidToken, refreshToken, logoutAndRedirect } from "./auth";
+import {
+  ensureValidToken,
+  refreshToken,
+  redirectToLoginAfterSessionExpiry,
+} from "./auth";
+import { authenticatedFetch } from "./http";
 
 // Additional types for the enhanced API
 export interface Organization {
@@ -466,8 +474,6 @@ class EnhancedApiService {
     // Prompt to extend session if token near expiry
     await ensureValidToken(120);
 
-    let token = window.localStorage.getItem("accessToken") || "";
-
     const headers: Record<string, string> = {};
 
     // Copy existing headers if they exist
@@ -481,48 +487,23 @@ class EnhancedApiService {
       headers["Content-Type"] = "application/json";
     }
 
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    } else {
-      // Attach lightweight demo headers only when no JWT is present
-      const userId = window.localStorage.getItem("user_id") || "user_demo";
-      const userRoles = window.localStorage.getItem("user_roles") || "";
-      const orgId = window.localStorage.getItem("org_id");
-      const projId = window.localStorage.getItem("proj_id");
-      headers["X-User-Id"] = userId;
-      if (userRoles) {
-        headers["X-User-Role"] = userRoles;
-      }
-      if (orgId) headers["X-Org-Id"] = orgId;
-      if (projId) headers["X-Proj-Id"] = projId;
-
-      const isLettersEndpoint =
-        endpoint.startsWith("/letters") || endpoint.includes("/letters?");
-      if (isLettersEndpoint) {
-        headers["X-Use-Dev-Auth"] = "true";
-      }
-    }
-
     // Helper to perform fetch
     const doFetch = async () =>
-      fetch(`${this.baseURL}${endpoint}`, {
+      authenticatedFetch(`${this.baseURL}${endpoint}`, {
         ...requestOptions,
+        credentials: requestOptions.credentials ?? "include",
         headers,
       });
 
     let response = await doFetch();
 
     // If unauthorized, attempt a single refresh then retry once
-    if (response.status === 401 && token) {
+    if (response.status === 401) {
       try {
         await refreshToken();
-        token = window.localStorage.getItem("accessToken") || "";
-        if (token) {
-          headers["Authorization"] = `Bearer ${token}`;
-        }
         response = await doFetch();
       } catch {
-        logoutAndRedirect("/");
+        redirectToLoginAfterSessionExpiry();
         throw new Error("Session expired. Redirecting to login.");
       }
     }
@@ -727,6 +708,9 @@ class EnhancedApiService {
     params: {
       unread_only?: boolean;
       category?: string;
+      event_type?: string;
+      project_id?: string;
+      search?: string;
       limit?: number;
       skip?: number;
     } = {},
@@ -737,6 +721,15 @@ class EnhancedApiService {
     }
     if (params.category) {
       search.set("category", params.category);
+    }
+    if (params.event_type) {
+      search.set("event_type", params.event_type);
+    }
+    if (params.project_id) {
+      search.set("project_id", params.project_id);
+    }
+    if (params.search) {
+      search.set("search", params.search);
     }
     if (params.limit !== undefined) {
       search.set("limit", String(params.limit));
@@ -756,15 +749,81 @@ class EnhancedApiService {
     });
   }
 
-  async markAllNotificationsRead(): Promise<{ updated: number }> {
+  async executeNotificationAction(
+    id: string,
+    action: string,
+    payload: Record<string, any> = {},
+  ): Promise<{ status: string; action: string; result: Record<string, any> }> {
+    return this.request<{ status: string; action: string; result: Record<string, any> }>(
+      `/notifications/${id}/action`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action, payload }),
+      },
+    );
+  }
+
+  async markAllNotificationsRead(filters?: {
+    category?: string;
+    event_type?: string;
+    project_id?: string;
+  }): Promise<{ updated: number }> {
     return this.request<{ updated: number }>(`/notifications/read-all`, {
       method: "POST",
+      body: filters ? JSON.stringify(filters) : undefined,
     });
   }
 
   async getUnreadNotificationCount(): Promise<{ unread_count: number }> {
     return this.request<{ unread_count: number }>(
       `/notifications/unread-count`,
+    );
+  }
+
+  async getNotificationPreferences(): Promise<NotificationPreference> {
+    return this.request<NotificationPreference>(`/notifications/preferences`);
+  }
+
+  async updateNotificationPreferences(
+    data: NotificationPreferenceUpdate,
+  ): Promise<NotificationPreference> {
+    return this.request<NotificationPreference>(`/notifications/preferences`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async sendNotificationTestEmail(data?: {
+    target_user_id?: string;
+    event_type?: string;
+  }): Promise<{ sent: boolean; delivery_log?: Record<string, any> }> {
+    return this.request<{ sent: boolean; delivery_log?: Record<string, any> }>(
+      `/notification-test/email`,
+      {
+        method: "POST",
+        body: JSON.stringify(data || {}),
+      },
+    );
+  }
+
+  async getProjectNotificationSettings(
+    projectId: string,
+  ): Promise<ProjectNotificationSubscription> {
+    return this.request<ProjectNotificationSubscription>(
+      `/projects/${projectId}/notification-settings`,
+    );
+  }
+
+  async updateProjectNotificationSettings(
+    projectId: string,
+    data: Partial<Pick<ProjectNotificationSubscription, "subscribed" | "event_settings">>,
+  ): Promise<ProjectNotificationSubscription> {
+    return this.request<ProjectNotificationSubscription>(
+      `/projects/${projectId}/notification-settings`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      },
     );
   }
 
@@ -891,47 +950,24 @@ class EnhancedApiService {
   async downloadBulkUploadTemplate(): Promise<Blob> {
     await ensureValidToken(120);
 
-    const token = window.localStorage.getItem("accessToken") || "";
     const headers: Record<string, string> = {
       Accept: "text/csv",
     };
 
-    const userId = window.localStorage.getItem("user_id") || "user_demo";
-    const userRoles = window.localStorage.getItem("user_roles") || "";
-    headers["X-User-Id"] = userId;
-    if (userRoles) {
-      headers["X-User-Role"] = userRoles;
-    }
-    const orgId = window.localStorage.getItem("org_id");
-    const projId = window.localStorage.getItem("proj_id");
-    if (orgId) {
-      headers["X-Org-Id"] = orgId;
-    }
-    if (projId) {
-      headers["X-Proj-Id"] = projId;
-    }
-    if (token) {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
     const doFetch = async () =>
-      fetch(`${this.baseURL}/documents/bulk-upload/template`, {
+      authenticatedFetch(`${this.baseURL}/documents/bulk-upload/template`, {
         method: "GET",
         headers,
       });
 
     let response = await doFetch();
 
-    if (response.status === 401 && token) {
+    if (response.status === 401) {
       try {
         await refreshToken();
-        const refreshedToken = window.localStorage.getItem("accessToken") || "";
-        if (refreshedToken) {
-          headers["Authorization"] = `Bearer ${refreshedToken}`;
-        }
         response = await doFetch();
       } catch {
-        logoutAndRedirect("/");
+        redirectToLoginAfterSessionExpiry();
         throw new Error("Session expired. Redirecting to login.");
       }
     }
@@ -1363,24 +1399,43 @@ class EnhancedApiService {
     return this.request<Role>(`/roles/${id}`);
   }
 
-  async createRole(roleData: Omit<Role, "_id">): Promise<Role> {
+  async createRole(
+    roleData: Omit<Role, "_id">,
+    options?: { stepUpToken?: string },
+  ): Promise<Role> {
     // Backend uses POST /roles (no trailing slash)
     return this.request<Role>("/roles", {
       method: "POST",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
       body: JSON.stringify(roleData),
     });
   }
 
-  async updateRole(id: string, roleData: Partial<Role>): Promise<Role> {
+  async updateRole(
+    id: string,
+    roleData: Partial<Role>,
+    options?: { stepUpToken?: string },
+  ): Promise<Role> {
     return this.request<Role>(`/roles/${id}`, {
       method: "PUT",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
       body: JSON.stringify(roleData),
     });
   }
 
-  async deleteRole(id: string): Promise<{ message: string }> {
+  async deleteRole(
+    id: string,
+    options?: { stepUpToken?: string },
+  ): Promise<{ message: string }> {
     return this.request<{ message: string }>(`/roles/${id}`, {
       method: "DELETE",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
     });
   }
 
@@ -1668,12 +1723,7 @@ class EnhancedApiService {
     }>;
     structure_summary: string;
   }> {
-    const orgId = window.localStorage.getItem("org_id") || undefined;
-    const projId = window.localStorage.getItem("proj_id") || undefined;
-
     const payload: any = { ...data };
-    if (orgId) payload.organization_id = orgId;
-    if (projId) payload.project_id = projId;
 
     return this.request<any>("/ai-assistant/generate-draft", {
       method: "POST",
@@ -1691,12 +1741,7 @@ class EnhancedApiService {
     points?: string;
     target_letter_id?: string;
   }): Promise<DeepPlanningResponse> {
-    const orgId = window.localStorage.getItem("org_id") || undefined;
-    const projId = window.localStorage.getItem("proj_id") || undefined;
-
     const payload: any = { ...data };
-    if (orgId) payload.organization_id = orgId;
-    if (projId) payload.project_id = projId;
 
     return this.request<DeepPlanningResponse>("/deep-planning/generate-draft", {
       method: "POST",

@@ -1,14 +1,16 @@
-﻿# services/permission_service.py
+# services/permission_service.py
 
 import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
 from uuid import uuid4
+import json
 
 from bson import ObjectId
 
 from ..core.config import settings
 from ..core.database import get_database
+from ..core.permissions import LEGACY_PERMISSION_ALIASES, equivalent_permissions
 from ..models.permission import (
     Permission,
     PermissionCreate,
@@ -20,6 +22,7 @@ from ..models.permission import (
 )
 from ..utils.error_handler import ValidationError
 from ..utils.audit_logger import AuditLogger
+from .runtime_state import get_runtime_state
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,10 @@ class PermissionService:
         "email": PermissionCategory.EMAIL_MANAGEMENT,
         "system": PermissionCategory.SYSTEM_ADMINISTRATION,
         "audit": PermissionCategory.AUDIT_MANAGEMENT,
+        "dms": PermissionCategory.DOCUMENT_MANAGEMENT,
+        "drafting": PermissionCategory.DRAFTING_MANAGEMENT,
+        "billing": PermissionCategory.BILLING_MANAGEMENT,
+        "subscription": PermissionCategory.SUBSCRIPTION_MANAGEMENT,
     }
 
     _VALID_ACTIONS = {level.value for level in PermissionLevel}
@@ -120,6 +127,7 @@ class PermissionService:
         self.audit_logger = AuditLogger()
         # Backward-compatible permission aliases so legacy role strings still satisfy new router checks.
         self._permission_aliases = {
+            **LEGACY_PERMISSION_ALIASES,
             # Organizations
             "organizations:read": ["orgs:view"],
             "organizations:create": ["orgs:create"],
@@ -137,9 +145,13 @@ class PermissionService:
             "documents:comment": ["docs:comment", "letters:comment"],
             "documents:share": ["docs:share"],
             "documents:approve": ["docs:approve"],
+            "documents:download_all": ["docs:download_all", "docs:download-all"],
             # Tags
             "tags:read": ["docs:view", "documents:read"],
         }
+        for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
+            for alias in aliases:
+                self._permission_aliases.setdefault(alias, []).append(canonical)
         
     async def _get_db(self):
         """Get database connection."""
@@ -600,7 +612,7 @@ class PermissionService:
             return False
 
         # Build a set of equivalent permission keys (requested key + aliases + canonical names)
-        lookup_keys = {permission_key}
+        lookup_keys = equivalent_permissions(permission_key) or {permission_key}
         aliases = self._permission_aliases.get(permission_key, [])
         lookup_keys.update(aliases)
         # If caller passes an alias, also add its canonical target for matching
@@ -610,6 +622,48 @@ class PermissionService:
                 lookup_keys.update(alias_list)
 
         granted = False
+        redis = None
+        cache_key = f"user_perms:{user_id}"
+        
+        try:
+            runtime = get_runtime_state()
+            redis = await runtime.get_redis()
+            if redis is not None:
+                cached_data = await redis.get(cache_key)
+                if cached_data:
+                    cache_parsed = json.loads(cached_data)
+                    raw_permissions = cache_parsed.get("raw_permissions", [])
+                    role_names = set(cache_parsed.get("role_names", []))
+                    perm_names = set(cache_parsed.get("perm_names", []))
+                    
+                    if "*" in raw_permissions or permission_key in raw_permissions:
+                        granted = True
+                    elif lookup_keys and set(raw_permissions) & lookup_keys:
+                        granted = True
+                    else:
+                        granted = bool(lookup_keys & perm_names) or "*" in perm_names
+
+                    if permission_key == "users:create":
+                        if role_names & {"superadmin", "orgadmin", "projectadmin"}:
+                            granted = True
+                        else:
+                            granted = False
+
+                    if not granted and permission_key == "users:read":
+                        if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
+                            granted = True
+                    
+                    if log:
+                        try:
+                            await self.audit_logger.log_permission_check(
+                                user_id, permission_key, granted, resource_type=resource_type, resource_id=resource_id
+                            )
+                        except Exception:
+                            pass
+                    return granted
+        except Exception as e:
+            logger.warning(f"Failed to read permission cache for {user_id}: {e}")
+
         try:
             db = await self._get_db()
             try:
@@ -665,6 +719,16 @@ class PermissionService:
                 if not granted and permission_key == "users:read":
                     if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                         granted = True
+                        
+                if redis is not None:
+                    try:
+                        await redis.set(cache_key, json.dumps({
+                            "raw_permissions": raw_permissions,
+                            "role_names": list(role_names),
+                            "perm_names": list(perm_names)
+                        }), ex=3600)
+                    except Exception as e:
+                        logger.warning(f"Failed to write permission cache for {user_id}: {e}")
         except Exception as exc:
             logger.error(f"Failed permission check for user {user_id}: {exc}")
             granted = False
@@ -911,6 +975,14 @@ class PermissionService:
                 return PermissionCategory(category_value).value
             except ValueError:
                 pass
+        if resource.startswith("dms."):
+            return PermissionCategory.DOCUMENT_MANAGEMENT.value
+        if resource.startswith("drafting."):
+            return PermissionCategory.DRAFTING_MANAGEMENT.value
+        if resource.startswith("billing."):
+            return PermissionCategory.BILLING_MANAGEMENT.value
+        if resource.startswith("subscription."):
+            return PermissionCategory.SUBSCRIPTION_MANAGEMENT.value
         category_enum = self._RESOURCE_CATEGORY_MAP.get(
             resource, PermissionCategory.SYSTEM_ADMINISTRATION
         )
@@ -933,15 +1005,16 @@ class PermissionService:
             legacy_identifier if isinstance(legacy_identifier, str) else None
         ) or (doc.get("code") if isinstance(doc.get("code"), str) else None)
         canonical_name = None
-        for candidate in (raw_name, alt_identifier, fallback_identifier):
-            if isinstance(candidate, str) and ":" in candidate:
+        raw_db_identifier = raw_db_id if isinstance(raw_db_id, str) else None
+        for candidate in (raw_name, alt_identifier, raw_db_identifier, fallback_identifier):
+            if isinstance(candidate, str) and (":" in candidate or "." in candidate):
                 canonical_name = candidate.strip()
                 break
         if not canonical_name:
             base_value = raw_name or alt_identifier or "system:read"
             base_str = str(base_value).strip()
             base_sanitized = base_str.lower().replace(" ", "_")
-            canonical_name = base_sanitized if ":" in base_sanitized else f"{base_sanitized}:read"
+            canonical_name = base_sanitized if ":" in base_sanitized or "." in base_sanitized else f"{base_sanitized}:read"
         doc["name"] = canonical_name
 
         original_label = doc.get("label") or doc.get("display_name")
@@ -954,12 +1027,12 @@ class PermissionService:
         resource_part = doc.get("resource")
         action_part = doc.get("action")
         if not resource_part or not isinstance(resource_part, str):
-            resource_part = canonical_name.split(":", 1)[0]
+            resource_part = canonical_name.split(":", 1)[0] if ":" in canonical_name else ".".join(canonical_name.split(".")[:-1])
         resource_part = resource_part.strip().lower() or "system"
         doc["resource"] = resource_part
 
         if not action_part or not isinstance(action_part, str):
-            action_part = canonical_name.split(":", 1)[1] if ":" in canonical_name else None
+            action_part = canonical_name.split(":", 1)[1] if ":" in canonical_name else canonical_name.split(".")[-1]
         doc["action"] = self._normalize_action(action_part)
 
         doc["category"] = self._normalize_category(resource_part, doc.get("category"))

@@ -38,6 +38,7 @@ const LetterWorkflowPage = () => {
     selectedLetter,
     setSelectedLetter,
     users,
+    currentUser,
     organizations,
     projects,
     letters,
@@ -45,6 +46,8 @@ const LetterWorkflowPage = () => {
     error,
     handleLetterInitiation,
     handleInputRequest,
+    assignContractDrafter,
+    assignReviewer,
     formatDate,
     fetchLetters,
   } = useLetterWorkflow();
@@ -205,10 +208,64 @@ const LetterWorkflowPage = () => {
     [letters, users]
   );
 
+  const currentUserRoles = useMemo(() => {
+    const rawRoles = currentUser?.roles;
+    if (Array.isArray(rawRoles)) {
+      return rawRoles.map((role) => String(role).toLowerCase());
+    }
+    if (typeof rawRoles === 'string') {
+      return rawRoles.split(',').map((role) => role.trim().toLowerCase());
+    }
+    return [];
+  }, [currentUser]);
+
+  const canAssignDrafter = useMemo(() => {
+    const managerRoles = new Set([
+      'superadmin',
+      'contraclaim_drafting_manager',
+      'contract_manager',
+      'contract manager',
+      'headcontract',
+      'contractmgr_org',
+      'contractmgr_proj',
+    ]);
+    return currentUserRoles.some((role) => managerRoles.has(role));
+  }, [currentUserRoles]);
+
+  const isContractLetterDrafter = useMemo(() => {
+    const drafterRoles = new Set([
+      'contraclaim_expert_drafter',
+      'contract_letter_drafter',
+      'contract letter drafter',
+      'letter_drafter',
+      'letter drafter',
+      'contract_drafter',
+      'contract drafter',
+    ]);
+    return (
+      currentUserRoles.some((role) => drafterRoles.has(role)) &&
+      !canAssignDrafter
+    );
+  }, [canAssignDrafter, currentUserRoles]);
+
+  const visibleLetters = useMemo(() => {
+    if (!isContractLetterDrafter || !currentUser?.id) {
+      return uiLetters;
+    }
+    return uiLetters.filter(
+      (letter) => String(letter.assignedTo?.id ?? '') === String(currentUser.id)
+    );
+  }, [currentUser?.id, isContractLetterDrafter, uiLetters]);
+
   const filteredLetters = useMemo(() => {
-    if (activeTab === 'All') return uiLetters;
-    return uiLetters.filter((letter) => letter.status === activeTab);
-  }, [uiLetters, activeTab]);
+    if (activeTab === 'All') return visibleLetters;
+    return visibleLetters.filter((letter) => letter.status === activeTab);
+  }, [visibleLetters, activeTab]);
+
+  const selectedUiLetter = useMemo(
+    () => uiLetters.find((letter) => letter.id === selectedLetterId),
+    [selectedLetterId, uiLetters]
+  );
 
   const handleInitiation = useCallback(
     async (payload: Parameters<typeof handleLetterInitiation>[0]) => {
@@ -314,6 +371,39 @@ const LetterWorkflowPage = () => {
     [handleInputRequest, fetchLetters]
   );
 
+  const handleAssignDrafter = useCallback(
+    async (
+      letterId: string,
+      payload: {
+        user_id: string;
+        drafting_profile:
+          | 'contractor'
+          | 'engineer_representation'
+          | 'employer_contract_review';
+      }
+    ) => {
+      await assignContractDrafter(letterId, payload);
+      await fetchLetters();
+    },
+    [assignContractDrafter, fetchLetters]
+  );
+
+  const handleAssignReviewer = useCallback(
+    async (
+      letterId: string,
+      runId: string,
+      payload: {
+        reviewer_user_id: string;
+        due_at?: string;
+        note?: string;
+      }
+    ) => {
+      await assignReviewer(letterId, runId, payload);
+      await fetchLetters();
+    },
+    [assignReviewer, fetchLetters]
+  );
+
   const handleSelectLetter = useCallback(
     (letterId: string) => {
       setSelectedLetterId(letterId);
@@ -337,7 +427,11 @@ const LetterWorkflowPage = () => {
       users={users}
       organizations={organizations}
       projects={projects}
+      selectedLetter={selectedUiLetter}
       selectedLetterId={selectedLetterId}
+      canAssignDrafter={activeTab === 'All' && canAssignDrafter}
+      onAssignDrafter={handleAssignDrafter}
+      onAssignReviewer={handleAssignReviewer}
       documentPrefill={documentPrefill ?? undefined}
       onInitiationDialogClose={clearInitiationContext}
     />

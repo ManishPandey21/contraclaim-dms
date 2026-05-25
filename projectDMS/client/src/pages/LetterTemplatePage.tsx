@@ -43,6 +43,7 @@ import {
   type LetterTemplateSection,
 } from '@/services/enhanced-api';
 import { DEFAULT_TEMPLATE_SECTIONS } from '@/components/letter-template/templateDefaults';
+import { sanitizeHtml } from '@/utils/sanitizeHtml';
 
 const categories = [
   'Contract Management',
@@ -115,11 +116,12 @@ const LetterTemplatePage = () => {
   };
 
   const buildPreviewContent = (sections: LetterTemplateSection[]) => {
-    return [...sections]
+    const html = [...sections]
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
       .filter((section) => section.enabled)
       .map((section) => section.content)
       .join('<hr class="my-4"/>');
+    return sanitizeHtml(html);
   };
 
   const getStatusColor = (status: string) => {

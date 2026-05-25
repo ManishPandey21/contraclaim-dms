@@ -18,6 +18,7 @@ from ..services.party_service import PartyService
 from ..services.project_service import ProjectService
 from ..services.organization_service import OrganizationService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..models.representative import (
     Representative, RepresentativeCreate, RepresentativeUpdate,
     RepresentativeLevel, RepresentativeResponse, RepresentativeListResponse
@@ -31,6 +32,30 @@ from ..utils.audit_logger import AuditLogger
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _fallback_scope(current_user: CurrentUser) -> tuple[Optional[str], Optional[str]]:
+    projects = getattr(current_user, "projects", None) or []
+    return getattr(current_user, "organization_id", None), projects[0] if projects else None
+
+
+async def _authorize_representative_policy(
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    resource_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> None:
+    fallback_org_id, fallback_project_id = _fallback_scope(current_user)
+    await PolicyService().authorize(
+        current_user,
+        permission,
+        resource_type="representative",
+        resource_id=resource_id,
+        organization_id=organization_id or fallback_org_id,
+        project_id=project_id or fallback_project_id,
+    )
 
 
 class RepresentativeController:
@@ -137,6 +162,11 @@ class RepresentativeController:
             await self.auth_service.check_organization_access(
                 current_user, validated_org_id, "create_representative"
             )
+            await _authorize_representative_policy(
+                current_user,
+                "dms.document.edit_metadata",
+                organization_id=validated_org_id,
+            )
             
             # Handle primary representative logic
             if validated_rep_data.is_primary:
@@ -196,6 +226,12 @@ class RepresentativeController:
             # Authorization check
             await self.auth_service.check_project_access(
                 current_user, project, "create_representative"
+            )
+            await _authorize_representative_policy(
+                current_user,
+                "dms.document.edit_metadata",
+                organization_id=project.get("organization_id") or project.get("organizationId"),
+                project_id=validated_project_id,
             )
             
             # Handle primary representative logic
@@ -260,6 +296,12 @@ class RepresentativeController:
             await self.rate_limiter.check_user_limit(current_user.id)
             
             # Build authorized query
+            await _authorize_representative_policy(
+                current_user,
+                "dms.document.view",
+                organization_id=filters.get("organization_id"),
+                project_id=filters.get("project_id"),
+            )
             authorized_query = await self.auth_service.build_representative_query(
                 current_user, filters
             )
@@ -302,6 +344,7 @@ class RepresentativeController:
                 raise RepresentativeError("Party not found", status.HTTP_404_NOT_FOUND)
             
             await self.auth_service.check_party_access(current_user, party, "read")
+            await _authorize_representative_policy(current_user, "dms.document.view")
             
             # Get representatives
             representatives = await self.rep_service.get_representatives_for_party(
@@ -339,6 +382,12 @@ class RepresentativeController:
                 raise RepresentativeError("Project not found", status.HTTP_404_NOT_FOUND)
             
             await self.auth_service.check_project_access(current_user, project, "read")
+            await _authorize_representative_policy(
+                current_user,
+                "dms.document.view",
+                organization_id=project.get("organization_id") or project.get("organizationId"),
+                project_id=validated_project_id,
+            )
             
             # Get representatives with proper scope
             org_id = project.get("organization_id") or project.get("organizationId")
@@ -533,20 +582,47 @@ class RepresentativeController:
             party = await self.party_service.get_party_by_id(representative.party_id)
             if party:
                 await self.auth_service.check_party_access(current_user, party, operation)
+                permission = "dms.document.view" if operation == "read" else "dms.document.edit_metadata"
+                await _authorize_representative_policy(
+                    current_user,
+                    permission,
+                    resource_id=str(representative.id),
+                )
         
         elif representative.project_id:
             project = await self.project_service.get_project_by_id(representative.project_id)
             if project:
                 await self.auth_service.check_project_access(current_user, project, operation)
+                permission = "dms.document.view" if operation == "read" else "dms.document.edit_metadata"
+                await _authorize_representative_policy(
+                    current_user,
+                    permission,
+                    resource_id=str(representative.id),
+                    organization_id=project.get("organization_id") or project.get("organizationId"),
+                    project_id=str(representative.project_id),
+                )
         
         elif representative.organization_id:
             await self.auth_service.check_organization_access(
                 current_user, representative.organization_id, operation
             )
+            permission = "dms.document.view" if operation == "read" else "dms.document.edit_metadata"
+            await _authorize_representative_policy(
+                current_user,
+                permission,
+                resource_id=str(representative.id),
+                organization_id=str(representative.organization_id),
+            )
         else:
             # Fallback authorization check
             await self.auth_service.require_permission(
                 current_user, f"representatives:{operation}"
+            )
+            permission = "dms.document.view" if operation == "read" else "dms.document.edit_metadata"
+            await _authorize_representative_policy(
+                current_user,
+                permission,
+                resource_id=str(representative.id),
             )
 
     async def _handle_primary_representative_change(
@@ -675,7 +751,14 @@ async def get_organization_representatives(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get representatives for an organization."""
-    # Simple passthrough - detailed logic in controller
+    await controller.auth_service.check_organization_access(
+        current_user, organization_id, "read"
+    )
+    await _authorize_representative_policy(
+        current_user,
+        "dms.document.view",
+        organization_id=organization_id,
+    )
     return await controller.rep_service.get_representatives_for_organization(organization_id)
 
 

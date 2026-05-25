@@ -10,6 +10,7 @@ from openai import OpenAI, RateLimitError
 from ..core.config import settings
 from ..core import templates
 from ..core.constants import OPENAI_MODELS
+from ..services.policy_service import PolicyService
 import numpy as np
 from bson.objectid import ObjectId
 from datetime import datetime
@@ -570,40 +571,19 @@ async def generate_draft_with_ai(
             )
         )
 
-        # Try using the newer Responses API first
-        try:
-            rate_limited_openai_call()
-            content_blocks = [{"type": "input_text", "text": prompt}]
-            
-            response = client.responses.create(
-                model=OPENAI_MODELS["responses"],
-                input=[{"role": "user", "content": content_blocks}],
-            )
-            
-            if hasattr(response, "output_text") and response.output_text:
-                logger.info("Successfully generated draft using Responses API")
-                return response.output_text
-            else:
-                # Fallback to chat completions
-                raise Exception("No output text from Responses API")
-                
-        except Exception as responses_error:
-            logger.warning(f"Responses API failed, falling back to chat completions: {responses_error}")
-            
-            # Fallback to chat completions
-            rate_limited_openai_call()
-            response = client.chat.completions.create(
-                model=OPENAI_MODELS["chat"],
-                messages=[
-                    {"role": "system", "content": templates.CONTRACT_MANAGER_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=2000,
-                temperature=0.2
-            )
-            
-            logger.info("Successfully generated draft using Chat Completions API")
-            return response.choices[0].message.content.strip()
+        rate_limited_openai_call()
+        response = client.chat.completions.create(
+            model=OPENAI_MODELS["chat"],
+            messages=[
+                {"role": "system", "content": templates.CONTRACT_MANAGER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2000,
+            temperature=0.2
+        )
+
+        logger.info("Successfully generated draft using Chat Completions API")
+        return response.choices[0].message.content.strip()
         
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded during draft generation: {str(e)}")
@@ -828,6 +808,13 @@ async def generate_deep_planning_draft(
         org_id = request.organization_id or getattr(current_user, "organization_id", None)
         proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
         authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
+        await PolicyService(db).authorize(
+            current_user,
+            "drafting.draft.create",
+            resource_type="deep_planning",
+            organization_id=org_id,
+            project_id=proj_id,
+        )
         
         # Validate document IDs
         await validate_document_ids(db, request.document_ids, current_user)
@@ -982,6 +969,15 @@ async def get_deep_planning_history(
     """Get history of deep planning generated drafts."""
     try:
         logger.info("Retrieving deep planning history")
+        org_id = getattr(current_user, "organization_id", None)
+        proj_id = (getattr(current_user, "projects", None) or [None])[0]
+        await PolicyService(db).authorize(
+            current_user,
+            "drafting.request.view",
+            resource_type="deep_planning_history",
+            organization_id=org_id,
+            project_id=proj_id,
+        )
         
         query_filter: Dict[str, Any] = {"generated_by": current_user.id}
 
@@ -1014,6 +1010,15 @@ async def analyze_document(
     """Analyze a document and extract key points and clauses."""
     try:
         logger.info(f"Analyzing document: {file.filename}")
+        org_id = getattr(current_user, "organization_id", None)
+        proj_id = (getattr(current_user, "projects", None) or [None])[0]
+        await PolicyService(db).authorize(
+            current_user,
+            "dms.document.view",
+            resource_type="deep_planning_analysis",
+            organization_id=org_id,
+            project_id=proj_id,
+        )
         
         # Read file content
         content = await file.read()

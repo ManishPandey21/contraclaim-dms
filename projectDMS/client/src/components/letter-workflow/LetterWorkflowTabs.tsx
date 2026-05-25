@@ -34,7 +34,7 @@ export const LetterWorkflowTabs: React.FC<LetterWorkflowTabsProps> = ({
         value: "Strategy" as const,
         label: "Strategy",
         icon: <Lightbulb className="mr-2 h-4 w-4" />,
-        description: "Strategic planning and LangGraph analysis",
+        description: "Strategic planning and drafting engine analysis",
       },
       {
         value: "Draft" as const,

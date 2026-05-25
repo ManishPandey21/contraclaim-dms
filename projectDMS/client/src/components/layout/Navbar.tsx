@@ -22,7 +22,9 @@ const Navbar = () => {
     if (path === "/users") return "Users Management";
     if (path === "/permissions") return "Permissions";
     if (path === "/settings") return "Settings";
+    if (path === "/notifications") return "Notifications";
     if (path === "/profile") return "My Profile";
+    if (path === "/letter-quality") return "Letter Quality Dashboard";
     if (path.includes("/documentviewer/") || path.includes("/document/")) {
       return "Document Viewer";
     }

@@ -87,6 +87,11 @@ class Citation(BaseModel):
     snippet: str
     document_title: Optional[str] = None
     letter_no: Optional[str] = None
+    file_name: Optional[str] = None
+    clause_number: Optional[str] = None
+    clause_title: Optional[str] = None
+    section_heading: Optional[str] = None
+    page_numbers: List[int] = Field(default_factory=list)
 
 
 class RagResponse(BaseModel):

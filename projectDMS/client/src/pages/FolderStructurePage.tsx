@@ -1,4 +1,13 @@
-import React, { useState, ChangeEvent, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ChevronRight,
+  Download,
+  File,
+  FolderOpen,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -7,9 +16,9 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
@@ -17,128 +26,288 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { useForm, Controller } from "react-hook-form";
-import {
-  ChevronRight,
-  Download,
-  File,
-  Folder, // This import is not used, can be removed.
-  FolderPlus,
-  Upload,
-  Loader2,
-  Plus, // This import is not used, can be removed.
-  FolderOpen,
-} from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Separator } from "@/components/ui/separator";
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbSeparator,
-} from "@/components/ui/breadcrumb";
+import useRBAC from "@/hooks/useRBAC";
 import { api } from "@/services/api";
 import { listOrganizations } from "@/services/organizations-api";
 import { listProjects } from "@/services/projects-api";
+import type { DocumentBulkDownloadType } from "@/types/api";
 
-// Adjusted types based on backend and actual usage
-type FolderFormValues = {
-  organization: string; // This will be organization._id
-  project: string; // This will be project._id
-  direction: "Incoming" | "Outgoing";
-  year: string;
-  month: string;
-};
-
-type FileUploadValues = {
-  letterNumber: string;
-  file: FileList;
-};
-
-interface FolderItem {
-  id: string; // MongoDB _id
-  name: string;
-  path: string;
-  type: "folder" | "file";
-  children?: FolderItem[];
-  size?: number;
-  created_at?: string; // ISO string
-  file_extension?: string;
-}
+type UploadType = "incoming" | "outgoing" | "contract";
 
 interface Organization {
   _id: string;
   name: string;
-  shortName: string;
+  shortName?: string;
 }
 
 interface Project {
   _id: string;
   name: string;
-  organization_id: string; // Added for clarity
-  shortName: string;
+  organization_id: string;
+  shortName?: string;
+}
+
+interface DocumentItem {
+  _id?: string;
+  id?: string;
+  filename: string;
+  uploadType: UploadType | string;
+  date?: string;
+  createdAt?: string;
+  filesize?: number;
+  status?: string;
+}
+
+interface DownloadScope {
+  downloadType: DocumentBulkDownloadType;
+  uploadType?: UploadType;
+  year?: number;
+  month?: number;
+}
+
+interface TreeNode {
+  id: string;
+  name: string;
+  type: "folder" | "file";
+  children: TreeNode[];
+  scope?: DownloadScope;
+  document?: DocumentItem;
+  size?: number;
+}
+
+const MONTH_NAMES = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const UPLOAD_TYPE_LABELS: Record<UploadType, string> = {
+  incoming: "Incoming",
+  outgoing: "Outgoing",
+  contract: "Contracts",
+};
+
+function normalizeUploadType(value?: string): UploadType {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "outgoing") return "outgoing";
+  if (normalized === "contract") return "contract";
+  return "incoming";
+}
+
+function documentId(document: DocumentItem): string {
+  return String(document._id || document.id || "");
+}
+
+function documentDate(document: DocumentItem): Date {
+  const value = document.date || document.createdAt;
+  const parsed = value ? new Date(value) : new Date();
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function compactName(value: string): string {
+  return String(value || "Project")
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80) || "Project";
+}
+
+function extractFilenameFromDisposition(contentDisposition?: string): string | null {
+  if (!contentDisposition) return null;
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    return decodeURIComponent(utf8Match[1].replace(/"/g, ""));
+  }
+  const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+  return filenameMatch?.[1] ? filenameMatch[1] : null;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string) {
+  const url = window.URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+function buildDocumentTree(documents: DocumentItem[]): TreeNode {
+  const root: TreeNode = {
+    id: "root",
+    name: "Project Documents",
+    type: "folder",
+    children: [],
+    scope: { downloadType: "complete" },
+  };
+
+  const directionMap = new Map<UploadType, TreeNode>();
+  const directionOrder: UploadType[] = ["incoming", "outgoing", "contract"];
+
+  for (const type of directionOrder) {
+    const downloadType: DocumentBulkDownloadType =
+      type === "contract" ? "contracts" : "letters";
+    const node: TreeNode = {
+      id: type,
+      name: UPLOAD_TYPE_LABELS[type],
+      type: "folder",
+      children: [],
+      scope: { downloadType, uploadType: type },
+    };
+    directionMap.set(type, node);
+  }
+
+  for (const doc of documents) {
+    const id = documentId(doc);
+    if (!id) continue;
+
+    const uploadType = normalizeUploadType(doc.uploadType);
+    const direction = directionMap.get(uploadType);
+    if (!direction) continue;
+
+    const date = documentDate(doc);
+    const year = date.getFullYear();
+    const month = date.getMonth() + 1;
+    const yearId = `${uploadType}/${year}`;
+    const monthId = `${yearId}/${String(month).padStart(2, "0")}`;
+
+    let yearNode = direction.children.find((item) => item.id === yearId);
+    if (!yearNode) {
+      yearNode = {
+        id: yearId,
+        name: String(year),
+        type: "folder",
+        children: [],
+        scope: {
+          ...direction.scope!,
+          year,
+        },
+      };
+      direction.children.push(yearNode);
+    }
+
+    let monthNode = yearNode.children.find((item) => item.id === monthId);
+    if (!monthNode) {
+      monthNode = {
+        id: monthId,
+        name: MONTH_NAMES[month - 1],
+        type: "folder",
+        children: [],
+        scope: {
+          ...direction.scope!,
+          year,
+          month,
+        },
+      };
+      yearNode.children.push(monthNode);
+    }
+
+    monthNode.children.push({
+      id: `document/${id}`,
+      name: doc.filename || id,
+      type: "file",
+      children: [],
+      document: doc,
+      size: doc.filesize,
+    });
+  }
+
+  for (const direction of directionMap.values()) {
+    direction.children.sort((a, b) => Number(b.name) - Number(a.name));
+    for (const year of direction.children) {
+      year.children.sort((a, b) => {
+        const aMonth = a.scope?.month || 0;
+        const bMonth = b.scope?.month || 0;
+        return bMonth - aMonth;
+      });
+      for (const month of year.children) {
+        month.children.sort((a, b) => a.name.localeCompare(b.name));
+      }
+    }
+  }
+
+  root.children = directionOrder
+    .map((type) => directionMap.get(type)!)
+    .filter((node) => node.children.length > 0);
+
+  return root;
+}
+
+function findNode(root: TreeNode, path: string[]): TreeNode {
+  let current = root;
+  for (const id of path) {
+    const next = current.children.find((child) => child.id === id);
+    if (!next) return root;
+    current = next;
+  }
+  return current;
+}
+
+function pathFromNodeId(id: string): string[] {
+  if (id === "root") return [];
+  const parts = id.split("/");
+  return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
 const FolderStructurePage: React.FC = () => {
   const { toast } = useToast();
-  const {
-    register: registerCreate,
-    handleSubmit: handleCreateSubmit,
-    control: controlCreate,
-    formState: { errors: createErrors },
-    reset: resetCreateForm,
-    watch: watchCreateForm, // To watch changes for dependent selects (e.g., projects based on org)
-  } = useForm<FolderFormValues>();
-  const {
-    register: registerUpload,
-    handleSubmit: handleUploadSubmit,
-    formState: { errors: uploadErrors },
-    reset: resetUploadForm,
-  } = useForm<FileUploadValues>();
+  const { roles, can } = useRBAC();
 
-  const [folderStructure, setFolderStructure] = useState<FolderItem[]>([]);
-  const [currentPath, setCurrentPath] = useState<string[]>([]); // Array of path segments
-  const [uploading, setUploading] = useState(false);
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [loading, setLoading] = useState(true);
-
-  // State for fetched organizations and projects
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [selectedOrgId, setSelectedOrgId] = useState<string>("");
+  const [selectedProjId, setSelectedProjId] = useState<string>("");
+  const [path, setPath] = useState<string[]>([]);
+  const [selectedNodeId, setSelectedNodeId] = useState<string>("root");
   const [loadingOrganizations, setLoadingOrganizations] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
+  const [loadingDocuments, setLoadingDocuments] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
 
-  // Watch for changes in selected organization to fetch projects
-  const selectedOrganizationId = watchCreateForm("organization");
-  // Local state used to drive dependent effects and UI disabling reliably with Controller
-  const [selectedOrgId, setSelectedOrgId] = useState<string | undefined>(
-    undefined
-  );
-  const [selectedProjId, setSelectedProjId] = useState<string | undefined>(
-    undefined
-  );
+  const canDownloadAllDocuments =
+    roles.some((role) =>
+      ["superadmin", "orgadmin", "projectadmin"].includes(
+        String(role).toLowerCase()
+      )
+    ) || can("documents:download_all");
 
-  // Helper to generate short names that match backend contracts path scheme (max 10 chars)
-  // Rules:
-  // - lowercase
-  // - replace non-alphanumeric with '-'
-  // - collapse multiple '-'
-  // - trim leading/trailing '-'
-  // - truncate to 10 chars (as per contracts.py comment)
-  const shortenName = (
-    fullName: string,
-    _type: "organization" | "project"
-  ): string => {
-    const base = (fullName || "untitled").toLowerCase();
-    const step1 = base.replace(/[^a-z0-9]+/g, "-");
-    const step2 = step1.replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
-    const step3 = step2.slice(0, 10);
-    return step3 || "untitled";
-  };
+  const selectedProject = projects.find((project) => project._id === selectedProjId);
+  const tree = useMemo(() => buildDocumentTree(documents), [documents]);
+  const currentNode = useMemo(() => findNode(tree, path), [tree, path]);
+  const selectedNode = useMemo(() => {
+    if (selectedNodeId === "root") return tree;
+    const stack = [...tree.children];
+    while (stack.length > 0) {
+      const node = stack.shift()!;
+      if (node.id === selectedNodeId) return node;
+      stack.push(...node.children);
+    }
+    return currentNode;
+  }, [currentNode, selectedNodeId, tree]);
 
-  // --- Fetching Organizations and Projects ---
+  const breadcrumbNodes = useMemo(() => {
+    const result: TreeNode[] = [tree];
+    let cursor = tree;
+    for (const id of path) {
+      const next = cursor.children.find((child) => child.id === id);
+      if (!next) break;
+      result.push(next);
+      cursor = next;
+    }
+    return result;
+  }, [path, tree]);
+
   useEffect(() => {
     const fetchOrganizations = async () => {
       setLoadingOrganizations(true);
@@ -161,776 +330,432 @@ const FolderStructurePage: React.FC = () => {
 
   useEffect(() => {
     const fetchProjects = async () => {
-      if (selectedOrgId) {
-        setLoadingProjects(true);
-        try {
-          const data = await listProjects({
-            organization_id: selectedOrgId,
-          });
-          setProjects(data as unknown as Project[]);
-        } catch (error) {
-          console.error("Error fetching projects:", error);
-          toast({
-            title: "Error",
-            description: "Failed to load projects.",
-            variant: "destructive",
-          });
-        } finally {
-          setLoadingProjects(false);
-        }
-      } else {
-        setProjects([]); // Clear projects if no organization is selected
+      if (!selectedOrgId) {
+        setProjects([]);
+        setSelectedProjId("");
+        setDocuments([]);
+        setPath([]);
+        setSelectedNodeId("root");
+        return;
+      }
+
+      setLoadingProjects(true);
+      try {
+        const data = await listProjects({ organization_id: selectedOrgId });
+        setProjects(data as unknown as Project[]);
+      } catch (error) {
+        console.error("Error fetching projects:", error);
+        toast({
+          title: "Error",
+          description: "Failed to load projects.",
+          variant: "destructive",
+        });
+      } finally {
+        setLoadingProjects(false);
       }
     };
     fetchProjects();
   }, [selectedOrgId, toast]);
 
-  // When organization & project change, navigate to the project's root path
-  // so the right pane shows project-specific folders directly.
-  useEffect(() => {
-    const goToProjectRoot = async () => {
-      if (!selectedOrgId || !selectedProjId) return;
-
-      // Find selected org/project to derive short path segment
-      const orgObj = organizations.find((o) => o._id === selectedOrgId);
-      const projObj = projects.find((p) => p._id === selectedProjId);
-      if (!orgObj || !projObj) return;
-
-      const orgShort =
-        orgObj.shortName || shortenName(orgObj.name, "organization");
-      const projShort =
-        projObj.shortName || shortenName(projObj.name, "project");
-
-      const rootPath = `uploads/${orgShort}/${projShort}`;
-      await navigateToFolder(rootPath);
-    };
-    goToProjectRoot();
-  }, [selectedOrgId, selectedProjId, organizations, projects]);
-  // --- End Fetching Organizations and Projects ---
-
-  // Effect to fetch initial folder structure (root)
-  useEffect(() => {
-    const fetchRootFolderStructure = async () => {
-      setLoading(true);
-      try {
-        const { data } = await api.get("/folder_structure");
-        setFolderStructure(data as FolderItem[]); // Root items are directly in the array
-        setCurrentPath([]); // Start at root
-      } catch (error) {
-        console.error("Error fetching root folder structure:", error);
-        toast({
-          title: "Error",
-          description: "Failed to load folder structure.",
-          variant: "destructive",
-        });
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchRootFolderStructure();
-  }, [toast]);
-
-  // Determine current folder's contents based on currentPath
-  const currentContents = React.useMemo(() => {
-    let contents = folderStructure;
-    let found = true;
-
-    for (const segment of currentPath) {
-      const nextFolder = contents.find(
-        (item) => item.type === "folder" && item.name === segment
-      );
-      if (nextFolder && nextFolder.children) {
-        contents = nextFolder.children;
-      } else {
-        found = false;
-        break;
-      }
-    }
-    return found ? contents : [];
-  }, [folderStructure, currentPath]);
-
-  // Navigate into a folder
-  const navigateToFolder = async (path: string) => {
-    setLoading(true);
-    try {
-      // Backend endpoint now fetches a specific folder's contents, not just root
-      const { data } = await api.get<FolderItem>(`/folder_structure/${path}`, {
-        params: {
-          organization_id: selectedOrgId || undefined,
-          project_id: selectedProjId || undefined,
-        },
-      });
-      // When navigating, we replace the entire folderStructure state with the fetched folder and its children
-      // This simplifies currentContents logic for nested views
-      setFolderStructure([data]);
-      // Update currentPath to reflect the new depth
-      setCurrentPath(
-        path.split("/").filter((segment) => segment && segment !== "uploads")
-      );
-    } catch (error) {
-      console.error("Error navigating to folder:", error);
-      toast({
-        title: "Error",
-        description: "Failed to navigate to folder.",
-        variant: "destructive",
-      });
-      // Fallback: If navigation fails, try to fetch root again or clear state
-      setFolderStructure([]);
-      setCurrentPath([]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Navigate back up the path
-  const navigateUp = async () => {
-    if (currentPath.length === 0) {
-      // Already at root, just re-fetch root
-      setLoading(true);
-      try {
-        const { data } = await api.get<FolderItem[]>("/folder_structure", {
-          params: {
-            organization_id: selectedOrgId || undefined,
-            project_id: selectedProjId || undefined,
-          },
-        });
-        setFolderStructure(data);
-        setCurrentPath([]);
-      } catch (error) {
-        console.error("Error fetching root folder structure:", error);
-        toast({
-          title: "Error",
-          description: "Failed to load folder structure.",
-          variant: "destructive",
-        });
-      } finally {
-        setLoading(false);
-      }
+  const fetchDocuments = useCallback(async () => {
+    if (!selectedProjId) {
+      setDocuments([]);
       return;
     }
 
-    const newPathSegments = currentPath.slice(0, -1);
-    setCurrentPath(newPathSegments);
+    setLoadingDocuments(true);
+    try {
+      const all: DocumentItem[] = [];
+      const limit = 1000;
+      let skip = 0;
+      let total = 0;
 
-    if (newPathSegments.length === 0) {
-      // Navigating back to root, refetch root items
-      setLoading(true);
-      try {
-        const { data } = await api.get<FolderItem[]>("/folder_structure", {
+      do {
+        const { data } = await api.get("/documents", {
           params: {
             organization_id: selectedOrgId || undefined,
-            project_id: selectedProjId || undefined,
+            project_id: selectedProjId,
+            skip,
+            limit,
           },
         });
-        setFolderStructure(data);
-      } catch (error) {
-        console.error("Error fetching root folder structure:", error);
-        toast({
-          title: "Error",
-          description: "Failed to load folder structure.",
-          variant: "destructive",
-        });
-      } finally {
-        setLoading(false);
-      }
-    } else {
-      // Navigate to the parent folder
-      const parentPath = `uploads/${newPathSegments.join("/")}`;
-      await navigateToFolder(parentPath);
-    }
-  };
+        const batch = (data?.documents || []) as DocumentItem[];
+        total = Number(data?.total || batch.length);
+        all.push(...batch);
+        skip += limit;
+        if (batch.length === 0) break;
+      } while (all.length < total);
 
-  const handleCreateFolder = async (data: FolderFormValues) => {
-    setCreatingFolder(true);
-    try {
-      // Find the full organization and project objects from the fetched data
-      const organization = organizations.find(
-        (o) => o._id === data.organization
-      );
-      const project = projects.find((p) => p._id === data.project);
-
-      if (!organization || !project) {
-        throw new Error("Invalid organization or project selected.");
-      }
-
-      const orgShort = shortenName(organization.name, "organization");
-      const projectShort = shortenName(project.name, "project");
-      // Direction and month names can be directly used or shortened if desired
-      const directionShort = data.direction.replace(/\s/g, "").toLowerCase(); // Example shortening
-      const monthShort = data.month.toLowerCase(); // Example shortening
-
-      // Construct the full path for the new folder
-      const newFolderPath = `uploads/${orgShort}/${projectShort}/${data.year}/${monthShort}`;
-
-      const folderStructureData = {
-        name: data.month, // The name of the month folder being created
-        path: newFolderPath,
-        type: "folder",
-        children: [], // No children upon creation
-        organization_id: data.organization, // Pass the organization_id (already is _id from form)
-        project_id: data.project, // Pass the project_id (already is _id from form)
-      };
-
-      const { data: result } = await api.post(
-        "/folder_structure",
-        folderStructureData
-      );
-      toast({
-        title: "Success",
-        description: result.message,
-      });
-
-      resetCreateForm();
-      // Re-fetch the current folder contents to update the UI
-      if (currentPath.length === 0) {
-        // If at root, re-fetch root
-        const { data: rootData } = await api.get<FolderItem[]>(
-          "/folder_structure"
-        );
-        setFolderStructure(rootData);
-      } else {
-        // Re-fetch the current folder to see the new sub-folder
-        const currentFullPath = `uploads/${currentPath.join("/")}`;
-        await navigateToFolder(currentFullPath);
-      }
+      setDocuments(all);
+      setPath([]);
+      setSelectedNodeId("root");
     } catch (error: any) {
-      console.error("Error creating folder:", error);
+      console.error("Error fetching documents:", error);
       toast({
         title: "Error",
-        description: error.message || "Failed to create folder.",
+        description:
+          error?.response?.data?.detail?.message ||
+          error?.response?.data?.detail ||
+          "Failed to load project documents.",
         variant: "destructive",
       });
     } finally {
-      setCreatingFolder(false);
+      setLoadingDocuments(false);
     }
-  };
+  }, [selectedOrgId, selectedProjId, toast]);
 
-  const handleUploadFile = async (data: FileUploadValues) => {
-    setUploading(true);
+  useEffect(() => {
+    fetchDocuments();
+  }, [fetchDocuments]);
+
+  const downloadFile = async (node: TreeNode) => {
+    const doc = node.document;
+    const id = doc ? documentId(doc) : "";
+    if (!id || !doc) return;
+
+    setDownloadingId(node.id);
     try {
-      if (!data.file || data.file.length === 0) {
-        throw new Error("No file selected.");
-      }
-
-      const file = data.file[0];
-      const formData = new FormData();
-      formData.append("file", file);
-      // Backend expects these as query parameters
-      formData.append("name", data.letterNumber);
-      formData.append("file_extension", ".pdf"); // Assuming only PDF
-      // The `path` for upload should be the full path of the *current folder*
-      const currentFullPath =
-        currentPath.length === 0
-          ? "uploads"
-          : `uploads/${currentPath.join("/")}`;
-      formData.append("path", currentFullPath);
-
-      // Extract organization_id and project_id from the current path or state
-      // This is a simplification; ideally, you'd have these from user context or stored state
-      // For more robust handling, ensure organization_id and project_id are available
-      // either from user session or selected context for the upload.
-      const orgShortFromPath = currentPath[0];
-      const projShortFromPath = currentPath[1];
-
-      const currentOrg = organizations.find(
-        (o) => shortenName(o.name, "organization") === orgShortFromPath
-      );
-      const currentProj = projects.find(
-        (p) => shortenName(p.name, "project") === projShortFromPath
-      );
-
-      if (!currentOrg || !currentProj) {
-        throw new Error(
-          "Could not determine organization or project from current path for upload. Please select an organization/project first."
-        );
-      }
-
-      // Append organization_id and project_id to formData for backend query params
-      formData.append("organization_id", currentOrg._id);
-      formData.append("project_id", currentProj._id);
-
-      // Construct query parameters string for the URL
-      const queryParams = new URLSearchParams({
-        name: data.letterNumber,
-        path: currentFullPath,
-        file_extension: ".pdf",
-        organization_id: currentOrg._id,
-        project_id: currentProj._id,
-      }).toString();
-
-      const { data: result } = await api.post(
-        `/upload_file?${queryParams}`,
-        formData,
-        {
-          headers: { "Content-Type": "multipart/form-data" },
-        }
-      );
-      toast({
-        title: "Success",
-        description: result.message,
-      });
-
-      resetUploadForm();
-      // Re-fetch the current folder contents to update the UI
-      await navigateToFolder(currentFullPath);
-    } catch (error: any) {
-      console.error("Error uploading file:", error);
-      toast({
-        title: "Error",
-        description: error.message || "Failed to upload file.",
-        variant: "destructive",
-      });
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const handleDownload = async (
-    itemPath: string,
-    itemName: string,
-    itemType: string
-  ) => {
-    try {
-      // For files, download directly. For folders, response is a zip.
-      const response = await api.get("/folder_structure/download", {
-        params: { path: itemPath },
+      const response = await api.get(`/documents/${id}/download`, {
         responseType: "blob",
       });
-      const blob = response.data as Blob;
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = itemType === "folder" ? `${itemName}.zip` : itemName; // Use itemName for file download
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-
+      const filename =
+        extractFilenameFromDisposition(response.headers["content-disposition"]) ||
+        doc.filename ||
+        "document";
+      triggerBlobDownload(response.data as Blob, filename);
       toast({
-        title: "Success",
-        description: `${itemType} downloaded successfully.`,
+        title: "Download ready",
+        description: `${filename} downloaded successfully.`,
       });
     } catch (error: any) {
-      console.error(`Error downloading ${itemType}:`, error);
+      console.error("Error downloading document:", error);
       toast({
-        title: "Error",
-        description: error.message || `Failed to download ${itemType}.`,
+        title: "Download failed",
+        description:
+          error?.response?.data?.detail?.message ||
+          error?.message ||
+          "Failed to download document.",
         variant: "destructive",
       });
+    } finally {
+      setDownloadingId(null);
     }
   };
 
-  const handleOpenFile = async (filePath: string) => {
+  const downloadFolder = async (node: TreeNode) => {
+    if (!selectedProjId || !node.scope) return;
+
+    setDownloadingId(node.id);
     try {
-      const { data } = await api.get("/folder_structure/open_file", {
-        params: { file_path: filePath },
+      const response = await api.get("/documents/download-all", {
+        params: {
+          project_id: selectedProjId,
+          type: node.scope.downloadType,
+          upload_type: node.scope.uploadType,
+          year: node.scope.year,
+          month: node.scope.month,
+        },
+        responseType: "blob",
       });
-      if (data.presigned_url) {
-        window.open(data.presigned_url, "_blank");
-        toast({
-          title: "Success",
-          description: "File opened in a new tab.",
-        });
-      } else {
-        throw new Error("Presigned URL not received.");
-      }
-    } catch (error: any) {
-      console.error("Error opening file:", error);
+
+      const fallbackProject = compactName(
+        selectedProject?.shortName || selectedProject?.name || "Project"
+      );
+      const fallbackScope = compactName(node.name);
+      const filename =
+        extractFilenameFromDisposition(response.headers["content-disposition"]) ||
+        `${fallbackProject}_${fallbackScope}_${new Date()
+          .toISOString()
+          .slice(0, 10)}.zip`;
+
+      triggerBlobDownload(response.data as Blob, filename);
       toast({
-        title: "Error",
-        description: error.message || "Failed to open file.",
+        title: "Download ready",
+        description: `${node.name} package downloaded successfully.`,
+      });
+    } catch (error: any) {
+      console.error("Error downloading folder:", error);
+      const data = error?.response?.data;
+      let message = error?.message || "Failed to download selected folder.";
+      if (data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await data.text());
+          message = parsed?.detail?.message || parsed?.detail || parsed?.message || message;
+        } catch {
+          // keep fallback
+        }
+      } else {
+        message = data?.detail?.message || data?.detail || data?.message || message;
+      }
+      toast({
+        title: "Download failed",
+        description: message,
         variant: "destructive",
       });
+    } finally {
+      setDownloadingId(null);
     }
+  };
+
+  const downloadNode = async (node: TreeNode) => {
+    if (node.type === "file") {
+      await downloadFile(node);
+      return;
+    }
+    await downloadFolder(node);
+  };
+
+  const navigateTo = (node: TreeNode) => {
+    if (node.type !== "folder") return;
+    if (node.id === "root") {
+      setPath([]);
+      setSelectedNodeId("root");
+      return;
+    }
+    setPath(pathFromNodeId(node.id));
+    setSelectedNodeId(node.id);
+  };
+
+  const formatSize = (size?: number) => {
+    if (!size) return "";
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   return (
-    <div className="flex min-h-screen">
-      {/* Sidebar for Forms */}
-      <div className="w-1/3 bg-gray-100 p-6 space-y-6">
-        {/* Create Folder Card */}
+    <div className="flex min-h-screen bg-gray-50">
+      <aside className="w-80 border-r bg-white p-6">
         <Card>
           <CardHeader>
-            <CardTitle>Create New Folder</CardTitle>
+            <CardTitle>Document Scope</CardTitle>
             <CardDescription>
-              Generate a new folder structure
-              (Org/Project/Direction/Year/Month).
+              Select a project, then download the project, a folder, or a file.
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            <form
-              onSubmit={handleCreateSubmit(handleCreateFolder)}
-              className="space-y-4"
-            >
-              <div className="space-y-2">
-                <Label htmlFor="organization">Organization</Label>
-                <Controller
-                  name="organization"
-                  control={controlCreate}
-                  rules={{ required: true }}
-                  render={({ field }) => (
-                    <Select
-                      value={field.value || ""}
-                      onValueChange={(value) => {
-                        field.onChange(value);
-                        setSelectedOrgId(value);
-                        setSelectedProjId(undefined);
-                        setProjects([]);
-                      }}
-                    >
-                      <SelectTrigger id="organization">
-                        <SelectValue placeholder="Select an organization" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {loadingOrganizations ? (
-                          <SelectItem value="loading" disabled>
-                            Loading organizations...
-                          </SelectItem>
-                        ) : organizations.length === 0 ? (
-                          <SelectItem value="no-orgs" disabled>
-                            No organizations available
-                          </SelectItem>
-                        ) : (
-                          organizations.map((org) => (
-                            <SelectItem key={org._id} value={org._id}>
-                              {org.name}
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
-                  )}
-                />
-                {createErrors.organization && (
-                  <p className="text-red-500 text-sm">
-                    Organization is required.
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="project">Project</Label>
-                <Controller
-                  name="project"
-                  control={controlCreate}
-                  rules={{ required: true }}
-                  render={({ field }) => (
-                    <Select
-                      value={field.value || ""}
-                      onValueChange={(value) => {
-                        field.onChange(value);
-                        setSelectedProjId(value);
-                      }}
-                      disabled={!selectedOrgId || loadingProjects}
-                    >
-                      <SelectTrigger id="project">
-                        <SelectValue placeholder="Select a project" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {loadingProjects ? (
-                          <SelectItem value="loading" disabled>
-                            Loading projects...
-                          </SelectItem>
-                        ) : projects.length === 0 ? (
-                          <SelectItem value="no-projects" disabled>
-                            No projects available or select organization first
-                          </SelectItem>
-                        ) : (
-                          projects.map((proj) => (
-                            <SelectItem key={proj._id} value={proj._id}>
-                              {proj.name}
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
-                  )}
-                />
-                {createErrors.project && (
-                  <p className="text-red-500 text-sm">Project is required.</p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="direction">Direction</Label>
-                <RadioGroup
-                  onValueChange={(value: "Incoming" | "Outgoing") =>
-                    registerCreate("direction").onChange({
-                      target: { value },
-                    })
-                  }
-                  defaultValue="Incoming"
-                  className="flex items-center space-x-4"
-                >
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="Incoming" id="r1" />
-                    <Label htmlFor="r1">Incoming</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="Outgoing" id="r2" />
-                    <Label htmlFor="r2">Outgoing</Label>
-                  </div>
-                </RadioGroup>
-                {createErrors.direction && (
-                  <p className="text-red-500 text-sm">Direction is required.</p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="year">Year</Label>
-                <Input
-                  id="year"
-                  type="number"
-                  placeholder="e.g., 2023"
-                  {...registerCreate("year", {
-                    required: true,
-                    pattern: /^\d{4}$/,
-                  })}
-                />
-                {createErrors.year && (
-                  <p className="text-red-500 text-sm">
-                    Year is required and must be 4 digits.
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="month">Month</Label>
-                <Select {...registerCreate("month", { required: true })}>
-                  <SelectTrigger id="month">
-                    <SelectValue placeholder="Select a month" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {[
-                      "January",
-                      "February",
-                      "March",
-                      "April",
-                      "May",
-                      "June",
-                      "July",
-                      "August",
-                      "September",
-                      "October",
-                      "November",
-                      "December",
-                    ].map((month) => (
-                      <SelectItem key={month} value={month}>
-                        {month}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {createErrors.month && (
-                  <p className="text-red-500 text-sm">Month is required.</p>
-                )}
-              </div>
-
-              <Button
-                type="submit"
-                className="w-full"
-                disabled={creatingFolder}
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>Organization</Label>
+              <Select
+                value={selectedOrgId}
+                onValueChange={(value) => {
+                  setSelectedOrgId(value);
+                  setSelectedProjId("");
+                }}
               >
-                {creatingFolder ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <FolderPlus className="mr-2 h-4 w-4" />
-                    Create Folder
-                  </>
-                )}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select organization" />
+                </SelectTrigger>
+                <SelectContent>
+                  {loadingOrganizations ? (
+                    <SelectItem value="loading" disabled>
+                      Loading organizations...
+                    </SelectItem>
+                  ) : (
+                    organizations.map((org) => (
+                      <SelectItem key={org._id} value={org._id}>
+                        {org.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
 
-        {/* Upload File Card */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Upload File</CardTitle>
-            <CardDescription>
-              Upload a file to the current folder.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-4">
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-gray-500">
-                  Current Upload Path:{" "}
-                  <span className="font-medium">
-                    {currentPath.length === 0
-                      ? "Root"
-                      : `uploads/${currentPath.join("/")}`}
-                  </span>
-                </p>
+            <div className="space-y-2">
+              <Label>Project</Label>
+              <Select
+                value={selectedProjId}
+                onValueChange={setSelectedProjId}
+                disabled={!selectedOrgId || loadingProjects}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select project" />
+                </SelectTrigger>
+                <SelectContent>
+                  {loadingProjects ? (
+                    <SelectItem value="loading" disabled>
+                      Loading projects...
+                    </SelectItem>
+                  ) : (
+                    projects.map((project) => (
+                      <SelectItem key={project._id} value={project._id}>
+                        {project.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Separator />
+
+            <div className="space-y-2 text-sm text-gray-600">
+              <div className="flex justify-between">
+                <span>Total files</span>
+                <span className="font-medium text-gray-900">{documents.length}</span>
               </div>
-              <div className="space-y-4">
-                <form
-                  onSubmit={handleUploadSubmit(handleUploadFile)}
-                  className="space-y-4"
-                >
-                  <div className="space-y-2">
-                    <Label htmlFor="letterNumber">Letter/Document Number</Label>
-                    <Input
-                      id="letterNumber"
-                      placeholder="e.g., ABC-2023-001"
-                      {...registerUpload("letterNumber", { required: true })}
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="file">Select File (PDF)</Label>
-                    <Input
-                      id="file"
-                      type="file"
-                      accept=".pdf"
-                      {...registerUpload("file", { required: true })}
-                    />
-                    <p className="text-xs text-gray-500">
-                      File will be renamed to {"{Letter Number}.pdf"}
-                    </p>
-                  </div>
-
-                  <Button
-                    type="submit"
-                    variant="outline"
-                    className="w-full"
-                    disabled={uploading}
-                  >
-                    {uploading ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Uploading...
-                      </>
-                    ) : (
-                      <>
-                        <Upload className="mr-2 h-4 w-4" />
-                        Upload File
-                      </>
-                    )}
-                  </Button>
-                </form>
+              <div className="flex justify-between">
+                <span>Selected</span>
+                <span className="max-w-40 truncate font-medium text-gray-900">
+                  {selectedNode.name}
+                </span>
               </div>
             </div>
+
+            <div className="grid gap-2">
+              <Button
+                onClick={() => downloadNode(selectedNode)}
+                disabled={
+                  !selectedProjId ||
+                  downloadingId !== null ||
+                  (selectedNode.type === "folder" && !canDownloadAllDocuments)
+                }
+              >
+                {downloadingId ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="mr-2 h-4 w-4" />
+                )}
+                Download Selected
+              </Button>
+              <Button
+                variant="outline"
+                onClick={fetchDocuments}
+                disabled={!selectedProjId || loadingDocuments}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Refresh
+              </Button>
+            </div>
+
+            {!canDownloadAllDocuments && (
+              <p className="text-xs text-gray-500">
+                Folder ZIP downloads require project bulk-download permission.
+                Individual files remain available when document read access is granted.
+              </p>
+            )}
           </CardContent>
         </Card>
-      </div>
+      </aside>
 
-      {/* Main Content Area - Folder Structure Display */}
-      <div className="flex-1 p-6">
+      <main className="flex-1 p-6">
         <Card>
           <CardHeader>
             <CardTitle>Folder Structure</CardTitle>
             <CardDescription>
-              Browse and manage your organized documents.
+              Browse real uploaded documents grouped by direction, year, and month.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {/* Breadcrumbs */}
-            <Breadcrumb className="mb-4">
-              <BreadcrumbList>
-                <BreadcrumbItem>
-                  <BreadcrumbLink
-                    onClick={navigateUp}
-                    className="cursor-pointer"
+            <div className="mb-4 flex flex-wrap items-center gap-2 text-sm">
+              {breadcrumbNodes.map((node, index) => (
+                <React.Fragment key={node.id}>
+                  {index > 0 && <ChevronRight className="h-4 w-4 text-gray-400" />}
+                  <button
+                    type="button"
+                    className="rounded px-1.5 py-1 text-gray-700 hover:bg-gray-100"
+                    onClick={() => navigateTo(node)}
                   >
-                    Root
-                  </BreadcrumbLink>
-                </BreadcrumbItem>
-                {currentPath.map((segment, index) => (
-                  <React.Fragment key={index}>
-                    <BreadcrumbSeparator>
-                      <ChevronRight />
-                    </BreadcrumbSeparator>
-                    <BreadcrumbItem>
-                      <BreadcrumbLink
-                        onClick={() =>
-                          navigateToFolder(
-                            `uploads/${currentPath
-                              .slice(0, index + 1)
-                              .join("/")}`
-                          )
-                        }
-                        className="cursor-pointer"
-                      >
-                        {segment}
-                      </BreadcrumbLink>
-                    </BreadcrumbItem>
-                  </React.Fragment>
-                ))}
-              </BreadcrumbList>
-            </Breadcrumb>
+                    {index === 0 ? "Root" : node.name}
+                  </button>
+                </React.Fragment>
+              ))}
+            </div>
 
             <Separator className="mb-4" />
 
-            {loading ? (
-              <div className="flex justify-center items-center h-40">
-                <Loader2 className="h-8 w-8 animate-spin text-gray-500" />
-                <span className="ml-2 text-gray-500">Loading...</span>
+            {!selectedProjId ? (
+              <div className="flex h-56 items-center justify-center text-gray-500">
+                Select an organization and project to view documents.
+              </div>
+            ) : loadingDocuments ? (
+              <div className="flex h-56 items-center justify-center text-gray-500">
+                <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+                Loading documents...
+              </div>
+            ) : currentNode.children.length === 0 ? (
+              <div className="flex h-56 items-center justify-center text-gray-500">
+                No documents found for this selection.
               </div>
             ) : (
-              <ScrollArea className="h-[calc(100vh-280px)] pr-4">
-                {currentContents.length === 0 ? (
-                  <p className="text-gray-500">This folder is empty.</p>
-                ) : (
-                  <div className="grid gap-2">
-                    {currentContents.map((item) => (
+              <ScrollArea className="h-[calc(100vh-260px)] pr-4">
+                <div className="grid gap-2">
+                  {currentNode.children.map((node) => {
+                    const isSelected = selectedNode.id === node.id;
+                    const isDownloading = downloadingId === node.id;
+                    const folderDownloadDisabled =
+                      node.type === "folder" && !canDownloadAllDocuments;
+
+                    return (
                       <div
-                        key={item.id}
-                        className="flex items-center justify-between p-2 rounded-md hover:bg-gray-50 transition-colors"
+                        key={node.id}
+                        className={`flex items-center justify-between rounded-md border p-3 transition-colors ${
+                          isSelected
+                            ? "border-blue-300 bg-blue-50"
+                            : "border-gray-200 bg-white hover:bg-gray-50"
+                        }`}
                       >
-                        <div
-                          className="flex items-center gap-2 cursor-pointer"
-                          onClick={() =>
-                            item.type === "folder"
-                              ? navigateToFolder(item.path)
-                              : handleOpenFile(item.path)
-                          }
+                        <button
+                          type="button"
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          onClick={() => setSelectedNodeId(node.id)}
+                          onDoubleClick={() => navigateTo(node)}
                         >
-                          {item.type === "folder" ? (
-                            <FolderOpen className="h-5 w-5 text-blue-500" />
+                          {node.type === "folder" ? (
+                            <FolderOpen className="h-5 w-5 shrink-0 text-blue-500" />
                           ) : (
-                            <File className="h-5 w-5 text-gray-500" />
+                            <File className="h-5 w-5 shrink-0 text-gray-500" />
                           )}
-                          <span>{item.name}</span>
-                          {item.type === "file" && item.file_extension && (
-                            <span className="text-xs text-gray-500 ml-1">
-                              ({item.file_extension.substring(1).toUpperCase()})
+                          <span className="truncate font-medium">{node.name}</span>
+                          {node.type === "folder" && (
+                            <span className="text-xs text-gray-500">
+                              {node.children.length} item{node.children.length === 1 ? "" : "s"}
                             </span>
                           )}
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {item.type === "file" && item.size && (
-                            <span className="text-sm text-gray-500">
-                              {(item.size / 1024).toFixed(2)} KB
+                          {node.type === "file" && node.size ? (
+                            <span className="text-xs text-gray-500">
+                              {formatSize(node.size)}
                             </span>
+                          ) : null}
+                        </button>
+
+                        <div className="ml-3 flex items-center gap-2">
+                          {node.type === "folder" && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => navigateTo(node)}
+                            >
+                              Open
+                            </Button>
                           )}
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() =>
-                              handleDownload(item.path, item.name, item.type)
+                            onClick={() => downloadNode(node)}
+                            disabled={downloadingId !== null || folderDownloadDisabled}
+                            title={
+                              folderDownloadDisabled
+                                ? "Folder download requires bulk-download permission"
+                                : "Download"
                             }
                           >
-                            <Download className="h-4 w-4" />
+                            {isDownloading ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Download className="h-4 w-4" />
+                            )}
                           </Button>
-                          {/* Add a delete button for demonstration */}
-                          {/* <Button variant="ghost" size="sm" onClick={() => handleDelete(item.path, item.type)}>
-                            <Trash2 className="h-4 w-4 text-red-500" />
-                          </Button> */}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
+                    );
+                  })}
+                </div>
               </ScrollArea>
             )}
           </CardContent>
         </Card>
-      </div>
+      </main>
     </div>
   );
 };

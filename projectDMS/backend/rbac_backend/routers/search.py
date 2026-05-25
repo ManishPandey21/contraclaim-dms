@@ -5,6 +5,8 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from ..core.database import get_database
 from ..core.security import get_current_user
 from ..models.user import User
+from ..services.policy_service import PolicyService
+from ..services.scope_service import ScopeService
 import re
 from bson import ObjectId
 import logging
@@ -38,6 +40,16 @@ async def search_documents(
     """
     try:
         start_time = datetime.now()
+        requested_org = str(organizations[0]) if organizations else getattr(current_user, "organization_id", None)
+        requested_project = str(projects[0]) if projects else None
+        await PolicyService().authorize(
+            current_user,
+            "dms.document.view",
+            resource_type="search",
+            organization_id=requested_org,
+            project_id=requested_project,
+            audit=False,
+        )
         
         # Build search pipeline
         pipeline = []
@@ -46,16 +58,18 @@ async def search_documents(
         # RBAC scoping
         roles = set(current_user.roles or [])
         if "superadmin" not in roles:
+            scope = ScopeService()
+            allowed_orgs = await scope.client_organization_ids(current_user)
+            allowed_projects = await scope.client_project_ids(current_user)
             if "orgadmin" in roles or "orguser" in roles:
-                if getattr(current_user, "organization_id", None):
-                    match_conditions["organization_id"] = str(current_user.organization_id)
+                if allowed_orgs:
+                    match_conditions["organization_id"] = {"$in": sorted(allowed_orgs)}
                 else:
                     # No org context => no results
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
             elif "projectadmin" in roles or "projectuser" in roles:
-                user_projects = [str(pid) for pid in (getattr(current_user, "projects", []) or [])]
-                if user_projects:
-                    match_conditions["project_id"] = {"$in": user_projects}
+                if allowed_projects:
+                    match_conditions["project_id"] = {"$in": sorted(allowed_projects)}
                 else:
                     return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
             else:
@@ -102,17 +116,29 @@ async def search_documents(
         if organizations:
             try:
                 org_ids = [ObjectId(org_id) if ObjectId.is_valid(org_id) else org_id for org_id in organizations]
-                match_conditions["organization_id"] = {"$in": org_ids}
             except Exception:
-                match_conditions["organization_id"] = {"$in": organizations}
+                org_ids = organizations
+            if "superadmin" not in roles:
+                requested = {str(item) for item in organizations}
+                permitted = requested & allowed_orgs
+                if not permitted:
+                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
+                org_ids = sorted(permitted)
+            match_conditions["organization_id"] = {"$in": org_ids}
         
         # Project filter
         if projects:
             try:
                 project_ids = [ObjectId(proj_id) if ObjectId.is_valid(proj_id) else proj_id for proj_id in projects]
-                match_conditions["project_id"] = {"$in": project_ids}
             except Exception:
-                match_conditions["project_id"] = {"$in": projects}
+                project_ids = projects
+            if "superadmin" not in roles:
+                requested = {str(item) for item in projects}
+                permitted = requested & allowed_projects
+                if not permitted:
+                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
+                project_ids = sorted(permitted)
+            match_conditions["project_id"] = {"$in": project_ids}
         
         # Category filter
         if categories:

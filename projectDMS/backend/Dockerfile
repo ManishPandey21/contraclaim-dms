@@ -14,6 +14,10 @@ COPY rbac_backend/requirements.txt ./rbac_backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r rbac_backend/requirements.txt
 
 COPY . .
+RUN mkdir -p /app/uploads /app/logs
+RUN adduser --disabled-password --gecos "" appuser \
+    && chown -R appuser:appuser /app
+USER appuser
 
 EXPOSE 8000
 

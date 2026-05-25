@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/form";
 import { PlusCircle, Save } from "lucide-react";
 import { toast } from "sonner";
-import { enhancedApi } from "@/services/enhanced-api";
+import { enhancedApi, type DocumentUpdateData } from "@/services/enhanced-api";
 
 type MetadataFieldName =
   | "uploadType"
@@ -83,14 +83,19 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
   }, [metadataFields, form]);
 
   const [isSaving, setIsSaving] = useState(false);
+  const selectedTagValue = form.watch("tag");
+  const selectedTagId =
+    availableTags.find(
+      (tag) => tag.value === selectedTagValue || tag.label === selectedTagValue
+    )?.value || selectedTagValue || "";
+  const filteredSubtags = selectedTagId
+    ? availableSubtags.filter((subtag) => subtag.tagId === selectedTagId)
+    : [];
 
   const handleSave = async () => {
     try {
       setIsSaving(true);
       const formValues = form.getValues();
-      console.log("Form values:", formValues);
-      console.log("Available tags:", availableTags);
-      console.log("Available subtags:", availableSubtags);
 
       let tagIds: string[] = [];
       let subTagIds: string[] = [];
@@ -106,7 +111,6 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
           // If not found in availableTags, assume it's already an ID
           tagIds = [formValues.tag];
         }
-        console.log("Selected tag:", selectedTag, "Tag IDs:", tagIds);
       }
 
       if (formValues.subTag) {
@@ -122,16 +126,10 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
           // If not found in availableSubtags, assume it's already an ID
           subTagIds = [formValues.subTag];
         }
-        console.log(
-          "Selected subtag:",
-          selectedSubTag,
-          "SubTag IDs:",
-          subTagIds
-        );
       }
 
-      const updateData = {
-        uploadType: formValues.uploadType,
+      const updateData: DocumentUpdateData = {
+        uploadType: formValues.uploadType?.toLowerCase(),
         letterNo: formValues.letterNo,
         date: formValues.date,
         subject: formValues.subject,
@@ -141,7 +139,7 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
         status: formValues.status,
         ...(tagIds.length > 0 && { tags: tagIds }),
         ...(subTagIds.length > 0 && { subTags: subTagIds }),
-      } as any;
+      };
 
       const cleanedData = Object.fromEntries(
         Object.entries(updateData).filter(
@@ -151,9 +149,6 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
             !(Array.isArray(value) && value.length === 0)
         )
       );
-
-      console.log("Update data being sent:", cleanedData);
-
       await enhancedApi.updateDocument(documentId, cleanedData);
 
       toast.success("Document metadata updated successfully");
@@ -189,9 +184,16 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
                       value={formField.value}
                       onValueChange={(value) => {
                         formField.onChange(value); // Update react-hook-form state
+                        if (field.id === "tag") {
+                          form.setValue("subTag", "");
+                          onMetadataChange("subTag", "");
+                        }
                         onMetadataChange(field.id, value); // Notify parent
                       }}
-                      disabled={field.id === "subTag" && isLoadingSubtags}
+                      disabled={
+                        field.id === "subTag" &&
+                        (isLoadingSubtags || !selectedTagId)
+                      }
                     >
                       <SelectTrigger id={field.id}>
                         <SelectValue
@@ -203,20 +205,46 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
                         />
                       </SelectTrigger>
                       <SelectContent>
-                        {field.options?.map((option) => {
-                          const isGroupLabel =
-                            field.id === "status" &&
-                            option.trim().startsWith("---");
-                          return (
+                        {field.id === "tag"
+                          ? availableTags.map((tag) => (
+                              <SelectItem key={tag.value} value={tag.value}>
+                                {tag.label}
+                              </SelectItem>
+                            ))
+                          : field.id === "subTag"
+                          ? filteredSubtags.map((subtag) => (
+                              <SelectItem
+                                key={subtag.value}
+                                value={subtag.value}
+                              >
+                                {subtag.label}
+                              </SelectItem>
+                            ))
+                          : field.options?.map((option) => {
+                              const isGroupLabel =
+                                field.id === "status" &&
+                                option.trim().startsWith("---");
+                              return (
+                                <SelectItem
+                                  key={option}
+                                  value={option}
+                                  disabled={isGroupLabel}
+                                >
+                                  {option}
+                                </SelectItem>
+                              );
+                            })}
+                        {field.id === "subTag" &&
+                          selectedTagId &&
+                          !isLoadingSubtags &&
+                          filteredSubtags.length === 0 && (
                             <SelectItem
-                              key={option}
-                              value={option}
-                              disabled={isGroupLabel}
+                              value="__no-subtags"
+                              disabled
                             >
-                              {option}
+                              No subtags available
                             </SelectItem>
-                          );
-                        })}
+                          )}
                       </SelectContent>
                     </Select>
                   ) : field.type === "textarea" ? (

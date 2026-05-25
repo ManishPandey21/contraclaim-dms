@@ -1113,7 +1113,7 @@ class LetterDraftGraph:
                 )
                 try:
                     llm_plan = await plan_generator.generate(
-                        llm_plan_prompt, max_tokens=900, model=plan_model
+                        llm_plan_prompt, max_tokens=1800, model=plan_model
                     )
                     if llm_plan:
                         plan_text = llm_plan
@@ -1256,16 +1256,94 @@ class LetterDraftGraph:
                 return ""
             lines: List[str] = []
             for idx, source in enumerate(sources, start=1):
-                label = source.label or source.source_type
+                source_type = source.source_type.replace("_", " ")
+                label = source.label or source_type
                 snippet = source.snippet or ""
                 clause = source.clause_number or ""
-                prefix = f"[S{idx}] {label}"
+                prefix = f"[S{idx}] {source_type}: {label}"
                 if clause:
                     prefix += f" (Clause {clause})"
                 if snippet:
                     prefix += f": {snippet}"
                 lines.append(prefix.strip())
             return "\n".join(lines[:20])
+
+        def _normalise_sender_profile(value: Optional[str]) -> str:
+            if not value:
+                return "Contractor"
+            lowered = str(value).strip().lower()
+            if lowered.startswith("engineer"):
+                return "Engineer"
+            if lowered.startswith("employer"):
+                return "Employer"
+            return "Contractor"
+
+        def _profile_patterns(profile: str) -> str:
+            if profile == "Employer":
+                return (
+                    "Posture: authoritative, governance-oriented, compliance-focused.\n"
+                    "Typical flow: reference to the matter; clear decision or instruction; contractual basis; "
+                    "expectations on time, quality, and process; consequences of non-compliance.\n"
+                    "Tone: direct, procedural, risk-allocating, controlling yet reasonable; avoid aggressive language."
+                )
+            if profile == "Engineer":
+                return (
+                    "Posture: neutral, procedurally precise, analytically structured.\n"
+                    "Typical flow: background and submissions received; contractual analysis; reasoning; determination or decision.\n"
+                    "Tone: impartial, transparent, rooted in contractual criteria; distinguish submissions from determinations."
+                )
+            return (
+                "Posture: protective, commercially aware, entitlement-focused.\n"
+                "Typical flow: factual chronology; contractual basis; impact description; entitlement position; reservation of rights.\n"
+                "Tone: firm and forward-looking on entitlements without overstating certainty; use without prejudice, "
+                "reserves all rights, and subject to further particulars where supported."
+            )
+
+        def _active_workspace_label() -> str:
+            org_id = (getattr(letter, "organization_id", None) if letter else None) or request.organization_id
+            project_id = (getattr(letter, "project_id", None) if letter else None) or request.project_id
+            letter_no = getattr(letter, "letter_no", None) if letter else None
+            parts = [
+                f"organization={org_id or 'not provided'}",
+                f"project={project_id or 'not provided'}",
+                f"letter_id={request.letter_id}",
+            ]
+            if letter_no:
+                parts.append(f"letter_no={letter_no}")
+            return "; ".join(parts)
+
+        def _format_prior_correspondence() -> str:
+            if not conversation_chain:
+                return "No prior same-workspace correspondence was available."
+            candidates = [
+                entry
+                for entry in conversation_chain
+                if not letter or entry.id != getattr(letter, "id", None)
+            ]
+            if not candidates:
+                return "No prior same-workspace correspondence was available."
+            lines: List[str] = []
+            for idx, entry in enumerate(candidates[-5:], start=1):
+                summary_source = pick_non_empty(
+                    [
+                        getattr(entry, "summary", None),
+                        getattr(entry, "content", None),
+                        getattr(entry, "subject", None),
+                    ]
+                )
+                snippet = _condense_text(summary_source, 360) or "Summary unavailable"
+                letter_no = getattr(entry, "letter_no", None)
+                subject_label = getattr(entry, "subject", None) or "Previous correspondence"
+                date_value = getattr(entry, "date", None) or getattr(entry, "created_at", None)
+                if isinstance(date_value, datetime):
+                    date_label = date_value.strftime("%Y-%m-%d")
+                else:
+                    date_label = str(date_value or "undated")
+                reference_label = subject_label
+                if letter_no:
+                    reference_label += f" ({letter_no})"
+                lines.append(f"[P{idx}] {date_label} - {reference_label}: {snippet}")
+            return "\n".join(lines)
 
         async def draft_letter() -> Dict[str, Any]:
             augmented_context = request.context or ""
@@ -1292,12 +1370,23 @@ class LetterDraftGraph:
 
             sources_block_full = _format_sources_block(draft_sources)
             prompt_context = augmented_context.strip() or requirements_text
+            sender_profile = _normalise_sender_profile(
+                getattr(letter, "strategy_role", None) if letter else None
+            )
+            if sender_profile == "Engineer" and getattr(letter, "strategy_recipient", None):
+                sender_profile = (
+                    f"{sender_profile} (recipient focus: {getattr(letter, 'strategy_recipient')})"
+                )
             prompt_payload = {
                 "subject": request.subject,
                 "recipient": request.recipient or "the counterparty",
+                "sender_profile": sender_profile,
+                "active_contract_workspace": _active_workspace_label(),
                 "plan": plan or plan_context_text or "Use the provided context to outline the response.",
                 "requirements": prompt_context or "No explicit requirements provided.",
                 "sources": sources_block_full or "No sources available; highlight need for evidence.",
+                "prior_correspondence": _format_prior_correspondence(),
+                "profile_patterns": _profile_patterns(sender_profile.split(" ", 1)[0]),
             }
 
             try:
@@ -1390,7 +1479,11 @@ class LetterDraftGraph:
                     )
                 )
 
-            if re.search(r"<clause|\[clause|tbd|to be confirmed", draft.body, re.IGNORECASE):
+            if re.search(
+                r"<clause|\[clause|\[confirm:|\[to be inserted by user:|\[position conflict:|tbd|to be confirmed",
+                draft.body,
+                re.IGNORECASE,
+            ):
                 reviewer_findings.append(
                     DraftReviewFinding(
                         level="warning",

@@ -25,6 +25,7 @@ from .contract_graph_service import (
 )
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.generator import LLMGenerator
+from ..retrieval.source_metadata import normalize_source_payload
 from ..retrieval.vector_client import VectorClient
 
 LLAMA_INDEX_IMPORT_ERROR: Optional[Exception] = None
@@ -723,6 +724,24 @@ class DatabaseService:
                 name="docvec_text_idx",
                 background=True,
             )
+            await self.db.document_vectors.create_index(
+                [
+                    ("uploadType", 1),
+                    ("organization_id", 1),
+                    ("project_id", 1),
+                    ("document_id", 1),
+                    ("clause_number", 1),
+                    ("clause_start_position", 1),
+                    ("chunk_index", 1),
+                ],
+                name="docvec_contract_clause_lookup_idx",
+                background=True,
+            )
+            await self.db.document_vectors.create_index(
+                [("chunk_id", 1)],
+                name="docvec_chunk_id_idx",
+                background=True,
+            )
         except Exception as e:
             logger.debug(f"Document vectors index creation failed: {e}")
 
@@ -841,6 +860,20 @@ class DatabaseService:
             return
 
         try:
+            contract_document_ids = sorted(
+                {
+                    str(record.get("document_id"))
+                    for record in records
+                    if record.get("document_id") and record.get("uploadType") == "contract"
+                }
+            )
+            if contract_document_ids:
+                await self.db.document_vectors.delete_many(
+                    {
+                        "uploadType": "contract",
+                        "document_id": {"$in": contract_document_ids},
+                    }
+                )
             await self.db.document_vectors.insert_many(records)
             logger.info(f"Inserted {len(records)} document vector records")
         except Exception as e:
@@ -876,6 +909,7 @@ class ContractIngestor:
         self.hasher = FileHasher()
         self.categorizer = create_contract_categorizer(settings)
         self.contract_graph = ContractGraphService()
+        self._indexes_ready = False
 
     def _initialize_vector_service(
         self, vector_config: Optional[DocumentProcessingConfig] = None
@@ -916,6 +950,10 @@ class ContractIngestor:
         Uses intelligent clause extraction instead of arbitrary chunking.
         """
         try:
+            if not self._indexes_ready:
+                await self.db_service.ensure_indexes()
+                self._indexes_ready = True
+
             file_path_obj = Path(file_path).resolve()
             await self._validate_file(file_path_obj)
 
@@ -948,6 +986,11 @@ class ContractIngestor:
                 project_id=project_id,
                 tags=final_tags,
                 file_size=file_size,
+                extra={
+                    "processing_stage": "parsing",
+                    "stage_label": "Extracting text",
+                    "progress": 40,
+                },
             )
 
             # Extract text from document
@@ -962,6 +1005,21 @@ class ContractIngestor:
             # Categorize document
             categories = await self._categorize_text(text, org_name, proj_name)
             logger.info(f"Categorization complete: {len(categories)} categories")
+            await self.db_service.upsert_job_status(
+                upload_id,
+                str(file_path_obj),
+                filename,
+                "processing",
+                organization_id=organization_id,
+                project_id=project_id,
+                tags=final_tags,
+                file_size=file_size,
+                extra={
+                    "processing_stage": "categorization",
+                    "stage_label": "Categorizing contract",
+                    "progress": 50,
+                },
+            )
 
             # PHASE 1: MARKER + CLAUSE EXTRACTION
             marker_result: Optional[MarkerResult] = None
@@ -1009,6 +1067,21 @@ class ContractIngestor:
                 map_pages = True
 
             logger.info("Extracted %s clauses from %s (source=%s)", len(clauses), filename, clause_source)
+            await self.db_service.upsert_job_status(
+                upload_id,
+                str(file_path_obj),
+                filename,
+                "processing",
+                organization_id=organization_id,
+                project_id=project_id,
+                tags=final_tags,
+                file_size=file_size,
+                extra={
+                    "processing_stage": "clause_extraction",
+                    "stage_label": f"Extracted {len(clauses)} clauses",
+                    "progress": 65,
+                },
+            )
 
             # Build payloads with clause metadata
             payloads = self._build_clause_payloads(
@@ -1025,6 +1098,21 @@ class ContractIngestor:
                 clause_source=clause_source,
             )
             logger.info(f"Built {len(payloads)} payloads from {len(clauses)} clauses")
+            await self.db_service.upsert_job_status(
+                upload_id,
+                str(file_path_obj),
+                filename,
+                "processing",
+                organization_id=organization_id,
+                project_id=project_id,
+                tags=final_tags,
+                file_size=file_size,
+                extra={
+                    "processing_stage": "embedding",
+                    "stage_label": f"Embedding {len(payloads)} clause segments",
+                    "progress": 75,
+                },
+            )
 
             # Process payloads through vector service if available
             vector_results: Optional[List[Dict[str, Any]]] = None
@@ -1040,6 +1128,22 @@ class ContractIngestor:
                 records = self._payloads_to_records(payloads)
 
             qdrant_chunks = await self._index_clause_vectors(payloads, vector_results)
+            await self.db_service.upsert_job_status(
+                upload_id,
+                str(file_path_obj),
+                filename,
+                "processing",
+                organization_id=organization_id,
+                project_id=project_id,
+                tags=final_tags,
+                file_size=file_size,
+                extra={
+                    "processing_stage": "vector_storage",
+                    "stage_label": "Writing vector records",
+                    "progress": 90,
+                    "qdrant_chunks": qdrant_chunks,
+                },
+            )
 
             # Graph sync (FalkorDB) - organization/project scoped
             if self.contract_graph.enabled:
@@ -1074,7 +1178,12 @@ class ContractIngestor:
                 project_id=project_id,
                 tags=final_tags,
                 file_size=file_size,
-                extra={"qdrant_chunks": qdrant_chunks},
+                extra={
+                    "qdrant_chunks": qdrant_chunks,
+                    "processing_stage": "completed",
+                    "stage_label": "Processing complete",
+                    "progress": 100,
+                },
             )
 
             logger.info(f"Successfully ingested {filename}")
@@ -1336,13 +1445,29 @@ class ContractIngestor:
             for chunk_data in clause_chunks:
                 chunk_text = chunk_data['text']
                 chunk_checksum = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+                toc_path = clause.toc_path or []
+                enriched_parts = [
+                    f"Clause {chunk_data['clause_number']}: {chunk_data['clause_title']}",
+                    f"Section: {section_heading}",
+                ]
+                if toc_path:
+                    enriched_parts.append(f"Hierarchy: {' > '.join(toc_path)}")
+                if page_numbers:
+                    enriched_parts.append(f"Pages: {', '.join(str(page) for page in page_numbers)}")
+                if clause_tags:
+                    enriched_parts.append(f"Clause tags: {', '.join(clause_tags)}")
+                if final_tags:
+                    enriched_parts.append(f"Document tags: {', '.join(final_tags)}")
+                enriched_parts.append(chunk_text)
+                text_enriched = "\n".join(enriched_parts)
 
-                metadata = {
+                metadata = normalize_source_payload({
                     "upload_id": upload_id,
                     "document_id": document_id,
                     "organization_id": str(organization_id),
                     "project_id": str(project_id) if project_id else None,
                     "uploadType": "contract",
+                    "document_type": "contract",
                     "letterNo": None,
                     "source_file": source_path,
                     "source_filename": filename,
@@ -1374,7 +1499,8 @@ class ContractIngestor:
                     "tags": final_tags,
                     "checksum_sha256": chunk_checksum,
                     "source": clause_source,
-                }
+                    "text_enriched": text_enriched,
+                })
 
                 payloads.append({
                     "text": chunk_text,
@@ -1437,7 +1563,7 @@ class ContractIngestor:
             "project_id": metadata.get("project_id"),
             "page_start": metadata.get("page_number") or metadata.get("page"),
             "text": text,
-            "text_enriched": None,
+            "text_enriched": metadata.get("text_enriched"),
             "tags": metadata.get("tags", []),
             "embedding_provider": "openai",
             "embedding_model": self.config.EMBEDDING_MODEL,
@@ -1500,9 +1626,19 @@ class ContractIngestor:
             metadata = dict(item.get("metadata") or {})
             text_chunk = item.get("text") or ""
             checksum = item.get("checksum")
+            checksum_value = checksum or metadata.get("checksum_sha256") or hashlib.sha256(
+                text_chunk.encode("utf-8")
+            ).hexdigest()
+            chunk_id = metadata.get("chunk_id") or self._build_chunk_id(
+                str(metadata.get("upload_id") or metadata.get("document_id") or "contract"),
+                metadata.get("clause_number"),
+                int(metadata.get("chunk_index") or 0),
+                checksum_value,
+            )
 
             record = {
                 **metadata,
+                "chunk_id": chunk_id,
                 "vector_ref": None,
                 "embedding_id": metadata.get("embedding_id"),
                 "embedding": [],
@@ -1533,11 +1669,11 @@ class ContractIngestor:
                 metadata.get("file_path") or metadata.get("source_file"),
             )
             record.setdefault("section", metadata.get("section"))
+            record.setdefault("document_type", "contract")
+            record.setdefault("text_enriched", metadata.get("text_enriched"))
 
             if not record.get("checksum_sha256"):
-                record["checksum_sha256"] = checksum or hashlib.sha256(
-                    text_chunk.encode("utf-8")
-                ).hexdigest()
+                record["checksum_sha256"] = checksum_value
 
             records.append(record)
 
@@ -1558,9 +1694,19 @@ class ContractIngestor:
             metadata = dict(item.get("metadata") or {})
             text_chunk = item.get("text") or ""
             embedding = item.get("embedding") or []
+            checksum_value = metadata.get("checksum_sha256") or hashlib.sha256(
+                text_chunk.encode("utf-8")
+            ).hexdigest()
+            chunk_id = metadata.get("chunk_id") or self._build_chunk_id(
+                str(metadata.get("upload_id") or metadata.get("document_id") or "contract"),
+                metadata.get("clause_number"),
+                int(metadata.get("chunk_index") or 0),
+                checksum_value,
+            )
 
             record = {
                 **metadata,
+                "chunk_id": chunk_id,
                 "vector_ref": item.get("vector_ref"),
                 "embedding_id": metadata.get("embedding_id"),
                 "embedding": embedding,
@@ -1572,7 +1718,7 @@ class ContractIngestor:
             }
 
             if not record.get("checksum_sha256"):
-                record["checksum_sha256"] = hashlib.sha256(text_chunk.encode("utf-8")).hexdigest()
+                record["checksum_sha256"] = checksum_value
 
             record.setdefault("tags", metadata.get("tags", []))
             record["clause_tags"] = metadata.get("clause_tags") or []
@@ -1594,6 +1740,8 @@ class ContractIngestor:
                 metadata.get("file_path") or metadata.get("source_file"),
             )
             record.setdefault("section", metadata.get("section"))
+            record.setdefault("document_type", "contract")
+            record.setdefault("text_enriched", metadata.get("text_enriched"))
             records.append(record)
 
         return records

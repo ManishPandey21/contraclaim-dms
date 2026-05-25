@@ -375,7 +375,7 @@ const ReportsAnalyticsPage = () => {
     if (selectedReport.id !== "letter-status") {
       setLetterStatuses([]);
     }
-  }, [selectedReport]);
+  }, [isTagReport, selectedReport]);
 
   const availableColumns = useMemo(
     () => selectedReport?.defaultColumns ?? [],
@@ -549,6 +549,7 @@ const ReportsAnalyticsPage = () => {
     includeSelf,
       letterDirection,
     selectedTagName,
+    selectedTagId,
     selectedSubtagId,
     selectedSubtagName,
       letterStatuses,

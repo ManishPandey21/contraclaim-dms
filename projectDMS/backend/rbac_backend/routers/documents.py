@@ -4,7 +4,8 @@
 Document management module with secure file handling, proper authorization, and bulk upload capabilities.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query, BackgroundTasks, Body, Header
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Query, BackgroundTasks, Body, Header, Request
+from starlette.background import BackgroundTask
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, date
 import logging
@@ -20,10 +21,11 @@ from bson import ObjectId
 import tempfile
 
 from ..core.database import get_db, get_database
+from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser, authorize_scope, require_permission
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
-from ..services.document_service import DocumentService
+from ..services.document_service import DocumentConflictError, DocumentService
 from ..services.file_service import SecureFileService
 from ..services.export_service import ExportService
 from ..services.authorization_service import AuthorizationService
@@ -34,6 +36,14 @@ from ..services.reference_sync_service import ReferenceSyncError
 from ..services.permission_service import PermissionService
 from ..services.storage_settings_service import StorageSettingsService
 from ..services.s3_service import S3Service
+from ..services.storage_key_builder import StorageKeyBuilder
+from ..services.file_object_service import FileObjectService
+from ..services.document_audit_service import DocumentAuditService
+from ..services.document_bulk_download_service import DocumentBulkDownloadService
+from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
+from ..services.upload_limits import upload_concurrency_limiter
+from ..services.upload_streaming import SpooledUpload, spool_upload_file, validate_spooled_upload
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..models.document import (
     Document,
@@ -51,7 +61,7 @@ from ..models.document import (
 )
 from ..models.notification import NotificationContext, NotificationType
 from ..models.storage_settings import StorageProviderConfig
-from ..utils.validation import validate_file, sanitize_filename
+from ..utils.validation import sanitize_filename
 from ..utils.error_handler import handle_exceptions, DocumentError
 from ..utils.date_parser import parse_date_safely
 from ..utils.csv_validator import validate_csv_structure, parse_csv_row
@@ -60,6 +70,14 @@ from fastapi.responses import FileResponse, Response
 logger = logging.getLogger(__name__)
 router = APIRouter()
 permission_service = PermissionService()
+
+
+async def get_policy_service() -> PolicyService:
+    return PolicyService()
+
+
+async def get_document_bulk_download_service() -> DocumentBulkDownloadService:
+    return DocumentBulkDownloadService()
 
 
 def verify_langgraph_token(x_api_token: str = Header(...)) -> None:
@@ -87,6 +105,46 @@ async def _ensure_document_access(
             detail="Not authorized to access this document",
         )
 
+
+def _parse_revision_header(
+    if_match: Optional[str] = None,
+    x_document_revision: Optional[str] = None,
+) -> Optional[int]:
+    raw = if_match or x_document_revision
+    if not raw:
+        return None
+    value = str(raw).strip()
+    if value.startswith("W/"):
+        value = value[2:].strip()
+    value = value.strip('"')
+    if not value:
+        return None
+    try:
+        revision = int(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document revision header",
+        ) from exc
+    if revision < 1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid document revision header",
+        )
+    return revision
+
+
+async def _set_document_revision_headers(
+    response: Response,
+    controller: "DocumentController",
+    document_id: str,
+) -> None:
+    revision = await controller.document_service.get_document_revision(document_id)
+    if revision is not None:
+        response.headers["X-Document-Revision"] = str(revision)
+        response.headers["ETag"] = f'"{revision}"'
+
+
 class DocumentController:
     """Document controller with clean separation of concerns and bulk upload support."""
 
@@ -105,6 +163,13 @@ class DocumentController:
         self.bulk_upload_service = bulk_upload_service
         self.storage_settings = StorageSettingsService()
         self.s3_service = S3Service()
+        self.storage_key_builder = StorageKeyBuilder()
+        self.file_object_service = FileObjectService(
+            file_service=self.file_service,
+            s3_service=self.s3_service,
+            storage_settings=self.storage_settings,
+        )
+        self.audit_service = DocumentAuditService()
 
     async def _write_to_providers(
         self,
@@ -114,88 +179,107 @@ class DocumentController:
         project_id: str,
         filename: str,
         upload_type: str,
+        letter_no: Optional[str] = None,
+        current_user: Optional[CurrentUser] = None,
     ) -> Dict[str, Any]:
         """
         Resolve storage settings and write to enabled providers.
         Returns dict with filepath_local, filepath_s3, storage_locations, and resolved_path.
         """
-        filepath_local = None
-        filepath_s3 = None
-        storage_locations: List[Dict[str, Any]] = []
-
         try:
-            resolved = await self.storage_settings.resolve_settings(org_id, project_id)
+            context = await self.file_object_service.resolve_storage_context(org_id, project_id)
         except Exception as exc:  # pragma: no cover - fallback path
             logger.warning("Failed to resolve storage settings; using local only. %s", exc)
-            resolved = None
+            context = {
+                "organization": org_id,
+                "project": project_id,
+                "providers": [StorageProviderConfig(id="local", enabled=True, primary=True)],
+            }
 
-        # Default path selection
-        if resolved:
-            if upload_type.lower() == "incoming":
-                path_prefix = resolved.base_paths.incoming
-            elif upload_type.lower() == "outgoing":
-                path_prefix = resolved.base_paths.outgoing
-            else:
-                path_prefix = resolved.base_paths.contracts
-            providers = resolved.providers or [StorageProviderConfig(id="local", enabled=True, primary=True)]
-        else:
-            path_prefix = f"/{org_id}/{project_id}/{upload_type}"
-            providers = [StorageProviderConfig(id="local", enabled=True, primary=True)]
-
-        # ensure deterministic order: primary first
-        providers = sorted(providers, key=lambda p: (not p.primary, p.id))
-
-        for provider in providers:
-            if not provider.enabled:
-                continue
-            try:
-                if provider.id == "local":
-                    local_path = await self.file_service.store_document(
-                        content,
-                        org_id,
-                        project_id,
-                        filename,
-                        path_structure=path_prefix,
-                    )
-                    filepath_local = filepath_local or local_path
-                    storage_locations.append(
-                        {"provider": "local", "path": local_path, "status": "ok"}
-                    )
-                elif provider.id == "s3":
-                    key_prefix = provider.prefix or path_prefix.strip("/")
-                    object_key = f"{key_prefix.rstrip('/')}/{filename}"
-                    saved_key = await self.s3_service.upload_bytes(
-                        object_key,
-                        content,
-                        content_type=sniff_mime_from_bytes(content, filename),
-                    )
-                    filepath_s3 = filepath_s3 or saved_key
-                    storage_locations.append(
-                        {"provider": "s3", "path": saved_key, "status": "ok"}
-                    )
-                else:
-                    storage_locations.append(
-                        {"provider": provider.id, "path": None, "status": "skipped"}
-                    )
-            except Exception as exc:
-                logger.error("Failed to store via provider %s: %s", provider.id, exc)
-                storage_locations.append(
-                    {"provider": provider.id, "path": None, "status": f"error: {exc}"}
-                )
-                continue
-
-        if not filepath_local and not filepath_s3:
+        upload_id = str(ObjectId())
+        storage_key = self.storage_key_builder.build_document_key(
+            organization=context["organization"],
+            project=context["project"],
+            upload_type=upload_type,
+            letter_no=letter_no,
+            original_filename=filename,
+            upload_id=upload_id,
+        )
+        try:
+            result = await self.file_object_service.store_bytes(
+                content=content,
+                organization_id=org_id,
+                project_id=project_id,
+                original_filename=filename,
+                storage_key=storage_key,
+                current_user=current_user,
+                document_type=str(upload_type or "document").lower(),
+                upload_id=upload_id,
+                content_type=sniff_mime_from_bytes(content, filename),
+                providers=context["providers"],
+            )
+        except Exception as exc:
+            logger.error("Failed to store document through file object service: %s", exc)
             raise DocumentError(
                 "Failed to store document to any provider",
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            ) from exc
+        result["resolved_path"] = str(Path(storage_key).parent)
+        return result
 
-        return {
-            "filepath_local": filepath_local,
-            "filepath_s3": filepath_s3,
-            "storage_locations": storage_locations,
-            "resolved_path": path_prefix,
-        }
+    async def _write_spooled_to_providers(
+        self,
+        *,
+        spooled: SpooledUpload,
+        org_id: str,
+        project_id: str,
+        upload_type: str,
+        letter_no: Optional[str] = None,
+        current_user: Optional[CurrentUser] = None,
+        document_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            context = await self.file_object_service.resolve_storage_context(org_id, project_id)
+        except Exception as exc:  # pragma: no cover - fallback path
+            logger.warning("Failed to resolve storage settings; using local only. %s", exc)
+            context = {
+                "organization": org_id,
+                "project": project_id,
+                "providers": [StorageProviderConfig(id="local", enabled=True, primary=True)],
+            }
+
+        upload_id = str(ObjectId())
+        storage_key = self.storage_key_builder.build_document_key(
+            organization=context["organization"],
+            project=context["project"],
+            upload_type=upload_type,
+            letter_no=letter_no,
+            original_filename=spooled.filename,
+            upload_id=upload_id,
+        )
+        try:
+            result = await self.file_object_service.store_path(
+                source_path=spooled.path,
+                size=spooled.size,
+                sha256=spooled.sha256,
+                mime_type=spooled.mime_type,
+                organization_id=org_id,
+                project_id=project_id,
+                original_filename=spooled.filename,
+                storage_key=storage_key,
+                current_user=current_user,
+                document_type=document_type or str(upload_type or "document").lower(),
+                upload_id=upload_id,
+                providers=context["providers"],
+            )
+        except Exception as exc:
+            logger.error("Failed to store spooled document through file object service: %s", exc)
+            raise DocumentError(
+                "Failed to store document to any provider",
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ) from exc
+        result["resolved_path"] = str(Path(storage_key).parent)
+        return result
 
     async def _materialize_for_processing(self, document: Document) -> str:
         """
@@ -397,32 +481,40 @@ class DocumentController:
             if not file.filename or not letter_no:
                 raise DocumentError("Missing required fields", status.HTTP_400_BAD_REQUEST)
 
-            # Secure file handling
-            safe_filename = sanitize_filename(file.filename)
-            content = await file.read()
+            max_size = max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+            async with upload_concurrency_limiter.slot(
+                f"user:{current_user.id}",
+                int(settings.UPLOAD_MAX_CONCURRENT_PER_USER),
+            ), upload_concurrency_limiter.slot(
+                f"org:{organization_id}",
+                int(settings.UPLOAD_MAX_CONCURRENT_PER_ORG),
+            ):
+                spooled = await spool_upload_file(file, max_size_bytes=max_size)
+                try:
+                    validation_result = validate_spooled_upload(
+                        spooled, settings.ALLOWED_DOCUMENT_MIMES
+                    )
 
-            # Validate file
-            validation_result = await validate_file(
-                content, safe_filename, settings.ALLOWED_DOCUMENT_MIMES
-            )
+                    if not validation_result.is_valid:
+                        raise DocumentError(
+                            f"Invalid file: {validation_result.error}",
+                            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+                        )
 
-            if not validation_result.is_valid:
-                raise DocumentError(
-                    f"Invalid file: {validation_result.error}",
-                    status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
-                )
+                    # Parse date safely
+                    parsed_date = parse_date_safely(date_str)
 
-            # Parse date safely
-            parsed_date = parse_date_safely(date_str)
-
-            # Store file(s) according to storage settings
-            store_result = await self._write_to_providers(
-                content=content,
-                org_id=organization_id,
-                project_id=project_id,
-                filename=safe_filename,
-                upload_type=upload_type,
-            )
+                    # Store file(s) according to storage settings
+                    store_result = await self._write_spooled_to_providers(
+                        spooled=spooled,
+                        org_id=organization_id,
+                        project_id=project_id,
+                        upload_type=upload_type,
+                        letter_no=letter_no,
+                        current_user=current_user,
+                    )
+                finally:
+                    await spooled.cleanup()
 
             # Create document record
             document = await self.document_service.create_document(
@@ -438,6 +530,46 @@ class DocumentController:
                 current_user=current_user,
                 emit_upload_notification=emit_upload_notification,
                 **kwargs
+            )
+
+            version_id = await self.file_object_service.attach_document_version(
+                document_id=document.id,
+                file_object_id=store_result.get("file_object_id"),
+                metadata_snapshot=document.model_dump(by_alias=True, exclude_none=True),
+                current_user=current_user,
+                reason="upload",
+            )
+            try:
+                db = await get_database()
+                await db.documents.update_one(
+                    {"_id": ObjectId(document.id)},
+                    {
+                        "$set": {
+                            "file_object_id": store_result.get("file_object_id"),
+                            "current_version_id": version_id,
+                            "storage_key": store_result.get("storage_key"),
+                            "sha256": store_result.get("sha256"),
+                            "lifecycle_state": "active",
+                        }
+                    },
+                )
+            except Exception:
+                logger.warning("Failed to attach file object metadata to document %s", document.id, exc_info=True)
+
+            await self.audit_service.emit(
+                resource_type="document",
+                resource_id=document.id,
+                event_type="document.created",
+                actor_id=getattr(current_user, "id", None),
+                organization_id=organization_id,
+                project_id=project_id,
+                metadata={
+                    "file_object_id": store_result.get("file_object_id"),
+                    "storage_key": store_result.get("storage_key"),
+                    "sha256": store_result.get("sha256"),
+                    "deduped": store_result.get("deduped", False),
+                    "upload_streamed": True,
+                },
             )
 
             # Schedule background processing if needed
@@ -771,6 +903,16 @@ class DocumentController:
                 "organization_id": organization_id,
                 "project_id": project_id,
             },
+            actions=[
+                {
+                    "key": "view_documents",
+                    "label": "View Documents",
+                    "method": "navigate",
+                    "href": "/documents",
+                }
+            ],
+            resource_link="/documents",
+            dedupe_key=f"bulk_upload_completed:{job_id}",
         )
 
     async def _process_bulk_upload(
@@ -1126,7 +1268,8 @@ async def controller_update_document(
     self,
     document_id: str,
     update_data: DocumentUpdate,
-    current_user: CurrentUser
+    current_user: CurrentUser,
+    expected_revision: Optional[int] = None,
 ) -> Document:
     """Update document with validation and authorization."""
     try:
@@ -1147,15 +1290,39 @@ async def controller_update_document(
         updated_document_model = document.model_copy(update=update_payload)
 
         updated_document = await self.document_service.update_document(
-            document_id, updated_document_model
+            document_id,
+            updated_document_model,
+            expected_revision=expected_revision,
         )
         if not updated_document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
+
+        await self.audit_service.emit(
+            resource_type="document",
+            resource_id=document_id,
+            event_type="document.updated",
+            actor_id=getattr(current_user, "id", None),
+            organization_id=document.organization_id,
+            project_id=document.project_id,
+            metadata={
+                "updated_fields": sorted(update_payload.keys()),
+                "expected_revision": expected_revision,
+                "current_revision": await self.document_service.get_document_revision(document_id),
+            },
+        )
 
         return await self.document_service.enrich_document(updated_document)
 
     except DocumentError:
         raise
+    except DocumentConflictError as exc:
+        raise DocumentError(
+            "Document was modified by another user",
+            status.HTTP_409_CONFLICT,
+            error="ConflictError",
+            code="document_conflict",
+            details={"current_revision": exc.current_revision},
+        ) from exc
     except Exception as e:
         logger.error(f"Document update failed: {str(e)}")
         raise HTTPException(
@@ -1167,7 +1334,8 @@ async def controller_update_document(
 async def controller_delete_document(
     self,
     document_id: str,
-    current_user: CurrentUser
+    current_user: CurrentUser,
+    expected_revision: Optional[int] = None,
 ):
     """Delete document with proper authorization and cleanup."""
     try:
@@ -1179,12 +1347,36 @@ async def controller_delete_document(
             current_user, document.organization_id, document.project_id, "delete"
         )
 
-        deleted = await self.document_service.delete_document(document_id)
+        deleted = await self.document_service.delete_document(
+            document_id,
+            expected_revision=expected_revision,
+        )
         if not deleted:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
+        await self.audit_service.emit(
+            resource_type="document",
+            resource_id=document_id,
+            event_type="document.deleted",
+            actor_id=getattr(current_user, "id", None),
+            organization_id=document.organization_id,
+            project_id=document.project_id,
+            metadata={
+                "soft_delete": True,
+                "expected_revision": expected_revision,
+                "current_revision": await self.document_service.get_document_revision(document_id),
+            },
+        )
 
     except DocumentError:
         raise
+    except DocumentConflictError as exc:
+        raise DocumentError(
+            "Document was modified by another user",
+            status.HTTP_409_CONFLICT,
+            error="ConflictError",
+            code="document_conflict",
+            details={"current_revision": exc.current_revision},
+        ) from exc
     except Exception as e:
         logger.error(f"Document deletion failed: {str(e)}")
         raise HTTPException(
@@ -1212,20 +1404,81 @@ async def controller_add_enclosure(
         if not file.filename:
             raise DocumentError("No file provided", status.HTTP_400_BAD_REQUEST)
 
-        safe_filename = sanitize_filename(file.filename)
-        content = await file.read()
+        max_size = max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+        async with upload_concurrency_limiter.slot(
+            f"user:{current_user.id}",
+            int(settings.UPLOAD_MAX_CONCURRENT_PER_USER),
+        ), upload_concurrency_limiter.slot(
+            f"org:{document.organization_id}",
+            int(settings.UPLOAD_MAX_CONCURRENT_PER_ORG),
+        ):
+            spooled = await spool_upload_file(file, max_size_bytes=max_size)
+            try:
+                validation_result = validate_spooled_upload(
+                    spooled, settings.ALLOWED_ENCLOSURE_MIMES
+                )
+                if not validation_result.is_valid:
+                    raise DocumentError(
+                        f"Invalid enclosure: {validation_result.error}",
+                        status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                    )
 
-        validation_result = await validate_file(
-            content, safe_filename, settings.ALLOWED_ENCLOSURE_MIMES
+                context = await self.file_object_service.resolve_storage_context(
+                    document.organization_id,
+                    document.project_id,
+                )
+                upload_id = str(ObjectId())
+                storage_key = self.storage_key_builder.build_enclosure_key(
+                    organization=context["organization"],
+                    project=context["project"],
+                    parent_document_id=document_id,
+                    original_filename=spooled.filename,
+                    upload_id=upload_id,
+                )
+                store_result = await self.file_object_service.store_path(
+                    source_path=spooled.path,
+                    size=spooled.size,
+                    sha256=spooled.sha256,
+                    mime_type=spooled.mime_type,
+                    organization_id=document.organization_id,
+                    project_id=document.project_id,
+                    original_filename=spooled.filename,
+                    storage_key=storage_key,
+                    current_user=current_user,
+                    document_type="enclosure",
+                    upload_id=upload_id,
+                    providers=context["providers"],
+                    document_id=document_id,
+                )
+            finally:
+                await spooled.cleanup()
+        await self.audit_service.emit(
+            resource_type="document",
+            resource_id=document_id,
+            event_type="document.enclosure_added",
+            actor_id=getattr(current_user, "id", None),
+            organization_id=document.organization_id,
+            project_id=document.project_id,
+            metadata={
+                "filename": spooled.filename,
+                "file_object_id": store_result.get("file_object_id"),
+                "storage_key": store_result.get("storage_key"),
+                "upload_streamed": True,
+            },
         )
-        if not validation_result.is_valid:
-            raise DocumentError(
-                f"Invalid enclosure: {validation_result.error}",
-                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            )
 
         return await self.document_service.add_enclosure(
-            document_id, content, safe_filename, current_user
+            document_id,
+            spooled.sample,
+            spooled.filename,
+            current_user,
+            filepath_local=store_result.get("filepath_local"),
+            filepath_s3=store_result.get("filepath_s3"),
+            storage_key=store_result.get("storage_key"),
+            file_object_id=store_result.get("file_object_id"),
+            storage_locations=store_result.get("storage_locations"),
+            filetype=spooled.mime_type,
+            filesize=spooled.size,
         )
 
     except DocumentError:
@@ -1341,7 +1594,7 @@ async def controller_add_reference(
         if not target:
             raise DocumentError("Referenced document not found", status.HTTP_404_NOT_FOUND)
 
-        await _ensure_document_access(current_user, reference_data.referenced_document_id, "documents:read")
+        await _ensure_document_access(current_user, reference_data.referenced_document_id, "dms.document.view")
 
         await self.auth_service.check_document_access(
             current_user, target.organization_id, target.project_id, "read"
@@ -1577,7 +1830,7 @@ async def vector_search_documents_endpoint(
     uploadType: Optional[str] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ) -> Dict[str, Any]:
     filters = {
         "organization_id": organization_id,
@@ -1601,9 +1854,11 @@ async def export_documents(
     uploadType: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Export documents with filtering. Returns a downloadable file.
@@ -1620,6 +1875,8 @@ async def export_documents(
         "uploadType": uploadType,
         "status": status,
         "search": search,
+        "date_from": date_from,
+        "date_to": date_to,
     }
 
     # Authorization-aware query
@@ -1862,9 +2119,18 @@ async def create_document(
 
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("documents:create")),
 ):
     """Create a new document."""
+    await policy.authorize(
+        current_user,
+        "dms.document.upload",
+        resource_type="project",
+        resource_id=project_id,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
     allowed = await permission_service.check_resource_access(
         current_user.id,
         "documents:create",
@@ -1902,13 +2168,17 @@ async def create_document(
 @handle_exceptions
 async def get_document(
     id: str,
+    response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Get a specific document."""
-    await _ensure_document_access(current_user, id, "documents:read")
-    return await controller_get_document(controller, id, current_user)
+    await _ensure_document_access(current_user, id, "dms.document.view")
+    document = await controller_get_document(controller, id, current_user)
+    await PolicyService().authorize_document(current_user, "dms.document.view", document)
+    await _set_document_revision_headers(response, controller, id)
+    return document
 
 
 @router.post("/documents/{id}/process", response_model=DocumentProcessingResult)
@@ -1935,13 +2205,57 @@ async def process_document_internal(
     return await controller.process_document(id, None, skip_authorization=True)
 
 
+@router.get("/documents/download-all")
+@handle_exceptions
+async def download_all_project_documents(
+    project_id: str = Query(..., min_length=1),
+    type: str = Query("complete", pattern="^(letters|contracts|complete)$"),
+    upload_type: Optional[str] = Query(None, pattern="^(incoming|outgoing|contract)$"),
+    year: Optional[int] = Query(None, ge=1900, le=3000),
+    month: Optional[int] = Query(None, ge=1, le=12),
+    document_id: Optional[str] = Query(None, min_length=1),
+    service: DocumentBulkDownloadService = Depends(get_document_bulk_download_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """
+    Download all project letters/documents, contract documents, or both as a zip.
+
+    Authorization is enforced in the service:
+    - superadmin: any project
+    - orgadmin: projects in their organization
+    - projectadmin: assigned projects
+    - other users: assigned project plus documents:download_all
+    """
+    result = await service.create_project_archive(
+        project_id=project_id,
+        download_type=type,  # type: ignore[arg-type]
+        current_user=current_user,
+        upload_type=upload_type,
+        year=year,
+        month=month,
+        document_id=document_id,
+    )
+    headers = {
+        "X-Document-Count": str(result.file_count),
+        "X-Archive-Size": str(result.total_size),
+        "Access-Control-Expose-Headers": "Content-Disposition, X-Document-Count, X-Archive-Size",
+    }
+    return FileResponse(
+        path=str(result.zip_path),
+        media_type="application/zip",
+        filename=result.filename,
+        headers=headers,
+        background=BackgroundTask(service.cleanup_paths, result.cleanup_paths),
+    )
+
+
 @router.get("/documents/{id}/download")
 @handle_exceptions
 async def download_document(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """
     Securely download/stream the original document bytes.
@@ -1955,12 +2269,8 @@ async def download_document(
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    await _ensure_document_access(current_user, id, "documents:read")
-
-    # Authorization check
-    await controller.auth_service.check_document_access(
-        current_user, document.organization_id, document.project_id, "read"
-    )
+    await policy.authorize_document(current_user, "dms.document.download", document)
+    await _ensure_document_access(current_user, id, "dms.document.download")
 
     # Prefer local file if present
     try:
@@ -1968,6 +2278,16 @@ async def download_document(
         if path:
             p = Path(path)
             if p.exists() and p.is_file():
+                controller.file_object_service.assert_local_path_allowed(str(p))
+                await controller.audit_service.emit(
+                    resource_type="document",
+                    resource_id=id,
+                    event_type="document.downloaded",
+                    actor_id=getattr(current_user, "id", None),
+                    organization_id=document.organization_id,
+                    project_id=document.project_id,
+                    metadata={"provider": "local"},
+                )
                 media = document.filetype or "application/octet-stream"
                 return FileResponse(
                     path=str(p),
@@ -1985,14 +2305,26 @@ async def download_document(
             presigned = await controller.s3_service.generate_presigned_url(
                 s3_key, current_user
             )
+            await controller.audit_service.emit(
+                resource_type="document",
+                resource_id=id,
+                event_type="document.downloaded",
+                actor_id=getattr(current_user, "id", None),
+                organization_id=document.organization_id,
+                project_id=document.project_id,
+                metadata={"provider": "s3"},
+            )
             return Response(status_code=307, headers={"Location": presigned.get("url")})
         except Exception:
             # continue to presigned_url below
             pass
 
-    # If we have a stored presigned/public URL, redirect to it (temporary)
+    # Stored public URLs are intentionally not used for downloads.
     if isinstance(document.presigned_url, str) and document.presigned_url:
-        return Response(status_code=307, headers={"Location": document.presigned_url})
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Stored public file URLs are not used for downloads; regenerate an authorized URL",
+        )
 
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not available for download")
 
@@ -2006,13 +2338,16 @@ async def list_documents(
     subTags: Optional[List[str]] = Query(None),
     uploadType: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     letterNo: Optional[List[str]] = Query(None),
     subject: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """List documents with filtering and pagination."""
     filters = {
@@ -2022,11 +2357,22 @@ async def list_documents(
         "subTags": subTags,
         "uploadType": uploadType,
         "status": status,
+        "search": search,
+        "date_from": date_from,
+        "date_to": date_to,
         "letterNo": letterNo,
         "subject": subject,
     }
     pagination = {"skip": skip, "limit": limit}
 
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="documents",
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=False,
+    )
     return await controller_list_documents(controller, filters, pagination, current_user)
 
 
@@ -2035,26 +2381,82 @@ async def list_documents(
 async def update_document(
     id: str,
     document_update: DocumentUpdate,
+    response: Response,
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("documents:update")),
 ):
     """Update a document."""
+    existing = await controller.document_service.get_document_by_id(id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_EDIT_METADATA, existing)
     await _ensure_document_access(current_user, id, "documents:update")
-    return await controller_update_document(controller, id, document_update, current_user)
+    expected_revision = _parse_revision_header(if_match, x_document_revision)
+    document = await controller_update_document(
+        controller,
+        id,
+        document_update,
+        current_user,
+        expected_revision=expected_revision,
+    )
+    await _set_document_revision_headers(response, controller, id)
+    return document
 
 
 @router.delete("/documents/{id}", status_code=204)
 @handle_exceptions
 async def delete_document(
     id: str,
+    request: Request,
+    if_match: Optional[str] = Header(default=None, alias="If-Match"),
+    x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     _: None = Depends(require_permission("documents:delete")),
 ):
     """Delete a document."""
+    await require_step_up(request, current_user, action="documents.delete")
+    existing = await controller.document_service.get_document_by_id(id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_DELETE, existing)
     await _ensure_document_access(current_user, id, "documents:delete")
-    await controller_delete_document(controller, id, current_user)
+    expected_revision = _parse_revision_header(if_match, x_document_revision)
+    await controller_delete_document(
+        controller,
+        id,
+        current_user,
+        expected_revision=expected_revision,
+    )
+
+
+@router.get("/documents/{id}/audit-events", response_model=List[Dict[str, Any]])
+@handle_exceptions
+async def list_document_audit_events(
+    id: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+    _: None = Depends(require_permission("dms.document.view")),
+):
+    """Return immutable audit events for a document."""
+    await _ensure_document_access(current_user, id, "dms.document.view")
+    document = await controller.document_service.get_document_by_id(id)
+    if not document:
+        raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
+    await controller.auth_service.check_document_access(
+        current_user, document.organization_id, document.project_id, "read"
+    )
+    return await controller.audit_service.list_events(
+        resource_type="document",
+        resource_id=id,
+        skip=skip,
+        limit=limit,
+    )
 
 
 @router.get("/documents/{id}/enclosures", response_model=List[Enclosure])
@@ -2063,10 +2465,10 @@ async def list_enclosures(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """List all enclosures for a document."""
-    await _ensure_document_access(current_user, id, "documents:read")
+    await _ensure_document_access(current_user, id, "dms.document.view")
     return await controller_list_enclosures(controller, id, current_user)
 
 
@@ -2104,10 +2506,10 @@ async def get_document_references(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Retrieve parsed and linked references for a document."""
-    await _ensure_document_access(current_user, id, "documents:read")
+    await _ensure_document_access(current_user, id, "dms.document.view")
     return await controller_list_references(controller, id, current_user)
 
 
@@ -2162,7 +2564,7 @@ async def link_documents_endpoint(
 ):
     """Link two documents together."""
     await _ensure_document_access(current_user, payload.source_document_id, "documents:update")
-    await _ensure_document_access(current_user, payload.target_document_id, "documents:read")
+    await _ensure_document_access(current_user, payload.target_document_id, "dms.document.view")
     return await controller_link_documents(controller, payload, current_user)
 
 
@@ -2172,10 +2574,10 @@ async def get_linked_documents(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Return documents linked to the given document."""
-    await _ensure_document_access(current_user, id, "documents:read")
+    await _ensure_document_access(current_user, id, "dms.document.view")
     return await controller_list_linked_documents(controller, id, current_user)
 
 # ---------------------------------------------
@@ -2187,7 +2589,7 @@ async def get_document_comments(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Return comments for a document: [{ id, text, author, createdAt }, ...]
@@ -2197,7 +2599,7 @@ async def get_document_comments(
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    await _ensure_document_access(current_user, id, "documents:read")
+    await _ensure_document_access(current_user, id, "dms.document.view")
 
     # Authorization
     await controller.auth_service.check_document_access(
@@ -2229,7 +2631,17 @@ async def add_document_comment(
         current_user, document.organization_id, document.project_id, "update"
     )
 
-    return await controller.document_service.add_comment(id, text, current_user)
+    comment = await controller.document_service.add_comment(id, text, current_user)
+    await controller.audit_service.emit(
+        resource_type="document",
+        resource_id=id,
+        event_type="document.comment_added",
+        actor_id=getattr(current_user, "id", None),
+        organization_id=document.organization_id,
+        project_id=document.project_id,
+        metadata={"comment_id": comment.get("id")},
+    )
+    return comment
 
 @router.post("/documents/bulk-upload", response_model=BulkUploadResponse)
 @handle_exceptions
@@ -2328,7 +2740,8 @@ async def request_draft_for_document(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:read")),
+    policy: PolicyService = Depends(get_policy_service),
+    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Initialize a draft letter request for a document.
@@ -2340,11 +2753,20 @@ async def request_draft_for_document(
         if not document:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-        await _ensure_document_access(current_user, id, "documents:read")
+        await _ensure_document_access(current_user, id, "dms.document.view")
 
         # Authorization check
         await controller.auth_service.check_document_access(
             current_user, document.organization_id, document.project_id, "read"
+        )
+
+        await policy.authorize(
+            current_user,
+            "drafting.request.create",
+            resource_type="document",
+            resource_id=id,
+            organization_id=document.organization_id,
+            project_id=document.project_id,
         )
 
         # Check if document already has a draft in progress

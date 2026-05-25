@@ -50,6 +50,14 @@ class DocumentProcessingError(Exception):
     """Custom exception for document processing errors"""
     pass
 
+
+class DocumentConflictError(DocumentServiceError):
+    """Raised when a stale client attempts to overwrite a newer document."""
+
+    def __init__(self, message: str, *, current_revision: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.current_revision = current_revision
+
 class DocumentService:
     """Async service for document CRUD operations with proper error handling"""
     
@@ -245,6 +253,9 @@ class DocumentService:
             if not doc_data:
                 logger.info(f"Document not found: {document_id}")
                 return None
+            if doc_data.get("lifecycle_state") == "deleted":
+                logger.info(f"Document is soft-deleted: {document_id}")
+                return None
 
             document = Document(**doc_data)
             logger.info(f"Retrieved document: {document_id}")
@@ -405,6 +416,8 @@ class DocumentService:
                 document_dict["letterNoNormalized"] = normalize_letter_code(str(document_dict.get("letterNo")))
             else:
                 document_dict["letterNoNormalized"] = None
+            document_dict.setdefault("lifecycle_state", "active")
+            document_dict.setdefault("_revision", 1)
 
             db = await self._get_db()
             result = await db.documents.insert_one(document_dict)
@@ -430,6 +443,16 @@ class DocumentService:
                         context=self._resolve_upload_notification_context(document),
                         actor_id=actor_id,
                         data=self._build_upload_notification_data(document, doc_id),
+                        actions=[
+                            {
+                                "key": "view_document",
+                                "label": "View Document",
+                                "method": "navigate",
+                                "href": f"/documentviewer/{doc_id}",
+                            }
+                        ],
+                        resource_link=f"/documentviewer/{doc_id}",
+                        dedupe_key=f"document:new_upload:{doc_id}",
                     )
                     logger.info(f"Emitted NEW_UPLOAD notification for document {doc_id}")
                 except Exception as e:
@@ -556,9 +579,12 @@ class DocumentService:
         skip = int(pagination.get("skip", 0) or 0)
         limit = int(pagination.get("limit", 50) or 50)
         skip, limit = validate_pagination(skip, limit)
+        query = dict(query or {})
+        query.setdefault("lifecycle_state", {"$ne": "deleted"})
         raw_items, page = await fetch_paginated(
             db.documents,
-            filter=query or {},
+            filter=query,
+            sort=[("createdAt", -1), ("date", -1), ("_id", -1)],
             skip=skip,
             limit=limit,
             count_total=True,
@@ -601,20 +627,41 @@ class DocumentService:
         total = page.total if page.total is not None else len(items)
         return items, total
 
-    async def add_enclosure(self, document_id: str, content: bytes, filename: str, current_user: Any = None) -> EnclosureResponse:
+    async def add_enclosure(
+        self,
+        document_id: str,
+        content: bytes,
+        filename: str,
+        current_user: Any = None,
+        *,
+        filepath_local: Optional[str] = None,
+        filepath_s3: Optional[str] = None,
+        storage_key: Optional[str] = None,
+        file_object_id: Optional[str] = None,
+        storage_locations: Optional[List[Dict[str, Any]]] = None,
+        filetype: Optional[str] = None,
+        filesize: Optional[int] = None,
+    ) -> EnclosureResponse:
         db = await self._get_db()
         doc_oid = self._validate_document_id(document_id)
         enc = Enclosure(
             id=str(ObjectId()),
             filename=filename,
-            filepath_local="",
-            filepath_s3=None,
+            filepath_local=filepath_local,
+            filepath_s3=filepath_s3,
             presigned_url=None,
-            filetype=sniff_mime_from_bytes(content),
-            filesize=len(content or b""),
+            filetype=filetype or sniff_mime_from_bytes(content, filename),
+            filesize=int(filesize if filesize is not None else len(content or b"")),
             uploadedBy=(getattr(current_user, "id", None) or getattr(current_user, "email", "system")),
         )
-        await db.documents.update_one({"_id": doc_oid}, {"$push": {"enclosures": enc.model_dump(by_alias=True)}})
+        enc_doc = enc.model_dump(by_alias=True)
+        if storage_key:
+            enc_doc["storage_key"] = storage_key
+        if file_object_id:
+            enc_doc["file_object_id"] = file_object_id
+        if storage_locations:
+            enc_doc["storage_locations"] = storage_locations
+        await db.documents.update_one({"_id": doc_oid}, {"$push": {"enclosures": enc_doc}})
         return EnclosureResponse(enclosure=enc, message="Enclosure added successfully")
 
     async def queue_document_processing(self, document: Document, file_path: str) -> str:
@@ -1239,7 +1286,27 @@ class DocumentService:
             "linked_documents": linked_documents,
         }
 
-    async def update_document(self, document_id: str, updated_document: Document) -> Optional[Document]:
+    async def get_document_revision(self, document_id: str) -> Optional[int]:
+        db = await self._get_db()
+        try:
+            doc_oid = self._validate_document_id(document_id)
+            raw = await db.documents.find_one({"_id": doc_oid}, {"_revision": 1})
+        except InvalidDocumentIdError:
+            raw = await db.documents.find_one({"_id": document_id}, {"_revision": 1})
+        if not raw:
+            return None
+        try:
+            return int(raw.get("_revision") or 1)
+        except Exception:
+            return 1
+
+    async def update_document(
+        self,
+        document_id: str,
+        updated_document: Document,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> Optional[Document]:
         """
         Update an existing document.
         
@@ -1284,12 +1351,23 @@ class DocumentService:
                 return await self.get_document(document_id)
             
             db = await self._get_db()
+            update_dict["updatedAt"] = datetime.utcnow()
+            query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
+            if expected_revision is not None:
+                query["_revision"] = int(expected_revision)
             result = await db.documents.update_one(
-                {"_id": doc_oid},
-                {"$set": update_dict}
+                query,
+                {"$set": update_dict, "$inc": {"_revision": 1}}
             )
             
             if result.matched_count == 0:
+                if expected_revision is not None:
+                    current_revision = await self.get_document_revision(document_id)
+                    if current_revision is not None:
+                        raise DocumentConflictError(
+                            "Document was modified by another user",
+                            current_revision=current_revision,
+                        )
                 logger.info(f"Document not found for update: {document_id}")
                 return None
             
@@ -1311,7 +1389,12 @@ class DocumentService:
             logger.error(f"Failed to update document {document_id}: {e}")
             raise DocumentServiceError(f"Document update failed: {str(e)}")
     
-    async def delete_document(self, document_id: str) -> bool:
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
         """
         Delete a document by ID.
         
@@ -1331,9 +1414,29 @@ class DocumentService:
             logger.info(f"Deleting document: {document_id}")
             
             db = await self._get_db()
-            result = await db.documents.delete_one({"_id": doc_oid})
+            query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
+            if expected_revision is not None:
+                query["_revision"] = int(expected_revision)
+            result = await db.documents.update_one(
+                query,
+                {
+                    "$set": {
+                        "lifecycle_state": "deleted",
+                        "deletedAt": datetime.utcnow(),
+                        "updatedAt": datetime.utcnow(),
+                    },
+                    "$inc": {"_revision": 1},
+                },
+            )
             
-            success = result.deleted_count > 0
+            success = result.matched_count > 0
+            if not success and expected_revision is not None:
+                current_revision = await self.get_document_revision(document_id)
+                if current_revision is not None:
+                    raise DocumentConflictError(
+                        "Document was modified by another user",
+                        current_revision=current_revision,
+                    )
             if success:
                 logger.info(f"Deleted document: {document_id}")
             else:

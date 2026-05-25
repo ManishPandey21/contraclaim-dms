@@ -3,12 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import re
 
 import redis
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from pydantic import BaseModel, BaseSettings, Field
+from pydantic import BaseModel, Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 try:  # Optional OpenAI support
@@ -27,18 +29,20 @@ from redis.commands.graph.edge import Edge
 
 
 class Settings(BaseSettings):
-    graph_name: str = Field(default_factory=lambda: Path("contract_graph").stem)
+    graph_name: str = Field("contraclaim", alias="GRAPHITI_GRAPH_NAME")
     falkordb_url: str = Field("redis://falkordb:6379", alias="GRAPHITI_DB_URL")
+    api_key: Optional[str] = Field(None, alias="GRAPHITI_API_KEY")
     openai_api_key: Optional[str] = Field(None, alias="GRAPHITI_OPENAI_API_KEY")
     openai_model: str = Field("gpt-4o-mini")
     log_level: str = Field("INFO", alias="GRAPHITI_LOG_LEVEL")
     log_dir: Path = Field(Path("/app/logs"))
     default_limit: int = Field(25, ge=1, le=500)
 
-    class Config:
-        env_file = ".env"
-        env_prefix = "GRAPHITI_"
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="GRAPHITI_",
+        case_sensitive=False,
+    )
 
 
 settings = Settings()
@@ -220,6 +224,7 @@ class GraphitiService:
         return self._run(query, params)
 
     def relate(self, payload: RelationshipPayload) -> QueryResponse:
+        relationship = _validate_identifier(payload.relationship.upper(), "relationship")
         params = {
             "source": payload.source_id,
             "target": payload.target_id,
@@ -227,20 +232,21 @@ class GraphitiService:
         }
         query = (
             "MATCH (a {id: $source}), (b {id: $target}) "
-            f"MERGE (a)-[r:{payload.relationship}]->(b) "
+            f"MERGE (a)-[r:{relationship}]->(b) "
             "SET r += $properties, r.updated_at = timestamp() "
             "RETURN r"
         )
         return self._run(query, params)
 
     def temporal(self, request: TemporalQuery) -> QueryResponse:
+        label = _validate_identifier(request.label, "label")
         params = {
             "start": request.start.isoformat(),
             "end": request.end.isoformat(),
             "limit": request.limit,
         }
         query = (
-            f"MATCH (n:{request.label}) "
+            f"MATCH (n:{label}) "
             "WHERE n.occurred_at >= $start AND n.occurred_at <= $end "
             "RETURN n ORDER BY n.occurred_at ASC LIMIT $limit"
         )
@@ -252,6 +258,25 @@ class GraphitiService:
 
 graphiti_service = GraphitiService(settings.graph_name, settings.falkordb_url)
 openai_client = AsyncOpenAI(api_key=settings.openai_api_key) if settings.openai_api_key and AsyncOpenAI else None
+
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(value: str, field_name: str) -> str:
+    if not IDENTIFIER_RE.fullmatch(value or ""):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid {field_name}",
+        )
+    return value
+
+
+async def require_api_key(authorization: str | None = Header(default=None)) -> None:
+    if not settings.api_key:
+        return
+    expected = f"Bearer {settings.api_key}"
+    if authorization != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
 
 @retry(wait=wait_exponential(multiplier=1, min=1, max=5), stop=stop_after_attempt(3))
@@ -355,7 +380,7 @@ async def temporal(query: TemporalQuery) -> QueryResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/graph/query", response_model=QueryResponse, tags=["admin"])
+@app.post("/graph/query", response_model=QueryResponse, tags=["admin"], dependencies=[Depends(require_api_key)])
 async def raw_query(request: QueryRequest) -> QueryResponse:
     try:
         return graphiti_service.raw(request)

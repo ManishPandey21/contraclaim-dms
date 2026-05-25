@@ -45,6 +45,9 @@ export interface UILetter {
   engineerContext?: string;
   employerContext?: string;
   draftBody?: string;
+  draftingProfile?: string;
+  draftingAssignedBy?: string;
+  draftingAssignedAt?: string;
   summaryPoints?: string[];
   graphStatus?: string;
   graphWarnings?: string[];
@@ -84,7 +87,12 @@ export interface UILetterInputRequest {
 }
 
 const resolveUser = (users: User[], userId?: string | null): UILetterUser => {
-  if (!userId) {
+  const normalizedUserId =
+    typeof userId === "object" && userId !== null
+      ? String((userId as any).id ?? (userId as any)._id ?? (userId as any).$oid ?? "")
+      : String(userId ?? "");
+
+  if (!normalizedUserId) {
     return {
       id: "unknown",
       name: "Unassigned",
@@ -92,7 +100,9 @@ const resolveUser = (users: User[], userId?: string | null): UILetterUser => {
   }
 
   const match = users.find(
-    (user) => String(user.id) === String(userId),
+    (user) =>
+      String(user.id) === normalizedUserId ||
+      String(user.email ?? "") === normalizedUserId,
   );
 
   if (match) {
@@ -105,8 +115,8 @@ const resolveUser = (users: User[], userId?: string | null): UILetterUser => {
   }
 
   return {
-    id: String(userId),
-    name: String(userId),
+    id: normalizedUserId,
+    name: "Unknown user",
   };
 };
 
@@ -191,6 +201,9 @@ export const mapLetterToUi = (
       (letter as any).draft_output ??
       letter.content ??
       "",
+    draftingProfile: (letter as any).drafting_profile ?? undefined,
+    draftingAssignedBy: (letter as any).drafting_assigned_by ?? undefined,
+    draftingAssignedAt: normaliseDate((letter as any).drafting_assigned_at),
     summaryPoints: (letter as any).summary_points ?? [],
     graphStatus: (letter as any).graph_status ?? undefined,
     graphWarnings: (letter as any).graph_warnings ?? [],
@@ -242,6 +255,8 @@ export const mapInputRequestToUi = (
       request?.requested_by ??
       request?.requestedBy,
   );
+  const responses = Array.isArray(request?.responses) ? request.responses : [];
+  const latestResponse = responses.length ? responses[responses.length - 1] : null;
 
   return {
     id: String(request?.id ?? request?._id ?? ""),
@@ -256,9 +271,14 @@ export const mapInputRequestToUi = (
     createdAt:
       normaliseDate(request?.created_at ?? request?.createdAt) ??
       new Date().toISOString(),
-    response: request?.response ?? undefined,
+    response: request?.response ?? latestResponse?.message ?? undefined,
     respondedAt:
-      normaliseDate(request?.responded_at ?? request?.respondedAt) ??
+      normaliseDate(
+        request?.responded_at ??
+          request?.respondedAt ??
+          latestResponse?.responded_at ??
+          latestResponse?.respondedAt
+      ) ??
       undefined,
   };
 };

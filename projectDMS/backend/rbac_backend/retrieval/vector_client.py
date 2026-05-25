@@ -6,6 +6,7 @@ import math
 from typing import Any, Dict, List, Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
+from .source_metadata import normalize_source_payload
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,7 @@ class VectorClient:
                     if key in payload or value is None:
                         continue
                     payload[key] = value
+            payload = normalize_source_payload(payload)
             payloads.append(payload)
             self._memory_index.append(
                 {"vector": vector, "payload": payload, "namespace": namespace or self.config.qdrant_collection}
@@ -328,8 +330,7 @@ class VectorClient:
             entry
             for entry in self._memory_index
             if entry.get("namespace") == collection
-            and entry["payload"].get("org_id") == filters.get("org_id")
-            and entry["payload"].get("project_id") == filters.get("project_id")
+            and self._matches_filters(entry.get("payload", {}), filters)
         ]
         scored = [
             {
@@ -341,6 +342,28 @@ class VectorClient:
         ]
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
+
+    @staticmethod
+    def _matches_filters(payload: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        for key, expected in filters.items():
+            if expected is None:
+                continue
+            actual = payload.get(key)
+            if key == "tags":
+                if isinstance(expected, list) and expected:
+                    actual_values = actual if isinstance(actual, list) else [actual]
+                    if not any(value in actual_values for value in expected):
+                        return False
+                elif expected and expected != actual:
+                    return False
+                continue
+            if isinstance(expected, list):
+                if expected and actual not in expected:
+                    return False
+                continue
+            if actual != expected:
+                return False
+        return True
 
     def _build_filter(self, filters: Dict[str, Any]):
         if not self._qmodels:

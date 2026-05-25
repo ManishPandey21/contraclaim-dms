@@ -3,6 +3,8 @@ import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Sparkles, CheckCircle, Edit3, Loader2 } from "lucide-react";
 import { useLetterWorkflow } from "@/hooks/useLetterWorkflow";
 import { useLanggraphDraft } from "@/hooks/useLanggraphDraft";
+import { useLetterDrafting } from "@/hooks/useLetterDrafting";
+import { LANGGRAPH_ENABLED } from "@/config/features";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -25,17 +27,88 @@ import type {
 } from "@/types/langgraph";
 import { formatDateTime } from "@/utils/dateFormat";
 import { mapLetterToUi, UILetter } from "@/utils/letterWorkflowMapping";
-import { useLanggraphStrategyPlan } from "@/hooks/useLanggraphStrategyPlan";
 import type {
   StrategyContextResponse,
   StrategyPlanResponse,
   StrategyRole,
 } from "@/types/strategyPlan";
+import type { DraftRunResponse, SourceEvidence } from "@/types/letterDrafting";
 
 type DocumentSummarySource =
   | LanggraphContextDocument
   | ContextDocumentSummary
   | Record<string, unknown>;
+
+const backgroundItemsFromDraftRun = (
+  run: DraftRunResponse
+): LanggraphBackgroundItem[] => {
+  const entries: LanggraphBackgroundItem[] = [];
+  const currentMaterials = Array.isArray(run.context_bundle?.current_materials)
+    ? run.context_bundle.current_materials
+    : [];
+  currentMaterials.slice(0, 4).forEach((text, index) => {
+    if (typeof text !== "string" || !text.trim()) return;
+    entries.push({
+      id: `current-${index}`,
+      type: "summary",
+      text,
+      generated_at: run.completed_at,
+    });
+  });
+  (run.sources ?? []).slice(0, 12).forEach((source: SourceEvidence, index) => {
+    entries.push({
+      id: source.source_id || `source-${index}`,
+      type:
+        source.source_type === "contract_clause"
+          ? "clause"
+          : source.source_type === "prior_correspondence" ||
+              source.source_type === "graph_thread"
+            ? "letter"
+            : source.source_type === "comment"
+              ? "comment"
+              : "document",
+      text: source.snippet || source.text || source.label,
+      documents: source.document_id ? [source.document_id] : undefined,
+      generated_at: run.completed_at,
+    });
+  });
+  return entries;
+};
+
+const strategyPlanFromDraftRun = (
+  run: DraftRunResponse,
+  fallback: UILetter,
+  background: LanggraphBackgroundItem[]
+): StrategyPlanResponse => ({
+  letter_id: run.letter_id,
+  run_id: run.run_id,
+  status: run.status,
+  generated_at: run.completed_at ?? run.started_at ?? new Date().toISOString(),
+  plan: run.plan ?? "",
+  tone_approach: {},
+  content_structure: (run.planning_sheet ?? {}) as Record<string, any>,
+  specific_responses: Array.isArray(run.reply_matrix)
+    ? (run.reply_matrix as Record<string, any>[])
+    : [],
+  risk_mitigation: {},
+  desired_outcome: {},
+  summary_points:
+    ((run.source_integrity_summary?.key_points as string[] | undefined) ??
+      fallback.summaryPoints ??
+      []),
+  background_summary: background,
+  context_document_ids:
+    run.context_bundle?.selected_document_ids ?? fallback.contextDocumentIds ?? [],
+  context_documents: fallback.contextDocuments ?? [],
+  trace: (run.trace ?? []).map((entry, index) => ({
+    name: String(entry.stage ?? `stage-${index + 1}`),
+    status: String(entry.status ?? "success"),
+    started_at: run.started_at ?? new Date().toISOString(),
+    completed_at: run.completed_at ?? run.started_at ?? new Date().toISOString(),
+    data: entry,
+  })),
+  warnings: run.warnings ?? [],
+});
 
 const isLanggraphNodeTrace = (value: unknown): value is LanggraphNodeTrace => {
   if (!value || typeof value !== "object") {
@@ -74,16 +147,18 @@ const deriveTraceFromSources = (
 const LetterStrategicPlanPage = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { letters, users, handleLetterUpdate, fetchLetters } =
+  const { letters, users, currentUser, handleLetterUpdate, fetchLetters } =
     useLetterWorkflow();
   const { toast } = useToast();
 
-  const { runDraft, loading: langgraphLoading } = useLanggraphDraft();
+  const { loading: langgraphLoading } = useLanggraphDraft();
   const {
-    data: generatedPlan,
-    generateStrategyPlan,
-    loading: strategyGenerating,
-  } = useLanggraphStrategyPlan();
+    run: runDraftingWorkflow,
+    preparePlan,
+    acceptPlan,
+    loading: draftingLoading,
+  } = useLetterDrafting();
+  const strategyGenerating = draftingLoading || (LANGGRAPH_ENABLED && langgraphLoading);
 
   const rawLetter = useMemo(
     () => letters.find((entry) => entry.id === id),
@@ -212,6 +287,7 @@ const LetterStrategicPlanPage = () => {
   }, [
     normalizeRecipient,
     normalizeRole,
+    uiLetter,
     uiLetter?.id,
     uiLetter?.strategyRole,
     uiLetter?.strategyRecipient,
@@ -222,16 +298,12 @@ const LetterStrategicPlanPage = () => {
   ]);
 
   useEffect(() => {
-    if (generatedPlan) {
-      setStrategyPlanData(generatedPlan);
-      return;
-    }
     if (letterPlan) {
       setStrategyPlanData(letterPlan);
     } else {
       setStrategyPlanData(null);
     }
-  }, [generatedPlan, letterPlan]);
+  }, [letterPlan]);
 
   useEffect(() => {
     if (strategyPlanData) {
@@ -395,21 +467,23 @@ const LetterStrategicPlanPage = () => {
     if (!id || !viewLetter) return;
     try {
       setRunningBackground(true);
-      const response = await runDraft({
-        letterId: id,
+      const response = await runDraftingWorkflow(id, {
+        mode: "background",
+        draft_type: "reply",
+        letter_category: "general",
+        role: selectedRole,
+        recipient_focus: selectedRole === "engineer" ? engineerRecipient : undefined,
         subject: viewLetter.subject,
         recipient: viewLetter.recipient,
-        context: viewLetter.content,
+        requirements: viewLetter.content,
         points: summaryPoints.length > 0 ? summaryPoints.join("\n") : undefined,
-        documentIds: selectedDocIds,
-        analysisOnly: true,
+        document_ids: selectedDocIds,
       });
 
-      setPlanDraft(response.plan ?? "");
-      setSummaryPoints(response.summary_points ?? []);
-      setBackgroundItems(
-        (response.background_summary as LanggraphBackgroundItem[]) ?? []
-      );
+      setPlanDraft(response.plan ?? planDraft);
+      const background = backgroundItemsFromDraftRun(response);
+      setBackgroundItems(background);
+      setStrategyPlanData(strategyPlanFromDraftRun(response, viewLetter, background));
 
       await fetchLetters();
       toast({
@@ -431,10 +505,11 @@ const LetterStrategicPlanPage = () => {
     }
   }, [
     id,
-    runDraft,
-    viewLetter?.subject,
-    viewLetter?.recipient,
-    viewLetter?.content,
+    runDraftingWorkflow,
+    engineerRecipient,
+    planDraft,
+    selectedRole,
+    viewLetter,
     summaryPoints,
     selectedDocIds,
     fetchLetters,
@@ -452,39 +527,43 @@ const LetterStrategicPlanPage = () => {
       return;
     }
     try {
-      const response = await generateStrategyPlan({
-        letterId: id,
+      const response = await preparePlan(id, {
+        mode: "strategy",
+        draft_type: "reply",
+        letter_category: "general",
         role: selectedRole,
-        audience: selectedRole === "engineer" ? engineerRecipient : undefined,
+        recipient_focus: selectedRole === "engineer" ? engineerRecipient : undefined,
         subject: viewLetter.subject,
         recipient: viewLetter.recipient,
-        contractorContext: aggregatedContexts.contractor,
-        engineerContext: aggregatedContexts.engineer,
-        employerContext: aggregatedContexts.employer,
-        summaryPoints,
-        documentIds: selectedDocIds,
-        requirements: viewLetter.content,
-        organizationId: viewLetter.organizationId,
-        projectId: viewLetter.projectId,
+        requirements: [
+          aggregatedContexts.contractor,
+          aggregatedContexts.engineer,
+          aggregatedContexts.employer,
+          viewLetter.content,
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        points: summaryPoints.length > 0 ? summaryPoints.join("\n") : undefined,
+        document_ids: selectedDocIds,
       });
 
-      setPlanDraft(response.plan ?? "");
-      setSummaryPoints(response.summary_points ?? []);
-      setBackgroundItems(
-        (response.background_summary as LanggraphBackgroundItem[]) ?? []
-      );
-      setStrategyPlanData(response);
+      const background = backgroundItemsFromDraftRun(response);
+      const planResponse = strategyPlanFromDraftRun(response, viewLetter, background);
+      setPlanDraft(planResponse.plan ?? "");
+      setSummaryPoints(planResponse.summary_points ?? []);
+      setBackgroundItems(background);
+      setStrategyPlanData(planResponse);
 
       await fetchLetters();
       toast({
         title: "Plan generated",
-        description: "LangGraph produced a new strategic plan for this letter.",
+        description: "Drafting engine produced a new strategic plan for this letter.",
       });
     } catch (error: any) {
       const description =
         error?.response?.data?.detail ??
         error?.message ??
-        "LangGraph drafting failed.";
+        "Drafting engine planning failed.";
       toast({
         title: "Unable to generate plan",
         description,
@@ -497,16 +576,14 @@ const LetterStrategicPlanPage = () => {
     aggregatedContexts.employer,
     engineerRecipient,
     fetchLetters,
-    generateStrategyPlan,
+    preparePlan,
     hasContexts,
     id,
     selectedDocIds,
     selectedRole,
     summaryPoints,
     toast,
-    viewLetter?.content,
-    viewLetter?.recipient,
-    viewLetter?.subject,
+    viewLetter,
   ]);
 
   const handleSavePlan = useCallback(async () => {
@@ -592,6 +669,14 @@ const LetterStrategicPlanPage = () => {
       });
     }
     if (id) {
+      if (strategyPlanData?.run_id) {
+        await acceptPlan(id, strategyPlanData.run_id);
+      } else {
+        await handleLetterUpdate(id, {
+          strategy_plan_approved_by: currentUser?.id ?? currentUser?.email,
+          strategy_plan_approved_at: new Date().toISOString(),
+        } as any);
+      }
       await handleLetterUpdate(id, { status: "Draft" });
       await fetchLetters();
     }
@@ -602,6 +687,9 @@ const LetterStrategicPlanPage = () => {
     navigate(`/letters/${id}/draft`);
   }, [
     engineerRecipient,
+    acceptPlan,
+    currentUser?.email,
+    currentUser?.id,
     fetchLetters,
     handleLetterUpdate,
     handleSavePlan,
@@ -612,6 +700,7 @@ const LetterStrategicPlanPage = () => {
     planDraft,
     selectedRole,
     summaryPoints,
+    strategyPlanData?.run_id,
     toast,
   ]);
 
@@ -753,7 +842,7 @@ const LetterStrategicPlanPage = () => {
               className="gap-2"
               variant="outline"
               onClick={handleGenerateBackground}
-              disabled={runningBackground || langgraphLoading}
+              disabled={runningBackground || strategyGenerating}
             >
               {runningBackground ? (
                 <>
@@ -813,7 +902,7 @@ const LetterStrategicPlanPage = () => {
                 No Strategic Plan Yet
               </h3>
               <p className="text-muted-foreground mb-4">
-                Generate a LangGraph plan to guide the drafting workflow.
+                Generate a drafting plan to guide the workflow.
               </p>
               <Button
                 onClick={handleGeneratePlan}

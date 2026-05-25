@@ -151,3 +151,20 @@ A centralized, searchable, and efficient system for managing contract correspond
 ✔ Collaboration on drafting responses
 ✔ Tracking and linking related correspondence
 ✔ Ensuring compliance with contractual deadlines
+
+
+Users can create, rename, and Organize folders by Organisation, project, year, month in structure manner.
+Document Upload Page with drag & drop funtionality Letter should get saved in Organize folders by Organisation, project, year, month in structure manner.
+Preview document with built-in PDF/Word viewer (zoom/rotate support) with Form with fields to update metadata: Date, Letter No., From/To, Subject, References, Summary of letter, Predefined tags/subtaggs.
+
+Upload the PDF with Metadata:
+
+Date: 11th Oct 2022
+Letter No.: Kanpur-LET-JVTI-CPM-00685-E01
+From: GC
+To: SYSTRA MVA Consulting
+Subject: Financial Implication for EOT
+Tags: Claim
+subtags: EOT
+References: O-SYST-KNPDD-01-LTT-00185, O-SYST-KNPDD-01-LTT-00132
+Summary of the Letter: Extension of time

@@ -65,6 +65,27 @@ function normalizeBaseUrl(url: string): string {
   return base;
 }
 
+function preferLocalProxy(base: string): string {
+  try {
+    if (typeof window === "undefined") return base;
+    if (!/^https?:\/\//i.test(base)) return base;
+
+    const pageHost = window.location.hostname;
+    const apiUrl = new URL(base);
+    const localHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+    if (
+      localHosts.has(pageHost) &&
+      localHosts.has(apiUrl.hostname) &&
+      apiUrl.origin !== window.location.origin
+    ) {
+      return apiUrl.pathname && apiUrl.pathname !== "/" ? apiUrl.pathname : "/api";
+    }
+  } catch {
+    return base;
+  }
+  return base;
+}
+
 /**
  * Resolve the API base URL using the priority order described above.
  */
@@ -73,7 +94,7 @@ export function resolveApiBaseUrl(): string {
   const fromRuntime = getRuntimeBaseUrl();
   const fromHost = getHostDerivedBaseUrl();
   const base = fromEnv || fromRuntime || fromHost || "/api";
-  return normalizeBaseUrl(base);
+  return preferLocalProxy(normalizeBaseUrl(base));
 }
 
 /**

@@ -1,4 +1,5 @@
 import { API_BASE_URL } from "@/config/api";
+import { authenticatedFetch } from "./http";
 
 export interface EmailGroup {
   _id: string;
@@ -29,20 +30,9 @@ class EmailGroupsApi {
   private base = API_BASE_URL;
 
   private authHeaders() {
-    const token = localStorage.getItem("accessToken") || "";
-    const headers: Record<string, string> = {
+    return {
       "Content-Type": "application/json",
     };
-    const userId = localStorage.getItem("user_id");
-    const userRoles = localStorage.getItem("user_roles");
-    if (userId) headers["X-User-Id"] = userId;
-    if (userRoles) headers["X-User-Role"] = userRoles;
-    const orgId = localStorage.getItem("org_id") || "";
-    const projId = localStorage.getItem("proj_id") || "";
-    if (orgId) headers["X-Org-Id"] = orgId;
-    if (projId) headers["X-Proj-Id"] = projId;
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-    return headers;
   }
 
   async list(params?: {
@@ -65,7 +55,7 @@ class EmailGroupsApi {
     const url = `${this.base}/email/groups${
       qs.toString() ? `?${qs.toString()}` : ""
     }`;
-    const res = await fetch(url, { headers: this.authHeaders() });
+    const res = await authenticatedFetch(url, { headers: this.authHeaders() });
     if (!res.ok) throw new Error(`Failed to fetch groups: ${res.status}`);
     // Backend returns a paginated response: { groups: EmailGroup[], total, page, limit, ... }
     const data = await res.json();
@@ -78,7 +68,7 @@ class EmailGroupsApi {
   }
 
   async create(payload: EmailGroupCreate): Promise<EmailGroup> {
-    const res = await fetch(`${this.base}/email/groups`, {
+    const res = await authenticatedFetch(`${this.base}/email/groups`, {
       method: "POST",
       headers: this.authHeaders(),
       body: JSON.stringify(payload),
@@ -88,7 +78,7 @@ class EmailGroupsApi {
   }
 
   async update(id: string, payload: EmailGroupUpdate): Promise<EmailGroup> {
-    const res = await fetch(`${this.base}/email/groups/${id}`, {
+    const res = await authenticatedFetch(`${this.base}/email/groups/${id}`, {
       method: "PUT",
       headers: this.authHeaders(),
       body: JSON.stringify(payload),
@@ -98,7 +88,7 @@ class EmailGroupsApi {
   }
 
   async remove(id: string): Promise<void> {
-    const res = await fetch(`${this.base}/email/groups/${id}`, {
+    const res = await authenticatedFetch(`${this.base}/email/groups/${id}`, {
       method: "DELETE",
       headers: this.authHeaders(),
     });
@@ -106,7 +96,7 @@ class EmailGroupsApi {
   }
 
   async resolveEmails(id: string): Promise<string[]> {
-    const res = await fetch(`${this.base}/email/groups/${id}/resolve`, {
+    const res = await authenticatedFetch(`${this.base}/email/groups/${id}/resolve`, {
       method: "POST",
       headers: this.authHeaders(),
     });

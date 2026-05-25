@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import { LanggraphDraftResponse } from "@/types/langgraph";
 
 export const useLetterGraphRuns = () => {
@@ -15,13 +16,9 @@ export const useLetterGraphRuns = () => {
     setLoading(true);
     setError(null);
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-      const res = await fetch(
+      const res = await authenticatedFetch(
         joinApiUrl(`/ai-assistant/langgraph/runs/${letterId}`),
-        { headers }
+        {}
       );
       if (res.status === 404) {
         setData(null);

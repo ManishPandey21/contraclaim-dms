@@ -9,6 +9,7 @@ from .database import get_db  # Corrected import
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, Field
 import uuid
+import re
 from bson import ObjectId
 from pydantic import ConfigDict
 from ..services.permission_service import PermissionService
@@ -50,7 +51,7 @@ def _normalize_roles_list(roles):
     out = []
     for r in (roles or []):
         s = str(r).strip().lower()
-        s = ROLE_ALIASES.get(s, s)
+        s = ROLE_ALIASES.get(s, ROLE_ALIASES.get(re.sub(r"[^a-z0-9]", "", s), s))
         out.append(s)
     # de-duplicate while preserving order
     result = []
@@ -67,17 +68,22 @@ class CurrentUser(BaseModel):
     id: str
     username: str
     email: EmailStr
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    job_title: Optional[str] = None
     roles: List[str]
     organization_id: Optional[str] = None
     organizations: List[str] = Field(default_factory=list)
     projects: List[str] = Field(default_factory=list)
+    account_type: str = "client_user"
     disabled: bool = False
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """
     Resolve current user from:
-    1) Bearer token (preferred)
-    2) Optional dev headers (only when ALLOW_DEV_HEADERS=True): X-User-Id, X-User-Role(s), X-Org-Id, X-Proj-Id
+    1) Bearer token when present and non-placeholder
+    2) HttpOnly auth cookie
+    3) Optional dev headers (only when ALLOW_DEV_HEADERS=True): X-User-Id, X-User-Role(s), X-Org-Id, X-Proj-Id
     """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -85,19 +91,40 @@ async def get_current_user(request: Request, db = Depends(get_db)):
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    # Try Authorization: Bearer <token>
+    # Try Authorization: Bearer <token>, then the HttpOnly cookie. Browser
+    # clients can carry stale legacy Authorization headers from older builds;
+    # those must not override a fresh cookie set by /api/login.
     auth_header = request.headers.get("authorization", "")
-    token = None
+    token_candidates: list[str] = []
     if isinstance(auth_header, str) and auth_header.lower().startswith("bearer "):
-        token = auth_header.split(" ", 1)[1].strip()
+        bearer_token = auth_header.split(" ", 1)[1].strip()
+        if bearer_token and bearer_token.lower() not in {"null", "undefined", "none"}:
+            token_candidates.append(bearer_token)
+    cookie_token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if isinstance(cookie_token, str) and cookie_token.strip():
+        cookie_token = cookie_token.strip()
+        if cookie_token not in token_candidates:
+            token_candidates.append(cookie_token)
 
-    if token:
+    for token in token_candidates:
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
             email: str = payload.get("sub")
+            iat: int = payload.get("iat", 0)
             if email:
                 user = await db.users.find_one({"email": email})
                 if user:
+                    user_id_str = str(user["_id"])
+                    
+                    # JWT Invalidation Check (Phase 3)
+                    from ..services.runtime_state import get_runtime_state
+                    runtime = get_runtime_state()
+                    redis = await runtime.get_redis()
+                    if redis is not None:
+                        min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
+                        if min_iat and iat < int(min_iat):
+                            raise credentials_exception
+
                     # Derive organizations for superuser/similar users if not present
                     orgs = user.get("organizations", [])
                     org_id = user.get("organization_id")
@@ -118,18 +145,22 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                         id=str(user["_id"]),
                         username=user.get("username", email),
                         email=user.get("email", email),
+                        first_name=user.get("first_name") or user.get("firstName"),
+                        last_name=user.get("last_name") or user.get("lastName"),
+                        job_title=user.get("job_title") or user.get("jobTitle"),
                         roles=roles,
                         organization_id=org_id_sanitized,
                         organizations=orgs_sanitized,
                         projects=projects_sanitized,
+                        account_type=user.get("account_type", "client_user"),
                         disabled=user.get("disabled", False),
                     )
         except JWTError:
-            # Fall through to header-based dev mode
-            pass
+            # Try the next credential source before falling through to dev mode.
+            continue
         except Exception:
-            # Any unexpected token error -> try header fallback
-            pass
+            # Any unexpected token error -> try the next credential source.
+            continue
 
     # Fallback: Dev headers (explicitly disabled unless ALLOW_DEV_HEADERS is True)
     if not settings.ALLOW_DEV_HEADERS:
@@ -158,6 +189,9 @@ async def get_current_user(request: Request, db = Depends(get_db)):
         # Try load real user if possible
         user_doc = await db.users.find_one({"_id": x_user_id}) or await db.users.find_one({"email": x_user_id})
         username = (user_doc.get("username") if user_doc else None) or str(x_user_id)
+        first_name = (user_doc.get("first_name") or user_doc.get("firstName")) if user_doc else None
+        last_name = (user_doc.get("last_name") or user_doc.get("lastName")) if user_doc else None
+        job_title = (user_doc.get("job_title") or user_doc.get("jobTitle")) if user_doc else None
         # Use example.com (RFC 2606) to keep fabricated emails valid for EmailStr while indicating non-production
         email = (user_doc.get("email") if user_doc else None) or f"{x_user_id}@example.com"
         org_id = x_org_id or (user_doc.get("organization_id") if user_doc else None)
@@ -181,10 +215,14 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             id=str(user_doc["_id"]) if user_doc and user_doc.get("_id") else str(x_user_id),
             username=username,
             email=email,
+            first_name=first_name,
+            last_name=last_name,
+            job_title=job_title,
             roles=roles,
             organization_id=org_id,
             organizations=orgs,
             projects=projects,
+            account_type=(user_doc.get("account_type") if user_doc else None) or "client_user",
             disabled=disabled,
         )
 
@@ -222,7 +260,7 @@ def require_permission(permission_name: str):
     audit_logger = get_audit_logger()
 
     async def permission_checker(current_user: CurrentUser = Depends(get_current_active_user)):
-        roles = {str(r).lower() for r in getattr(current_user, "roles", []) or []}
+        roles = set(_normalize_roles_list(getattr(current_user, "roles", []) or []))
         if "superadmin" in roles:
             try:
                 await audit_logger.log_permission_check(
@@ -232,8 +270,9 @@ def require_permission(permission_name: str):
                     resource_type="permission",
                     resource_id=normalized,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error("Audit log failed during permission check: %s", exc)
             return True
 
         has_perm = await permission_service.user_has_permission(
@@ -252,8 +291,9 @@ def require_permission(permission_name: str):
                 resource_type="permission",
                 resource_id=normalized,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).error("Audit log failed during permission check: %s", exc)
 
         if not has_perm:
             raise HTTPException(
@@ -375,6 +415,15 @@ def authorize_scope(
             raise HTTPException(status_code=403, detail="Not authorized for this organization")
         return
 
+    # External Experts (assigned to specific projects, but not necessarily in the organization)
+    expert_roles = {"contraclaim_expert_drafter", "contraclaim_expert_reviewer", "contraclaim_drafting_manager", "contract_expert"}
+    if roles & expert_roles:
+        proj_ids = effective_project_ids(current_user)
+        if project_id is None or str(project_id) not in proj_ids:
+            raise HTTPException(status_code=403, detail="Not authorized for this project as an expert")
+        # Do not check organization_id here because experts may work cross-org.
+        return
+
     # Default deny
     raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -477,6 +526,26 @@ def build_scope_query(
         q: Dict[str, Any] = {}
         if org_id_val is not None:
             q[org_field] = str(org_id_val)
+        if project_id is not None:
+            if str(project_id) not in proj_ids:
+                return _deny_all()
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids([project_id])}
+            else:
+                q[id_field] = {"$in": _expand_object_ids([project_id])}
+        else:
+            if project_field:
+                q[project_field] = {"$in": _expand_object_ids(proj_ids)}
+            else:
+                q[id_field] = {"$in": _expand_object_ids(proj_ids)}
+        return q
+
+    expert_roles = {"contraclaim_expert_drafter", "contraclaim_expert_reviewer", "contraclaim_drafting_manager", "contract_expert"}
+    if roles & expert_roles:
+        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
+        if not proj_ids:
+            return _deny_all()
+        q: Dict[str, Any] = {}
         if project_id is not None:
             if str(project_id) not in proj_ids:
                 return _deny_all()

@@ -12,6 +12,7 @@ import {
 import { FileText, Trash, Paperclip, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 import { formatDateTime } from "@/utils/datetime";
 
 interface Enclosure {
@@ -39,13 +40,9 @@ const EnclosuresPanel: React.FC<EnclosuresPanelProps> = ({ documentId }) => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(`/documents/${documentId}/enclosures`),
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
-        }
+        {}
       );
       if (!response.ok) {
         let errorMessage = `Failed to fetch enclosures: ${response.status}`;
@@ -86,14 +83,10 @@ const EnclosuresPanel: React.FC<EnclosuresPanelProps> = ({ documentId }) => {
           const formData = new FormData();
           formData.append("file", file); // The backend expects a 'file' field
 
-          const response = await fetch(
+          const response = await authenticatedFetch(
             joinApiUrl(`/documents/${documentId}/enclosures`),
             {
               method: "POST",
-              headers: {
-                Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-                // Don't set Content-Type: multipart/form-data; the browser will do it
-              },
               body: formData,
             }
           );
@@ -149,13 +142,10 @@ const EnclosuresPanel: React.FC<EnclosuresPanelProps> = ({ documentId }) => {
     setError(null);
 
     try {
-      const response = await fetch(
+      const response = await authenticatedFetch(
         joinApiUrl(`/documents/${documentId}/enclosures/${enclosureId}`),
         {
           method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("accessToken")}`,
-          },
         }
       );
 

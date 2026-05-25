@@ -191,6 +191,8 @@ const RegisterPage = () => {
 
   useEffect(() => {
     fetchOrganizations();
+    // Initial organization list bootstrap intentionally runs once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Organization form
@@ -314,6 +316,8 @@ const RegisterPage = () => {
       setActiveTab("project");
       loadProjectForEdit(projectId);
     }
+    // URL-driven form bootstrap; loaders depend on form instances and are called intentionally here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   // Handle organization form submission

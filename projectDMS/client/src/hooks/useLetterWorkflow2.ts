@@ -49,48 +49,9 @@ const parseOrganizationsResponse = (payload: any): Organization[] => {
 };
 
 const buildFallbackHeaders = (): Record<string, string> => {
-  const headers: Record<string, string> = {
+  return {
     Accept: "application/json",
   };
-  if (typeof window === "undefined") {
-    return headers;
-  }
-
-  const token = window.localStorage.getItem("accessToken");
-  if (token && token.trim() !== "") {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
-
-  const storedUserId = window.localStorage.getItem("user_id") ?? "";
-  headers["X-User-Id"] = storedUserId.trim() !== "" ? storedUserId : "demo";
-
-  const storedRoles = window.localStorage.getItem("user_roles") ?? "";
-  let roleHeader = storedRoles.trim();
-  if (!roleHeader) {
-    roleHeader = "superadmin";
-  } else {
-    try {
-      const parsed = JSON.parse(roleHeader);
-      if (Array.isArray(parsed)) {
-        roleHeader = parsed.map((role: any) => String(role)).join(",");
-      }
-    } catch {
-      // keep original string
-    }
-  }
-  headers["X-User-Role"] = roleHeader;
-  headers["X-User-Roles"] = roleHeader;
-
-  const orgId = window.localStorage.getItem("org_id");
-  if (orgId && orgId.trim() !== "") {
-    headers["X-Org-Id"] = orgId;
-  }
-
-  const projId = window.localStorage.getItem("proj_id");
-  if (projId && projId.trim() !== "") {
-    headers["X-Proj-Id"] = projId;
-  }
-  return headers;
 };
 
 const fetchOrganizationsResilient = async (): Promise<Organization[]> => {
@@ -271,34 +232,12 @@ export const useLetterWorkflow = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Build authorization headers for org/project-scoped endpoints
+  // Backend derives user and tenant scope from the HttpOnly session cookie.
   const headerFor = useCallback(
-    (letterId?: string, orgIdOverride?: string, projIdOverride?: string) => {
-      const target = letterId
-        ? letters.find((l) => l.id === letterId)
-        : selectedLetter;
-
-      const orgId =
-        orgIdOverride ??
-        target?.organization_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("org_id") ?? undefined
-          : undefined);
-      const projId =
-        projIdOverride ??
-        target?.project_id ??
-        (typeof window !== "undefined"
-          ? window.localStorage.getItem("proj_id") ?? undefined
-          : undefined);
-
-      return {
-        headers: {
-          "X-Org-Id": orgId ?? "",
-          "X-Proj-Id": projId ?? "",
-        },
-      };
+    (_letterId?: string, _orgIdOverride?: string, _projIdOverride?: string) => {
+      return {};
     },
-    [letters, selectedLetter]
+    []
   );
 
   // Normalize backend letter payload to hook shape (ensures .id exists)
@@ -485,79 +424,6 @@ export const useLetterWorkflow = () => {
   useEffect(() => {
     fetchLetters();
   }, [fetchLetters]);
-
-  // Ensure scoping headers (org_id/proj_id) based on roles and available data,
-  // so backend returns scoped letters for non-superadmin users.
-  useEffect(() => {
-    try {
-      if (typeof window === "undefined") return;
-      const rawRoles = window.localStorage.getItem("user_roles");
-      const parseRoles = (raw: string | null): string[] => {
-        if (!raw) return [];
-        try {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed))
-            return parsed.map((r) => String(r).toLowerCase());
-        } catch {
-          // not JSON, treat as comma-separated
-        }
-        return String(raw)
-          .split(",")
-          .map((r) => r.trim().toLowerCase())
-          .filter(Boolean);
-      };
-      const roles = parseRoles(rawRoles);
-
-      // If superadmin, allow full visibility without forcing org/project scope
-      if (roles.includes("superadmin")) return;
-
-      const hasOrgRole = roles.some((r) => r === "orgadmin" || r === "orguser");
-      const hasProjRole = roles.some(
-        (r) =>
-          r === "projectadmin" ||
-          r === "projectuser" ||
-          r === "projadmin" ||
-          r === "projuser"
-      );
-
-      let updated = false;
-      let orgId = window.localStorage.getItem("org_id") || undefined;
-      let projId = window.localStorage.getItem("proj_id") || undefined;
-
-      if (hasOrgRole && !orgId && organizations.length > 0) {
-        orgId = String(organizations[0].id);
-        window.localStorage.setItem("org_id", orgId);
-        updated = true;
-      }
-
-      if (hasProjRole && !projId && projects.length > 0) {
-        // Prefer a project under the selected org if available
-        const preferredOrgId = orgId;
-        let chosen = projects[0];
-        if (preferredOrgId) {
-          const underOrg = projects.find(
-            (p) => String(p.organizationId) === String(preferredOrgId)
-          );
-          if (underOrg) chosen = underOrg;
-        }
-        projId = String(chosen.id);
-        window.localStorage.setItem("proj_id", projId);
-        // Ensure org_id aligns with the chosen project if still missing
-        if (!orgId && chosen.organizationId) {
-          orgId = String(chosen.organizationId);
-          window.localStorage.setItem("org_id", orgId);
-        }
-        updated = true;
-      }
-
-      if (updated) {
-        // Re-fetch letters with new scoping headers applied by Axios interceptor
-        fetchLetters();
-      }
-    } catch {
-      // Non-fatal
-    }
-  }, [organizations, projects, fetchLetters]);
 
   const handleLetterInitiation = useCallback(
     async (payload: CreateLetterInput): Promise<Letter> => {

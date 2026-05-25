@@ -225,7 +225,7 @@ def _expand_id_values(values: List[str]) -> List[Any]:
     "/stats",
     response_model=DashboardStatsResponse,
     summary="Aggregated dashboard statistics",
-    dependencies=[Depends(require_permission("documents:read"))],
+    dependencies=[Depends(require_permission("dms.dashboard.view"))],
 )
 async def get_dashboard_stats(
     search: Optional[str] = Query(

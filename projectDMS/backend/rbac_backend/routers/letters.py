@@ -145,6 +145,18 @@ class SubmitLetterRequest(BaseModel):
 
 
 
+class AssignDrafterRequest(BaseModel):
+    user_id: str
+    drafting_profile: str
+
+
+CONTRACT_DRAFTING_PROFILE_TO_STRATEGY_ROLE = {
+    "contractor": "contractor",
+    "engineer_representation": "engineer",
+    "employer_contract_review": "employer",
+}
+
+
 class LetterController:
 
 
@@ -1303,6 +1315,298 @@ class LetterController:
 
 
 
+        if update_data.recipient is not None:
+
+
+
+            validated_fields['recipient'] = sanitize_text(
+
+
+
+                validate_input(update_data.recipient, max_length=1000)
+
+
+
+            )
+
+
+
+        if update_data.status is not None:
+
+
+
+            next_status = sanitize_text(
+
+
+
+                validate_input(update_data.status, max_length=50)
+
+
+
+            )
+
+
+
+            if next_status not in {
+
+
+
+                "Draft", "Input", "Strategy", "Review", "Approval", "Completed", "Rejected"
+
+
+
+            }:
+
+
+
+                raise LetterError("Invalid letter status", status.HTTP_400_BAD_REQUEST)
+
+
+
+            validated_fields['status'] = next_status
+
+
+
+        if update_data.assigned_to is not None:
+
+
+
+            validated_fields['assigned_to'] = sanitize_text(
+
+
+
+                validate_input(update_data.assigned_to, max_length=200)
+
+
+
+            )
+
+
+
+        if update_data.reference is not None:
+
+
+
+            validated_fields['reference'] = update_data.reference
+
+
+
+        if update_data.strategy_plan is not None:
+
+
+
+            validated_fields['strategy_plan'] = sanitize_text(
+
+
+
+                update_data.strategy_plan, max_length=50000
+
+
+
+            )
+
+
+
+        if update_data.strategic_outline is not None:
+
+
+
+            validated_fields['strategic_outline'] = update_data.strategic_outline
+
+
+
+        if update_data.summary_points is not None:
+
+
+
+            validated_fields['summary_points'] = [
+
+
+
+                sanitize_text(str(point), max_length=5000)
+
+
+
+                for point in update_data.summary_points[:100]
+
+
+
+                if str(point).strip()
+
+
+
+            ]
+
+
+
+        if update_data.strategy_role is not None:
+
+
+
+            strategy_role = sanitize_text(
+
+
+
+                validate_input(update_data.strategy_role, max_length=50)
+
+
+
+            ).lower()
+
+
+
+            if strategy_role not in {"contractor", "engineer", "employer"}:
+
+
+
+                raise LetterError("Invalid strategy role", status.HTTP_400_BAD_REQUEST)
+
+
+
+            validated_fields['strategy_role'] = strategy_role
+
+
+
+        if update_data.strategy_recipient is not None:
+
+
+
+            validated_fields['strategy_recipient'] = sanitize_text(
+
+
+
+                update_data.strategy_recipient, max_length=200
+
+
+
+            )
+
+        if update_data.strategy_plan_approved_by is not None:
+
+            validated_fields['strategy_plan_approved_by'] = sanitize_text(
+
+                validate_input(update_data.strategy_plan_approved_by, max_length=200)
+
+            )
+
+        if update_data.strategy_plan_approved_at is not None:
+
+            validated_fields['strategy_plan_approved_at'] = update_data.strategy_plan_approved_at
+
+        if update_data.accepted_strategy_version is not None:
+
+            validated_fields['accepted_strategy_version'] = update_data.accepted_strategy_version
+
+
+
+        for text_field in (
+
+
+
+            "contractor_context",
+
+
+
+            "engineer_context",
+
+
+
+            "employer_context",
+
+
+
+            "draft_plan",
+
+
+
+            "draft_output",
+
+
+
+            "background_annotations",
+
+
+
+        ):
+
+
+
+            value = getattr(update_data, text_field, None)
+
+
+
+            if value is not None:
+
+
+
+                validated_fields[text_field] = sanitize_text(value, max_length=50000)
+
+
+
+        for list_field in (
+
+
+
+            "context_document_ids",
+
+
+
+            "context_documents",
+
+
+
+            "background_summary",
+
+
+
+            "draft_sources",
+
+
+
+            "reviewer_findings",
+
+
+
+            "graph_warnings",
+
+
+
+            "graph_thread",
+
+
+
+            "draft_trace",
+
+
+
+            "strategy_graph_trace",
+
+
+
+        ):
+
+
+
+            value = getattr(update_data, list_field, None)
+
+
+
+            if value is not None:
+
+
+
+                validated_fields[list_field] = value
+
+
+
+        if update_data.reviewer_blocking is not None:
+
+
+
+            validated_fields['reviewer_blocking'] = bool(update_data.reviewer_blocking)
+
+
+
         
 
 
@@ -1856,6 +2160,67 @@ async def update_letter(
 
 
     return await controller.update_letter(letter_id, update_data, current_user)
+
+
+@router.post("/letters/{letter_id}/assign-drafter", response_model=Letter)
+@handle_exceptions
+async def assign_contract_drafter(
+    letter_id: str,
+    payload: AssignDrafterRequest,
+    controller: LetterController = Depends(get_letter_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Assign a contract letter drafter and drafting representation profile."""
+    letter = await controller.letter_service.get_letter_by_id(letter_id)
+    if not letter:
+        raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+
+    await controller.auth_service.check_letter_access(current_user, letter, "update")
+    can_assign = await controller.auth_service.has_permission(
+        current_user,
+        "drafting.request.assign",
+        context={"resource_type": "letter", "resource_id": letter_id},
+    )
+    role_names = {str(role).lower() for role in (getattr(current_user, "roles", []) or [])}
+    is_manager = bool(
+        role_names
+        & {
+            "superadmin",
+            "contraclaim_drafting_manager",
+            "contract_manager",
+            "contract manager",
+            "headcontract",
+            "contractmgr_org",
+            "contractmgr_proj",
+        }
+    )
+    if not can_assign and not is_manager:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Contract Managers can assign contract letter drafters",
+        )
+
+    normalized_profile = str(payload.drafting_profile or "").strip().lower()
+    if normalized_profile not in CONTRACT_DRAFTING_PROFILE_TO_STRATEGY_ROLE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid drafting profile",
+        )
+
+    updated = await controller.letter_service.update_letter(
+        letter_id,
+        {
+            "assigned_to": validate_input(payload.user_id, required=True),
+            "drafting_profile": normalized_profile,
+            "strategy_role": CONTRACT_DRAFTING_PROFILE_TO_STRATEGY_ROLE[normalized_profile],
+            "drafting_assigned_by": getattr(current_user, "id", None),
+            "drafting_assigned_at": datetime.now(timezone.utc),
+        },
+        current_user,
+    )
+    if not updated:
+        raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+    return updated
 
 
 

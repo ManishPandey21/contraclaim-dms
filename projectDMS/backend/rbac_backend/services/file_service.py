@@ -129,6 +129,38 @@ class SecureFileService(FileService):
         logger.info("Stored document at: %s", file_path)
         return str(file_path.resolve())
 
+    async def store_existing_file(
+        self,
+        source_path: Path,
+        organization_id: str,
+        project_id: str,
+        filename: str,
+        stored_filename: Optional[str] = None,
+        path_structure: Optional[str] = None,
+    ) -> str:
+        if not filename:
+            raise ValueError("Filename is required to store document")
+        source = Path(source_path).expanduser().resolve()
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"Source file not found: {source}")
+        if path_structure:
+            safe_segments = [
+                self._safe_segment(s) for s in path_structure.strip("/").split("/") if s.strip()
+            ]
+            target_dir = self.base_dir.joinpath(*safe_segments)
+        else:
+            target_dir = self._target_dir(organization_id, project_id)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / Path(stored_filename or filename).name
+
+        def _copy() -> None:
+            shutil.copyfile(source, target_path)
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, _copy)
+        logger.info("Stored existing file at: %s", target_path)
+        return str(target_path.resolve())
+
     async def _compress_content(self, content: bytes, extension: str) -> bytes:
         """Compress content based on file type."""
         ext = extension.lower()
@@ -192,6 +224,29 @@ class SecureFileService(FileService):
         data = await chunk_file.read()
         await chunk_file.seek(0)
 
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, chunk_path.write_bytes, data)
+        return chunk_path.exists()
+
+    async def store_chunk_bytes(
+        self,
+        data: bytes,
+        upload_id: str,
+        chunk_index: int,
+        *,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
+        if chunk_index < 0:
+            raise ValueError("Chunk index cannot be negative")
+        chunk_folder = (
+            self.chunk_dir
+            / self._safe_segment(organization_id or "unassigned")
+            / self._safe_segment(user_id or "anonymous")
+            / self._safe_segment(upload_id)
+        )
+        chunk_folder.mkdir(parents=True, exist_ok=True)
+        chunk_path = chunk_folder / f"{chunk_index:05d}.part"
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, chunk_path.write_bytes, data)
         return chunk_path.exists()

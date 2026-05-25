@@ -1,6 +1,7 @@
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { ensureCsrfToken, installCsrfFetchInterceptor } from "./services/http";
 
 if (
   typeof import.meta !== "undefined" &&
@@ -13,5 +14,8 @@ if (
   console.debug = noop;
   console.warn = noop;
 }
+
+installCsrfFetchInterceptor();
+void ensureCsrfToken();
 
 createRoot(document.getElementById("root")!).render(<App />);

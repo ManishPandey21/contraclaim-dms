@@ -4,12 +4,33 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import LetterDraftPage from "../LetterDraftPage";
 
-const apiGetMock = vi.fn();
+const apiGetMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/services/api", () => ({
   api: {
     get: apiGetMock,
   },
+}));
+
+vi.mock("@/hooks/useLetterWorkflow", () => ({
+  useLetterWorkflow: () => ({
+    letters: [
+      {
+        id: "abc123",
+        title: "Test Letter Subject",
+        subject: "Test Letter Subject",
+        recipient: "Chief Engineer",
+        status: "Draft",
+        strategicPlan: "Use the approved strategy.",
+        strategy_plan: "Use the approved strategy.",
+        content: "Draft content",
+      },
+    ],
+    users: [],
+    handleLetterUpdate: vi.fn(),
+    submitForReview: vi.fn(),
+    fetchLetters: vi.fn(),
+  }),
 }));
 
 vi.mock("@/hooks/useLanggraphDraft", () => ({
@@ -22,12 +43,29 @@ vi.mock("@/hooks/useLanggraphDraft", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useLetterDrafting", () => ({
+  useLetterDrafting: () => ({
+    data: null,
+    loading: false,
+    error: null,
+    run: vi.fn(),
+    generateDraft: vi.fn(),
+    preparePlan: vi.fn(),
+    latestRun: vi.fn(),
+    reviseRun: vi.fn(),
+    approveRun: vi.fn(),
+    exportRun: vi.fn(),
+    issueRun: vi.fn(),
+    reset: vi.fn(),
+  }),
+}));
+
 vi.mock("@/hooks/useLetterGraphRuns", () => ({
   useLetterGraphRuns: () => ({
     data: null,
     loading: false,
     error: null,
-    fetchRun: vi.fn(),
+    fetchRun: vi.fn().mockResolvedValue(null),
     setData: vi.fn(),
   }),
 }));
@@ -73,20 +111,7 @@ describe("LetterDraftPage without LangGraph enabled", () => {
   });
 
   it("fetches letter metadata and displays it", async () => {
-    apiGetMock.mockResolvedValueOnce({
-      data: {
-        id: "abc123",
-        subject: "Test Letter Subject",
-        recipient: "Chief Engineer",
-        status: "Draft",
-      },
-    });
-
     renderAt("abc123");
-
-    await waitFor(() =>
-      expect(apiGetMock).toHaveBeenCalledWith("/letters/abc123")
-    );
 
     await waitFor(() =>
       expect(
@@ -94,6 +119,6 @@ describe("LetterDraftPage without LangGraph enabled", () => {
       ).toBeInTheDocument()
     );
 
-    expect(screen.getByText("LangGraph Draft Workspace")).toBeInTheDocument();
+    expect(screen.getByText("Draft Workspace")).toBeInTheDocument();
   });
 });

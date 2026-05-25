@@ -1,6 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import {
   Plus,
+  Search,
+  ChevronLeft,
   ChevronRight,
   ChevronDown,
   Save,
@@ -41,7 +43,11 @@ interface TagWithFrontendState extends MainTag {
 }
 
 const TagsPage = () => {
+  const tagsPerPage = 10;
   const [tags, setTags] = useState<TagWithFrontendState[]>([]);
+  const [totalTags, setTotalTags] = useState(0);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [tagSearchTerm, setTagSearchTerm] = useState("");
   const [newTagName, setNewTagName] = useState("");
   const [newSubTagNames, setNewSubTagNames] = useState<Record<string, string>>(
     {}
@@ -58,12 +64,47 @@ const TagsPage = () => {
     deleteTag: false,
     updateTag: false,
   });
+  const [subTagOperationLoading, setSubTagOperationLoading] = useState<
+    Record<string, boolean>
+  >({});
 
-  const fetchTags = async () => {
+  const totalPages = Math.max(1, Math.ceil(totalTags / tagsPerPage));
+  const firstResult = totalTags === 0 ? 0 : (currentPage - 1) * tagsPerPage + 1;
+  const lastResult = Math.min(currentPage * tagsPerPage, totalTags);
+
+  const setSubTagBusy = useCallback((key: string, busy: boolean) => {
+    setSubTagOperationLoading((prev) => {
+      if (busy) return { ...prev, [key]: true };
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
+  const isSubTagBusy = useCallback(
+    (key: string) => Boolean(subTagOperationLoading[key]),
+    [subTagOperationLoading]
+  );
+
+  const fetchTags = useCallback(async () => {
     setLoading(true);
     try {
-      const list = await listTags();
-      const withSubtags = list.map((tag) => ({
+      const result = await listTags({
+        search: tagSearchTerm,
+        page: currentPage,
+        limit: tagsPerPage,
+      });
+      const nextTotalPages = Math.max(
+        1,
+        Math.ceil(result.total / tagsPerPage)
+      );
+      setTotalTags(result.total);
+      if (result.total > 0 && currentPage > nextTotalPages) {
+        setCurrentPage(nextTotalPages);
+        return;
+      }
+
+      const withSubtags = result.tags.map((tag) => ({
         ...tag,
         subTags: [],
         isExpanded: false,
@@ -82,11 +123,11 @@ const TagsPage = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [currentPage, tagSearchTerm]);
 
   useEffect(() => {
     fetchTags();
-  }, []);
+  }, [fetchTags]);
 
   const addNewTag = async () => {
     if (!newTagName.trim()) {
@@ -99,7 +140,11 @@ const TagsPage = () => {
       await createTag({ name: newTagName.trim() });
       toast.success("Tag created");
       setNewTagName("");
-      fetchTags().catch(() => {});
+      if (currentPage !== 1) {
+        setCurrentPage(1);
+      } else {
+        fetchTags().catch(() => {});
+      }
     } catch (error) {
       logError(error, {
         scope: "TagsPage",
@@ -114,11 +159,28 @@ const TagsPage = () => {
   };
 
   const addSubTag = async (tagId: string) => {
+    const busyKey = `add:${tagId}`;
+    if (isSubTagBusy(busyKey)) return;
+
     const input = (newSubTagNames[tagId] || "").trim();
     if (!input) {
       toast.error("Subtag name cannot be empty");
       return;
     }
+
+    const selectedTag = tags.find((tag) => tag._id === tagId);
+    if (
+      selectedTag?.subTags.some(
+        (subTag) => subTag.name.trim().toLowerCase() === input.toLowerCase()
+      )
+    ) {
+      toast.error("Subtag already exists", {
+        description: "Use a unique subtag name within this tag.",
+      });
+      return;
+    }
+
+    setSubTagBusy(busyKey, true);
     try {
       await createSubTag(tagId, { name: input });
       const latest = await listSubTags(tagId);
@@ -138,17 +200,28 @@ const TagsPage = () => {
       toast.error("Error adding subtag", {
         description: extractErrorMessage(error, "Unable to add subtag."),
       });
+    } finally {
+      setSubTagBusy(busyKey, false);
     }
   };
 
-  const saveTag = async (tagId: string, newName: string) => {
+  const saveTag = async (tagId: string, newName: string): Promise<boolean> => {
+    const name = newName.trim();
+    if (!name) {
+      toast.error("Tag name cannot be empty");
+      return false;
+    }
+    if (operationLoading.updateTag) return false;
+
+    setOperationLoading((prev) => ({ ...prev, updateTag: true }));
     try {
-      await updateTagRequest(tagId, { name: newName });
+      await updateTagRequest(tagId, { name });
       setTags((prev) =>
-        prev.map((t) => (t._id === tagId ? { ...t, name: newName } : t))
+        prev.map((t) => (t._id === tagId ? { ...t, name } : t))
       );
 
       toast.success("Tag updated");
+      return true;
     } catch (error) {
       logError(error, {
         scope: "TagsPage",
@@ -158,6 +231,9 @@ const TagsPage = () => {
       toast.error("Error updating tag", {
         description: extractErrorMessage(error, "Unable to update tag."),
       });
+      return false;
+    } finally {
+      setOperationLoading((prev) => ({ ...prev, updateTag: false }));
     }
   };
 
@@ -165,16 +241,26 @@ const TagsPage = () => {
     tagId: string,
     subTagId: string,
     newName: string
-  ) => {
+  ): Promise<boolean> => {
+    const name = newName.trim();
+    if (!name) {
+      toast.error("Subtag name cannot be empty");
+      return false;
+    }
+
+    const busyKey = `update:${subTagId}`;
+    if (isSubTagBusy(busyKey)) return false;
+
+    setSubTagBusy(busyKey, true);
     try {
-      await updateSubTagRequest(subTagId, { name: newName });
+      await updateSubTagRequest(subTagId, { name });
       setTags((prev) =>
         prev.map((t) =>
           t._id === tagId
             ? {
                 ...t,
                 subTags: t.subTags.map((st) =>
-                  st._id === subTagId ? { ...st, name: newName } : st
+                  st._id === subTagId ? { ...st, name } : st
                 ),
               }
             : t
@@ -182,6 +268,7 @@ const TagsPage = () => {
       );
 
       toast.success("Subtag updated");
+      return true;
     } catch (error) {
       logError(error, {
         scope: "TagsPage",
@@ -191,47 +278,81 @@ const TagsPage = () => {
       toast.error("Error updating subtag", {
         description: extractErrorMessage(error, "Unable to update subtag."),
       });
+      return false;
+    } finally {
+      setSubTagBusy(busyKey, false);
     }
   };
 
   const saveEditing = async () => {
+    let saved = false;
     if (editingTagId) {
-      await saveTag(editingTagId, editingValue);
+      saved = await saveTag(editingTagId, editingValue);
     } else if (editingSubTagId) {
-      await saveSubTag(
+      saved = await saveSubTag(
         editingSubTagId.tagId,
         editingSubTagId.subTagId,
         editingValue
       );
     }
-    cancelEditing();
+    if (saved) cancelEditing();
   };
 
-  const deleteTag = async (tagId: string) => {
+  const deleteTag = async (tag: TagWithFrontendState) => {
+    if (operationLoading.deleteTag) return;
+
+    const confirmed = window.confirm(
+      `Delete tag "${tag.name}"? This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setOperationLoading((prev) => ({ ...prev, deleteTag: true }));
     try {
-      await deleteTagRequest(tagId);
-      setTags((prev) => prev.filter((t) => t._id !== tagId));
+      await deleteTagRequest(tag._id);
+      setTags((prev) => prev.filter((t) => t._id !== tag._id));
+      const nextTotal = Math.max(0, totalTags - 1);
+      const nextTotalPages = Math.max(1, Math.ceil(nextTotal / tagsPerPage));
+      setTotalTags(nextTotal);
+      if (currentPage > nextTotalPages) {
+        setCurrentPage(nextTotalPages);
+      } else {
+        fetchTags().catch(() => {});
+      }
 
       toast.success("Tag deleted");
     } catch (error) {
       logError(error, {
         scope: "TagsPage",
         action: "deleteTag",
-        metadata: { tagId },
+        metadata: { tagId: tag._id },
       });
       toast.error("Error deleting tag", {
         description: extractErrorMessage(error, "Unable to delete tag."),
       });
+    } finally {
+      setOperationLoading((prev) => ({ ...prev, deleteTag: false }));
     }
   };
 
-  const deleteSubTag = async (tagId: string, subTagId: string) => {
+  const deleteSubTag = async (tagId: string, subTag: SubTag) => {
+    const busyKey = `delete:${subTag._id}`;
+    if (isSubTagBusy(busyKey)) return;
+
+    const confirmed = window.confirm(
+      `Delete subtag "${subTag.name}"? This action cannot be undone.`
+    );
+    if (!confirmed) return;
+
+    setSubTagBusy(busyKey, true);
     try {
-      await deleteSubTagRequest(subTagId);
+      await deleteSubTagRequest(subTag._id);
       setTags((prev) =>
         prev.map((t) =>
           t._id === tagId
-            ? { ...t, subTags: t.subTags.filter((st) => st._id !== subTagId) }
+            ? {
+                ...t,
+                subTags: t.subTags.filter((st) => st._id !== subTag._id),
+              }
             : t
         )
       );
@@ -241,11 +362,13 @@ const TagsPage = () => {
       logError(error, {
         scope: "TagsPage",
         action: "deleteSubTag",
-        metadata: { tagId, subTagId },
+        metadata: { tagId, subTagId: subTag._id },
       });
       toast.error("Error deleting subtag", {
         description: extractErrorMessage(error, "Unable to delete subtag."),
       });
+    } finally {
+      setSubTagBusy(busyKey, false);
     }
   };
 
@@ -340,14 +463,14 @@ const TagsPage = () => {
     return "Created by";
   };
 
-  // Helper Components
-  const TagActions = ({ tag }: { tag: TagWithFrontendState }) => (
+  const renderTagActions = (tag: TagWithFrontendState) => (
     <div className="flex items-center gap-1">
       <Button
         variant="ghost"
         size="sm"
         className="h-7 w-7"
         onClick={() => startEditing(tag._id, tag.name)}
+        disabled={operationLoading.deleteTag || operationLoading.updateTag}
       >
         <Edit size={14} />
       </Button>
@@ -355,26 +478,29 @@ const TagsPage = () => {
         variant="ghost"
         size="sm"
         className="h-7 w-7"
-        onClick={() => deleteTag(tag._id)}
+        onClick={() => deleteTag(tag)}
+        disabled={operationLoading.deleteTag}
       >
-        <Trash size={14} />
+        {operationLoading.deleteTag ? (
+          <Loader2 size={14} className="animate-spin" />
+        ) : (
+          <Trash size={14} />
+        )}
       </Button>
     </div>
   );
 
-  const SubTagActions = ({
-    tagId,
-    subTag,
-  }: {
-    tagId: string;
-    subTag: SubTag;
-  }) => (
+  const renderSubTagActions = (tagId: string, subTag: SubTag) => (
     <div className="flex items-center gap-1">
       <Button
         variant="ghost"
         size="sm"
         className="h-7 w-7"
         onClick={() => startEditingSubTag(tagId, subTag._id, subTag.name)}
+        disabled={
+          isSubTagBusy(`update:${subTag._id}`) ||
+          isSubTagBusy(`delete:${subTag._id}`)
+        }
       >
         <Edit size={14} />
       </Button>
@@ -382,14 +508,19 @@ const TagsPage = () => {
         variant="ghost"
         size="sm"
         className="h-7 w-7"
-        onClick={() => deleteSubTag(tagId, subTag._id)}
+        onClick={() => deleteSubTag(tagId, subTag)}
+        disabled={isSubTagBusy(`delete:${subTag._id}`)}
       >
-        <Trash size={14} />
+        {isSubTagBusy(`delete:${subTag._id}`) ? (
+          <Loader2 size={14} className="animate-spin" />
+        ) : (
+          <Trash size={14} />
+        )}
       </Button>
     </div>
   );
 
-  const TagItem = ({ tag }: { tag: TagWithFrontendState }) => (
+  const renderTagItem = (tag: TagWithFrontendState) => (
     <div key={tag._id} className="border-b last:border-b-0">
       <div className="flex items-center justify-between p-3 bg-gray-50">
         <div className="flex items-center">
@@ -398,8 +529,11 @@ const TagsPage = () => {
             size="sm"
             className="p-1 h-7 w-7"
             onClick={() => toggleExpand(tag._id)}
+            disabled={tag.subtagsLoading}
           >
-            {tag.isExpanded ? (
+            {tag.subtagsLoading ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : tag.isExpanded ? (
               <ChevronDown size={18} />
             ) : (
               <ChevronRight size={18} />
@@ -419,8 +553,14 @@ const TagsPage = () => {
                 variant="outline"
                 className="h-8"
                 onClick={saveEditing}
+                disabled={operationLoading.updateTag}
               >
-                <Save size={14} className="mr-1" /> Save
+                {operationLoading.updateTag ? (
+                  <Loader2 size={14} className="mr-1 animate-spin" />
+                ) : (
+                  <Save size={14} className="mr-1" />
+                )}
+                Save
               </Button>
               <Button
                 size="sm"
@@ -441,7 +581,7 @@ const TagsPage = () => {
           )}
         </div>
 
-        {editingTagId !== tag._id && <TagActions tag={tag} />}
+        {editingTagId !== tag._id && renderTagActions(tag)}
       </div>
 
       {tag.isExpanded && (
@@ -464,8 +604,14 @@ const TagsPage = () => {
                     variant="outline"
                     className="h-8"
                     onClick={saveEditing}
+                    disabled={isSubTagBusy(`update:${subTag._id}`)}
                   >
-                    <Save size={14} className="mr-1" /> Save
+                    {isSubTagBusy(`update:${subTag._id}`) ? (
+                      <Loader2 size={14} className="mr-1 animate-spin" />
+                    ) : (
+                      <Save size={14} className="mr-1" />
+                    )}
+                    Save
                   </Button>
                   <Button
                     size="sm"
@@ -486,7 +632,7 @@ const TagsPage = () => {
               )}
 
               {editingSubTagId?.subTagId !== subTag._id && (
-                <SubTagActions tagId={tag._id} subTag={subTag} />
+                renderSubTagActions(tag._id, subTag)
               )}
             </div>
           ))}
@@ -494,6 +640,7 @@ const TagsPage = () => {
             <Input
               placeholder="Enter subtag name"
               value={newSubTagNames[tag._id] ?? ""}
+              disabled={isSubTagBusy(`add:${tag._id}`)}
               onChange={(e) =>
                 setNewSubTagNames((prev) => ({
                   ...prev,
@@ -502,8 +649,16 @@ const TagsPage = () => {
               }
               className="flex-1"
             />
-            <Button onClick={() => addSubTag(tag._id)}>
-              <Plus size={16} className="mr-1" /> Add Subtag
+            <Button
+              onClick={() => addSubTag(tag._id)}
+              disabled={isSubTagBusy(`add:${tag._id}`)}
+            >
+              {isSubTagBusy(`add:${tag._id}`) ? (
+                <Loader2 size={16} className="mr-1 animate-spin" />
+              ) : (
+                <Plus size={16} className="mr-1" />
+              )}
+              Add Subtag
             </Button>
           </div>
         </div>
@@ -535,6 +690,29 @@ const TagsPage = () => {
             </CardDescription>
           </CardHeader>
           <CardContent>
+            <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div className="relative w-full md:max-w-sm">
+                <Search
+                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                />
+                <Input
+                  placeholder="Search tags"
+                  value={tagSearchTerm}
+                  onChange={(e) => {
+                    setTagSearchTerm(e.target.value);
+                    setCurrentPage(1);
+                  }}
+                  className="pl-9"
+                />
+              </div>
+              <div className="text-sm text-gray-500">
+                {totalTags > 0
+                  ? `Showing ${firstResult}-${lastResult} of ${totalTags}`
+                  : "No tags to show"}
+              </div>
+            </div>
+
             <div className="mb-6 bg-gray-50 p-4 rounded-lg">
               <h3 className="text-md font-medium mb-3">Add New Tag</h3>
               <div className="flex gap-2">
@@ -545,7 +723,12 @@ const TagsPage = () => {
                   className="flex-1"
                 />
                 <Button onClick={addNewTag} disabled={operationLoading.addTag}>
-                  <Plus size={16} className="mr-1" /> Add Tag
+                  {operationLoading.addTag ? (
+                    <Loader2 size={16} className="mr-1 animate-spin" />
+                  ) : (
+                    <Plus size={16} className="mr-1" />
+                  )}
+                  Add Tag
                 </Button>
               </div>
             </div>
@@ -555,9 +738,53 @@ const TagsPage = () => {
               </div>
             ) : (
               <div className="border rounded-md">
-                {tags.map((tag) => (
-                  <TagItem key={tag._id} tag={tag} />
-                ))}
+                {tags.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center px-4 py-12 text-center">
+                    <TagIcon size={28} className="mb-3 text-gray-400" />
+                    <h3 className="text-base font-medium">
+                      {tagSearchTerm.trim() ? "No Matching Tags" : "No Tags Yet"}
+                    </h3>
+                    <p className="mt-1 max-w-md text-sm text-gray-500">
+                      {tagSearchTerm.trim()
+                        ? "No tags match your search. Try a different term or clear the search field."
+                        : "Create a tag to start categorizing documents."}
+                    </p>
+                  </div>
+                ) : (
+                  tags.map((tag) => renderTagItem(tag))
+                )}
+              </div>
+            )}
+
+            {!loading && totalTags > tagsPerPage && (
+              <div className="mt-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="text-sm text-gray-500">
+                  Page {currentPage} of {totalPages}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                    disabled={currentPage === 1}
+                  >
+                    <ChevronLeft size={16} className="mr-1" />
+                    Previous
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setCurrentPage((page) => Math.min(totalPages, page + 1))
+                    }
+                    disabled={currentPage >= totalPages}
+                  >
+                    Next
+                    <ChevronRight size={16} className="ml-1" />
+                  </Button>
+                </div>
               </div>
             )}
           </CardContent>

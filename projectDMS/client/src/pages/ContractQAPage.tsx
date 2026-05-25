@@ -247,6 +247,10 @@ const ContractQAPage: React.FC = () => {
         max_tokens: 512,
         require_citations: requireCitations,
         max_iterations: 3,
+        metadata_filters: {
+          uploadType: "contract",
+          document_type: "contract",
+        },
       };
       const resp: ContractIterativeQAResponse = await askIterativeContractQuestion(payload, controller.signal);
       setAnswer(resp.answer);
@@ -441,12 +445,26 @@ const ContractQAPage: React.FC = () => {
                 {citations.map((c, idx) => (
                   <li key={c.chunk_id || idx} className="text-sm text-gray-700 flex items-center gap-2">
                     <Badge variant="outline">#{idx + 1}</Badge>
-                    <div>
-                      <div className="font-medium">{c.document_title || selectedUploadName || "Contract"}</div>
+                      <div>
+                      <div className="font-medium">
+                        {c.clause_number ? `Clause ${c.clause_number}` : c.document_title || selectedUploadName || "Contract"}
+                        {c.clause_title ? ` - ${c.clause_title}` : ""}
+                      </div>
                       <div className="text-xs text-gray-500">
                         {c.letter_no ? `${c.letter_no} - ` : ""}
-                        {c.page ? `p.${c.page}` : "page n/a"} - score {c.score?.toFixed(3) ?? "n/a"}
+                        {c.file_name ? `${c.file_name} - ` : ""}
+                        {c.page_numbers?.length
+                          ? `p.${c.page_numbers.join(", ")}`
+                          : c.page
+                          ? `p.${c.page}`
+                          : "page n/a"}{" "}
+                        - score {c.score?.toFixed(3) ?? "n/a"}
                       </div>
+                      {c.section_heading && (
+                        <div className="text-xs text-gray-500">
+                          Section: {c.section_heading}
+                        </div>
+                      )}
                       <div className="text-xs text-gray-600">{c.snippet}</div>
                     </div>
                   </li>

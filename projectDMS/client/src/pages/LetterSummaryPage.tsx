@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { joinApiUrl } from "@/config/api";
+import { authenticatedFetch } from "@/services/http";
 
 interface LetterOut {
   id: string;
@@ -79,37 +80,24 @@ const LetterSummaryPage: React.FC = () => {
   const [newComment, setNewComment] = useState("");
   const [savingComment, setSavingComment] = useState(false);
 
-  const loadComments = async () => {
+  const loadComments = useCallback(async () => {
     if (!id) return;
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}` }
-        : {};
-      const res = await fetch(joinApiUrl(`/documents/${id}/comments`), {
-        headers,
-      });
+      const res = await authenticatedFetch(joinApiUrl(`/documents/${id}/comments`));
       if (!res.ok) return;
       const data = await res.json();
       const list = Array.isArray(data) ? data : data?.comments ?? [];
       setComments(list);
     } catch {}
-  };
+  }, [id]);
 
   const saveComment = async () => {
     if (!newComment.trim() || !id) return;
     setSavingComment(true);
     try {
-      const token = localStorage.getItem("accessToken") || "";
-      const headers: Record<string, string> = token
-        ? {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          }
-        : { "Content-Type": "application/json" };
-      const res = await fetch(joinApiUrl(`/documents/${id}/comments`), {
+      const res = await authenticatedFetch(joinApiUrl(`/documents/${id}/comments`), {
         method: "POST",
-        headers,
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: newComment.trim() }),
       });
       if (!res.ok) return;
@@ -123,7 +111,7 @@ const LetterSummaryPage: React.FC = () => {
 
   useEffect(() => {
     loadComments();
-  }, [id]);
+  }, [loadComments]);
 
   useEffect(() => {
     const run = async () => {
@@ -131,11 +119,7 @@ const LetterSummaryPage: React.FC = () => {
       setLoading(true);
       setError(null);
       try {
-        const token = localStorage.getItem("accessToken") || "";
-        const headers: Record<string, string> = token
-          ? { Authorization: `Bearer ${token}` }
-          : {};
-        const res = await fetch(joinApiUrl(`/documents/${id}`), { headers });
+        const res = await authenticatedFetch(joinApiUrl(`/documents/${id}`));
         if (!res.ok) throw new Error(`Failed to fetch letter: ${res.status}`);
         const d = await res.json();
         const merged: LetterOut = {
@@ -182,7 +166,7 @@ const LetterSummaryPage: React.FC = () => {
       return parseBulletString(r);
     }
     return [];
-  }, [doc?.reference]);
+  }, [doc]);
 
   const copyText = async (text: string) => {
     try {

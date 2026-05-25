@@ -289,44 +289,7 @@ const DocumentsPage = () => {
   };
 
   const buildAuthHeaders = useCallback((): Record<string, string> => {
-    if (typeof window === "undefined") return {};
-
-    const headers: Record<string, string> = {};
-    const token = window.localStorage.getItem("accessToken");
-    if (token && token.trim() !== "") {
-      headers["Authorization"] = `Bearer ${token}`;
-    }
-
-    const userId = window.localStorage.getItem("user_id");
-    headers["X-User-Id"] = userId && userId.trim() !== "" ? userId : "demo";
-
-    const rawRoles = window.localStorage.getItem("user_roles");
-    let rolesHeader = "superadmin";
-    if (rawRoles && rawRoles.trim() !== "") {
-      try {
-        const parsed = JSON.parse(rawRoles);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          rolesHeader = parsed.map((r: any) => String(r)).join(",");
-        } else {
-          rolesHeader = rawRoles;
-        }
-      } catch {
-        rolesHeader = rawRoles;
-      }
-    }
-    headers["X-User-Role"] = rolesHeader;
-    headers["X-User-Roles"] = rolesHeader;
-
-    const orgId = window.localStorage.getItem("org_id");
-    if (orgId && orgId.trim() !== "") {
-      headers["X-Org-Id"] = orgId;
-    }
-    const projId = window.localStorage.getItem("proj_id");
-    if (projId && projId.trim() !== "") {
-      headers["X-Proj-Id"] = projId;
-    }
-
-    return headers;
+    return {};
   }, []);
 
   const fetchDocuments = useCallback(async () => {

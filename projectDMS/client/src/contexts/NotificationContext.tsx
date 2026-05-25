@@ -125,7 +125,7 @@ export const useWebSocketNotifications = () => {
         fetchNotifications(activeCategory);
       }
     }
-  }, [lastJsonMessage]);
+  }, [fetchNotifications, lastJsonMessage, refreshUnreadCount]);
 
   return { readyState };
 };

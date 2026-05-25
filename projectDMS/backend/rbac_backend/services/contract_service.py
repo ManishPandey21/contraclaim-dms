@@ -26,12 +26,15 @@ from ..models.contract_models import (
     StatusResponse,
 )
 from ..models.document import Document
+from ..models.storage_architecture import ContractAggregate, ContractVersion
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
 from ..utils.error_handler import ContractError
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
+from .document_audit_service import DocumentAuditService
 from .document_service import DocumentService, DocumentServiceError
+from .file_object_service import FileObjectService
 from .ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,8 @@ class ContractService:
         self._embedding_client = EmbeddingClient(self._processing_config)
         self._vector_client = VectorClient(self._processing_config)
         self._document_service = DocumentService()
+        self._file_object_service = FileObjectService()
+        self._audit_service = DocumentAuditService()
 
     async def _get_db(self):
         if self._db is None:
@@ -185,6 +190,9 @@ class ContractService:
                 "max_file_size_bytes": max_file_size_bytes,
                 "max_chunk_size_bytes": max_chunk_size_bytes,
                 "max_chunks": max_chunks,
+                "received_chunks": [],
+                "missing_chunks": [],
+                "chunk_checksums": {},
             }
         )
         return ContractUploadSessionResponse(
@@ -234,7 +242,8 @@ class ContractService:
         if file_size is not None and file_size > int(session.get("max_file_size_bytes") or 0):
             raise ContractError("Upload exceeds the maximum allowed file size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
-        await sessions.update_one({"upload_id": upload_id}, {"$set": {"status": "uploading", "updatedAt": datetime.utcnow()}})
+        if not session.get("document_id"):
+            await sessions.update_one({"upload_id": upload_id}, {"$set": {"status": "uploading", "updatedAt": datetime.utcnow()}})
         session["organization_id"] = effective_org
         session["project_id"] = effective_project or ""
         return session
@@ -259,6 +268,9 @@ class ContractService:
         filepath_s3: Optional[str],
         storage_locations: List[Dict[str, Any]],
         current_user: CurrentUser,
+        file_object_id: Optional[str] = None,
+        storage_key: Optional[str] = None,
+        sha256: Optional[str] = None,
     ) -> str:
         try:
             document = Document(
@@ -286,9 +298,98 @@ class ContractService:
                 contract_error=None,
             )
             created = await self._document_service.create_document(document=document)
+            document_id = str(created.id)
+            await self._attach_contract_storage_records(
+                document_id=document_id,
+                upload_id=upload_id,
+                filename=filename,
+                organization_id=organization_id,
+                project_id=project_id,
+                current_user=current_user,
+                file_object_id=file_object_id,
+                storage_key=storage_key,
+                sha256=sha256,
+                metadata_snapshot=document.model_dump(by_alias=True, exclude_none=True),
+            )
+            await self._audit_service.emit(
+                resource_type="contract",
+                resource_id=document_id,
+                event_type="contract.created",
+                actor_id=getattr(current_user, "id", None),
+                organization_id=organization_id,
+                project_id=project_id,
+                metadata={
+                    "upload_id": upload_id,
+                    "file_object_id": file_object_id,
+                    "storage_key": storage_key,
+                    "sha256": sha256,
+                },
+            )
             return str(created.id)
         except DocumentServiceError as exc:
             raise ContractError(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR) from exc
+
+    async def _attach_contract_storage_records(
+        self,
+        *,
+        document_id: str,
+        upload_id: str,
+        filename: str,
+        organization_id: str,
+        project_id: Optional[str],
+        current_user: CurrentUser,
+        file_object_id: Optional[str],
+        storage_key: Optional[str],
+        sha256: Optional[str],
+        metadata_snapshot: Dict[str, Any],
+    ) -> None:
+        db = await self._get_db()
+        contract = ContractAggregate(
+            organization_id=organization_id,
+            project_id=project_id or "",
+            title=filename,
+            document_ids=[document_id],
+            created_by=getattr(current_user, "id", None),
+        )
+        contract_result = await db.contracts.insert_one(contract.model_dump(by_alias=True))
+        contract_id = str(contract_result.inserted_id)
+        version = ContractVersion(
+            contract_id=contract_id,
+            document_id=document_id,
+            upload_id=upload_id,
+            version_number=1,
+            file_object_id=file_object_id,
+            sha256=sha256,
+            filename=filename,
+            created_by=getattr(current_user, "id", None),
+        )
+        version_result = await db.contract_versions.insert_one(version.model_dump(by_alias=True))
+        contract_version_id = str(version_result.inserted_id)
+        await db.contracts.update_one(
+            {"_id": contract_id},
+            {"$set": {"current_version_id": contract_version_id, "updatedAt": datetime.utcnow()}},
+        )
+        document_version_id = await self._file_object_service.attach_document_version(
+            document_id=document_id,
+            file_object_id=file_object_id,
+            metadata_snapshot=metadata_snapshot,
+            current_user=current_user,
+            reason="contract_upload",
+        )
+        await db.documents.update_one(
+            {"_id": self._as_lookup_id(document_id)},
+            {
+                "$set": {
+                    "contract_id": contract_id,
+                    "contract_version_id": contract_version_id,
+                    "file_object_id": file_object_id,
+                    "current_version_id": document_version_id,
+                    "storage_key": storage_key,
+                    "sha256": sha256,
+                    "lifecycle_state": "active",
+                }
+            },
+        )
 
     async def update_contract_document(
         self,
@@ -312,6 +413,19 @@ class ContractService:
             {"_id": self._as_lookup_id(document_id)},
             {"$set": update_fields},
         )
+        try:
+            await (await self._get_db()).contract_versions.update_one(
+                {"document_id": document_id},
+                {
+                    "$set": {
+                        "status": status_value,
+                        "ingestion_status": status_value,
+                        "updatedAt": datetime.utcnow(),
+                    }
+                },
+            )
+        except Exception:
+            logger.warning("Failed to update contract version status for %s", document_id, exc_info=True)
 
     async def update_job_status(
         self,
@@ -362,31 +476,91 @@ class ContractService:
         project_id = str(payload.get("project_id") or "") or None
         filename = str(payload.get("filename") or "")
         tags = [str(tag) for tag in (payload.get("tags") or []) if tag]
-        processing_path = Path(str(payload.get("processing_path") or "")).resolve()
+        file_object_id = str(payload.get("file_object_id") or "")
+        processing_path_value = str(payload.get("processing_path") or "")
         if not upload_id or not document_id or not organization_id or not filename:
             raise ContractError("Invalid contract ingest payload", status.HTTP_500_INTERNAL_SERVER_ERROR)
+        materialized_temp = False
+        if file_object_id:
+            processing_path = await self._file_object_service.materialize_to_temp(
+                file_object_id,
+                suffix=Path(filename).suffix,
+            )
+            materialized_temp = True
+        else:
+            processing_path = Path(processing_path_value).resolve()
         if not processing_path.exists():
             raise ContractError("Contract processing file is missing", status.HTTP_404_NOT_FOUND)
 
-        await self.update_job_status(upload_id, "processing", metadata={"document_id": document_id, "filename": filename})
+        await self.update_job_status(
+            upload_id,
+            "processing",
+            metadata={
+                "document_id": document_id,
+                "filename": filename,
+                "processing_stage": "materializing",
+                "stage_label": "Preparing file for processing",
+                "progress": 10,
+            },
+        )
         await self.update_contract_document(document_id, status_value="processing", tags=tags)
         processed_path = processing_path
         try:
+            await self.update_job_status(
+                upload_id,
+                "processing",
+                metadata={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "processing_stage": "ocr",
+                    "stage_label": "Running OCR / text preparation",
+                    "progress": 20,
+                },
+            )
             processed_path = await OCRService(self._processing_config).process_document(processing_path, language="eng")
+            await self.update_job_status(
+                upload_id,
+                "processing",
+                metadata={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "processing_stage": "ingestion",
+                    "stage_label": "Extracting clauses and indexing vectors",
+                    "progress": 35,
+                },
+            )
             result = await self.ingest_contract(processed_path, organization_id, project_id, filename, tags, upload_id, document_id)
             categories = result.get("categories") or []
             await self.update_job_status(
                 upload_id,
                 "completed",
-                metadata={"document_id": document_id, "filename": filename, "categories": categories},
+                metadata={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "categories": categories,
+                    "processing_stage": "completed",
+                    "stage_label": "Processing complete",
+                    "progress": 100,
+                },
             )
             await self.update_contract_document(document_id, status_value="completed", categories=categories, tags=tags)
         except Exception as exc:
-            await self.update_job_status(upload_id, "failed", error=str(exc), metadata={"document_id": document_id, "filename": filename})
+            await self.update_job_status(
+                upload_id,
+                "failed",
+                error=str(exc),
+                metadata={
+                    "document_id": document_id,
+                    "filename": filename,
+                    "processing_stage": "failed",
+                    "stage_label": "Processing failed",
+                },
+            )
             await self.update_contract_document(document_id, status_value="failed", error=str(exc), tags=tags)
             raise
         finally:
-            self._cleanup_tmp_file(processing_path)
+            if materialized_temp or processing_path_value:
+                self._cleanup_tmp_file(processing_path)
             if processed_path != processing_path:
                 self._cleanup_tmp_file(processed_path)
 
@@ -407,6 +581,7 @@ class ContractService:
     ) -> ContractListResponse:
         query = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
         query["uploadType"] = "contract"
+        query["lifecycle_state"] = {"$ne": "deleted"}
         rows = await (
             (await self._get_documents())
             .find(query)
@@ -420,7 +595,11 @@ class ContractService:
 
     async def get_contract_document(self, document_id: str, current_user: CurrentUser) -> Dict[str, Any]:
         document = await (await self._get_documents()).find_one({"_id": self._as_lookup_id(document_id)})
-        if not document or str(document.get("uploadType") or "").lower() != "contract":
+        if (
+            not document
+            or str(document.get("uploadType") or "").lower() != "contract"
+            or document.get("lifecycle_state") == "deleted"
+        ):
             raise ContractError("Contract document not found", status.HTTP_404_NOT_FOUND)
         self._authorize_scope(document, current_user)
         return document
@@ -428,10 +607,38 @@ class ContractService:
     def _hybrid_enabled(self, request: ContractSearchRequest) -> bool:
         return bool((request.query or "").strip() and self._processing_config.qdrant_enabled and self._vector_client.enabled)
 
-    def _build_regex(self, match_stage: Dict[str, Any], text_query: str) -> Optional[str]:
+    def _build_structured_search_filters(self, match_stage: Dict[str, Any], request: ContractSearchRequest) -> None:
+        def add_regex(field: str, value: Optional[str]) -> None:
+            cleaned = (value or "").strip()
+            if cleaned:
+                match_stage[field] = {"$regex": re.escape(cleaned), "$options": "i"}
+
+        add_regex("clause_number", request.clause_number)
+        add_regex("clause_title", request.clause_title)
+        add_regex("section_heading", request.section_heading)
+        if request.clause_tags:
+            match_stage["clause_tags"] = {"$all": [tag for tag in request.clause_tags if tag]}
+
+        page_bounds: Dict[str, int] = {}
+        if request.page_from:
+            page_bounds["$gte"] = request.page_from
+        if request.page_to:
+            page_bounds["$lte"] = request.page_to
+        if page_bounds:
+            match_stage.setdefault("$and", []).append(
+                {
+                    "$or": [
+                        {"page_numbers": {"$elemMatch": page_bounds}},
+                        {"page_number": page_bounds},
+                        {"page": page_bounds},
+                    ]
+                }
+            )
+
+    def _build_regex(self, match_stage: Dict[str, Any], text_query: str, exact_phrase: bool = False) -> Optional[str]:
         quoted_phrases = re.findall(r'"([^"]+)"', text_query)
         unquoted_query = re.sub(r'"[^"]+"', " ", text_query).strip()
-        if not quoted_phrases and len(text_query.split()) > 1:
+        if exact_phrase and not quoted_phrases and len(text_query.split()) > 1:
             quoted_phrases = [text_query]
             unquoted_query = ""
 
@@ -466,7 +673,14 @@ class ContractService:
             escaped_terms.append(re.escape(cleaned))
         regex = "|".join(escaped_terms) if escaped_terms else re.escape(unquoted_query.strip() or text_query)
         if regex:
-            match_stage["text"] = {"$regex": regex, "$options": "i"}
+            match_stage.setdefault("$and", []).append(
+                {
+                    "$or": [
+                        {"text_enriched": {"$regex": regex, "$options": "i"}},
+                        {"text": {"$regex": regex, "$options": "i"}},
+                    ]
+                }
+            )
         return regex
 
     async def search_contracts(self, request: ContractSearchRequest, current_user: CurrentUser) -> ContractSearchResponse:
@@ -487,13 +701,15 @@ class ContractService:
             match_stage["$or"] = [{"document_id": request.document_id}, {"upload_id": request.document_id}]
         if request.tags:
             match_stage["tags"] = {"$all": request.tags}
+        self._build_structured_search_filters(match_stage, request)
 
-        regex = self._build_regex(match_stage, query_text)
+        regex = self._build_regex(match_stage, query_text, exact_phrase=request.exact_phrase)
         page_size, skip_count = request.limit, request.skip
         candidate_limit = max(page_size * 5, page_size + skip_count + 10)
-        lexical_candidates = await self._lexical_candidates(collection, match_stage, regex, candidate_limit)
+        lexical_candidates = await self._lexical_candidates(collection, match_stage, regex, candidate_limit, request.category_terms)
         vector_candidates = await self._vector_candidates(request, effective_org, effective_project, project_filters, candidate_limit)
         normalized, total_count, has_more = await self._assemble_results(collection, lexical_candidates, vector_candidates, page_size, skip_count)
+        normalized = self._rerank_contract_chunks(normalized, request)
         summary, summary_title = self._build_summary(normalized) if request.summarize else (None, None)
         return ContractSearchResponse(
             results=[ContractClauseChunk(**item) for item in normalized],
@@ -507,20 +723,30 @@ class ContractService:
             sources=[ContractSource(**item) for item in self._build_sources(normalized)],
         )
 
-    async def _lexical_candidates(self, collection, match_stage: Dict[str, Any], regex: Optional[str], candidate_limit: int) -> List[Dict[str, Any]]:
+    async def _lexical_candidates(self, collection, match_stage: Dict[str, Any], regex: Optional[str], candidate_limit: int, category_terms: Optional[Sequence[str]] = None) -> List[Dict[str, Any]]:
         pipeline: List[Dict[str, Any]] = [{"$match": match_stage}]
+        category_regex = self._build_category_regex(category_terms or [])
+        text_input = {"$ifNull": ["$text_enriched", {"$ifNull": ["$text", ""]}]}
         if regex:
+            add_fields: Dict[str, Any] = {
+                "match_score": {"$size": {"$regexFindAll": {"input": text_input, "regex": regex, "options": "i"}}},
+            }
+            if category_regex:
+                add_fields["category_score"] = {"$size": {"$regexFindAll": {"input": text_input, "regex": category_regex, "options": "i"}}}
+            else:
+                add_fields["category_score"] = 0
             pipeline.extend(
                 [
-                    {"$addFields": {"match_score": {"$size": {"$regexFindAll": {"input": "$text", "regex": regex, "options": "i"}}}}},
+                    {"$addFields": add_fields},
                     {"$match": {"match_score": {"$gt": 0}}},
+                    {"$addFields": {"combined_match_score": {"$add": ["$match_score", {"$multiply": ["$category_score", 0.35]}]}}},
                 ]
             )
         else:
-            pipeline.append({"$addFields": {"match_score": 0.0}})
+            pipeline.append({"$addFields": {"match_score": 0.0, "combined_match_score": 0.0}})
         pipeline.extend(
             [
-                {"$group": {"_id": {"document_id": "$document_id", "clause_number": "$clause_number", "clause_start": "$clause_start_position"}, "best_score": {"$max": "$match_score"}, "document_id": {"$first": "$document_id"}, "upload_id": {"$first": "$upload_id"}, "clause_number": {"$first": "$clause_number"}, "clause_start_position": {"$first": "$clause_start_position"}, "createdAt": {"$first": "$createdAt"}}},
+                {"$group": {"_id": {"document_id": "$document_id", "clause_number": "$clause_number", "clause_start": "$clause_start_position"}, "best_score": {"$max": "$combined_match_score"}, "document_id": {"$first": "$document_id"}, "upload_id": {"$first": "$upload_id"}, "clause_number": {"$first": "$clause_number"}, "clause_start_position": {"$first": "$clause_start_position"}, "createdAt": {"$first": "$createdAt"}}},
                 {"$sort": {"best_score": -1, "clause_start_position": 1, "createdAt": -1}},
                 {"$limit": candidate_limit},
             ]
@@ -535,18 +761,59 @@ class ContractService:
         if not self._hybrid_enabled(request):
             return []
         try:
-            embeddings = await self._embedding_client.embed([request.query.strip()])
+            vector_query = " ".join([request.query.strip(), *[term.strip() for term in request.category_terms[:20] if term.strip()]])
+            embeddings = await self._embedding_client.embed([vector_query])
             query_vector = embeddings[0] if embeddings else []
             if not query_vector:
                 return []
-            return await self._vector_client.search(
+            filters: Dict[str, Any] = {
+                "org_id": effective_org,
+                "project_id": [effective_project] if effective_project else project_filters,
+                "document_id": request.document_id,
+                "tags": request.tags or None,
+                "uploadType": "contract",
+            }
+            results = await self._vector_client.search(
                 query_vector,
-                filters={"org_id": effective_org, "project_id": [effective_project] if effective_project else project_filters, "document_id": request.document_id, "tags": request.tags or None, "uploadType": "contract"},
+                filters=filters,
                 limit=candidate_limit,
             )
+            return [item for item in results if self._payload_matches_structured_filters(item.get("payload") or {}, request)]
         except Exception as exc:
             logger.warning("Contract vector search failed: %s", exc)
             return []
+
+    def _payload_matches_structured_filters(self, payload: Dict[str, Any], request: ContractSearchRequest) -> bool:
+        def contains(field: str, value: Optional[str]) -> bool:
+            needle = (value or "").strip().lower()
+            if not needle:
+                return True
+            return needle in str(payload.get(field) or "").lower()
+
+        if not contains("clause_number", request.clause_number):
+            return False
+        if not contains("clause_title", request.clause_title):
+            return False
+        if not contains("section_heading", request.section_heading):
+            return False
+        if request.clause_tags:
+            actual_tags = payload.get("clause_tags") or []
+            if not isinstance(actual_tags, list):
+                actual_tags = [actual_tags]
+            actual = {str(tag).lower() for tag in actual_tags}
+            expected = {tag.lower() for tag in request.clause_tags if tag}
+            if expected and not expected.issubset(actual):
+                return False
+        if request.page_from or request.page_to:
+            pages = payload.get("page_numbers") or payload.get("page") or []
+            if not isinstance(pages, list):
+                pages = [pages]
+            low = request.page_from or 1
+            high = request.page_to or 10**9
+            page_values = [int(page) for page in pages if isinstance(page, (int, float)) or str(page).isdigit()]
+            if not any(low <= page <= high for page in page_values):
+                return False
+        return True
 
     async def _assemble_results(self, collection, lexical_candidates: List[Dict[str, Any]], vector_candidates: List[Dict[str, Any]], page_size: int, skip_count: int) -> Tuple[List[Dict[str, Any]], int, bool]:
         def clause_key(document_id: Optional[str], clause_number: Optional[str], clause_start: Optional[Any]) -> str:
@@ -612,6 +879,97 @@ class ContractService:
                 chunk["score"] = combined_scores.get(key, 0.0)
                 normalized.append(self._normalize_vector_chunk(chunk))
         return normalized, total_count, has_more
+
+    def _build_category_regex(self, category_terms: Sequence[str]) -> Optional[str]:
+        terms: List[str] = []
+        seen: set[str] = set()
+        for term in category_terms:
+            cleaned = re.sub(r"\s+", " ", str(term or "").strip())
+            lowered = cleaned.lower()
+            if not cleaned or len(cleaned) < 3 or lowered in seen:
+                continue
+            seen.add(lowered)
+            terms.append(re.escape(cleaned))
+            if len(terms) >= 30:
+                break
+        return "|".join(terms) if terms else None
+
+    def _rerank_contract_chunks(self, normalized: Sequence[Dict[str, Any]], request: ContractSearchRequest) -> List[Dict[str, Any]]:
+        if not normalized:
+            return []
+
+        query_terms = self._extract_query_terms(request.query)
+        phrase = request.query.strip().strip('"').lower() if request.exact_phrase else ""
+        category_terms = [str(term).lower() for term in request.category_terms if str(term).strip()]
+        clause_number = (request.clause_number or "").lower()
+        clause_title = (request.clause_title or "").lower()
+        section_heading = (request.section_heading or "").lower()
+
+        def key_for(chunk: Dict[str, Any]) -> str:
+            return f"{chunk.get('document_id') or ''}::{chunk.get('clause_number') or ''}::{chunk.get('clause_start_position') or 0}"
+
+        def chunk_score(chunk: Dict[str, Any]) -> float:
+            base = float(chunk.get("score") or 0.0) * 100.0
+            text = " ".join(
+                str(chunk.get(field) or "")
+                for field in ("text_enriched", "text", "clause_title", "section_heading")
+            ).lower()
+            for term in query_terms:
+                if term in text:
+                    base += min(text.count(term), 5) * 0.35
+            if phrase and phrase in text:
+                base += 2.5
+            for term in category_terms:
+                if term in text:
+                    base += 0.12
+            if clause_number and clause_number in str(chunk.get("clause_number") or "").lower():
+                base += 3.0
+            if clause_title and clause_title in str(chunk.get("clause_title") or "").lower():
+                base += 2.0
+            if section_heading and section_heading in str(chunk.get("section_heading") or "").lower():
+                base += 1.5
+            if request.page_from or request.page_to:
+                pages = chunk.get("page_numbers") or []
+                if not isinstance(pages, list):
+                    pages = [pages]
+                low = request.page_from or 1
+                high = request.page_to or 10**9
+                if any(isinstance(page, int) and low <= page <= high for page in pages):
+                    base += 0.75
+            return base
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        scores: Dict[str, float] = {}
+        for item in normalized:
+            key = key_for(item)
+            grouped.setdefault(key, []).append(dict(item))
+            scores[key] = max(scores.get(key, 0.0), chunk_score(item))
+
+        ordered_keys = sorted(
+            grouped.keys(),
+            key=lambda key: (
+                -scores.get(key, 0.0),
+                grouped[key][0].get("clause_start_position") or 0,
+                grouped[key][0].get("chunk_index") or 0,
+            ),
+        )
+        reranked: List[Dict[str, Any]] = []
+        for key in ordered_keys:
+            for chunk in sorted(grouped[key], key=lambda item: item.get("chunk_index") or 0):
+                chunk["score"] = scores.get(key, float(chunk.get("score") or 0.0))
+                reranked.append(chunk)
+        return reranked
+
+    def _extract_query_terms(self, query: str) -> List[str]:
+        stopwords = {"a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it", "of", "on", "or", "per", "the", "this", "that", "these", "those", "to", "upon", "was", "were", "with", "without"}
+        terms: List[str] = []
+        seen: set[str] = set()
+        for term in re.split(r"\W+", query.lower()):
+            if len(term) < 3 or term in stopwords or term in seen:
+                continue
+            seen.add(term)
+            terms.append(term)
+        return terms
 
     def _build_sources(self, normalized: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
         sources_map: Dict[str, Dict[str, Any]] = {}

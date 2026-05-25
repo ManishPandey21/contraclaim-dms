@@ -6,7 +6,8 @@ import {
   useNotificationStore,
   useWebSocketNotifications,
 } from "../contexts/NotificationContext";
-import { NotificationCategory } from "../types/api";
+import enhancedApi from "../services/enhanced-api";
+import { NotificationCategory, NotificationItem } from "../types/api";
 import { cn } from "../lib/utils";
 
 const categories: Array<{ label: string; value: NotificationCategory | "all" }> = [
@@ -15,6 +16,8 @@ const categories: Array<{ label: string; value: NotificationCategory | "all" }> 
   { label: "Approvals", value: "approvals" },
   { label: "Uploads", value: "uploads" },
   { label: "Comments", value: "comments" },
+  { label: "Reminders", value: "reminders" },
+  { label: "Security", value: "security" },
 ];
 
 const formatTimestamp = (value: string) => {
@@ -73,7 +76,7 @@ const NotificationCenter: React.FC = () => {
     if (open) {
       fetchNotifications(activeCategory);
     }
-  }, [fetchNotifications, open]);
+  }, [activeCategory, fetchNotifications, open]);
 
   useEffect(() => {
     const intervalId = window.setInterval(() => {
@@ -96,35 +99,45 @@ const NotificationCenter: React.FC = () => {
     await markAllRead();
   };
 
-  const handleNotificationClick = async (notification: {
-    id: string;
-    type: string;
-    unread: boolean;
-    resource_type?: string;
-    resource_id?: string;
-    data?: {
-      document_id?: string;
-    };
-  }) => {
+  const resolveNotificationPath = (notification: NotificationItem) => {
+    if (notification.resource_link) return notification.resource_link;
+    const navigateAction = notification.actions?.find(
+      (action) => action.method === "navigate" && action.href,
+    );
+    if (navigateAction?.href) return navigateAction.href;
+    if (notification.type === "bulk_upload_completed") return "/documents";
+
+    const documentId =
+      notification.data?.document_id ||
+      (notification.resource_type === "document"
+        ? notification.resource_id
+        : undefined);
+    if (documentId) return `/documentviewer/${documentId}`;
+
+    if (notification.resource_type === "letter" && notification.resource_id) {
+      return `/letters/${notification.resource_id}/input`;
+    }
+    return "/notifications";
+  };
+
+  const handleNotificationClick = async (notification: NotificationItem) => {
     try {
       if (notification.unread) {
         await markRead(notification.id);
       }
     } finally {
-      if (notification.type === "bulk_upload_completed") {
-        navigate("/documents");
-      } else {
-        const documentId =
-          notification.data?.document_id ||
-          (notification.resource_type === "document"
-            ? notification.resource_id
-            : undefined);
-        if (documentId) {
-          navigate(`/documentviewer/${documentId}`);
-        }
-      }
+      navigate(resolveNotificationPath(notification));
       setOpen(false);
     }
+  };
+
+  const handleNotificationAction = async (
+    notification: NotificationItem,
+    actionKey: string,
+  ) => {
+    await enhancedApi.executeNotificationAction(notification.id, actionKey);
+    await fetchNotifications(activeCategory);
+    await refreshUnreadCount();
   };
 
   return (
@@ -155,7 +168,7 @@ const NotificationCenter: React.FC = () => {
             {loading && <p className="text-sm text-gray-500">Loading...</p>}
           </div>
 
-          <div className="px-4 pb-2 flex space-x-1 bg-gray-50">
+          <div className="px-4 pb-2 flex flex-wrap gap-1 bg-gray-50">
             {categories.map(({ label, value }) => {
               const selected = value === activeCategory;
               return (
@@ -164,7 +177,7 @@ const NotificationCenter: React.FC = () => {
                   type="button"
                   onClick={() => handleCategoryChange(value)}
                   className={cn(
-                    "flex-1 py-2 text-sm font-medium rounded-lg transition-colors",
+                    "px-3 py-2 text-sm font-medium rounded-lg transition-colors",
                     selected
                       ? "bg-white text-indigo-700 shadow"
                       : "text-gray-600 hover:text-gray-800 hover:bg-white"
@@ -194,17 +207,40 @@ const NotificationCenter: React.FC = () => {
                         onClick={() => handleNotificationClick(notification)}
                       >
                         <p className="text-sm font-medium text-gray-900">
-                          {notification.data?.title ||
+                          {notification.title ||
+                            notification.data?.title ||
                             notification.type.replace(/_/g, " ").toUpperCase()}
                         </p>
                         <p className="text-sm text-gray-600">
-                          {notification.data?.message || notification.resource_type}
+                          {notification.message ||
+                            notification.data?.message ||
+                            notification.resource_type}
                         </p>
                         <p className="text-xs text-gray-400 mt-1">
                           {formatTimestamp(notification.created_at)}
                         </p>
                       </button>
                       <div className="flex flex-col items-end gap-2">
+                        {notification.actions
+                          ?.filter((action) => action.method === "post")
+                          .slice(0, 2)
+                          .map((action) => (
+                            <button
+                              key={action.key}
+                              type="button"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void handleNotificationAction(notification, action.key);
+                              }}
+                              disabled={
+                                notification.action_state?.[action.key]?.status ===
+                                "completed"
+                              }
+                              className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 disabled:opacity-50"
+                            >
+                              {action.label}
+                            </button>
+                          ))}
                         {notification.unread && (
                           <button
                             type="button"
@@ -226,6 +262,15 @@ const NotificationCenter: React.FC = () => {
           </div>
 
           <div className="px-4 py-3 border-t border-gray-200">
+            <button
+              onClick={() => {
+                navigate("/notifications");
+                setOpen(false);
+              }}
+              className="mb-3 w-full flex justify-center items-center text-sm font-medium text-gray-700 hover:text-gray-900"
+            >
+              View all notifications
+            </button>
             <button
               onClick={handleMarkAll}
               className="w-full flex justify-center items-center text-sm font-medium text-indigo-600 hover:text-indigo-500"

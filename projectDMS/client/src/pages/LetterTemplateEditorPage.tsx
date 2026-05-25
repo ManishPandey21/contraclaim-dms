@@ -31,6 +31,7 @@ import {
   type LetterTemplateSection,
   type LetterTemplateStatus,
 } from '@/services/enhanced-api';
+import { sanitizeHtml } from '@/utils/sanitizeHtml';
 
 interface PlaceholderVariable {
   key: string;
@@ -215,10 +216,11 @@ const LetterTemplateEditorPage = () => {
   };
 
   const getPreviewContent = () => {
-    return normalizeSections(sections)
+    const html = normalizeSections(sections)
       .filter((s) => s.enabled)
       .map((s) => s.content)
       .join('<hr class="my-4"/>');
+    return sanitizeHtml(html);
   };
 
   const orderedSections = normalizeSections(sections);
