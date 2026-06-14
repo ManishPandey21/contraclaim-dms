@@ -155,7 +155,7 @@ jobs:
         run: docker build -t projectdms-client:${{ github.sha }} ./client
 
       - name: Scan backend image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-backend:${{ github.sha }}
           format: table
@@ -164,7 +164,7 @@ jobs:
           severity: CRITICAL,HIGH
 
       - name: Scan frontend image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-client:${{ github.sha }}
           format: table
