@@ -1,0 +1,81 @@
+# Document Management System (DMS) WebApp
+
+## Overview
+The Document Management System (DMS) is a web application designed for efficient document tracking, AI-powered contract management, secure access control, and advanced analytics. This application is built using React, Node.js, and MongoDB.
+
+## Technology Stack
+- **Frontend:** React.js (with Material-UI or Ant Design)
+- **Backend:** Node.js (with Express.js)
+- **Database:** MongoDB
+- **Storage:** AWS S3 for file uploads
+- **Real-time Collaboration:** Socket.io
+
+## Features
+1. **Document Management & AI-Powered Processing**
+   - AI-Powered Contract Analysis
+   - AI-Based Letter Drafting & Auto-Correction
+   - Auto-Tagging & Metadata Extraction
+   - Folder Structure for Document Storage
+   - Bulk Document Upload & Download
+   - PDF Preview & In-Browser Editing
+   - Automated Workflow for Letter Approvals & Reply Drafting
+
+2. **User Management, Role-Based Access, and Permissions**
+   - Multi-Company & Project-Based Access
+   - Role-Based Access Control (RBAC) & Custom Roles
+   - Audit Logs for Role & Permission Changes
+   - Two-Factor Authentication (2FA) for Admins
+   - Real-Time Notifications for Role Updates & Access Changes
+   - User Activity Logs for Tracking Changes
+   - Login Activity & IP Tracking
+
+3. **Security, Compliance, and Analytics**
+   - Session Management & Auto-Logout
+   - Geo-Location Tracking for Logins
+   - User Behavior Analytics
+   - Graphical Dashboard for Admin Insights
+   - Automated Reports on Role-Based Actions
+   - AI-Powered Smart Recommendations
+   - Real-Time Multi-User Collaboration
+   - Alerts for Suspicious Logins & Activity
+
+4. **Advanced Search, Categorization, and Reporting**
+   - Full-Text Search & Smart Filters
+   - AI-Powered Document Categorization
+   - Real-Time Document Status Tracking
+   - Custom Workflows & Approval Chains
+
+## Setup Instructions
+
+### Prerequisites
+- Node.js
+- MongoDB
+- AWS Account (for S3 storage)
+
+### Installation
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd dms/server
+   ```
+
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Create a `.env` file in the `server` directory and add your environment variables (see `.env` example above).
+
+4. Start the server:
+   ```bash
+   npm run dev
+   ```
+
+5. The server will run on `http://localhost:5000`.
+
+## Usage
+- Use the API endpoints to manage documents, users, and projects.
+- Frontend can be set up in a separate directory and connected to this backend.
+
+## License
+This project is licensed under the MIT License.

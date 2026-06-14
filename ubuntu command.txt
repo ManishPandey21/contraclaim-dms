@@ -1,0 +1,626 @@
+
+Running Backend
+sudo systemctl restart contraclaim-api
+
+Check status of Docker 
+sudo service docker status
+
+Go to front end Directory
+
+Cd ..
+cd /opt/contraclaim/client
+npm run build
+
+Coping Build to Web directory
+
+sudo rm -rf /var/www/web/*
+
+sudo cp -r dist/* /var/www/web/
+
+
+
+
+
+cd ..
+    2  sudo apt update && sudo apt -y upgrade
+    3  sudo ufw allow OpenSSH
+    4  sudo adduser deploy
+    5  exit
+    6  sudo reboot
+    7  cd ..
+    8  sudo apt update && sudo apt install -y build-essential git curl unzip pkg-config   python3.11 python3.11-venv python3.11-dev   libxml2-dev libxslt1-dev libffi-dev libjpeg-dev zlib1g-dev qpdf ghostscript   tesseract-ocr libtesseract-dev ocrmypdf poppler-utils pngquant \
+    9  sudo apt update && sudo apt install -y build-essential git curl unzip pkg-config   libxml2-dev libxslt1-dev libffi-dev libjpeg-dev zlib1g-dev qpdf ghostscript   tesseract-ocr libtesseract-dev ocrmypdf poppler-utils pngquant
+   10  sudo libxml2-dev libxslt1-dev libffi-dev libjpeg-dev zlib1g-dev qpdf ghostscript
+   11  sudo apt install -y libxml2-dev libxslt1-dev libffi-dev libjpeg-dev zlib1g-dev qpdf ghostscript
+   12  sudo apt install -y tesseract-ocr libtesseract-dev ocrmypdf poppler-utils pngquant
+   13  sudo timedatectl set-timezone UTC
+   14  c ..
+   15  cd ..
+   16  sudo adduser deploy
+   17  sudo usermod -aG sudo deploy
+   18  sudo ufw allow OpenSSH
+   19  sudo mkdir -p /var/www/web
+   20  sudo chown -R $USER:$USER /var/www/web
+   21  cd /var/www/web
+   22  sudo mkdir -p /var/www/backend
+   23  cd ..
+   24  npm install
+   25  sudo apt install -y nodejs npm
+   26  npm install
+   27  sudo apt install -y python3-venv python3-pip
+   28  sudo mkdir -p /var/www/api
+   29  sudo chown -R $USER:$USER /var/www/api
+   30  sudo -u deploy mkdir -p /opt/contraclaim && sudo chown deploy:deploy /opt/contraclaim
+   31  sudo -u mkdir -p /opt/contraclaim && sudo chown deploy:deploy /opt/contraclaim
+   32  sudo -u mkdir -p /opt/contraclaim && sudo chown $USER:$USER /opt/contraclaim
+   33  sudo mkdir -p /opt/contraclaim && sudo chown $USER:$USER /opt/contraclaim
+   34  cd ..
+   35  sudo apt update
+   36  sudo apt install -y wget curl gnupg software-properties-common
+   37  curl -fsSL https://pgp.mongodb.com/server-8.0.asc |   sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg   --dearmor
+   38  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/8.0 multiverse" |   sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+   39  sudo apt update
+   40  # Start MongoDB service
+   41  sudo systemctl start mongod
+   42  sudo apt install -y mongodb-org
+   43  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/8.0 multiverse" |   sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+   44  sudo apt update
+   45  sudo apt install -y mongodb-org
+   46  curl -fsSL https://pgp.mongodb.com/server-8.0.asc |   sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg   --dearmor
+   47  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/8.0 multiverse" |   sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+   48  sudo apt install -y mongodb-org
+   49  sudo rm -f /etc/apt/sources.list.d/mongodb*.list
+   50  curl -fsSL https://pgp.mongodb.com/server-8.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb.gpg
+   51  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+   52  sudo apt update
+   53  sudo apt install -y mongodb-org
+   54  sudo systemctl start mongod
+   55  sudo systemctl enable mongod
+   56  sudo systemctl status mongod
+   57  sudo ufw allow 27017/tcp
+   58  mongod --version
+   59  cd /var/www/web
+   60  npm install
+   61  sudo npm install -g npm@latest
+   62  sudo npm install -g typescript
+   63  npm install
+   64  cd ..
+   65  cd var
+   66  cd ..
+   67  cd var
+   68  ls
+   69  cd ..
+   70  cd opt
+   71  cd contraclaim
+   72  ls
+   73  cd client
+   74  npm install
+   75  npm run build
+   76  ls
+   77  cd ..
+   78  cd opt
+   79  cd contraclaim
+   80  cd client
+   81  npm install
+   82  npm run build
+   83  sudo cp -r /opt/contraclaim/client/dist/* /var/www/web/
+   84  cd ..
+   85  sudo cp -r /opt/contraclaim/client/dist/* /var/www/web/
+   86  sudo apt install -y docker.io
+   87  docker run -d --name qdrant -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant:latest
+   88  docker run -d --name redis -p 6379:6379 redis:7-alpine
+   89  docker run -d --name falkordb -p 6380:6379 -v falkordb_data:/data falkordb/falkordb:latest
+   90  sudo usermod -aG docker $USER
+   91  newgrp docker
+   92  docker ps
+   93  docker run -d --name qdrant -p 6333:6333 -v qdrant_data:/qdrant/storage qdrant/qdrant:latest
+   94  docker run -d --name redis -p 6379:6379 redis:7-alpine
+   95  docker run -d --name falkordb -p 6380:6379 -v falkordb_data:/data falkordb/falkordb:latest
+   96  docker ps
+   97  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+   98  sudo apt install -y git curl ufw nginx
+   99  sudo ufw allow OpenSSH
+  100  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  101  sudo rm -f /etc/nginx/sites-enabled/default
+  102  sudo apt install -y python3-venv python3-pip
+  103  cd /opt/contraclaim/backend
+  104  python3 -m venv .venv
+  105  source .venv/bin/activate
+  106  pip install -r requirements.txt
+  107  sudo apt install python3.12 python3.12-venv python3.12-devsudo apt install python3.12 python3.12-venv python3.12-dev
+  108  python3.11 --version
+  109  pip install llama-index-core             llama-index-embeddings-openai             llama-index-vector-stores-mongodb
+  110  pip install pydantic-ai==0.0.15             bleach==6.1.0             griffe==0.48.0
+  111  pip install pydantic-ai bleach griffe --upgrade
+  112  sudo nano /etc/systemd/system/contraclaim-api.service
+  113  sudo systemctl daemon-reload
+  114  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  115  sudo ln -s /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/
+  116  curl -I http://api.contraclaim.com
+  117  sudo nginx -t
+  118  sudo systemctl reload nginx
+  119  sudo apt install -y certbot python3-certbot-nginx
+  120  sudo certbot renew --dry-run
+  121  sudo systemctl restart contraclaim-api
+  122  sudo systemctl reload nginx
+  123  curl -I http://api.contraclaim.com
+  124  sudo systemctl status contraclaim-api.service
+  125  curl -v http://127.0.0.1:8000/
+  126  journalctl -u contraclaim-api.service -n 20 --no-pager
+  127  pip install "fastapi[standard]"
+  128  sudo systemctl restart contraclaim-api
+  129  journalctl -u contraclaim-api.service -n 20 --no-pager
+  130  pip install motor
+  131  sudo systemctl restart contraclaim-api
+  132  journalctl -u contraclaim-api.service -n 20 --no-pager
+  133  sudo systemctl restart contraclaim-api
+  134  sudo systemctl restart contra
+  135  curl -v http://127.0.0.1:8000/
+  136  sudo systemctl restart contraclaim-api
+  137  sudo systemctl status contraclaim-api
+  138  journalctl -u contraclaim-api.service -n 20 --no-pager
+  139  pip install "python-jose[cryptography]" "passlib[bcrypt]"
+  140  sed -i 's/==.*//g' /opt/contraclaim/backend/requirements.txt
+  141  pip install -r /opt/contraclaim/backend/requirements.txt
+  142  sudo systemctl restart contraclaim-api
+  143  journalctl -u contraclaim-api.service -n 20 --no-pager
+  144  pip install pd
+  145  sed -i '/pywin32/d' requirements.txt
+  146  sed -i 's/==.*//g' requirements.txt
+  147  head -n 10 requirements.txt
+  148  pip install -r requirements.txt
+  149  pip install griffe
+  150  journalctl -u contraclaim-api.service -n 20 --no-pager
+  151  sudo systemctl restart contraclaim-api
+  152  journalctl -u contraclaim-api.service -n 20 --no-pager
+  153  pip install pandas
+  154  sudo systemctl restart contraclaim-api
+  155  journalctl -u contraclaim-api.service -n 20 --no-pager
+  156  pip install openpyxl
+  157  sudo systemctl restart contraclaim-api
+  158  journalctl -u contraclaim-api.service -n 20 --no-pager
+  159  pip install chardet
+  160  sudo systemctl restart contraclaim-api
+  161  journalctl -u contraclaim-api.service -n 20 --no-pager
+  162  sudo systemctl restart contraclaim-api
+  163  sudo systemctl status contraclaim-api
+  164  curl -v http://127.0.0.1:8000/
+  165  cd ..
+  166  sudo mv /home/ubuntu/backup_contraclaim/* /opt/contraclaim/backup_db/
+  167  mongorestore --db contraclaim \
+  168  mongosh
+  169  cd /home/ubuntu/backup_contraclaim/contraclaim
+  170  cd..
+  171  cd ..
+  172  cd /home/ubuntu/backup_contraclaim/contraclaim
+  173  mongorestore --db contraclaim --collection users users.bson
+  174  mongorestore --db contraclaim --collection tags tags.bson
+  175  mongorestore --db contraclaim --collection subtags subtags.bson
+  176  mongorestore --db contraclaim --collection roles roles.bson
+  177  mongorestore --db contraclaim --collection permissions permissions.bson
+  178  mongorestore --db contraclaim --collection projects projects.bson
+  179  mongorestore --db contraclaim --collection organizations organizations.bson
+  180  mongorestore --db contraclaim --collection email_groups email_groups.bson
+  181  cd opt
+  182  cd contraclaim
+  183  cd backup_db
+  184  ls
+  185  cd contraclaim
+  186  mongorestore --db contraclaim --collection users users.bson
+  187  mongorestore --db contraclaim --collection tags tags.bson
+  188  mongorestore --db contraclaim --collection subtags subtags.bson
+  189  mongorestore --db contraclaim --collection roles roles.bson
+  190  mongorestore --db contraclaim --collection permissions permissions.bson
+  191  mongorestore --db contraclaim --collection projects projects.bson
+  192  mongorestore --db contraclaim --collection organizations organizations.bson
+  193  mongorestore --db contraclaim --collection email_groups email_groups.bson
+  194  mongosh
+  195  cd ..
+  196  sudo systemctl restart contraclaim-api
+  197  sudo systemctl status contraclaim-api
+  198  mongosh contraclaim --eval "db.getCollectionNames()"
+  199  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  200  cd ..
+  201  sudo nano /etc/nginx/sites-available/app.contraclaim.com
+  202  sudo ln -s /etc/nginx/sites-available/app.contraclaim.com /etc/nginx/sites-enabled/
+  203  sudo nginx -t
+  204  sudo systemctl reload nginx
+  205  sudo rm -f /etc/nginx/sites-enabled/default
+  206  sudo rm -f /etc/nginx/sites-enabled/api.contraclaim.com
+  207  sudo nginx -t
+  208  sudo systemctl reload nginx
+  209  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  210  cd ..
+  211  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  212  sudo rm -f /etc/nginx/sites-enabled/web.contraclaim.com
+  213  sudo ln -s /etc/nginx/sites-available/web.contraclaim.com /etc/nginx/sites-enabled/
+  214  sudo systemctl reload nginx
+  215  sudo ln -s /etc/nginx/sites-available/web.contraclaim.com /etc/nginx/sites-enabled/
+  216  sudo apt install -y certbot python3-certbot-nginx
+  217  sudo certbot --nginx -d web.contraclaim.com -d app.contraclaim.com
+  218  sudo certbot renew --dry-run
+  219  sudo systemctl restart mongod
+  220  sudo systemctl status mongod
+  221  sudo reboot
+  222  df -h
+  223  cd ..
+  224  df -h
+  225  sudo systemctl status contraclaim-api
+  226  sudo systemctl restart contraclaim-api
+  227  sudo systemctl status contraclaim-api
+  228  pip install passlib[bcrypt]
+  229  source /opt/contraclaim/backend/.venv/bin/activate
+  230  cd opt
+  231  cd contraclaim
+  232  cd backend
+  233  source /opt/contraclaim/backend/.venv/bin/activate
+  234  pip install passlib[bcrypt]
+  235  sudo systemctl restart contraclaim-api
+  236  sudo systemctl status contraclaim-api
+  237  pip install bcrypt
+  238  sudo systemctl restart contraclaim-api
+  239  journalctl -u contraclaim-api.service -n 20 --no-pager
+  240  pip install "bcrypt==3.2.2"
+  241  pip install qdrant-client
+  242  sudo systemctl restart contraclaim-api
+  243  cd ..
+  244  cd opt
+  245  cd contracalim
+  246  ls
+  247  cd contraclaim
+  248  cd client
+  249  npm run build
+  250  sudo rm -rf /var/www/web/
+  251  sudo cp -r dist/* /var/www/web/
+  252  sudo cp -r dist/* /var/www/web
+  253  sudo mkdir -p /var/www/web
+  254  sudo cp -r dist/* /var/www/web
+  255  sudo systemctl reload nginx
+  256  cd /opt/contraclaim/backend
+  257  source .venv/bin/activate
+  258  sudo systemctl restart contraclaim-api
+  259  sudo systemctl daemon-reload
+  260  sudo systemctl enable --now contraclaim-api
+  261  sudo systemctl restart contraclaim-api
+  262  sudo systemctl status contraclaim-api
+  263  sudo systemctl enable --now docker
+  264  sudo systemctl status docker
+  265  docker info
+  266  docker ps
+  267  systemctl is-active docker
+  268  sudo systemctl restart docker
+  269  docker ps
+  270  sudo systemctl enable docker
+  271  docker start $(docker ps -aq)
+  272  docker ps
+  273  docker update --restart unless-stopped qdrant
+  274  docker update --restart unless-stopped redis
+  275  docker update --restart unless-stopped falkordb
+  276  docker inspect -f '{{.Name}} -> {{.HostConfig.RestartPolicy.Name}}' qdrant redis falkordb
+  277  journalctl -u contraclaim-api.service -n 20 --no-pager
+  278  Dec 26 20:43:04 vps-5dec80c1 uvicorn[20942]: 2025-12-26 20:43:04,288 - WARNING - rbac_backend.services.ocr_service - OCRmyPDF not available - scanned PDFs may not be processed correctly
+  279  ocrmypdf --version
+  280  tesseract --version
+  281  qpdf --version
+  282  tesseract --list-langs
+  283  sudo apt install -y   tesseract-ocr-eng   tesseract-ocr-hin   tesseract-ocr-mar   tesseract-ocr-tam   tesseract-ocr-ben
+  284  ocrmypdf --optimize 3 --deskew input.pdf output.pdf
+  285  ocrmypdf --version && tesseract --version && gs --version
+  286  gs --version
+  287  journalctl -u contraclaim-api.service -n 20 --no-pager
+  288  cd /opt/contraclaim/backend
+  289  source .venv/bin/activate
+  290  python -c "import ocrmypdf; print('import ok', ocrmypdf.__version__)"
+  291  source /opt/contraclaim/backend/.venv/bin/activate
+  292  pip install ocrmypdf
+  293  python -c "import ocrmypdf; print(ocrmypdf.__version__)"
+  294  sudo systemctl restart contraclaim-api
+  295  which ocrmypdf
+  296  sudo -u ubuntu /usr/bin/env bash -lc 'which ocrmypdf && ocrmypdf --version'
+  297  cd /opt/contraclaim/backend
+  298  source .venv/bin/activate
+  299  python -c "import ocrmypdf; print('import ok', ocrmypdf.__version__)"
+  300  sudo systemctl cat contraclaim-api | sed -n '1,200p'
+  301  sudo systemctl daemon-reload
+  302  journalctl -u contraclaim-api.service -n 20 --no-pager
+  303  curl -X PUT "http://localhost:6333/collections/contracts"   -H "Content-Type: application/json"   -d '{
+  304      "vectors": {
+  305        "size": 1536,
+  306        "distance": "Cosine"
+  307      }
+  308    }'
+  309  curl http://localhost:6333/collections
+  310  journalctl -u contraclaim-api.service -n 20 --no-pager
+  311  curl http://localhost:6333/healthz
+  312  curl -X PUT "http://localhost:6333/collections/contracts"   -H "Content-Type: application/json"   -d '{
+  313      "vectors": {
+  314        "size": 1536,
+  315        "distance": "Cosine"
+  316      }
+  317    }'
+  318  curl http://localhost:6333/collections
+  319  python -c "import os; print('EMBEDDING_MODEL=', os.getenv('EMBEDDING_MODEL') or os.getenv('OPENAI_EMBEDDING_MODEL'))"
+  320  journalctl -u contraclaim-api.service -n 20 --no-pager
+  321  sudo systemctl restart contraclaim-api
+  322  cd ..
+  323  curl http://localhost:6333/collections/contracts | python -m json.tool | sed -n '1,120p'
+  324  nano /opt/contraclaim/backend/.env
+  325  ls -la /opt/contraclaim/backend | grep env
+  326  cat /opt/contraclaim/backend/.env 2>/dev/null | sed -n '1,120p'
+  327  journalctl -u contraclaim-api.service -n 20 --no-pager
+  328  sudo systemctl restart contraclaim-api
+  329  sudo journalctl -u contraclaim-api -f
+  330  curl -I https://app.contraclaim.com
+  331  cd ..
+  332  sudo mkdir -p /var/storage/documents
+  333  sudo chown -R $User:$User /var/storage
+  334  sudo -u $User touch /var/storage/documents/test_write.txt
+  335  sudo chmod -R 755 /var/storage
+  336  sudo -u $User touch /var/storage/documents/test_write.txt
+  337  sudo chmod -R 755 /var/storage
+  338  sudo systemctl show contraclaim-api -p User
+  339  sudo chown -R ubuntu:ubuntu /var/storage
+  340  sudo chmod -R 755 /var/storage
+  341  ls -ld /var/storage /var/storage/documents
+  342  sudo -u ubuntu touch /var/storage/documents/test_write.txt
+  343  rm /var/storage/documents/test_write.txt
+  344  sudo mkdir -p /var/www/backend/uploads
+  345  sudo chown -R ubuntu:ubuntu /var/www/backend
+  346  sudo chmod -R 755 /var/www/backend
+  347  sudo chmod -R 755 /var/www/backend/uploads
+  348  ls -ld /var/www/backend /var/www/backend/uploads
+  349  sudo -u ubuntu touch /var/www/backend/uploads/test_write.txt
+  350  rm /var/www/backend/uploads/test_write.txt
+  351  curl -I https://app.contraclaim.com
+  352  grep -R "localhost\|127.0.0.1" -n /var/www/web/dist | head -n 20
+  353  grep -R "localhost\|127.0.0.1" -n /var/www/web | head -n 20
+  354  cd ..
+  355  curl -I http://app.contraclaim.com
+  356  curl -I https://app.contraclaim.com
+  357  grep -R --line-number --binary-files=without-match "app.contraclaim.com\|api.contraclaim.com\|web.contraclaim.com" /var/www/web/assets | head -n 50
+  358  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  359  sudo ln -sf /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/api.contraclaim.com
+  360  sudo systemctl restart contraclaim-api
+  361  curl -I https://web.contraclaim.com
+  362  curl -I https://api.contraclaim.com
+  363  curl -I https://app.contraclaim.com
+  364  sudo nginx -t && sudo systemctl reload nginx
+  365  curl -I https://app.contraclaim.com
+  366  cd ..
+  367  sudo systemctl reload nginx
+  368  sudo systemctl restart contraclaim-api
+  369  sudo systemctl status contraclaim-api --no-pager
+  370  curl -I https://app.contraclaim.com
+  371  sudo nano /etc/nginx/sites-available/app.contraclaim.com
+  372  sudo systemctl show contraclaim-api -p User
+  373  curl -I https://api.contraclaim.com
+  374  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  375  sudo systemctl show contraclaim-api -p Environment | tr ' ' '\n' | grep -E "EMBEDDING_MODEL|OPENAI_EMBEDDING_MODEL" || true
+  376  EnvironmentFile=/opt/contraclaim/backend/.env
+  377  sudo nano /etc/systemd/system/contraclaim-api.service
+  378  grep -nE "EMBEDDING_MODEL|OPENAI_EMBEDDING_MODEL|EMBED|OPENAI|QDRANT" /opt/contraclaim/backend/.env
+  379  sudo ufw deny 6333
+  380  sudo systemctl show -p ExecStart contraclaim-api
+  381  sudo nano /etc/apache2/sites-available/web.contraclaim.com.conf
+  382  redis-cli -p 6379 ping
+  383  docker ps
+  384  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  385  sudo ln -s /etc/nginx/sites-available/web.contraclaim.com /etc/nginx/sites-enabled/
+  386  rm /etc/nginx/sites-enabled/web.contraclaim.com
+  387  sudo nano /etc/nginx/sites-enabled/app.contraclaim.com
+  388  sudo nano /etc/nginx/sites-enabled/web.contraclaim.com
+  389  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  390  sudo ln -s /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/
+  391  sudo certbot --nginx -d api.contraclaim.com
+  392  sudo apt install -y certbot python3-certbot-nginx
+  393  sudo certbot --nginx -d web.contraclaim.com -d api.contraclaim.com
+  394  sudo systemctl restart contraclaim-api
+  395  sudo systemctl daemon-reload
+  396  curl -I https://api.contraclaim.com
+  397  cd opt
+  398  cd contraclaim
+  399  cd backend
+  400  cd ..
+  401  client
+  402  cd client
+  403  npm run build
+  404  sudo cp -r dist/* /var/www/web
+  405  npm run build
+  406  sudo cp -r dist/* /var/www/web
+  407  cd ..
+  408  cd backend
+  409  sudo systemctl restart contraclaim-api
+  410  sudo nano /etc/nginx/nginx.conf
+  411  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  412  sudo nano /etc/nginx/sites-available/app.contraclaim.com
+  413  sudo nginx -t
+  414  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  415  sudo systemctl restart contraclaim-api
+  416  curl -I https://api.contraclaim.com
+  417  sudo nginx -t && sudo systemctl reload nginx
+  418  curl -I https://api.contraclaim.com
+  419  sudo systemctl restart contraclaim-api
+  420  cd ..
+  421  sudo journalctl -u contraclaim-api -f
+  422  sudo systemctl restart contraclaim-api
+  423  cd ..
+  424  sudo rm /etc/nginx/sites-available/app.contraclaim.com
+  425  sudo rm /etc/nginx/sites-enabled/app.contraclaim.com
+  426  sudo ln -s /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/
+  427  sudo apt install -y certbot python3-certbot-nginx
+  428  sudo certbot --nginx -d web.contraclaim.com -d api.contraclaim.com
+  429  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  430  nano /opt/contraclaim/backend/rbac_backend/main.py
+  431  curl -I https://api.contraclaim.com
+  432  sudo nano /etc/nginx/sites-available/web.contraclaim.com
+  433  sudo nginx -t && sudo systemctl reload nginx
+  434  curl http://localhost:6333/collections
+  435  sudo systemctl daemon-reload
+  436  sudo certbot renew --dry-run
+  437  sudo ln -s /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/
+  438  curl -I http://api.contraclaim.com
+  439  sudo rm /etc/nginx/sites-enabled/api.contraclaim.com
+  440  sudo ln -s /etc/nginx/sites-available/api.contraclaim.com /etc/nginx/sites-enabled/
+  441  sudo systemctl daemon-reload
+  442  sudo nginx -t
+  443  sudo certbot --nginx -d api.contraclaim.com
+  444  sudo rm /etc/nginx/sites-enabled/app.contraclaim.com
+  445  sudo nginx -tdig +short api.contraclaim.com A
+  446  dig +short api.contraclaim.com A
+  447  dig +short api.contraclaim.com AAAA
+  448  dig +short api.contraclaim.com A
+  449  dig +short api.contraclaim.com AAAA
+  450  sudo nginx -t
+  451  curl -I http://api.contraclaim.com
+  452  sudo nano /etc/nginx/sites-available/api.contraclaim.com
+  453  sudo rm /etc/nginx/sites-available/app.contraclaim.com
+  454  sudo certbot --nginx -d api.contraclaim.com
+  455  dig +short api.contraclaim.com A
+  456  nslookup api.contraclaim.com
+  457  sudo certbot --nginx -d api.contraclaim.com
+  458  sudo nginx -t
+  459  sudo systemctl restart contraclaim-api
+  460  cd ..
+  461  cd opt
+  462  cd contraclaim
+  463  cd client
+  464  npm run build
+  465  sudo cp -r dist/* /var/www/web/
+  466  cd ..
+  467  cd backend
+  468  source .venv/bin/activate
+  469  pip install APScheduler
+  470  sudo systemctl restart contraclaim-api
+  471  cd ..
+  472  cd var
+  473  cd www
+  474  cd web
+  475  ls
+  476  cd ..
+  477  cdopt
+  478  cd opt
+  479  cd contraclaim
+  480  cd client
+  481  npm run build
+  482  sudo cp -r dist/* /var/www/web/
+  483  npm run build
+  484  sudo cp -r dist/* /var/www/web/
+  485  sudo nginx -t
+  486  sudo systemctl reload nginx
+  487  cd..
+  488  cd ..
+  489  sudo journalctl -u contraclaim-api -f
+  490  docker ps
+  491  sudo systemctl status docker
+  492  cd client
+  493  npm run build
+  494  sudo cp -r dist/* /var/www/web/
+  495  sudo journalctl -u contraclaim-api -f
+  496  cd ..
+  497  cd opt
+  498  cd contrclaim
+  499  cdcontraclaim
+  500  cd contraclaim
+  501  cd client
+  502  npm run build
+  503  sudo cp -r dist/* /var/www/web/
+  504  sudo systemctl restart contraclaim-api
+  505  cd ..
+  506  cd opt
+  507  cd contraclaim
+  508  cd client
+  509  npm run build
+  510  sudo cp -r dist/* /var/www/web/
+  511  sudo systemctl restart contraclaim-api
+  512  cd ..
+  513  sudo systemctl restart contraclaim-api
+  514  cd opt
+  515  cd contraclaim
+  516  cd client
+  517  cd ..
+  518  cd opt
+  519  cd contraclaim
+  520  cd client
+  521  npm run build
+  522  sudo systemctl restart contraclaim-api
+  523  sudo cp -r dist/* /var/www/web/
+  524  sudo systemctl restart contraclaim-api
+  525  cd ..
+  526  sudo systemctl restart contraclaim-api
+  527  cd ..
+  528  cd opt
+  529  cd contraclaim
+  530  cd client
+  531  npm run build
+  532  sudo cp -r dist/* /var/www/web/
+  533  cd ..
+  534  cd /opt/contraclaim/client$/
+  535  cd /opt/contraclaim/client
+  536  npm run build
+  537  sudo cp -r dist/* /var/www/web/
+  538  sudo systemctl restart contraclaim-api
+  539  cd ..
+  540  cd /opt/contraclaim/client
+  541  sudo systemctl restart contraclaim-api
+  542  npm run build
+  543  sudo cp -r dist/* /var/www/web/
+  544  npm run build
+  545  sudo cp -r dist/* /var/www/web/
+  546  cd ..
+  547  sudo systemctl restart contraclaim-api
+  548  cd /opt/contraclaim/client
+  549  cd ..
+  550  cd /opt/contraclaim/client
+  551  npm run build
+  552  sudo cp -r dist/* /var/www/web/
+  553  npm run build
+  554  cd ..
+  555  cd /opt/contraclaim/client
+  556  npm run build
+  557  sudo rm -rf /var/www/web/^
+  558  sudo rm -rf /var/www/web/*
+  559  sudo cp -r dist/* /var/www/web/
+  560  sudo rm -rf /opt/contraclaim/backend/rbac_backend
+  561  sudo systemctl restart contraclaim-api
+  562  cd..
+  563  c ..
+  564  cd ..
+  565  cd /opt/contraclaim/client
+  566  sudo cp -r dist/* /var/www/web/
+  567  cd ..
+  568  cd /opt/contraclaim/client
+  569  sudo rm -rf /var/www/web/*
+  570  npm run build
+  571  sudo cp -r dist/* /var/www/web/
+  572  sudo systemctl restart contraclaim-api
+  573  cd ..
+  574  sudo systemctl restart contraclaim-api
+  575  cd /opt/contraclaim/client
+  576  sudo rm -rf /var/www/web/*
+  577  npm run build
+  578  npm install @tiptap/react @tiptap/core @tiptap/pm
+  579  npm run build
+  580  npm install @tiptap/starter-kit
+  581  npm run build
+  582  npm install @tiptap/extension-text-align
+  583  npm run build
+  584  npm install @tiptap/extension-placeholder
+  585  npm run build
+  586  sudo rm -rf /var/www/web/*
+  587  sudo cp -r dist/* /var/www/web/
+  588  cd ..
+  589  cd /opt/contraclaim/client
+  590  npm run build
+  591  sudo cp -r dist/* /var/www/web/
+  592  cd ..
+  593  sudo systemctl restart contraclaim-api
+  594  cd ..
+  595  sudo systemctl restart contraclaim-api
+  596  cd /opt/contraclaim/client
+  597  npm run build
+  598  sudo rm -rf /var/www/web/*
+  599  sudo cp -r dist/* /var/www/web/
+  600  cd ..
+  601  sudo service docker status
+  602  cd /opt/contraclaim
+  603  cd backend

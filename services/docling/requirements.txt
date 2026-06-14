@@ -1,0 +1,16 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pillow>=10.3.0
+pytesseract>=0.3.10
+pdfminer.six>=20231228
+pypdf>=4.2.0
+python-docx>=1.1.0
+python-pptx>=0.6.22
+numpy>=1.26.4
+opencv-python-headless>=4.9.0
+loguru>=0.7.0
+markdownify>=0.11.6
+qdrant-client[grpc]>=1.9.1
+sentence-transformers>=3.0.1
+orjson>=3.10.3

@@ -1,0 +1,305 @@
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-backend-env: &backend-env
+  ENVIRONMENT: "production"
+  ENABLE_API_DOCS: "false"
+  ALLOW_DEV_HEADERS: "false"
+  DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must point to the production MongoDB replica set}"
+  MONGODB_DATABASE: "${MONGODB_DATABASE:-contraclaim}"
+  MONGODB_REPLICA_SET: "${MONGODB_REPLICA_SET:?MONGODB_REPLICA_SET is required in production}"
+  MONGODB_RETRY_WRITES: "${MONGODB_RETRY_WRITES:-true}"
+  MONGODB_ALLOW_STANDALONE_PRODUCTION: "false"
+  SECRET_KEY: "${SECRET_KEY:?SECRET_KEY is required}"
+  AUTH_COOKIE_NAME: "${AUTH_COOKIE_NAME:-cc_access_token}"
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: "${AUTH_COOKIE_SAMESITE:-lax}"
+  AUTH_COOKIE_DOMAIN: "${AUTH_COOKIE_DOMAIN:-}"
+  CORS_ORIGINS: "${CORS_ORIGINS:?CORS_ORIGINS is required}"
+  PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}"
+  PUBLIC_API_URL: "${PUBLIC_API_URL:-${PUBLIC_BASE_URL}/api}"
+  APP_URL: "${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}"
+  OPENAI_API_KEY: "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
+  AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID is required}"
+  AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY is required}"
+  AWS_REGION: "${AWS_REGION:-ap-south-1}"
+  AWS_BUCKET_NAME: "${AWS_BUCKET_NAME:?AWS_BUCKET_NAME is required}"
+  SMTP_HOST: "${SMTP_HOST:-smtp.gmail.com}"
+  SMTP_PORT: "${SMTP_PORT:-587}"
+  SMTP_USERNAME: "${SMTP_USERNAME:?SMTP_USERNAME is required}"
+  SMTP_PASSWORD: "${SMTP_PASSWORD:?SMTP_PASSWORD is required}"
+  SMTP_FROM_EMAIL: "${SMTP_FROM_EMAIL:?SMTP_FROM_EMAIL is required}"
+  SMTP_SETTINGS_ENCRYPTION_KEY: "${SMTP_SETTINGS_ENCRYPTION_KEY:?SMTP_SETTINGS_ENCRYPTION_KEY is required}"
+  APP_REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/1"
+  RUNTIME_STATE_REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/1"
+  CONTRACT_QUEUE_REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
+  FALKORDB_URL: "redis://:${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}@falkordb:6379"
+  FALKORDB_ENABLED: "${FALKORDB_ENABLED:-true}"
+  FALKORDB_HOST: "falkordb"
+  FALKORDB_PORT: "6379"
+  FALKORDB_GRAPH_NAME: "contraclaim"
+  FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
+  GRAPH_PROVIDER: "direct_falkor"
+  GRAPHITI_ENABLED: "false"
+  QDRANT_URL: "http://qdrant:6333"
+  QDRANT_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+  VECTORDB_URL: "http://qdrant:6333"
+  VECTORDB_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+  LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN:?LANGGRAPH_API_TOKEN is required}"
+  LANGGRAPH_ENABLED: "${LANGGRAPH_ENABLED:-false}"
+  METRICS_ENABLED: "${METRICS_ENABLED:-true}"
+  METRICS_TOKEN: "${METRICS_TOKEN:?METRICS_TOKEN is required when metrics are enabled}"
+  LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+  SLOW_REQUEST_THRESHOLD_MS: "${SLOW_REQUEST_THRESHOLD_MS:-2000}"
+  UPLOADS_DIR: "/app/uploads"
+  SECURE_UPLOADS_DIR: "/app/uploads"
+  UPLOAD_STREAM_CHUNK_SIZE_MB: "${UPLOAD_STREAM_CHUNK_SIZE_MB:-1}"
+  UPLOAD_VALIDATION_SAMPLE_BYTES: "${UPLOAD_VALIDATION_SAMPLE_BYTES:-8192}"
+  GENERAL_UPLOAD_MAX_FILE_SIZE_MB: "${GENERAL_UPLOAD_MAX_FILE_SIZE_MB:-100}"
+  UPLOAD_MAX_CONCURRENT_PER_USER: "${UPLOAD_MAX_CONCURRENT_PER_USER:-3}"
+  UPLOAD_MAX_CONCURRENT_PER_ORG: "${UPLOAD_MAX_CONCURRENT_PER_ORG:-20}"
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "true"
+      START_CONTRACT_QUEUE_WORKERS: "false"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+    expose:
+      - "8000"
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - edge-net
+      - service-net
+    expose:
+      - "5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5173/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  contract-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "rbac_backend.worker"]
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "false"
+      START_CONTRACT_QUEUE_WORKERS: "true"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    logging: *default-logging
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__LOG_LEVEL: "INFO"
+      QDRANT__STORAGE__SNAPSHOT_PATH: "/qdrant/snapshots"
+    volumes:
+      - qdrant_data:/qdrant/storage
+      - qdrant_snapshots:/qdrant/snapshots
+    networks:
+      - data-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -lc 'exec 3<>/dev/tcp/localhost/6333'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  falkordb:
+    image: falkordb/falkordb:v4.0.8
+    restart: unless-stopped
+    environment:
+      FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
+    command:
+      - "--save"
+      - "900"
+      - "1"
+      - "300"
+      - "10"
+      - "--appendonly"
+      - "yes"
+      - "--requirepass"
+      - "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
+      - "--maxmemory"
+      - "2gb"
+      - "--maxmemory-policy"
+      - "volatile-lru"
+    volumes:
+      - falkordb_data:/data
+    networks:
+      - data-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h localhost -a \"$${FALKORDB_PASSWORD}\" ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - redis-server --save 60 1 --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+    volumes:
+      - redis_data:/data
+    networks:
+      - service-net
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -h localhost -a \"$${REDIS_PASSWORD}\" ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+  graphiti:
+    profiles: ["graph-experimental"]
+    build:
+      context: ./services/graphiti
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      GRAPHITI_DB_URL: "redis://:${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}@falkordb:6379"
+      GRAPHITI_QDRANT_URL: "http://qdrant:6333"
+      GRAPHITI_QDRANT_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
+      GRAPHITI_OPENAI_API_KEY: "${OPENAI_API_KEY:?OPENAI_API_KEY is required}"
+      GRAPHITI_LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      GRAPHITI_GRAPH_NAME: "contraclaim"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    logging: *default-logging
+
+  clamav:
+    image: clamav/clamav:latest
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - service-net
+    logging: *default-logging
+
+  gateway:
+    image: httpd:2.4
+    restart: unless-stopped
+    depends_on:
+      client:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./config/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./config/health.txt:/usr/local/apache2/htdocs/health.txt:ro
+    networks:
+      - edge-net
+      - service-net
+    healthcheck:
+      test: ["CMD-SHELL", "test \"$$(wget -qO- http://localhost/health)\" = ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    logging: *default-logging
+
+volumes:
+  backend_uploads:
+  backend_logs:
+  qdrant_data:
+  qdrant_snapshots:
+  falkordb_data:
+  redis_data:
+
+networks:
+  data-net:
+    driver: bridge
+    internal: true
+  service-net:
+    driver: bridge
+    internal: true
+  edge-net:
+    driver: bridge

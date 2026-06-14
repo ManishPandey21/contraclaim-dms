@@ -1,0 +1,2512 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import re
+import zipfile
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+from fastapi import HTTPException
+
+from ...models.letter import Letter
+from ...models.letter_drafting import (
+    AssignReviewerRequest,
+    ConfirmAnalysisRequest,
+    ConfirmPlanRequest,
+    CyclicIterationTrace,
+    DraftAssertionSupport,
+    DraftAuditResponse,
+    DraftArtifact,
+    DraftConfidenceScores,
+    DraftContextPack,
+    DraftCommentRequest,
+    DraftGovernanceResponse,
+    DraftMetricBottleneck,
+    DraftMetricBreakdownItem,
+    DraftMetricKpi,
+    DraftMetricTrendPoint,
+    DraftQualityDashboardResponse,
+    DraftQualityRiskItem,
+    DraftingStartRequest,
+    DraftingStartResponse,
+    DraftMode,
+    DraftRole,
+    DraftRun,
+    DraftRunCreateRequest,
+    DraftReviewAssignment,
+    DraftReviewComment,
+    ExactClauseSearchRequest,
+    ExactReferenceSearchRequest,
+    IncomingLetterAnalysis,
+    ReviseDraftRequest,
+    ReturnForCorrectionRequest,
+    SourceEvidence,
+    SourceLedgerResponse,
+    ValidationFinding,
+    ValidationReport,
+)
+from ...models.notification import NotificationPriority, NotificationSeverity, NotificationType
+from ...services.authorization_service import AuthorizationService
+from ...services.policy_service import PolicyService
+from ...services.contract_service import ContractService
+from ...services.conversation_service import ConversationService
+from ...services.document_service import DocumentService
+from ...models.contract_models import ContractSearchRequest
+from ...core.security import build_scope_query
+from ...services.letter_service import LetterService
+from ...services.falkor_graph_service import normalize_letter_code
+from ...services.file_object_service import FileObjectService
+from ...utils.notification_service import NotificationService
+from .context import DraftContextBuilder
+from .generator import DraftGenerator, StrategyPlanner
+from .incoming_analyzer import IncomingLetterAnalyzer
+from .input_validator import DraftInputValidator
+from .planning import PlanningSheetBuilder
+from .prompts import PromptRegistry
+from .repository import DraftRunRepository
+from .validator import DraftValidator
+
+
+class DraftRunService:
+    """Coordinates v2 letter drafting runs."""
+
+    def __init__(self, db: Any):
+        self.db = db
+        self.letter_service = LetterService(db)
+        self.auth_service = AuthorizationService()
+        self.policy_service = PolicyService(db)
+        self.repository = DraftRunRepository(db)
+        self.prompt_registry = PromptRegistry(db)
+        self.validator = DraftValidator()
+        self.input_validator = DraftInputValidator()
+        self.incoming_analyzer = IncomingLetterAnalyzer()
+        self.planning_builder = PlanningSheetBuilder()
+
+    async def create_run(
+        self,
+        letter_id: str,
+        request: DraftRunCreateRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        started = datetime.now(timezone.utc)
+        run_id = str(uuid.uuid4())
+        warnings: list[str] = []
+        trace: list[dict[str, Any]] = []
+        letter = await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.create",
+        )
+        role = self._resolve_role(letter, request)
+        recipient_focus = request.recipient_focus or getattr(letter, "strategy_recipient", None)
+        inputs = self._inputs_payload(letter, request)
+
+        document_service = DocumentService(self.db)
+        context_builder = DraftContextBuilder(
+            document_service=document_service,
+            conversation_service=ConversationService(self.letter_service),
+        )
+
+        try:
+            context, sources, context_warnings = await context_builder.build(
+                letter, request, current_user
+            )
+            sources = await self._add_governance_comment_context(
+                letter_id,
+                context,
+                sources,
+                current_run_id=run_id,
+            )
+            sources = self._with_source_hashes(sources)
+            warnings.extend(context_warnings)
+            trace.append({"stage": "context", "status": "success", "source_count": len(sources)})
+
+            incoming_analysis: Optional[IncomingLetterAnalysis] = None
+            if request.draft_type == "reply":
+                incoming_analysis = await self.incoming_analyzer.analyze(
+                    letter, request, document_service
+                )
+                trace.append({"stage": "incoming_analysis", "status": "success"})
+
+            planning_sheet, reply_matrix, source_summary, deterministic_plan = (
+                self.planning_builder.build(
+                    letter,
+                    request,
+                    role,
+                    context,
+                    sources,
+                    incoming_analysis,
+                )
+            )
+            context_pack = self._build_context_pack(
+                letter=letter,
+                request=request,
+                run_id=run_id,
+                context=context,
+                sources=sources,
+                source_warnings=context_warnings,
+            )
+
+            threshold_report = self._merge_reports(
+                self.validator.threshold_findings(context),
+                self.input_validator.validate_request(letter, request, context, sources),
+            )
+            if threshold_report.blocking:
+                run = DraftRun(
+                    run_id=run_id,
+                    letter_id=letter_id,
+                    draft_type=request.draft_type,
+                    mode=request.mode,
+                    letter_category=request.letter_category,
+                    contract_package=request.contract_package,
+                    status="blocked",
+                    role=role,
+                    recipient_focus=recipient_focus,
+                    inputs=inputs,
+                    incoming_analysis=incoming_analysis,
+                    planning_sheet=planning_sheet,
+                    reply_matrix=reply_matrix,
+                    context_bundle=context,
+                    sources=sources,
+                    context_pack_id=context_pack.context_pack_id,
+                    plan=deterministic_plan,
+                    draft_artifact=self._blocked_artifact(threshold_report),
+                    source_integrity_summary=source_summary,
+                    validation_report=threshold_report,
+                    warnings=warnings,
+                    trace=trace,
+                    started_at=started,
+                    completed_at=datetime.now(timezone.utc),
+                    created_by=self._user_id(current_user),
+                )
+                return await self._create_and_record(run, current_user, context_pack=context_pack)
+
+            planner = StrategyPlanner(self.prompt_registry)
+            plan = await self._resolve_strategy_plan(letter_id, letter, request)
+            if request.mode in {"draft", "review"} and not plan:
+                validation = ValidationReport(
+                    blocking=True,
+                    findings=[
+                        ValidationFinding(
+                            level="error",
+                            code="missing_strategy_plan",
+                            message="Generate and save a strategic plan before AI drafting.",
+                        )
+                    ],
+                )
+                run = DraftRun(
+                    run_id=run_id,
+                    letter_id=letter_id,
+                    draft_type=request.draft_type,
+                    mode=request.mode,
+                    letter_category=request.letter_category,
+                    contract_package=request.contract_package,
+                    status="blocked",
+                    role=role,
+                    recipient_focus=recipient_focus,
+                    inputs=inputs,
+                    incoming_analysis=incoming_analysis,
+                    planning_sheet=planning_sheet,
+                    reply_matrix=reply_matrix,
+                    context_bundle=context,
+                    sources=sources,
+                    context_pack_id=context_pack.context_pack_id,
+                    plan=deterministic_plan,
+                    draft_artifact=self._blocked_artifact(validation),
+                    source_integrity_summary=source_summary,
+                    validation_report=validation,
+                    warnings=warnings,
+                    trace=trace + [{"stage": "strategy", "status": "blocked"}],
+                    started_at=started,
+                    completed_at=datetime.now(timezone.utc),
+                    created_by=self._user_id(current_user),
+                )
+                return await self._create_and_record(run, current_user, context_pack=context_pack)
+            if request.mode in {"background", "strategy"} and not plan:
+                plan, prompt_version, plan_warnings = await planner.generate(
+                    letter, role, recipient_focus, context, sources, inputs
+                )
+                plan = plan or deterministic_plan
+                warnings.extend(plan_warnings)
+                trace.append(
+                    {
+                        "stage": "strategy",
+                        "status": "success",
+                        "prompt_version": prompt_version,
+                    }
+                )
+
+            artifact: Optional[DraftArtifact] = None
+            validation = ValidationReport(blocking=False, findings=[])
+            cyclic_trace: List[CyclicIterationTrace] = []
+            assertion_support: List[DraftAssertionSupport] = []
+            confidence_scores: Optional[DraftConfidenceScores] = None
+            status = "completed"
+
+            if request.mode in {"draft", "review"}:
+                generator = DraftGenerator(self.prompt_registry)
+                artifact, draft_warnings = await generator.generate(
+                    letter,
+                    role,
+                    recipient_focus,
+                    context,
+                    sources,
+                    inputs,
+                    plan=plan,
+                    finalized=request.finalized,
+                )
+                warnings.extend(draft_warnings)
+                (
+                    artifact,
+                    sources,
+                    validation,
+                    cyclic_trace,
+                    assertion_support,
+                    confidence_scores,
+                    cyclic_warnings,
+                ) = await self._run_cyclic_draft(
+                    letter=letter,
+                    request=request,
+                    current_user=current_user,
+                    role=role,
+                    recipient_focus=recipient_focus,
+                    context=context,
+                    sources=sources,
+                    inputs=inputs,
+                    plan=plan,
+                    generator=generator,
+                    initial_artifact=artifact,
+                )
+                warnings.extend(cyclic_warnings)
+                if validation.blocking:
+                    status = "needs_attention"
+                trace.append(
+                    {
+                        "stage": "draft",
+                        "status": "success",
+                        "prompt_version": artifact.prompt_version,
+                    }
+                )
+                trace.append(
+                    {
+                        "stage": "cyclic_validation",
+                        "status": "success",
+                        "blocking": validation.blocking,
+                        "finding_count": len(validation.findings),
+                        "iteration_count": len(cyclic_trace),
+                    }
+                )
+            elif request.mode == "background":
+                artifact = DraftArtifact(
+                    draft_letter="",
+                    source_integrity_notes="Background context generated; no draft requested.",
+                    raw_model_output="",
+                )
+
+            context_pack = self._build_context_pack(
+                letter=letter,
+                request=request,
+                run_id=run_id,
+                context=context,
+                sources=sources,
+                source_warnings=context_warnings,
+            )
+
+            run = DraftRun(
+                run_id=run_id,
+                letter_id=letter_id,
+                draft_type=request.draft_type,
+                mode=request.mode,
+                letter_category=request.letter_category,
+                contract_package=request.contract_package,
+                status=status,
+                role=role,
+                recipient_focus=recipient_focus,
+                inputs=inputs,
+                incoming_analysis=incoming_analysis,
+                planning_sheet=planning_sheet,
+                reply_matrix=reply_matrix,
+                context_bundle=context,
+                sources=sources,
+                context_pack_id=context_pack.context_pack_id,
+                plan=plan,
+                draft_artifact=artifact,
+                source_integrity_summary=source_summary,
+                validation_report=validation,
+                cyclic_trace=cyclic_trace,
+                assertion_support=assertion_support,
+                confidence_scores=confidence_scores,
+                iteration_count=len(cyclic_trace),
+                warnings=warnings,
+                trace=trace,
+                started_at=started,
+                completed_at=datetime.now(timezone.utc),
+                created_by=self._user_id(current_user),
+            )
+            return await self._create_and_record(run, current_user, context_pack=context_pack)
+        except Exception as exc:
+            warnings.append(str(exc))
+            run = DraftRun(
+                run_id=run_id,
+                letter_id=letter_id,
+                draft_type=request.draft_type,
+                mode=request.mode,
+                letter_category=request.letter_category,
+                contract_package=request.contract_package,
+                status="failed",
+                role=role,
+                recipient_focus=recipient_focus,
+                inputs=inputs,
+                warnings=warnings,
+                trace=trace + [{"stage": "failed", "status": "error", "message": str(exc)}],
+                started_at=started,
+                completed_at=datetime.now(timezone.utc),
+                created_by=self._user_id(current_user),
+            )
+            stored = await self._create_and_record(run, current_user)
+            await self.repository.append_event(
+                letter_id,
+                stored.run_id,
+                "failed",
+                actor_user_id=self._user_id(current_user),
+                status=stored.status,
+                detail=str(exc),
+            )
+            return stored
+
+    async def get_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.request.view",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        return run
+
+    async def get_audit(self, letter_id: str, run_id: str, current_user: Any) -> DraftAuditResponse:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.audit.view",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        return DraftAuditResponse(
+            letter_id=str(letter_id),
+            run_id=str(run_id),
+            events=await self.repository.list_events(letter_id, run_id),
+        )
+
+    async def get_context_pack(
+        self,
+        letter_id: str,
+        run_id: str,
+        current_user: Any,
+    ) -> DraftContextPack:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.request.view",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        pack = await self.repository.get_context_pack(letter_id, run_id)
+        if not pack:
+            raise HTTPException(status_code=404, detail="Draft context pack not found")
+        return pack
+
+    async def get_source_ledger(
+        self,
+        letter_id: str,
+        run_id: str,
+        current_user: Any,
+    ) -> SourceLedgerResponse:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.request.view",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        sources = self._with_source_hashes(run.sources)
+        return SourceLedgerResponse(
+            letter_id=str(letter_id),
+            run_id=str(run_id),
+            source_count=len(sources),
+            sources=sources,
+        )
+
+    async def get_governance(
+        self,
+        letter_id: str,
+        run_id: str,
+        current_user: Any,
+    ) -> DraftGovernanceResponse:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.request.view",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        return DraftGovernanceResponse(
+            letter_id=str(letter_id),
+            run_id=str(run_id),
+            assignments=await self.repository.list_assignments(letter_id, run_id),
+            comments=await self.repository.list_comments(letter_id, run_id),
+            events=await self.repository.list_events(letter_id, run_id),
+        )
+
+    async def get_quality_dashboard(
+        self,
+        current_user: Any,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        window_days: int = 30,
+    ) -> DraftQualityDashboardResponse:
+        await self.policy_service.authorize(
+            current_user,
+            "drafting.audit.view",
+            resource_type="drafting_dashboard",
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        now = datetime.now(timezone.utc)
+        window_days = max(1, min(int(window_days or 30), 365))
+        window_start = now - timedelta(days=window_days)
+        letter_scope = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        letter_docs = await self.db.letters.find(
+            letter_scope,
+            {"_id": 1},
+        ).to_list(length=25000)
+        letter_ids = [str(doc.get("_id")) for doc in letter_docs if doc.get("_id")]
+        if not letter_ids:
+            return DraftQualityDashboardResponse(window_days=window_days)
+
+        run_query: Dict[str, Any] = {
+            "letter_id": {"$in": letter_ids},
+            "$or": [
+                {"started_at": {"$gte": window_start}},
+                {"completed_at": {"$gte": window_start}},
+                {"approved_at": {"$gte": window_start}},
+                {"issued_at": {"$gte": window_start}},
+            ],
+        }
+        run_docs = await self.db.letter_draft_runs.find(run_query).to_list(length=25000)
+        runs = [DraftRun(**doc) for doc in run_docs]
+        run_ids = [run.run_id for run in runs]
+        if not runs:
+            return DraftQualityDashboardResponse(window_days=window_days)
+
+        event_docs = await self.db.letter_draft_events.find(
+            {
+                "letter_id": {"$in": letter_ids},
+                "run_id": {"$in": run_ids},
+                "created_at": {"$gte": window_start},
+            }
+        ).to_list(length=50000)
+        assignment_docs = await self.db.letter_draft_assignments.find(
+            {
+                "letter_id": {"$in": letter_ids},
+                "run_id": {"$in": run_ids},
+                "status": "assigned",
+            }
+        ).to_list(length=25000)
+        issued_docs = await self.db.issued_letters.find(
+            {"letter_id": {"$in": letter_ids}, "run_id": {"$in": run_ids}}
+        ).to_list(length=25000)
+
+        returned_run_ids = {
+            str(event.get("run_id"))
+            for event in event_docs
+            if event.get("event_type") == "returned_for_correction"
+        }
+        approved_run_ids = {
+            str(event.get("run_id"))
+            for event in event_docs
+            if event.get("event_type") == "approved"
+        }
+        issued_artifact_map = {
+            str(doc.get("run_id")): bool(doc.get("docx_file_object_id") and doc.get("pdf_file_object_id"))
+            for doc in issued_docs
+        }
+
+        status_counts: Dict[str, int] = {}
+        trend_map: Dict[str, Dict[str, float]] = {}
+        durations: List[float] = []
+        iterations: List[float] = []
+        confidences: List[float] = []
+        source_counts: List[int] = []
+        unsupported_runs = 0
+        blocking_runs = 0
+        source_integrity_ok = 0
+        source_integrity_total = 0
+        active_runs = 0
+        approved_runs = 0
+        exported_runs = 0
+        issued_runs = 0
+        recent_risks: List[DraftQualityRiskItem] = []
+        bottleneck_ages: Dict[str, List[float]] = {}
+
+        for run in runs:
+            status_counts[run.status] = status_counts.get(run.status, 0) + 1
+            if run.status in {"completed", "needs_attention", "blocked"}:
+                active_runs += 1
+            if run.status in {"approved", "exported", "issued"}:
+                approved_runs += 1
+            if run.status in {"exported", "issued"}:
+                exported_runs += 1
+            if run.status == "issued":
+                issued_runs += 1
+
+            started_at = self._coerce_datetime(run.started_at)
+            completed_at = self._coerce_datetime(
+                run.issued_at or run.exported_at or run.approved_at or run.completed_at
+            )
+            if started_at and completed_at and completed_at >= started_at:
+                durations.append((completed_at - started_at).total_seconds() / 3600)
+            if run.iteration_count is not None:
+                iterations.append(float(run.iteration_count))
+            if run.confidence_scores:
+                confidences.append(float(run.confidence_scores.overall))
+            source_count = len(run.sources or [])
+            source_counts.append(source_count)
+            if run.mode in {"draft", "review"}:
+                source_integrity_total += 1
+                if source_count > 0 and all(source.source_hash for source in run.sources):
+                    source_integrity_ok += 1
+
+            finding_codes = {
+                finding.code
+                for finding in (run.validation_report.findings if run.validation_report else [])
+            }
+            unsupported = any("unsupported" in code for code in finding_codes)
+            if unsupported:
+                unsupported_runs += 1
+            if run.validation_report and run.validation_report.blocking:
+                blocking_runs += 1
+
+            trend_key = (started_at or completed_at or now).date().isoformat()
+            trend = trend_map.setdefault(
+                trend_key,
+                {
+                    "runs": 0,
+                    "approved": 0,
+                    "blocking": 0,
+                    "unsupported": 0,
+                    "confidence_sum": 0.0,
+                    "confidence_count": 0,
+                },
+            )
+            trend["runs"] += 1
+            if run.status in {"approved", "exported", "issued"}:
+                trend["approved"] += 1
+            if run.validation_report and run.validation_report.blocking:
+                trend["blocking"] += 1
+            if unsupported:
+                trend["unsupported"] += 1
+            if run.confidence_scores:
+                trend["confidence_sum"] += float(run.confidence_scores.overall)
+                trend["confidence_count"] += 1
+
+            if run.status in {"blocked", "needs_attention"}:
+                recent_risks.append(
+                    DraftQualityRiskItem(
+                        run_id=run.run_id,
+                        letter_id=run.letter_id,
+                        status=run.status,
+                        risk="blocking_validation" if run.validation_report.blocking else "needs_attention",
+                        detail=self._risk_detail(run),
+                        created_at=started_at,
+                    )
+                )
+            if source_count == 0 and run.mode in {"draft", "review"}:
+                recent_risks.append(
+                    DraftQualityRiskItem(
+                        run_id=run.run_id,
+                        letter_id=run.letter_id,
+                        status=run.status,
+                        risk="missing_sources",
+                        detail="Draft/review run has no source ledger entries.",
+                        created_at=started_at,
+                    )
+                )
+
+            age_hours = ((now - (started_at or now)).total_seconds() / 3600)
+            if run.status in {"completed", "needs_attention", "blocked"}:
+                bottleneck_ages.setdefault(run.status, []).append(age_hours)
+
+        overdue_review_count = 0
+        for assignment in assignment_docs:
+            due_at = self._coerce_datetime(assignment.get("due_at"))
+            if due_at and due_at < now:
+                overdue_review_count += 1
+
+        total_runs = len(runs)
+        unsupported_claim_rate = unsupported_runs / total_runs if total_runs else 0.0
+        blocking_validation_rate = blocking_runs / total_runs if total_runs else 0.0
+        source_integrity_rate = (
+            source_integrity_ok / source_integrity_total
+            if source_integrity_total
+            else 1.0
+        )
+        review_return_rate = len(returned_run_ids) / total_runs if total_runs else 0.0
+        first_review_approval_rate = (
+            len(approved_run_ids - returned_run_ids) / len(approved_run_ids)
+            if approved_run_ids
+            else 0.0
+        )
+        issue_artifact_compliance_rate = (
+            sum(1 for ok in issued_artifact_map.values() if ok) / len(issued_artifact_map)
+            if issued_artifact_map
+            else (1.0 if issued_runs == 0 else 0.0)
+        )
+        average_cycle_hours = self._average(durations)
+        average_iterations = self._average(iterations)
+        average_confidence = self._average(confidences)
+        average_sources = self._average([float(count) for count in source_counts])
+
+        response = DraftQualityDashboardResponse(
+            window_days=window_days,
+            total_runs=total_runs,
+            active_runs=active_runs,
+            approved_runs=approved_runs,
+            exported_runs=exported_runs,
+            issued_runs=issued_runs,
+            average_cycle_hours=round(average_cycle_hours, 2),
+            average_iterations=round(average_iterations, 2),
+            average_confidence=round(average_confidence, 4),
+            first_review_approval_rate=round(first_review_approval_rate, 4),
+            unsupported_claim_rate=round(unsupported_claim_rate, 4),
+            blocking_validation_rate=round(blocking_validation_rate, 4),
+            source_integrity_rate=round(source_integrity_rate, 4),
+            average_sources_per_run=round(average_sources, 2),
+            review_return_rate=round(review_return_rate, 4),
+            issue_artifact_compliance_rate=round(issue_artifact_compliance_rate, 4),
+            overdue_review_count=overdue_review_count,
+            status_breakdown=[
+                DraftMetricBreakdownItem(
+                    label=status,
+                    count=count,
+                    percentage=round(count / total_runs, 4) if total_runs else 0.0,
+                )
+                for status, count in sorted(status_counts.items())
+            ],
+            quality_trends=[
+                DraftMetricTrendPoint(
+                    date=key,
+                    runs=int(value["runs"]),
+                    approved=int(value["approved"]),
+                    blocking=int(value["blocking"]),
+                    unsupported_rate=round(value["unsupported"] / value["runs"], 4)
+                    if value["runs"]
+                    else 0.0,
+                    average_confidence=round(
+                        value["confidence_sum"] / value["confidence_count"], 4
+                    )
+                    if value["confidence_count"]
+                    else 0.0,
+                )
+                for key, value in sorted(trend_map.items())[-14:]
+            ],
+            bottlenecks=[
+                DraftMetricBottleneck(
+                    stage=stage,
+                    count=len(values),
+                    average_age_hours=round(self._average(values), 2),
+                )
+                for stage, values in sorted(bottleneck_ages.items())
+            ],
+            recent_risks=sorted(
+                recent_risks,
+                key=lambda item: item.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )[:12],
+        )
+        response.kpis = self._dashboard_kpis(response)
+        return response
+
+    async def assign_reviewer(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: AssignReviewerRequest,
+        current_user: Any,
+    ) -> DraftGovernanceResponse:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.request.assign",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.status in {"blocked", "failed", "approved", "exported", "issued"}:
+            raise HTTPException(status_code=400, detail=f"Cannot assign reviewer for draft status '{run.status}'")
+        if run.mode not in {"draft", "review"} or not run.draft_artifact:
+            raise HTTPException(status_code=400, detail="Only generated draft runs can be assigned for review")
+        if run.created_by and str(run.created_by) == str(request.reviewer_user_id):
+            raise HTTPException(status_code=400, detail="Reviewer must be different from drafter")
+        assignment = DraftReviewAssignment(
+            assignment_id=str(uuid.uuid4()),
+            letter_id=str(letter_id),
+            run_id=str(run_id),
+            reviewer_user_id=request.reviewer_user_id,
+            assigned_by=self._user_id(current_user),
+            due_at=request.due_at,
+            note=request.note,
+        )
+        await self.repository.upsert_assignment(assignment)
+        updated = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "assigned_reviewer_id": request.reviewer_user_id,
+                "approval_status": "under_review",
+            },
+        )
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "reviewer_assigned",
+            actor_user_id=self._user_id(current_user),
+            status=(updated or run).status,
+            payload={"reviewer_user_id": request.reviewer_user_id, "due_at": request.due_at},
+        )
+        await self._emit_notification(
+            NotificationType.APPROVAL_ASSIGNED,
+            letter_id,
+            current_user,
+            include_users=[request.reviewer_user_id],
+            title="Draft review assigned",
+            message="A letter draft has been assigned for your review.",
+        )
+        return await self.get_governance(letter_id, run_id, current_user)
+
+    async def add_comment(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: DraftCommentRequest,
+        current_user: Any,
+    ) -> DraftGovernanceResponse:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.perform",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.assigned_reviewer_id and str(run.assigned_reviewer_id) != str(self._user_id(current_user)):
+            can_admin = await self.policy_service.has_permission(current_user, "drafting.admin")
+            if not can_admin:
+                raise HTTPException(status_code=403, detail="Only the assigned reviewer can comment on this draft")
+        comment = DraftReviewComment(
+            comment_id=str(uuid.uuid4()),
+            letter_id=str(letter_id),
+            run_id=str(run_id),
+            body=request.body,
+            visibility=request.visibility,
+            created_by=self._user_id(current_user),
+        )
+        await self.repository.add_comment(comment)
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "comment_added",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"comment_id": comment.comment_id, "visibility": request.visibility},
+        )
+        return await self.get_governance(letter_id, run_id, current_user)
+
+    async def return_for_correction(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ReturnForCorrectionRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.return_for_revision",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.status in {"approved", "exported", "issued"}:
+            raise HTTPException(status_code=400, detail="Finalized draft cannot be returned for correction")
+        if run.assigned_reviewer_id and str(run.assigned_reviewer_id) != str(self._user_id(current_user)):
+            can_admin = await self.policy_service.has_permission(current_user, "drafting.admin")
+            if not can_admin:
+                raise HTTPException(status_code=403, detail="Only the assigned reviewer can return this draft")
+        updated = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "status": "needs_attention",
+                "approval_status": "returned_for_correction",
+                "returned_reason": request.reason,
+                "required_changes": list(request.required_changes),
+            },
+        )
+        result = updated or run
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "returned_for_correction",
+            actor_user_id=self._user_id(current_user),
+            status=result.status,
+            detail=request.reason,
+            payload={"required_changes": list(request.required_changes)},
+        )
+        await self._emit_notification(
+            NotificationType.APPROVAL_REJECTED,
+            letter_id,
+            current_user,
+            include_users=[run.created_by] if run.created_by else None,
+            title="Draft returned for correction",
+            message=request.reason,
+        )
+        return result
+
+    async def exact_clause_search(
+        self,
+        request: ExactClauseSearchRequest,
+        current_user: Any,
+    ) -> SourceLedgerResponse:
+        self._assert_scope_allowed(
+            current_user,
+            request.organization_id,
+            request.project_id,
+        )
+        response = await ContractService().search_contracts(
+            ContractSearchRequest(
+                query=request.clause_number,
+                organization_id=request.organization_id,
+                project_id=request.project_id,
+                document_id=request.document_id,
+                clause_number=request.clause_number,
+                exact_phrase=True,
+                limit=request.limit,
+                top_docs=min(request.limit, 10),
+                chunks_per_doc=3,
+                summarize=False,
+            ),
+            current_user,
+        )
+        sources: List[SourceEvidence] = []
+        for idx, chunk in enumerate(response.results, start=1):
+            clause_number = chunk.clause_number or request.clause_number
+            sources.append(
+                SourceEvidence(
+                    source_id=(
+                        f"clause:{chunk.document_id or chunk.upload_id or 'unknown'}:"
+                        f"{clause_number}:{chunk.chunk_index or idx}"
+                    ),
+                    source_type="contract_clause",
+                    allowed_use="clause",
+                    organization_id=request.organization_id,
+                    project_id=request.project_id,
+                    label=f"{clause_number} {chunk.clause_title or ''}".strip(),
+                    text=chunk.text,
+                    snippet=self._snippet(chunk.text),
+                    document_id=str(chunk.document_id or chunk.upload_id or "") or None,
+                    clause_number=clause_number,
+                    clause_title=chunk.clause_title,
+                    page_numbers=[
+                        int(p)
+                        for p in (chunk.page_numbers or ([chunk.page] if chunk.page else []))
+                        if p
+                    ],
+                    score=chunk.score,
+                    metadata={
+                        "upload_id": chunk.upload_id,
+                        "file_name": chunk.file_name or chunk.source_filename,
+                        "section_heading": chunk.section_heading,
+                        "toc_path": chunk.toc_path or [],
+                    },
+                )
+            )
+        sources = self._with_source_hashes(sources)
+        return SourceLedgerResponse(
+            letter_id="",
+            run_id="exact-clause",
+            source_count=len(sources),
+            sources=sources,
+        )
+
+    async def exact_reference_search(
+        self,
+        request: ExactReferenceSearchRequest,
+        current_user: Any,
+    ) -> SourceLedgerResponse:
+        self._assert_scope_allowed(
+            current_user,
+            request.organization_id,
+            request.project_id,
+        )
+        raw_reference = request.reference.strip()
+        normalized = normalize_letter_code(raw_reference)
+        exact_regex = f"^{raw_reference}$"
+        doc_query = {
+            "organization_id": request.organization_id,
+            "project_id": request.project_id,
+            "$or": [
+                {"letterNo": {"$regex": exact_regex, "$options": "i"}},
+                {"letter_no": {"$regex": exact_regex, "$options": "i"}},
+                {"letterNoNormalized": normalized},
+                {"references.letterNo": {"$regex": exact_regex, "$options": "i"}},
+                {"references.letter_no": {"$regex": exact_regex, "$options": "i"}},
+            ],
+        }
+        letter_query = {
+            "organization_id": request.organization_id,
+            "project_id": request.project_id,
+            "$or": [
+                {"letter_no": {"$regex": exact_regex, "$options": "i"}},
+                {"letterNo": {"$regex": exact_regex, "$options": "i"}},
+                {"reference": {"$regex": exact_regex, "$options": "i"}},
+                {"previous_letter_no": {"$regex": exact_regex, "$options": "i"}},
+            ],
+        }
+
+        doc_cursor = self.db.documents.find(doc_query).limit(request.limit)
+        letter_cursor = self.db.letters.find(letter_query).limit(request.limit)
+        docs = [doc async for doc in doc_cursor]
+        letters = [letter async for letter in letter_cursor]
+        sources: List[SourceEvidence] = []
+        for doc in docs:
+            doc_id = str(doc.get("_id") or doc.get("document_id") or "")
+            letter_no = doc.get("letterNo") or doc.get("letter_no") or raw_reference
+            text = doc.get("summary") or doc.get("full_text") or doc.get("ocrText") or doc.get("subject")
+            sources.append(
+                SourceEvidence(
+                    source_id=f"document:{doc_id}",
+                    source_type="context_document",
+                    allowed_use="fact",
+                    organization_id=request.organization_id,
+                    project_id=request.project_id,
+                    label=str(doc.get("subject") or letter_no or "Referenced document"),
+                    text=self._snippet(text, width=1200),
+                    snippet=self._snippet(text),
+                    document_id=doc_id or None,
+                    metadata={
+                        "letter_no": letter_no,
+                        "uploadType": doc.get("uploadType"),
+                        "date": doc.get("date") or doc.get("createdAt"),
+                    },
+                )
+            )
+        for letter in letters:
+            letter_id = str(letter.get("_id") or letter.get("id") or "")
+            letter_no = letter.get("letter_no") or letter.get("letterNo") or raw_reference
+            text = letter.get("content") or letter.get("draft_output") or letter.get("subject")
+            sources.append(
+                SourceEvidence(
+                    source_id=f"letter:{letter_id}",
+                    source_type="prior_correspondence",
+                    allowed_use="history_only",
+                    organization_id=request.organization_id,
+                    project_id=request.project_id,
+                    label=str(letter.get("subject") or letter_no or "Referenced letter"),
+                    text=self._snippet(text, width=1200),
+                    snippet=self._snippet(text),
+                    letter_id=letter_id or None,
+                    metadata={
+                        "letter_no": letter_no,
+                        "status": letter.get("status"),
+                        "recipient": letter.get("recipient"),
+                    },
+                )
+            )
+
+        deduped: Dict[str, SourceEvidence] = {}
+        for source in self._with_source_hashes(sources):
+            deduped[source.source_id] = source
+        final_sources = list(deduped.values())[: request.limit]
+        return SourceLedgerResponse(
+            letter_id="",
+            run_id="exact-reference",
+            source_count=len(final_sources),
+            sources=final_sources,
+        )
+
+    async def latest_run(
+        self,
+        letter_id: str,
+        mode: Optional[DraftMode],
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "read",
+            drafting_permission="drafting.request.view",
+        )
+        run = await self.repository.latest(letter_id, mode)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        return run
+
+    async def start_session(
+        self,
+        request: DraftingStartRequest,
+        current_user: Any,
+    ) -> DraftingStartResponse:
+        letter_id = request.incoming_letter_id or request.incoming_document_id
+        if not letter_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Start requires an existing incoming_letter_id or incoming_document_id in this backend version.",
+            )
+        next_step = "analyze-incoming" if request.draft_type == "reply" else "prepare-plan"
+        return DraftingStartResponse(
+            session_id=str(uuid.uuid4()),
+            letter_id=str(letter_id),
+            next_step=next_step,
+        )
+
+    async def analyze_incoming(
+        self,
+        letter_id: str,
+        request: DraftRunCreateRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        payload = request.model_copy(update={"mode": "background", "draft_type": "reply"})
+        return await self.create_run(letter_id, payload, current_user)
+
+    async def confirm_analysis(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ConfirmAnalysisRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.edit",
+        )
+        confirmed = request.analysis.model_copy(
+            update={
+                "confirmed_by_user": True,
+                "confirmed_at": datetime.now(timezone.utc),
+            }
+        )
+        run = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {"incoming_analysis": confirmed},
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "analysis_confirmed",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+        )
+        return run
+
+    async def prepare_plan(
+        self,
+        letter_id: str,
+        request: DraftRunCreateRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        payload = request.model_copy(update={"mode": "strategy"})
+        run = await self.create_run(letter_id, payload, current_user)
+        if run.plan and run.status not in {"failed", "blocked"}:
+            version = await self.repository.save_strategy_plan(
+                letter_id,
+                run,
+                self._user_id(current_user),
+                status="generated",
+            )
+            await self.repository.append_event(
+                letter_id,
+                run.run_id,
+                "plan_confirmed",
+                actor_user_id=self._user_id(current_user),
+                status=run.status,
+                detail="Strategic plan generated and saved as latest version.",
+                payload={"strategy_version": version, "auto_saved": True},
+            )
+        return run
+
+    async def confirm_plan(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ConfirmPlanRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.create",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        fields: Dict[str, Any] = {}
+        if request.planning_sheet:
+            fields["planning_sheet"] = request.planning_sheet.model_copy(
+                update={"user_confirmed": True}
+            )
+        if request.reply_matrix:
+            fields["reply_matrix"] = request.reply_matrix
+        if request.planning_sheet:
+            fields["plan"] = self.planning_builder._plan_text(
+                fields["planning_sheet"],
+                request.reply_matrix or existing.reply_matrix,
+            )
+        fields["approval_status"] = "plan_confirmed"
+        run = await self.repository.update_fields(letter_id, run_id, fields)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.plan:
+            version = await self.repository.save_strategy_plan(
+                letter_id,
+                run,
+                self._user_id(current_user),
+                status="confirmed",
+            )
+        else:
+            version = None
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "plan_confirmed",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"strategy_version": version},
+        )
+        return run
+
+    async def generate_draft(
+        self,
+        letter_id: str,
+        request: DraftRunCreateRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        payload = request.model_copy(update={"mode": "draft"})
+        return await self.create_run(letter_id, payload, current_user)
+
+    async def revise_run(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ReviseDraftRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        source = await self.get_run(letter_id, run_id, current_user)
+        revision_text = self._revision_instruction(request)
+        original_inputs = source.inputs or {}
+        payload = DraftRunCreateRequest(
+            mode="draft",
+            draft_type=source.draft_type,
+            letter_category=source.letter_category,
+            contract_package=source.contract_package,
+            role=source.role,
+            recipient_focus=source.recipient_focus,
+            subject=original_inputs.get("subject"),
+            recipient=original_inputs.get("recipient"),
+            requirements=revision_text,
+            points=original_inputs.get("points"),
+            purpose=original_inputs.get("purpose"),
+            desired_position=original_inputs.get("desired_position"),
+            required_action=original_inputs.get("required_action"),
+            background_facts=original_inputs.get("background_facts"),
+            trigger_event=original_inputs.get("trigger_event"),
+            tone=original_inputs.get("tone") or "firm_contractual",
+            timeline_days=original_inputs.get("timeline_days"),
+            incoming_document_id=original_inputs.get("incoming_document_id"),
+            incoming_letter_id=original_inputs.get("incoming_letter_id"),
+            clauses_to_consider=original_inputs.get("clauses_to_consider") or [],
+            attachments=original_inputs.get("attachments") or [],
+            document_ids=original_inputs.get("document_ids") or [],
+            include_letter_codes=original_inputs.get("include_letter_codes") or [],
+            exclude_letter_codes=original_inputs.get("exclude_letter_codes") or [],
+            plan_override=source.plan,
+        )
+        revised = await self.create_run(letter_id, payload, current_user)
+        updated = await self.repository.update_fields(
+            letter_id,
+            revised.run_id,
+            {
+                "revision_of_run_id": run_id,
+                "revision_action": request.revision_action,
+            },
+        )
+        result = updated or revised
+        await self.repository.append_event(
+            letter_id,
+            result.run_id,
+            "revised",
+            actor_user_id=self._user_id(current_user),
+            status=result.status,
+            payload={"revision_of_run_id": run_id, "revision_action": request.revision_action},
+        )
+        return result
+
+    async def validate_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.perform",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if not run.draft_artifact:
+            raise HTTPException(status_code=400, detail="Run does not contain a draft artifact")
+
+        validation = self._merge_reports(
+            self.validator.validate(
+                run.draft_artifact,
+                run.role,
+                run.sources,
+                finalized=bool((run.inputs or {}).get("finalized")),
+            ),
+            self.validator.strategy_alignment(run.draft_artifact, run.plan or ""),
+        )
+        status = "needs_attention" if validation.blocking else run.status
+        if run.status in {"blocked", "failed"} and not validation.blocking:
+            status = "completed"
+        updated = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "validation_report": validation,
+                "status": status,
+                "last_validated_at": datetime.now(timezone.utc),
+            },
+        )
+        result = updated or run
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "validated",
+            actor_user_id=self._user_id(current_user),
+            status=result.status,
+            payload={
+                "blocking": validation.blocking,
+                "finding_count": len(validation.findings),
+            },
+        )
+        return result
+
+    async def critique_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.perform",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if not run.draft_artifact:
+            raise HTTPException(status_code=400, detail="Run does not contain a draft artifact")
+
+        critique = self._merge_reports(
+            self.validator.critique(
+                run.draft_artifact,
+                run.role,
+                run.sources,
+                finalized=bool((run.inputs or {}).get("finalized")),
+            ),
+            self.validator.strategy_alignment(run.draft_artifact, run.plan or ""),
+        )
+        status = "needs_attention" if critique.blocking else run.status
+        trace = list(run.trace or [])
+        trace.append(
+            {
+                "stage": "critique",
+                "status": "success",
+                "blocking": critique.blocking,
+                "finding_count": len(critique.findings),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        updated = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "validation_report": critique,
+                "status": status,
+                "trace": trace,
+                "last_validated_at": datetime.now(timezone.utc),
+            },
+        )
+        result = updated or run
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "critiqued",
+            actor_user_id=self._user_id(current_user),
+            status=result.status,
+            payload={
+                "blocking": critique.blocking,
+                "finding_count": len(critique.findings),
+            },
+        )
+        return result
+
+    async def approve_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        letter = await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.approve",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if existing.status in {"approved", "exported", "issued"}:
+            raise HTTPException(status_code=400, detail="Draft is already approved or finalized")
+        if existing.status in {"blocked", "failed", "needs_attention"}:
+            raise HTTPException(status_code=400, detail="Draft must pass validation before approval")
+        if existing.approval_status and existing.approval_status not in {
+            "under_review",
+            "plan_confirmed",
+            "returned_for_correction",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Draft cannot be approved from approval status '{existing.approval_status}'",
+            )
+        if existing.created_by and str(existing.created_by) == str(self._user_id(current_user)):
+            can_self_approve = await self.policy_service.has_permission(current_user, "drafting.admin")
+            if not can_self_approve:
+                raise HTTPException(status_code=403, detail="Drafters cannot approve their own draft")
+        run = await self.accept_draft(letter_id, run_id, current_user)
+        now = datetime.now(timezone.utc)
+        approved_version = await self.repository.lock_approved_draft_version(
+            letter_id,
+            run_id,
+            self._user_id(current_user),
+        )
+        updated = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "status": "approved",
+                "approval_status": "approved",
+                "approved_by": self._user_id(current_user),
+                "approved_at": now,
+            },
+        )
+        result = updated or run
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "approved",
+            actor_user_id=self._user_id(current_user),
+            status=result.status,
+            payload={"approved_draft_version": approved_version},
+        )
+        await self._emit_notification(
+            NotificationType.DRAFT_APPROVED,
+            letter_id,
+            current_user,
+            include_users=[run.created_by] if run.created_by else None,
+            title="Draft approved",
+            message="A letter draft has been approved.",
+        )
+        return result
+
+    async def export_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.final.view",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if existing.status not in {"approved", "exported", "issued"}:
+            raise HTTPException(status_code=400, detail="Draft must be approved before export")
+        now = datetime.now(timezone.utc)
+        export_files = await self._export_artifacts(letter_id, existing, current_user)
+        run = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "status": "exported",
+                "exported_file_id": export_files.get("pdf_file_object_id")
+                or export_files.get("docx_file_object_id")
+                or f"draft-export:{run_id}",
+                "exported_docx_file_id": export_files.get("docx_file_object_id"),
+                "exported_pdf_file_id": export_files.get("pdf_file_object_id"),
+                "exported_by": self._user_id(current_user),
+                "exported_at": now,
+            },
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "exported",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload=export_files,
+        )
+        return run
+
+    async def issue_run(
+        self,
+        letter_id: str,
+        run_id: str,
+        issued_document_id: Optional[str],
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.final.view",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if existing.status not in {"exported", "issued"}:
+            raise HTTPException(status_code=400, detail="Draft must be exported before issue")
+        if not existing.exported_docx_file_id or not existing.exported_pdf_file_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Draft must have immutable DOCX and PDF export artifacts before issue",
+            )
+        now = datetime.now(timezone.utc)
+        issued_id = issued_document_id or f"issued:{run_id}"
+        run = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "status": "issued",
+                "issued_document_id": issued_id,
+                "issued_by": self._user_id(current_user),
+                "issued_at": now,
+            },
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.db.issued_letters.update_one(
+            {"letter_id": str(letter_id), "run_id": str(run_id)},
+            {
+                "$set": {
+                    "issued_letter_id": issued_id,
+                    "letter_id": str(letter_id),
+                    "run_id": str(run_id),
+                    "issued_document_id": issued_id,
+                    "exported_file_id": existing.exported_file_id,
+                    "docx_file_object_id": existing.exported_docx_file_id,
+                    "pdf_file_object_id": existing.exported_pdf_file_id,
+                    "source_ledger_hash": self._source_ledger_hash(existing.sources),
+                    "issued_by": self._user_id(current_user),
+                    "issued_at": now,
+                    "status": "issued",
+                    "updated_at": now,
+                }
+            },
+            upsert=True,
+        )
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "issued",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"issued_document_id": issued_id},
+        )
+        await self._emit_notification(
+            NotificationType.APPROVAL_COMPLETED,
+            letter_id,
+            current_user,
+            include_users=[existing.created_by] if existing.created_by else None,
+            title="Draft issued",
+            message="The approved letter draft has been issued.",
+        )
+        return run
+
+    async def accept_plan(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.request.accept",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.mode not in {"strategy", "draft", "review", "background"} or not run.plan:
+            raise HTTPException(status_code=400, detail="Run does not contain an acceptable plan")
+        version = await self.repository.mark_accepted_plan(letter_id, run, self._user_id(current_user))
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "plan_accepted",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"strategy_version": version},
+        )
+        return run
+
+    async def accept_draft(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.approve",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if run.mode not in {"draft", "review"} or not run.draft_artifact:
+            raise HTTPException(status_code=400, detail="Run does not contain an acceptable draft")
+        if not (run.plan or "").strip():
+            raise HTTPException(status_code=400, detail="Draft cannot be accepted without a saved strategic plan")
+        if run.created_by and str(run.created_by) == str(self._user_id(current_user)):
+            can_self_approve = await self.policy_service.has_permission(current_user, "drafting.admin")
+            if not can_self_approve:
+                raise HTTPException(status_code=403, detail="Drafters cannot approve their own draft")
+        if run.validation_report.blocking:
+            raise HTTPException(status_code=400, detail="Draft has blocking validation findings")
+        version = await self.repository.accept_draft(letter_id, run, self._user_id(current_user))
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "draft_accepted",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"draft_version": version},
+        )
+        return run
+
+    @staticmethod
+    def _average(values: List[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if isinstance(value, str):
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+        return None
+
+    @staticmethod
+    def _risk_detail(run: DraftRun) -> str:
+        findings = run.validation_report.findings if run.validation_report else []
+        if findings:
+            return findings[0].message
+        if run.returned_reason:
+            return run.returned_reason
+        return "Run requires reviewer attention."
+
+    @staticmethod
+    def _dashboard_kpis(response: DraftQualityDashboardResponse) -> List[DraftMetricKpi]:
+        def pct(value: float) -> str:
+            return f"{round(value * 100)}%"
+
+        return [
+            DraftMetricKpi(
+                key="cycle_time",
+                label="Avg cycle time",
+                value=response.average_cycle_hours,
+                formatted_value=f"{response.average_cycle_hours:.1f}h",
+                target="< 48h",
+                status="good" if response.average_cycle_hours <= 48 else "watch",
+                detail="Average time from draft run start to latest completed lifecycle point.",
+            ),
+            DraftMetricKpi(
+                key="first_review_approval",
+                label="First-review approval",
+                value=response.first_review_approval_rate,
+                formatted_value=pct(response.first_review_approval_rate),
+                target="> 75%",
+                status="good" if response.first_review_approval_rate >= 0.75 else "watch",
+                detail="Approved runs that were not returned for correction in the current window.",
+            ),
+            DraftMetricKpi(
+                key="unsupported_claims",
+                label="Unsupported claims",
+                value=response.unsupported_claim_rate,
+                formatted_value=pct(response.unsupported_claim_rate),
+                target="< 2%",
+                status="good" if response.unsupported_claim_rate <= 0.02 else "risk",
+                detail="Draft runs with unsupported source or clause findings.",
+            ),
+            DraftMetricKpi(
+                key="source_integrity",
+                label="Source integrity",
+                value=response.source_integrity_rate,
+                formatted_value=pct(response.source_integrity_rate),
+                target="> 95%",
+                status="good" if response.source_integrity_rate >= 0.95 else "watch",
+                detail="Runs with at least one source and source hashes on all source ledger entries.",
+            ),
+            DraftMetricKpi(
+                key="artifact_compliance",
+                label="Issued artifact compliance",
+                value=response.issue_artifact_compliance_rate,
+                formatted_value=pct(response.issue_artifact_compliance_rate),
+                target="100%",
+                status="good" if response.issue_artifact_compliance_rate >= 1 else "risk",
+                detail="Issued letters with immutable DOCX and PDF artifact references.",
+            ),
+            DraftMetricKpi(
+                key="overdue_reviews",
+                label="Overdue reviews",
+                value=float(response.overdue_review_count),
+                formatted_value=str(response.overdue_review_count),
+                target="0",
+                status="good" if response.overdue_review_count == 0 else "risk",
+                detail="Assigned review tasks past their due date.",
+            ),
+        ]
+
+    async def _export_artifacts(
+        self,
+        letter_id: str,
+        run: DraftRun,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        letter = await self.letter_service.get_letter(letter_id)
+        if not letter:
+            raise HTTPException(status_code=404, detail="Letter not found")
+        org_id = str(getattr(letter, "organization_id", "") or "")
+        project_id = str(getattr(letter, "project_id", "") or "")
+        if not org_id:
+            raise HTTPException(status_code=400, detail="Letter organization is required for export")
+        body = (run.draft_artifact.draft_letter if run.draft_artifact else "") or ""
+        subject = str(getattr(letter, "subject", None) or run.inputs.get("subject") or "Letter Draft")
+        safe_run = str(run.run_id).replace("/", "-")
+        base_key = f"letter-drafts/{letter_id}/{safe_run}"
+        file_service = FileObjectService(self.db)
+        docx_result = await file_service.store_bytes(
+            content=self._build_docx_bytes(subject, body),
+            organization_id=org_id,
+            project_id=project_id,
+            original_filename=f"{safe_run}.docx",
+            storage_key=f"{base_key}/{safe_run}.docx",
+            current_user=current_user,
+            document_type="letter_export",
+            upload_id=run.run_id,
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            document_id=letter_id,
+        )
+        pdf_result = await file_service.store_bytes(
+            content=self._build_pdf_bytes(subject, body),
+            organization_id=org_id,
+            project_id=project_id,
+            original_filename=f"{safe_run}.pdf",
+            storage_key=f"{base_key}/{safe_run}.pdf",
+            current_user=current_user,
+            document_type="letter_export",
+            upload_id=run.run_id,
+            content_type="application/pdf",
+            document_id=letter_id,
+        )
+        return {
+            "docx_file_object_id": docx_result.get("file_object_id"),
+            "pdf_file_object_id": pdf_result.get("file_object_id"),
+            "docx_storage_key": docx_result.get("storage_key"),
+            "pdf_storage_key": pdf_result.get("storage_key"),
+        }
+
+    @staticmethod
+    def _build_docx_bytes(subject: str, body: str) -> bytes:
+        try:
+            from docx import Document  # type: ignore
+
+            buffer = io.BytesIO()
+            doc = Document()
+            doc.add_heading(subject or "Letter Draft", level=1)
+            for paragraph in (body or "").splitlines():
+                doc.add_paragraph(paragraph)
+            doc.save(buffer)
+            return buffer.getvalue()
+        except Exception:
+            escaped_subject = (subject or "Letter Draft").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            escaped_body = (body or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            document_xml = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body>"
+                f"<w:p><w:r><w:t>{escaped_subject}</w:t></w:r></w:p>"
+                f"<w:p><w:r><w:t>{escaped_body}</w:t></w:r></w:p>"
+                "</w:body></w:document>"
+            )
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "[Content_Types].xml",
+                    (
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                        '<Default Extension="xml" ContentType="application/xml"/>'
+                        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+                        "</Types>"
+                    ),
+                )
+                archive.writestr(
+                    "_rels/.rels",
+                    (
+                        '<?xml version="1.0" encoding="UTF-8"?>'
+                        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+                        "</Relationships>"
+                    ),
+                )
+                archive.writestr("word/document.xml", document_xml)
+            return buffer.getvalue()
+
+    @staticmethod
+    def _build_pdf_bytes(subject: str, body: str) -> bytes:
+        try:
+            from reportlab.lib.pagesizes import A4  # type: ignore
+            from reportlab.pdfgen import canvas  # type: ignore
+
+            buffer = io.BytesIO()
+            pdf = canvas.Canvas(buffer, pagesize=A4)
+            width, height = A4
+            y = height - 72
+            pdf.setFont("Helvetica-Bold", 12)
+            pdf.drawString(72, y, (subject or "Letter Draft")[:100])
+            y -= 28
+            pdf.setFont("Helvetica", 10)
+            for line in (body or "").splitlines():
+                if y < 72:
+                    pdf.showPage()
+                    pdf.setFont("Helvetica", 10)
+                    y = height - 72
+                pdf.drawString(72, y, line[:110])
+                y -= 14
+            pdf.save()
+            return buffer.getvalue()
+        except Exception:
+            def escape_pdf(value: str) -> str:
+                return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+            lines = [subject or "Letter Draft", *[line for line in (body or "").splitlines() if line.strip()]]
+            text_ops = ["BT", "/F1 10 Tf", "72 760 Td"]
+            for index, line in enumerate(lines[:45]):
+                if index:
+                    text_ops.append("0 -14 Td")
+                text_ops.append(f"({escape_pdf(line[:100])}) Tj")
+            text_ops.append("ET")
+            stream = "\n".join(text_ops).encode("latin-1", errors="replace")
+            objects = [
+                b"<< /Type /Catalog /Pages 2 0 R >>",
+                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+                b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            ]
+            buffer = io.BytesIO()
+            buffer.write(b"%PDF-1.4\n")
+            offsets = []
+            for idx, obj in enumerate(objects, start=1):
+                offsets.append(buffer.tell())
+                buffer.write(f"{idx} 0 obj\n".encode("ascii"))
+                buffer.write(obj)
+                buffer.write(b"\nendobj\n")
+            xref_at = buffer.tell()
+            buffer.write(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+            buffer.write(b"0000000000 65535 f \n")
+            for offset in offsets:
+                buffer.write(f"{offset:010d} 00000 n \n".encode("ascii"))
+            buffer.write(
+                f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n".encode(
+                    "ascii"
+                )
+            )
+            return buffer.getvalue()
+
+    @staticmethod
+    def _source_ledger_hash(sources: List[SourceEvidence]) -> str:
+        payload = "|".join(sorted(source.source_hash or source.source_id for source in sources))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _emit_notification(
+        self,
+        event_type: NotificationType,
+        letter_id: str,
+        current_user: Any,
+        *,
+        include_users: Optional[List[str]],
+        title: str,
+        message: str,
+    ) -> None:
+        if not include_users:
+            return
+        try:
+            letter = await self.letter_service.get_letter(letter_id)
+            await NotificationService(self.db).emit(
+                event_type,
+                resource_id=str(letter_id),
+                resource_type="letter",
+                actor_id=self._user_id(current_user),
+                include_users=include_users,
+                priority=NotificationPriority.HIGH,
+                severity=NotificationSeverity.INFO,
+                data={
+                    "title": title,
+                    "message": message,
+                    "organization_id": str(getattr(letter, "organization_id", "") or "") if letter else None,
+                    "project_id": str(getattr(letter, "project_id", "") or "") if letter else None,
+                },
+            )
+        except Exception:
+            return
+
+    async def _create_and_record(
+        self,
+        run: DraftRun,
+        current_user: Any,
+        *,
+        context_pack: Optional[DraftContextPack] = None,
+    ) -> DraftRun:
+        if context_pack:
+            await self.repository.create_context_pack(context_pack)
+        stored = await self.repository.create(run)
+        await self.repository.append_event(
+            stored.letter_id,
+            stored.run_id,
+            "created",
+            actor_user_id=self._user_id(current_user),
+            status=stored.status,
+            payload={"mode": stored.mode, "draft_type": stored.draft_type},
+        )
+        return stored
+
+    async def _add_governance_comment_context(
+        self,
+        letter_id: str,
+        context: DraftContextBundle,
+        sources: List[SourceEvidence],
+        *,
+        current_run_id: str,
+    ) -> List[SourceEvidence]:
+        latest = await self.repository.latest(letter_id, None)
+        if not latest or latest.run_id == current_run_id:
+            return sources
+        comments = await self.repository.list_comments(letter_id, latest.run_id)
+        if not comments:
+            return sources
+        existing_lines = set(context.comments or [])
+        enriched = list(sources)
+        for index, comment in enumerate(comments[-10:], start=1):
+            body = self._snippet(comment.body, width=800)
+            if not body:
+                continue
+            if body not in existing_lines:
+                context.comments.append(body)
+                existing_lines.add(body)
+            enriched.append(
+                SourceEvidence(
+                    source_id=f"governance-comment:{latest.run_id}:{comment.comment_id}",
+                    source_type="comment",
+                    allowed_use="comment",
+                    organization_id=context.active_workspace.get("organization_id"),
+                    project_id=context.active_workspace.get("project_id"),
+                    label=f"Draft governance comment {index}",
+                    text=body,
+                    snippet=self._snippet(body, width=240),
+                    letter_id=str(letter_id),
+                    metadata={
+                        "source_run_id": latest.run_id,
+                        "comment_id": comment.comment_id,
+                        "visibility": comment.visibility,
+                        "created_by": comment.created_by,
+                    },
+                )
+            )
+        return enriched
+
+    async def _run_cyclic_draft(
+        self,
+        *,
+        letter: Letter,
+        request: DraftRunCreateRequest,
+        current_user: Any,
+        role: str,
+        recipient_focus: Optional[str],
+        context: Any,
+        sources: List[SourceEvidence],
+        inputs: Dict[str, Any],
+        plan: str,
+        generator: DraftGenerator,
+        initial_artifact: DraftArtifact,
+    ) -> tuple[
+        DraftArtifact,
+        List[SourceEvidence],
+        ValidationReport,
+        List[CyclicIterationTrace],
+        List[DraftAssertionSupport],
+        DraftConfidenceScores,
+        List[str],
+    ]:
+        artifact = initial_artifact
+        working_sources = self._with_source_hashes(sources)
+        trace: List[CyclicIterationTrace] = []
+        warnings: List[str] = []
+        validation = self._merge_reports(
+            self.validator.critique(
+                artifact,
+                role,
+                working_sources,
+                finalized=request.finalized,
+            ),
+            self.validator.strategy_alignment(artifact, plan),
+        )
+        max_iterations = max(1, min(int(request.max_iterations or 3), 5))
+
+        for iteration in range(1, max_iterations + 1):
+            refinement_queries = self._refinement_queries(validation)
+            retrieved: List[SourceEvidence] = []
+            regenerated = False
+
+            if validation.blocking and refinement_queries:
+                retrieved = await self._retrieve_refinement_sources(
+                    refinement_queries,
+                    context,
+                    current_user,
+                )
+                if retrieved:
+                    known_ids = {source.source_id for source in working_sources}
+                    additions = [source for source in retrieved if source.source_id not in known_ids]
+                    if additions:
+                        working_sources = self._with_source_hashes(working_sources + additions)
+                        artifact, draft_warnings = await generator.generate(
+                            letter,
+                            role,
+                            recipient_focus,
+                            context,
+                            working_sources,
+                            inputs,
+                            plan=plan,
+                            finalized=request.finalized,
+                        )
+                        warnings.extend(draft_warnings)
+                        regenerated = True
+                        validation = self._merge_reports(
+                            self.validator.critique(
+                                artifact,
+                                role,
+                                working_sources,
+                                finalized=request.finalized,
+                            ),
+                            self.validator.strategy_alignment(artifact, plan),
+                        )
+
+            trace.append(
+                CyclicIterationTrace(
+                    iteration=iteration,
+                    critique_blocking=validation.blocking,
+                    finding_codes=[finding.code for finding in validation.findings],
+                    refinement_queries=refinement_queries,
+                    retrieved_source_ids=[source.source_id for source in retrieved],
+                    regenerated=regenerated,
+                    notes=(
+                        "Stopping conditions satisfied."
+                        if not validation.blocking
+                        else "Blocking findings remain."
+                    ),
+                )
+            )
+
+            if not validation.blocking:
+                break
+            if not retrieved or not regenerated:
+                break
+
+        assertion_support = self._assertion_support(artifact, working_sources, validation)
+        confidence_scores = self._confidence_scores(validation, assertion_support, working_sources)
+        return (
+            artifact,
+            working_sources,
+            validation,
+            trace,
+            assertion_support,
+            confidence_scores,
+            warnings,
+        )
+
+    async def _retrieve_refinement_sources(
+        self,
+        refinement_queries: List[str],
+        context: Any,
+        current_user: Any,
+    ) -> List[SourceEvidence]:
+        org_id = context.active_workspace.get("organization_id")
+        project_id = context.active_workspace.get("project_id")
+        if not org_id or not project_id:
+            return []
+        retrieved: List[SourceEvidence] = []
+        for query in refinement_queries:
+            if not query:
+                continue
+            try:
+                result = await self.exact_clause_search(
+                    ExactClauseSearchRequest(
+                        organization_id=str(org_id),
+                        project_id=str(project_id),
+                        clause_number=query,
+                        limit=5,
+                    ),
+                    current_user,
+                )
+                retrieved.extend(result.sources)
+            except Exception:
+                continue
+        return self._with_source_hashes(retrieved)
+
+    @staticmethod
+    def _refinement_queries(validation: ValidationReport) -> List[str]:
+        queries: List[str] = []
+        for finding in validation.findings:
+            if finding.code != "unsupported_clause_citation" or not finding.evidence:
+                continue
+            for value in finding.evidence.split(","):
+                cleaned = value.strip()
+                if cleaned and cleaned not in queries:
+                    queries.append(cleaned)
+        return queries[:5]
+
+    def _assertion_support(
+        self,
+        artifact: DraftArtifact,
+        sources: List[SourceEvidence],
+        validation: ValidationReport,
+    ) -> List[DraftAssertionSupport]:
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", artifact.draft_letter or "")
+            if len(sentence.strip()) >= 30
+        ]
+        supports: List[DraftAssertionSupport] = []
+        for sentence in sentences[:20]:
+            source_ids = self._matching_source_ids(sentence, sources)
+            if "[CONFIRM:" in sentence or "[TO BE INSERTED BY USER:" in sentence:
+                status = "needs_confirmation"
+                risk = "medium"
+            elif source_ids:
+                status = "supported"
+                risk = "low"
+            elif any(source.source_type == "current_input" for source in sources):
+                status = "user_provided"
+                risk = "medium"
+            else:
+                status = "unsupported"
+                risk = "high"
+            supports.append(
+                DraftAssertionSupport(
+                    assertion_id=str(uuid.uuid4()),
+                    text=sentence,
+                    support_status=status,
+                    source_ids=source_ids,
+                    risk_level=risk,
+                )
+            )
+        if validation.blocking and not supports:
+            supports.append(
+                DraftAssertionSupport(
+                    assertion_id=str(uuid.uuid4()),
+                    text="Draft validation contains blocking findings.",
+                    support_status="unsupported",
+                    source_ids=[],
+                    risk_level="high",
+                )
+            )
+        return supports
+
+    @staticmethod
+    def _matching_source_ids(sentence: str, sources: List[SourceEvidence]) -> List[str]:
+        terms = {
+            term.lower()
+            for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]{3,}", sentence)
+            if term.lower() not in {"contractor", "engineer", "employer", "shall", "this", "that", "with"}
+        }
+        if not terms:
+            return []
+        matches: List[str] = []
+        for source in sources:
+            haystack = " ".join(
+                str(value or "")
+                for value in [
+                    source.label,
+                    source.text,
+                    source.snippet,
+                    source.clause_number,
+                    source.clause_title,
+                ]
+            ).lower()
+            hit_count = sum(1 for term in terms if term in haystack)
+            if hit_count >= max(2, min(4, len(terms) // 4)):
+                matches.append(source.source_id)
+        return matches[:5]
+
+    @staticmethod
+    def _confidence_scores(
+        validation: ValidationReport,
+        assertions: List[DraftAssertionSupport],
+        sources: List[SourceEvidence],
+    ) -> DraftConfidenceScores:
+        error_count = sum(1 for finding in validation.findings if finding.level == "error")
+        warning_count = sum(1 for finding in validation.findings if finding.level == "warning")
+        clause_sources = [source for source in sources if source.source_type == "contract_clause"]
+        clause_confidence = 1.0 if clause_sources else 0.55
+        if any(finding.code == "unsupported_clause_citation" for finding in validation.findings):
+            clause_confidence = 0.25
+
+        if assertions:
+            supported = sum(
+                1
+                for assertion in assertions
+                if assertion.support_status in {"supported", "user_provided"}
+            )
+            factual_support = supported / len(assertions)
+        else:
+            factual_support = 0.5
+
+        tone_suitability = max(0.0, 1.0 - (warning_count * 0.08) - (error_count * 0.2))
+        overall = max(
+            0.0,
+            min(
+                1.0,
+                (clause_confidence * 0.35)
+                + (factual_support * 0.4)
+                + (tone_suitability * 0.25)
+                - (error_count * 0.12),
+            ),
+        )
+        risk_level = "high" if error_count else ("medium" if warning_count or overall < 0.85 else "low")
+        return DraftConfidenceScores(
+            clause_confidence=round(clause_confidence, 3),
+            factual_support=round(factual_support, 3),
+            tone_suitability=round(tone_suitability, 3),
+            overall=round(overall, 3),
+            risk_level=risk_level,
+        )
+
+    def _build_context_pack(
+        self,
+        *,
+        letter: Letter,
+        request: DraftRunCreateRequest,
+        run_id: str,
+        context: Any,
+        sources: List[SourceEvidence],
+        source_warnings: List[str],
+    ) -> DraftContextPack:
+        inputs = self._inputs_payload(letter, request)
+        contractual_basis = [
+            {
+                "source_id": source.source_id,
+                "clause_number": source.clause_number,
+                "clause_title": source.clause_title,
+                "label": source.label,
+                "snippet": source.snippet,
+                "document_id": source.document_id,
+                "page_numbers": source.page_numbers,
+            }
+            for source in sources
+            if source.source_type == "contract_clause"
+        ]
+        prior_correspondence = [
+            {
+                "source_id": source.source_id,
+                "letter_id": source.letter_id,
+                "label": source.label,
+                "snippet": source.snippet,
+            }
+            for source in sources
+            if source.source_type in {"prior_correspondence", "graph_thread"}
+        ]
+        missing_confirmations = [
+            key.replace("_", " ")
+            for key, present in (context.threshold_inputs or {}).items()
+            if not present
+        ]
+        required_actions = [
+            value
+            for value in [
+                request.required_action,
+                request.desired_position,
+                request.purpose,
+            ]
+            if value
+        ]
+        facts = list(context.current_materials or [])[:20]
+        return DraftContextPack(
+            context_pack_id=str(uuid.uuid4()),
+            letter_id=str(getattr(letter, "id", "") or ""),
+            run_id=run_id,
+            project={
+                "organization_id": context.active_workspace.get("organization_id"),
+                "project_id": context.active_workspace.get("project_id"),
+                "letter_id": context.active_workspace.get("letter_id"),
+                "letter_no": context.active_workspace.get("letter_no"),
+            },
+            draft_request={
+                "draft_type": request.draft_type,
+                "letter_category": request.letter_category,
+                "contract_package": request.contract_package,
+                "role": request.role or getattr(letter, "strategy_role", None),
+                "subject": inputs.get("subject"),
+                "recipient": inputs.get("recipient"),
+                "tone": request.tone,
+                "trigger_event": request.trigger_event,
+            },
+            facts=facts,
+            contractual_basis=contractual_basis,
+            prior_correspondence=prior_correspondence,
+            required_actions=required_actions,
+            risk_flags=[],
+            missing_confirmations=missing_confirmations,
+            source_notes=list(source_warnings or []),
+            source_ids=[source.source_id for source in sources],
+        )
+
+    @staticmethod
+    def _assert_scope_allowed(current_user: Any, organization_id: str, project_id: str) -> None:
+        roles = {str(role).lower() for role in (getattr(current_user, "roles", []) or [])}
+        if "superadmin" in roles:
+            return
+        user_org = str(getattr(current_user, "organization_id", "") or "")
+        if user_org and str(organization_id) != user_org:
+            raise HTTPException(status_code=403, detail="Not authorized for this organization")
+        allowed_projects = {
+            str(project)
+            for project in (getattr(current_user, "projects", []) or [])
+            if project
+        }
+        if allowed_projects and str(project_id) not in allowed_projects:
+            raise HTTPException(status_code=403, detail="Not authorized for this project")
+
+    @staticmethod
+    def _snippet(value: Any, width: int = 500) -> Optional[str]:
+        if not value:
+            return None
+        text = " ".join(str(value).split())
+        if not text:
+            return None
+        if len(text) <= width:
+            return text
+        return f"{text[: max(0, width - 3)]}..."
+
+    @staticmethod
+    def _with_source_hashes(sources: List[SourceEvidence]) -> List[SourceEvidence]:
+        normalized: List[SourceEvidence] = []
+        for source in sources:
+            if source.source_hash:
+                normalized.append(source)
+                continue
+            raw = "|".join(
+                [
+                    source.source_id,
+                    source.source_type,
+                    source.allowed_use,
+                    source.document_id or "",
+                    source.letter_id or "",
+                    source.clause_number or "",
+                    source.text or source.snippet or "",
+                ]
+            )
+            normalized.append(
+                source.model_copy(
+                    update={
+                        "source_hash": hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                    }
+                )
+            )
+        return normalized
+
+    async def _load_and_authorize(
+        self,
+        letter_id: str,
+        current_user: Any,
+        action: str,
+        *,
+        drafting_permission: Optional[str] = None,
+    ) -> Letter:
+        letter = await self.letter_service.get_letter(letter_id)
+        if not letter:
+            raise HTTPException(status_code=404, detail="Letter not found")
+        if drafting_permission:
+            await self.policy_service.authorize(
+                current_user,
+                drafting_permission,
+                resource_type="letter",
+                resource_id=str(letter_id),
+                organization_id=str(getattr(letter, "organization_id", "") or ""),
+                project_id=str(getattr(letter, "project_id", "") or ""),
+                letter_id=str(letter_id),
+            )
+            return letter
+        await self.auth_service.check_letter_access(current_user, letter, action)
+        return letter
+
+    @staticmethod
+    def _resolve_role(letter: Letter, request: DraftRunCreateRequest) -> DraftRole:
+        raw = (request.role or getattr(letter, "strategy_role", None) or "contractor").lower()
+        if raw.startswith("engineer"):
+            return "engineer"
+        if raw.startswith("employer"):
+            return "employer"
+        return "contractor"
+
+    @staticmethod
+    def _inputs_payload(letter: Letter, request: DraftRunCreateRequest) -> Dict[str, Any]:
+        return {
+            "draft_type": request.draft_type,
+            "letter_category": request.letter_category,
+            "contract_package": request.contract_package,
+            "role": request.role or getattr(letter, "strategy_role", None),
+            "subject": request.subject or letter.subject,
+            "recipient": request.recipient or letter.recipient,
+            "requirements": request.requirements,
+            "points": request.points,
+            "purpose": request.purpose,
+            "desired_position": request.desired_position,
+            "required_action": request.required_action,
+            "background_facts": request.background_facts,
+            "trigger_event": request.trigger_event,
+            "tone": request.tone,
+            "timeline_days": request.timeline_days,
+            "incoming_document_id": request.incoming_document_id,
+            "incoming_letter_id": request.incoming_letter_id,
+            "clauses_to_consider": list(request.clauses_to_consider),
+            "attachments": list(request.attachments),
+            "document_ids": list(request.document_ids),
+            "include_letter_codes": list(request.include_letter_codes),
+            "exclude_letter_codes": list(request.exclude_letter_codes),
+            "plan_override": request.plan_override,
+            "max_iterations": request.max_iterations,
+            "finalized": request.finalized,
+        }
+
+    @staticmethod
+    def _blocked_artifact(report: ValidationReport) -> DraftArtifact:
+        required = ", ".join(finding.message for finding in report.findings)
+        return DraftArtifact(
+            draft_letter="",
+            source_integrity_notes=(
+                "DRAFT BLOCKED: Insufficient source material. Required: "
+                f"{required}"
+            ),
+            raw_model_output="",
+        )
+
+    @staticmethod
+    def _merge_reports(*reports: ValidationReport) -> ValidationReport:
+        findings = []
+        for report in reports:
+            findings.extend(report.findings)
+        return ValidationReport(
+            blocking=any(finding.level == "error" for finding in findings),
+            findings=findings,
+        )
+
+    async def _resolve_strategy_plan(
+        self,
+        letter_id: str,
+        letter: Letter,
+        request: DraftRunCreateRequest,
+    ) -> str:
+        if request.mode == "strategy":
+            return ""
+        if request.mode in {"draft", "review"} and not self._strategy_is_approved(letter):
+            return ""
+        if request.plan_override:
+            return request.plan_override
+        saved_plan = getattr(letter, "strategy_plan", None) or getattr(letter, "draft_plan", None)
+        if saved_plan:
+            return saved_plan
+        latest_strategy = await self.repository.latest(letter_id, "strategy")
+        if latest_strategy and latest_strategy.plan and latest_strategy.status != "failed":
+            return latest_strategy.plan
+        return ""
+
+    @staticmethod
+    def _strategy_is_approved(letter: Letter) -> bool:
+        if getattr(letter, "strategy_plan_approved_at", None):
+            return True
+        if getattr(letter, "accepted_strategy_version", None):
+            return True
+        # Backward compatibility for letters already advanced before the
+        # approval audit fields existed.
+        return str(getattr(letter, "status", "") or "").lower() in {
+            "draft",
+            "review",
+            "approval",
+            "completed",
+        }
+
+    @staticmethod
+    def _revision_instruction(request: ReviseDraftRequest) -> str:
+        labels = {
+            "make_firmer": "Revise the draft to be firmer while staying professional and source-faithful.",
+            "make_more_polite": "Revise the draft to be more polite and conciliatory without conceding unsupported points.",
+            "add_contractual_reasoning": "Add clearer contractual reasoning using only available clause evidence.",
+            "add_clause_reference": "Add clause references only where the retrieved source ledger supports them.",
+            "make_short": "Shorten the draft while preserving the required contractual position.",
+            "make_detailed": "Expand the draft with more structured facts, reasoning, and source integrity notes.",
+            "convert_to_employer_submission": "Revise from an Employer profile if supported by the request context.",
+            "convert_to_contractor_letter": "Revise from a Contractor profile if supported by the request context.",
+            "regenerate": "Regenerate the draft from the confirmed plan and source ledger.",
+            "custom_instruction": request.custom_instruction or "Apply the user's custom revision instruction.",
+        }
+        instruction = labels.get(request.revision_action, request.revision_action)
+        if request.additional_requirements:
+            instruction = f"{instruction}\nAdditional requirements: {request.additional_requirements}"
+        return instruction
+
+    @staticmethod
+    def _user_id(current_user: Any) -> Optional[str]:
+        return (
+            getattr(current_user, "id", None)
+            or getattr(current_user, "email", None)
+            or getattr(current_user, "username", None)
+        )

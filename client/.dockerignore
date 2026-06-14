@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+.git
+*.log
+.env*
+**/.env*
+**/secrets/
+**/*.pem
+**/*.key
+coverage/
