@@ -44,6 +44,7 @@ from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
 from ..services.upload_limits import upload_concurrency_limiter
 from ..services.upload_streaming import SpooledUpload, spool_upload_file, validate_spooled_upload
+from ..services.antivirus_service import AntivirusService
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..models.document import (
     Document,
@@ -500,6 +501,17 @@ class DocumentController:
                             f"Invalid file: {validation_result.error}",
                             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
                         )
+
+                    # --- ANTIVIRUS STREAM SCAN ---
+                    if settings.ANTIVIRUS_ENABLED:
+                        antivirus = AntivirusService()
+                        is_clean, scan_detail = await antivirus.scan_file(spooled.path)
+                        if not is_clean:
+                            raise DocumentError(
+                                f"Antivirus scan rejected this file: {scan_detail}",
+                                status.HTTP_400_BAD_REQUEST
+                            )
+                    # ------------------------------
 
                     # Parse date safely
                     parsed_date = parse_date_safely(date_str)
@@ -1422,6 +1434,17 @@ async def controller_add_enclosure(
                         f"Invalid enclosure: {validation_result.error}",
                         status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
                     )
+
+                # --- ANTIVIRUS STREAM SCAN ---
+                if settings.ANTIVIRUS_ENABLED:
+                    antivirus = AntivirusService()
+                    is_clean, scan_detail = await antivirus.scan_file(spooled.path)
+                    if not is_clean:
+                        raise DocumentError(
+                            f"Antivirus scan rejected this enclosure: {scan_detail}",
+                            status.HTTP_400_BAD_REQUEST
+                        )
+                # ------------------------------
 
                 context = await self.file_object_service.resolve_storage_context(
                     document.organization_id,

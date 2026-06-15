@@ -221,7 +221,7 @@ export const performanceUtils = {
     const start = performance.now();
     renderFn();
     const end = performance.now();
-    console.log(`${componentName} render time: ${end - start}ms`);
+    void (end - start); // render timing hook point (logging removed)
   },
 
   // Preload critical resources
@@ -294,9 +294,7 @@ export const withPerformanceMonitoring = <P extends object>(
     const metrics = usePerformanceMonitor();
 
     useEffect(() => {
-      if (process.env.NODE_ENV === "development") {
-        console.log(`${componentName} performance:`, metrics);
-      }
+      void metrics; // performance metrics hook point (logging removed)
     }, [metrics]);
 
     return React.createElement(WrappedComponent, props);

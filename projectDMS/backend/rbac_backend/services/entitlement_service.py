@@ -108,6 +108,32 @@ class EntitlementService:
             return {}
         return dict(plan.get("features") or {})
 
+    async def _addon_features(self, addon_codes: list) -> Dict[str, Any]:
+        """Merge features from all active add-ons."""
+        if not addon_codes:
+            return {}
+        db = await self._get_db()
+        merged: Dict[str, Any] = {}
+        cursor = db.addons.find({"code": {"$in": addon_codes}, "is_active": True})
+        async for addon in cursor:
+            merged.update(addon.get("features") or {})
+        return merged
+
+    async def _addon_limits(self, addon_codes: list) -> Dict[str, int]:
+        """Merge additional limits/capacity from active add-ons."""
+        if not addon_codes:
+            return {}
+        db = await self._get_db()
+        merged: Dict[str, int] = {}
+        cursor = db.addons.find({"code": {"$in": addon_codes}, "is_active": True})
+        async for addon in cursor:
+            for key, value in (addon.get("limits") or {}).items():
+                try:
+                    merged[key] = merged.get(key, 0) + int(value)
+                except (TypeError, ValueError):
+                    pass
+        return merged
+
     async def effective_features(
         self,
         *,
@@ -134,6 +160,11 @@ class EntitlementService:
             }
 
         features = await self._plan_features(subscription.get("plan_code"))
+        # Merge add-on features
+        addon_codes = subscription.get("active_add_ons") or []
+        addon_features = await self._addon_features(addon_codes)
+        features.update(addon_features)
+        # Apply entitlement overrides last (highest priority)
         features.update(subscription.get("entitlement_overrides") or {})
         return {
             "source": "project"
@@ -141,6 +172,10 @@ class EntitlementService:
             else "organization",
             "subscription_id": str(subscription.get("_id") or ""),
             "plan_code": subscription.get("plan_code"),
+            "billing_period": subscription.get("billing_period", "monthly"),
+            "trial": bool(subscription.get("trial")),
+            "trial_ends_at": subscription.get("trial_ends_at"),
+            "active_add_ons": addon_codes,
             "features": features,
             "dms_enabled": bool(features.get("feature.dms.enabled", False)),
             "drafting_enabled": bool(features.get("feature.drafting.enabled", False)),
@@ -258,6 +293,12 @@ class EntitlementService:
         except Exception:
             return True, "quota_invalid_unlimited"
 
+        # Add capacity from active add-ons
+        addon_codes = subscription.get("active_add_ons") or []
+        addon_limits = await self._addon_limits(addon_codes)
+        addon_boost = addon_limits.get(quota_key, 0)
+        limit_int += addon_boost
+
         # Count current-period usage from usage_events
         db = await self._get_db()
         now = datetime.utcnow()
@@ -281,4 +322,45 @@ class EntitlementService:
         if current_usage + quantity > limit_int:
             return False, "quota_exceeded"
         return True, "quota_available"
+
+    async def get_subscription_summary(
+        self,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a rich summary of the current subscription for dashboard display."""
+        effective = await self.effective_features(
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        subscription = await self._active_subscription(
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        plan_info: Dict[str, Any] = {}
+        if subscription and subscription.get("plan_code"):
+            db = await self._get_db()
+            plan = await db.plans.find_one({"code": str(subscription["plan_code"])})
+            if plan:
+                plan_info = {
+                    "name": plan.get("name"),
+                    "description": plan.get("description"),
+                    "tier": plan.get("tier"),
+                    "family": plan.get("family"),
+                    "max_users": plan.get("max_users"),
+                    "max_storage_gb": plan.get("max_storage_gb"),
+                    "pricing_tiers": plan.get("pricing_tiers", {}),
+                }
+
+        return {
+            **effective,
+            "plan_info": plan_info,
+            "status": str(subscription.get("status", "")) if subscription else "none",
+            "billing_period": subscription.get("billing_period", "monthly") if subscription else None,
+            "current_period_start": subscription.get("current_period_start") if subscription else None,
+            "current_period_end": subscription.get("current_period_end") if subscription else None,
+            "auto_renew": subscription.get("auto_renew", True) if subscription else False,
+            "cancelled_at": subscription.get("cancelled_at") if subscription else None,
+        }
 

@@ -147,6 +147,7 @@ class DocumentProcessor:
                 extracted_content, raw_ocr_text, pdf_path, path_structure, 
                 upload_type, document_id, parsed_metadata
             )
+            partial_failures = dict(getattr(self.database_service, "partial_failures", {}) or {})
 
             processing_time = time.time() - start_time
 
@@ -160,7 +161,8 @@ class DocumentProcessor:
                 chunks_created=chunks_created,
                 processing_time=processing_time,
                 metadata_source=metadata_source,
-                metadata_debug=metadata_debug
+                metadata_debug=metadata_debug,
+                partial_failures=partial_failures,
             )
 
         except Exception as e:

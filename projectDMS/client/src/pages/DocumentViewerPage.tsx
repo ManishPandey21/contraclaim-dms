@@ -11,7 +11,11 @@ import {
 } from "@/components/ui/resizable";
 import { toast } from "sonner";
 import { AlertTriangle, FileText, RefreshCw } from "lucide-react";
-import { enhancedApi, Document } from "@/services/enhanced-api";
+import {
+  enhancedApi,
+  Document,
+  type DocumentProcessingJobStatus,
+} from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
@@ -46,6 +50,8 @@ export interface LocalDocument extends Document {
   size?: string;
   version?: string;
   from_?: string; // Add this field if it's not in the base Document
+  filetype?: string;   // or required if always present
+  filename?: string;
   tags?: string[]; // Assuming tags are an array of strings
   subTags?: string[]; // Assuming subTags are an array of strings
   status: string; // Make required to match base Document interface
@@ -110,6 +116,9 @@ const DocumentViewerPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isError, setIsError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [processingStatus, setProcessingStatus] =
+    useState<DocumentProcessingJobStatus | null>(null);
+  const [isRetryingProcessing, setIsRetryingProcessing] = useState(false);
   const [createdByName, setCreatedByName] = useState<string>("");
   const [usersMap, setUsersMap] = useState<Record<string, string>>({});
   const [isLoadingReferences, setIsLoadingReferences] = useState(false);
@@ -161,12 +170,10 @@ const DocumentViewerPage: React.FC = () => {
         ...data,
         // Support both keys from backend responses
         from_: (data as any).from ?? (data as any).from_ ?? "",
-        uploadType:
-          data.uploadType?.toLowerCase() === "incoming"
-            ? "incoming"
-            : "outgoing",
-        tags: (data as any).tags || [], // Ensure tags are an array
-        subTags: (data as any).subTags || [], // Ensure subTags are an array
+
+          uploadType: data.uploadType?.toLowerCase() === "incoming" ? "incoming" : "outgoing",
+  tags: Array.isArray((data as any).tags) ? (data as any).tags : [],
+  subTags: Array.isArray((data as any).subTags) ? (data as any).subTags : [],
       };
       setDocument(localDoc);
       setUploadType(localDoc.uploadType);
@@ -185,6 +192,97 @@ const DocumentViewerPage: React.FC = () => {
     }
   }, [documentId]);
 
+  const fetchProcessingStatus = useCallback(async () => {
+    if (!documentId) return null;
+    try {
+      const status = await enhancedApi.getDocumentProcessingStatus(documentId);
+      setProcessingStatus(status);
+      return status;
+    } catch (error) {
+      console.warn("Unable to fetch processing status", error);
+      const fallbackStatus = {
+        _id: "",
+        document_id: documentId,
+        status: "not_queued",
+        attempts: 0,
+        max_attempts: 3,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      setProcessingStatus(fallbackStatus);
+      return fallbackStatus;
+    }
+  }, [documentId]);
+
+  const retryProcessing = useCallback(async () => {
+    if (!documentId) return;
+    setIsRetryingProcessing(true);
+    try {
+      const result = await enhancedApi.processDocument(documentId);
+      setProcessingStatus((prev) =>
+        result.job_id
+          ? {
+              _id: result.job_id,
+              document_id: documentId,
+              status: result.status || "queued",
+              stage: "queued",
+              attempts: 0,
+              max_attempts: 3,
+              error: null,
+              metadata: null,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            }
+          : prev
+      );
+      toast.success("Document processing queued");
+    } catch (error) {
+      toast.error("Failed to queue processing", {
+        description:
+          error instanceof Error ? error.message : "Unknown error occurred",
+      });
+    } finally {
+      setIsRetryingProcessing(false);
+    }
+  }, [documentId]);
+
+  useEffect(() => {
+    if (!documentId) return;
+    let cancelled = false;
+    let completedRefreshDone = false;
+    const terminal = new Set(["completed", "failed", "dead_lettered", "not_queued"]);
+
+    const currentStatus = processingStatus?.status;
+    if (currentStatus && terminal.has(currentStatus)) {
+      return;
+    }
+
+    const poll = async () => {
+      const status = await fetchProcessingStatus();
+      if (cancelled || !status) return;
+      if (status.status === "completed" && !completedRefreshDone) {
+        completedRefreshDone = true;
+        await fetchDocument();
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      if (cancelled) return;
+      const current = processingStatus?.status;
+      if (current && terminal.has(current)) {
+        window.clearInterval(interval);
+        return;
+      }
+      void poll();
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [documentId, fetchDocument, fetchProcessingStatus, processingStatus?.status]);
+
   const fetchAvailableAndLinkedDocuments = useCallback(async () => {
     if (!documentId) return;
     setIsLoadingAvailableDocuments(true);
@@ -198,7 +296,8 @@ const DocumentViewerPage: React.FC = () => {
         const errorData = await linkedResponse.json();
         throw new Error(errorData.detail || "Failed to fetch linked documents");
       }
-      const linkedData = await linkedResponse.json();
+      const rawLinkedData = await linkedResponse.json();
+      const linkedData = Array.isArray(rawLinkedData) ? rawLinkedData : (rawLinkedData.linked || []);
       const linkedDocumentIds = linkedData.map((ref: any) => ref.documentId);
 
       // Use lowercase for API calls
@@ -720,6 +819,33 @@ const DocumentViewerPage: React.FC = () => {
     );
   }
 
+  const effectiveProcessingStatus =
+    processingStatus?.status || document.processing_status || "not_queued";
+  const processingError =
+    processingStatus?.error || document.processing_error || null;
+  const showProcessingBanner = [
+    "queued",
+    "processing",
+    "retrying",
+    "failed",
+    "dead_lettered",
+    "metadata_extracted",
+    "completed",
+  ].includes(effectiveProcessingStatus);
+  const processingLabel =
+    effectiveProcessingStatus === "completed"
+      ? "Metadata extracted"
+      : effectiveProcessingStatus === "metadata_extracted"
+        ? "Metadata extracted; indexing is finishing"
+        : effectiveProcessingStatus === "failed" ||
+            effectiveProcessingStatus === "dead_lettered"
+          ? "Metadata extraction failed"
+          : effectiveProcessingStatus === "retrying"
+            ? "Metadata extraction retrying"
+            : effectiveProcessingStatus === "queued"
+              ? "Metadata extraction queued"
+              : "Metadata extraction in progress";
+
   return (
     <div className="h-screen flex flex-col bg-gray-100">
       <DocumentHeader
@@ -732,6 +858,46 @@ const DocumentViewerPage: React.FC = () => {
         setIsLinkReferenceDialogOpen={setIsLinkReferenceDialogOpen}
         relatedDocuments={relatedDocuments}
       />
+      {showProcessingBanner && (
+        <div
+          className={`border-b px-4 py-2 text-sm ${
+            effectiveProcessingStatus === "failed" ||
+            effectiveProcessingStatus === "dead_lettered"
+              ? "border-red-200 bg-red-50 text-red-800"
+              : effectiveProcessingStatus === "completed"
+                ? "border-green-200 bg-green-50 text-green-800"
+                : "border-amber-200 bg-amber-50 text-amber-900"
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <span className="font-medium">{processingLabel}</span>
+              {processingStatus?.stage && (
+                <span className="ml-2 text-xs opacity-80">
+                  Stage: {processingStatus.stage}
+                </span>
+              )}
+              {processingError?.message && (
+                <span className="ml-2 text-xs opacity-90">
+                  {String(processingError.message)}
+                </span>
+              )}
+            </div>
+            {(effectiveProcessingStatus === "failed" ||
+              effectiveProcessingStatus === "dead_lettered") && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void retryProcessing()}
+                disabled={isRetryingProcessing}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" />
+                {isRetryingProcessing ? "Retrying..." : "Retry Processing"}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
       <div className="flex-1 overflow-hidden">
         <ResizablePanelGroup direction="horizontal">
           <ResizablePanel defaultSize={75} minSize={50}>

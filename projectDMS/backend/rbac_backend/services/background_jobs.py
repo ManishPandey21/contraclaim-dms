@@ -368,10 +368,58 @@ async def start_background_services():
                 except Exception as e:
                     logger.error(f"Error in periodic assignment alerts: {e}")
         
+        # Schedule periodic subscription lifecycle management
+        async def periodic_subscription_lifecycle():
+            from .subscription_lifecycle_service import SubscriptionLifecycleService
+            from ..core.database import get_database
+            while processor.running:
+                try:
+                    await asyncio.sleep(60)  # Run every 60 seconds
+                    db = await get_database()
+                    if db is not None:
+                        lifecycle_service = SubscriptionLifecycleService(db)
+                        # Process trial expirations
+                        expired = await lifecycle_service.process_trial_expirations()
+                        if expired:
+                            logger.info(f"Subscription Lifecycle Job: Expired {len(expired)} trial subscriptions.")
+
+                        # Execute auto-renewals
+                        renewed = await lifecycle_service.execute_renewals()
+                        if renewed:
+                            logger.info(f"Subscription Lifecycle Job: Renewed {len(renewed)} subscriptions.")
+
+                        # Reset monthly usage counters
+                        archived = await lifecycle_service.reset_monthly_usage_counters()
+                        if archived:
+                            logger.info(f"Subscription Lifecycle Job: Archived {archived} monthly usage counters.")
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error in periodic subscription lifecycle: {e}")
+
+        async def periodic_document_processing_jobs():
+            """Poll durable Mongo-backed document processing jobs."""
+            from .document_service import DocumentService
+
+            service = DocumentService()
+            while processor.running:
+                try:
+                    processed = await service.process_next_processing_jobs(limit=3)
+                    await asyncio.sleep(1 if processed else 3)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Error in durable document processing loop: {e}")
+                    await asyncio.sleep(5)
+
         # Start cleanup task
         asyncio.create_task(periodic_cleanup())
         # Start assignment alerts task
         asyncio.create_task(periodic_assignment_alerts())
+        # Start subscription lifecycle task
+        asyncio.create_task(periodic_subscription_lifecycle())
+        # Start durable document processing queue task
+        asyncio.create_task(periodic_document_processing_jobs())
         
         logger.info("Background services started successfully")
         

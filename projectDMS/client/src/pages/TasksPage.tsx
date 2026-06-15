@@ -290,8 +290,7 @@ const TasksPage = () => {
   const onTaskSubmit = async (values: TaskFormValues) => {
     try {
       setIsSubmitting(true);
-      console.log('Creating new task:', values);
-      
+
       // Simulate API call
       await new Promise(resolve => setTimeout(resolve, 1500));
       
@@ -306,8 +305,6 @@ const TasksPage = () => {
         document: values.documentId ? documents.find(d => d.id === values.documentId) : undefined,
         createdAt: new Date().toISOString()
       };
-      
-      console.log('New task created:', newTask);
       
       toast.success("Task created successfully", {
         description: `Task assigned to ${newTask.assignedTo.name}`
@@ -341,8 +338,6 @@ const TasksPage = () => {
         user: users[0], // Current user
         timestamp: new Date().toISOString()
       };
-      
-      console.log('New comment added:', comment);
       
       toast.success("Comment added successfully");
       setNewComment("");

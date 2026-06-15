@@ -109,6 +109,12 @@ async def get_current_user(request: Request, db = Depends(get_db)):
     for token in token_candidates:
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            # Reject non-access tokens. Step-up tokens (typ="step_up") share the
+            # signing key and must never authenticate a normal session; tokens with
+            # an explicit non-"access" type are rejected too. Missing type ==
+            # legacy access token (back-compat during rollout).
+            if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
+                continue
             email: str = payload.get("sub")
             iat: int = payload.get("iat", 0)
             if email:
@@ -124,6 +130,17 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                         min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
                         if min_iat and iat < int(min_iat):
                             raise credentials_exception
+
+                        # Session invalidation: a logged-out or expired session must
+                        # immediately stop authenticating, even within the token TTL.
+                        # Only enforced when Redis is the session store; the
+                        # in-memory fallback is per-process and not authoritative.
+                        session_id = payload.get("session_id")
+                        if session_id:
+                            from ..services.authentication_service import AuthenticationService
+
+                            if not await AuthenticationService().is_session_active(str(session_id)):
+                                raise credentials_exception
 
                     # Derive organizations for superuser/similar users if not present
                     orgs = user.get("organizations", [])
@@ -243,6 +260,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
+    # Mark the audience of this token so non-access tokens (e.g. step-up tokens,
+    # which share the signing key) cannot be replayed as a session credential.
+    to_encode.setdefault("type", "access")
     encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
     return encoded_jwt
 
@@ -304,56 +324,13 @@ def require_permission(permission_name: str):
 
     return permission_checker
 
-def has_permission(permission: str):
-    async def has_permission_dependency(current_user: CurrentUser = Depends(get_current_active_user), db = Depends(get_db)):
-        try:
-            # Check if user has superadmin role (bypass permission check)
-            if "superadmin" in current_user.roles:
-                return current_user
-            
-            # Query roles using string IDs (not ObjectIds)
-            try:
-                user_roles = await db.roles.find({"_id": {"$in": current_user.roles}}).to_list(length=None)
-            except Exception as e:
-                # If role query fails, check if user is superadmin
-                if "superadmin" in current_user.roles:
-                    return current_user
-                raise HTTPException(status_code=500, detail="Error checking user permissions")
-            
-            user_permissions = []
-            for role in user_roles:
-                role_permissions = role.get("permissions", [])
-                if role_permissions:
-                    user_permissions.extend(role_permissions)
-
-            if permission not in user_permissions:
-                raise HTTPException(status_code=403, detail="Not enough permissions")
-            
-            return current_user
-            
-        except HTTPException:
-            # Re-raise HTTP exceptions as-is
-            raise
-        except Exception as e:
-            # For superadmin users, grant access even if there's an error
-            if "superadmin" in current_user.roles:
-                return current_user
-            raise HTTPException(status_code=500, detail="Internal server error during permission check")
-    return has_permission_dependency
-
-def require_roles(*roles: str):
-    async def role_dependency(current_user: CurrentUser = Depends(get_current_active_user)):
-        # Superadmin bypass
-        if "superadmin" in current_user.roles:
-            return current_user
-        # If no roles specified, allow any authenticated user
-        if not roles:
-            return current_user
-        # Ensure user has at least one required role
-        if any(role in current_user.roles for role in roles):
-            return current_user
-        raise HTTPException(status_code=403, detail="Insufficient role permissions")
-    return role_dependency
+# NOTE: The legacy `has_permission(permission)` dependency and `require_roles(*roles)`
+# were removed in the Week-1 authorization consolidation. `has_permission` queried
+# `db.roles` directly and swallowed errors into a superadmin-bypass; both diverged
+# from the canonical permission source. Use `require_permission(...)` (canonical
+# dependency) or `PolicyService.authorize(...)` (scoped, entitled, audited gate)
+# instead. For boolean predicates use `PolicyService.has_permission(...)`.
+# See docs/AUTHZ.md.
 
 # RBAC scope helpers
 def effective_project_ids(user: CurrentUser) -> List[str]:
@@ -389,7 +366,11 @@ def authorize_scope(
             allowed_orgs.add(str(org_id_val))
         allowed_projects = effective_project_ids(current_user)
 
-        if organization_id is not None and (allowed_orgs and str(organization_id) not in allowed_orgs):
+        # Deny-by-default: a superuser with no granted organizations has no scope.
+        # (Mirrors build_scope_query, which returns an empty-result filter here.)
+        if not allowed_orgs:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        if organization_id is not None and str(organization_id) not in allowed_orgs:
             raise HTTPException(status_code=403, detail="Not authorized for this organization")
         if project_id is not None and (allowed_projects and str(project_id) not in allowed_projects):
             raise HTTPException(status_code=403, detail="Not authorized for this project")

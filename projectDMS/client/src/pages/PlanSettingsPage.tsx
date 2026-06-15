@@ -1,10 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ChevronDown,
   ChevronRight,
   CircleSlash,
+  Clock,
   FolderClosed,
+  Package,
   RefreshCw,
+  Settings2,
 } from "lucide-react";
 import { toast } from "sonner";
 import useRBAC from "@/hooks/useRBAC";
@@ -250,7 +254,9 @@ const PlanSettingsPage = () => {
                 <TableHead>Name</TableHead>
                 <TableHead>Plan Selection</TableHead>
                 <TableHead>Effective Services</TableHead>
-                <TableHead>Source</TableHead>
+                <TableHead>Billing Period</TableHead>
+                <TableHead>Trial / Add-on Status</TableHead>
+                <TableHead>Effective Plan & Source</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -305,6 +311,27 @@ const PlanSettingsPage = () => {
                           {serviceBadge(
                             Boolean(effectiveOrg?.drafting_enabled),
                             "Drafting"
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <span className="text-xs text-muted-foreground">
+                          {effectiveOrg?.billing_period
+                            ? effectiveOrg.billing_period.charAt(0).toUpperCase() + effectiveOrg.billing_period.slice(1)
+                            : "—"}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-wrap gap-1">
+                          {effectiveOrg?.trial && (
+                            <Badge variant="outline" className="gap-1 text-amber-600 border-amber-300">
+                              <Clock className="h-3 w-3" /> Trial
+                            </Badge>
+                          )}
+                          {(effectiveOrg?.active_add_ons?.length || 0) > 0 && (
+                            <Badge variant="outline" className="gap-1">
+                              <Package className="h-3 w-3" /> {effectiveOrg?.active_add_ons?.length} add-on{(effectiveOrg?.active_add_ons?.length || 0) > 1 ? "s" : ""}
+                            </Badge>
                           )}
                         </div>
                       </TableCell>
@@ -367,6 +394,27 @@ const PlanSettingsPage = () => {
                                 )}
                               </div>
                             </TableCell>
+                            <TableCell>
+                              <span className="text-xs text-muted-foreground">
+                                {effectiveProject?.billing_period
+                                  ? effectiveProject.billing_period.charAt(0).toUpperCase() + effectiveProject.billing_period.slice(1)
+                                  : "—"}
+                              </span>
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1">
+                                {effectiveProject?.trial && (
+                                  <Badge variant="outline" className="gap-1 text-amber-600 border-amber-300">
+                                    <Clock className="h-3 w-3" /> Trial
+                                  </Badge>
+                                )}
+                                {(effectiveProject?.active_add_ons?.length || 0) > 0 && (
+                                  <Badge variant="outline" className="gap-1">
+                                    <Package className="h-3 w-3" /> {effectiveProject?.active_add_ons?.length}
+                                  </Badge>
+                                )}
+                              </div>
+                            </TableCell>
                             <TableCell className="text-muted-foreground">
                               {source === "inherited"
                                 ? `Inherited: ${planName(effectiveProject?.plan_code)}`
@@ -380,7 +428,7 @@ const PlanSettingsPage = () => {
                     {orgExpanded && orgProjects.length === 0 && (
                       <TableRow className="bg-muted/20">
                         <TableCell
-                          colSpan={4}
+                          colSpan={6}
                           className="pl-12 text-muted-foreground"
                         >
                           <div className="flex items-center gap-2">
@@ -397,6 +445,16 @@ const PlanSettingsPage = () => {
           </Table>
         </CardContent>
       </Card>
+
+      {/* Link to Subscription Management */}
+      <div className="flex justify-end">
+        <Link to="/subscription-management">
+          <Button variant="outline" className="gap-2">
+            <Settings2 className="h-4 w-4" />
+            Advanced Subscription Management
+          </Button>
+        </Link>
+      </div>
     </div>
   );
 };

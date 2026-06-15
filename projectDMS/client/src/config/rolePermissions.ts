@@ -82,6 +82,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/users": ["users:read"],
   "/permissions": ["roles:read"],
   "/plan-settings": ["subscription.entitlement.manage"],
+  "/subscription-management": ["subscription.entitlement.manage", "subscription.upgrade"],
   "/settings": ["settings:view"],
   "/notifications": [],
   "/profile": ["profile:read"],

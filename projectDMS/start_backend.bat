@@ -1,3 +1,3 @@
 @echo off
 cd /d C:\SaaS\projectDMS\backend
-python -m uvicorn rbac_backend.main:app --reload --port 8000
+C:\SaaS\projectDMS\.venv\Scripts\python.exe -m uvicorn rbac_backend.main:app --reload --port 8000

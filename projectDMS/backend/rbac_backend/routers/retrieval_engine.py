@@ -9,7 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ..agents.service import DraftingAgentService
 from ..agents.models import AgentRequest, AgentResponse
 from ..core.database import get_db
+from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
+from ..services.policy_service import PolicyService
 from ..ingestion.models import IngestionJob, IngestionJobCreate
 from ..ingestion.service import IngestionService
 from ..observability.models import AnalyticsRequest
@@ -63,13 +65,54 @@ async def get_reconciler(
     return VectorReconciler(db=db, embedding_client=embedding_client, vector_client=vector_client)
 
 
-def _ensure_scope(org_id: str, project_id: str, current_user: CurrentUser) -> None:
-    if "superadmin" in (current_user.roles or []):
-        return
-    if current_user.organization_id and current_user.organization_id != org_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-org access denied")
-    if current_user.projects and project_id not in current_user.projects:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project access denied")
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db=db)
+
+
+def _require_scope_values(org_id: Optional[str], project_id: Optional[str]) -> tuple[str, str]:
+    """Reject blank/missing scope before it reaches the deny-by-default policy.
+
+    SearchFilters types ``org_id``/``project_id`` as required strings, but empty
+    strings would otherwise pass straight through scope evaluation and return
+    unfiltered (cross-tenant) results.
+    """
+    org = (org_id or "").strip()
+    project = (project_id or "").strip()
+    if not org or not project:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A non-empty organization and project scope is required",
+        )
+    return org, project
+
+
+async def _authorize_scope(
+    current_user: CurrentUser,
+    org_id: Optional[str],
+    project_id: Optional[str],
+    *,
+    permission: str = Permissions.DOCUMENT_VIEW,
+    policy: Optional[PolicyService] = None,
+) -> None:
+    """Deny-by-default scope enforcement for the retrieval engine.
+
+    Replaces the legacy ``_ensure_scope`` helper, which silently skipped the
+    organization check when ``current_user.organization_id`` was falsy and the
+    project check when ``current_user.projects`` was empty -- allowing a caller
+    to claim an arbitrary ``org_id``/``project_id`` in the request body. The
+    central ``PolicyService`` verifies RBAC permission, subscription entitlement,
+    and tenant membership (``ScopeService.is_client_scope_allowed``) and emits an
+    audit event, matching the documents router.
+    """
+    org, project = _require_scope_values(org_id, project_id)
+    policy = policy or PolicyService()
+    await policy.authorize(
+        current_user,
+        permission,
+        resource_type="retrieval",
+        organization_id=org,
+        project_id=project,
+    )
 
 
 @router.post("/ingestion/jobs", response_model=IngestionJob)
@@ -77,8 +120,11 @@ async def create_ingestion_job(
     payload: IngestionJobCreate,
     ingestion_service: IngestionService = Depends(get_ingestion_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> IngestionJob:
-    _ensure_scope(payload.org_id, payload.project_id, current_user)
+    await _authorize_scope(
+        current_user, payload.org_id, payload.project_id, permission=Permissions.DOCUMENT_UPLOAD, policy=policy
+    )
     job = await ingestion_service.create_job(payload)
     return job
 
@@ -88,11 +134,12 @@ async def get_ingestion_job(
     job_id: str,
     ingestion_service: IngestionService = Depends(get_ingestion_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> IngestionJob:
     job = await ingestion_service.get_job(job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    _ensure_scope(job.org_id, job.project_id, current_user)
+    await _authorize_scope(current_user, job.org_id, job.project_id, policy=policy)
     return job
 
 
@@ -101,8 +148,9 @@ async def search(
     request: SearchRequest,
     retrieval_service: RetrievalService = Depends(get_retrieval_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> SearchResponse:
-    _ensure_scope(request.filters.org_id, request.filters.project_id, current_user)
+    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
     return await retrieval_service.search(request, current_user)
 
 
@@ -111,8 +159,9 @@ async def rag(
     request: RagRequest,
     retrieval_service: RetrievalService = Depends(get_retrieval_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> RagResponse:
-    _ensure_scope(request.filters.org_id, request.filters.project_id, current_user)
+    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
     return await retrieval_service.rag(request, current_user)
 
 
@@ -121,9 +170,13 @@ async def contract_qa(
     request: ContractQARequest,
     retrieval_service: RetrievalService = Depends(get_retrieval_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> ContractQAResponse:
     request.filters.metadata["uploadType"] = "contract"
     request.filters.metadata["document_type"] = "contract"
+    # Authorize the claimed scope up front so a foreign document_id cannot be
+    # probed via the lookup below before tenant membership is verified.
+    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
     contract_service = ContractService()
     if request.filters.document_id:
         document = await contract_service.get_contract_document(request.filters.document_id, current_user)
@@ -132,7 +185,9 @@ async def contract_qa(
         request.filters.org_id = str(document.get("organization_id") or request.filters.org_id)
         request.filters.project_id = str(document.get("project_id") or request.filters.project_id)
         request.filters.document_id = str(document.get("_id") or request.filters.document_id)
-    _ensure_scope(request.filters.org_id, request.filters.project_id, current_user)
+        # Re-authorize against the document's actual scope: the resolved
+        # org/project may differ from the claimed filters.
+        await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
     return await retrieval_service.contract_iterative_qa(request, current_user)
 
 
@@ -141,8 +196,9 @@ async def agent(
     request: AgentRequest,
     agent_service: DraftingAgentService = Depends(get_agent_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ) -> AgentResponse:
-    _ensure_scope(request.org_id, request.project_id, current_user)
+    await _authorize_scope(current_user, request.org_id, request.project_id, policy=policy)
     return await agent_service.run(request, current_user)
 
 
@@ -155,10 +211,13 @@ async def list_logs(
     to_ts: Optional[str] = Query(default=None, alias="to"),
     observability: ObservabilityService = Depends(get_observability),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     # Only superadmins can fetch unscoped logs
     if org_id and project_id:
-        _ensure_scope(org_id, project_id, current_user)
+        await _authorize_scope(
+            current_user, org_id, project_id, permission=Permissions.REPORT_VIEW, policy=policy
+        )
     elif "superadmin" not in (current_user.roles or []):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require scope")
     try:
@@ -174,9 +233,12 @@ async def analytics(
     request: AnalyticsRequest,
     observability: ObservabilityService = Depends(get_observability),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     if request.org_id and request.project_id:
-        _ensure_scope(request.org_id, request.project_id, current_user)
+        await _authorize_scope(
+            current_user, request.org_id, request.project_id, permission=Permissions.REPORT_VIEW, policy=policy
+        )
     elif "superadmin" not in (current_user.roles or []):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require org_id and project_id")
     return await observability.analytics(request)

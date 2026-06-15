@@ -80,6 +80,8 @@ class OrganizationService:
                 subscription_status=getattr(org_data, "subscription_status", None),
                 trial_days=getattr(org_data, "trial_days", None),
                 created_by=created_by,
+                billing_period=getattr(org_data, "billing_period", None),
+                add_on_codes=getattr(org_data, "add_on_codes", None),
             )
             
             # Return created organization
@@ -101,6 +103,8 @@ class OrganizationService:
         subscription_status: str | None,
         trial_days: int | None,
         created_by: Any,
+        billing_period: str | None = None,
+        add_on_codes: list | None = None,
     ) -> None:
         """Provision the initial subscription for a newly created organization."""
         from .monetization_service import MonetizationService
@@ -108,29 +112,44 @@ class OrganizationService:
 
         effective_plan = plan_code or "no_service_override"
         effective_status = subscription_status or ("trial" if plan_code else "active")
+        effective_billing_period = billing_period or "monthly"
 
         now = datetime.utcnow()
         starts_at = now
         ends_at = None
+        trial_ends_at = None
         is_trial = effective_status == "trial"
         is_pilot = effective_status == "pilot"
 
         if is_trial and trial_days:
             from datetime import timedelta
             ends_at = now + timedelta(days=trial_days)
+            trial_ends_at = ends_at
         elif is_pilot and trial_days:
             from datetime import timedelta
             ends_at = now + timedelta(days=trial_days)
 
+        # Compute period boundaries
+        from datetime import timedelta
+        period_map = {"quarterly": 90, "semi_annual": 182, "annual": 365}
+        period_days = period_map.get(effective_billing_period, 30)
+        current_period_end = now + timedelta(days=period_days)
+
         payload = SubscriptionCreate(
             organization_id=org_id,
             plan_code=effective_plan,
+            billing_period=effective_billing_period,
             status=effective_status,
             billing_status="active",
             starts_at=starts_at,
             ends_at=ends_at,
+            current_period_start=now,
+            current_period_end=current_period_end,
             trial=is_trial,
+            trial_ends_at=trial_ends_at,
             pilot=is_pilot,
+            auto_renew=not is_trial,
+            active_add_ons=add_on_codes or [],
         )
 
         try:

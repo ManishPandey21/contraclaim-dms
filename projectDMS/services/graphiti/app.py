@@ -55,9 +55,13 @@ logger.add(lambda msg: print(msg, end=""), level=settings.log_level)
 app = FastAPI(title="Graphiti Knowledge Graph API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "http://backend:8000",
+        "http://langgraph:8082",
+        "http://localhost:8000",
+    ],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -332,7 +336,7 @@ def readiness() -> Dict[str, str]:
     return {"status": "ready"}
 
 
-@app.post("/documents", response_model=QueryResponse, tags=["documents"])
+@app.post("/documents", response_model=QueryResponse, tags=["documents"], dependencies=[Depends(require_api_key)])
 async def upsert_document(document: GraphDocument) -> QueryResponse:
     summary: Optional[str] = None
     if document.generate_summary:
@@ -344,7 +348,7 @@ async def upsert_document(document: GraphDocument) -> QueryResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/episodes", response_model=QueryResponse, tags=["episodes"])
+@app.post("/episodes", response_model=QueryResponse, tags=["episodes"], dependencies=[Depends(require_api_key)])
 async def add_episode(episode: GraphEpisode) -> QueryResponse:
     try:
         return graphiti_service.add_episode(episode)
@@ -362,7 +366,7 @@ async def search(term: str = Query(..., min_length=2), limit: int = Query(settin
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/relationships", response_model=QueryResponse, tags=["relationships"])
+@app.post("/relationships", response_model=QueryResponse, tags=["relationships"], dependencies=[Depends(require_api_key)])
 async def relate(payload: RelationshipPayload) -> QueryResponse:
     try:
         return graphiti_service.relate(payload)
@@ -380,8 +384,20 @@ async def temporal(query: TemporalQuery) -> QueryResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+_DANGEROUS_CYPHER_RE = re.compile(
+    r"\b(DROP|DELETE|REMOVE|CREATE\s+INDEX|DROP\s+INDEX|CREATE\s+CONSTRAINT|DROP\s+CONSTRAINT)\b",
+    re.IGNORECASE,
+)
+
+
 @app.post("/graph/query", response_model=QueryResponse, tags=["admin"], dependencies=[Depends(require_api_key)])
 async def raw_query(request: QueryRequest) -> QueryResponse:
+    # Block dangerous write operations through the raw query endpoint
+    if _DANGEROUS_CYPHER_RE.search(request.query):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Destructive Cypher operations (DROP, DELETE, REMOVE, schema changes) are not allowed via the raw query endpoint",
+        )
     try:
         return graphiti_service.raw(request)
     except redis.RedisError as exc:

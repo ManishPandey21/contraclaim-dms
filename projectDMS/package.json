@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "index": "^0.4.0",
+    "llama": "^2.2.0"
+  }
+}

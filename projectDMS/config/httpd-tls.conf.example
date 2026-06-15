@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# Optional in-gateway TLS termination (Week 4.3)
+#
+# The default config/httpd.conf terminates plain HTTP on :80 and assumes TLS is
+# handled by an upstream load balancer / reverse proxy (recommended for cloud).
+#
+# Use THIS template instead when you want the Apache gateway itself to terminate
+# TLS (e.g. single-VM pilot). To enable:
+#   1. Obtain a cert + key (Let's Encrypt / ACM export) and mount them at
+#      /usr/local/apache2/conf/certs/{fullchain.pem,privkey.pem}
+#   2. Copy this file to config/httpd.conf (replacing the :80-only config)
+#   3. Publish :443 (and keep :80 for the ACME/redirect) in docker-compose.prod.yml:
+#         ports: ["443:443", "80:80"]
+#
+# HSTS, CSP and the other security headers are identical to the HTTP config.
+# ---------------------------------------------------------------------------
+
+ServerRoot "/usr/local/apache2"
+Listen 80
+Listen 443
+ServerName localhost
+
+LoadModule mpm_event_module modules/mod_mpm_event.so
+LoadModule unixd_module modules/mod_unixd.so
+LoadModule authz_core_module modules/mod_authz_core.so
+LoadModule authz_host_module modules/mod_authz_host.so
+LoadModule log_config_module modules/mod_log_config.so
+LoadModule alias_module modules/mod_alias.so
+LoadModule headers_module modules/mod_headers.so
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+LoadModule ssl_module modules/mod_ssl.so
+LoadModule rewrite_module modules/mod_rewrite.so
+
+User daemon
+Group daemon
+
+ErrorLog /proc/self/fd/2
+LogLevel warn
+LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
+CustomLog /proc/self/fd/1 combined
+
+ProxyRequests Off
+ProxyPreserveHost On
+ProxyTimeout 300
+
+# Modern TLS only.
+SSLProtocol -all +TLSv1.2 +TLSv1.3
+SSLCipherSuite HIGH:!aNULL:!MD5:!3DES
+SSLHonorCipherOrder on
+SSLSessionTickets off
+
+# --- :80 — ACME challenge + redirect everything else to HTTPS ---------------
+<VirtualHost *:80>
+    DocumentRoot "/usr/local/apache2/htdocs"
+    Alias "/health" "/usr/local/apache2/htdocs/health.txt"
+    <Location "/health">
+        Require all granted
+    </Location>
+    # Allow ACME http-01 challenge through, redirect the rest.
+    RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
+    RewriteCond %{REQUEST_URI} !^/health$
+    RewriteRule ^/(.*)$ https://%{HTTP_HOST}/$1 [R=308,L]
+</VirtualHost>
+
+# --- :443 — TLS termination + reverse proxy ---------------------------------
+<VirtualHost *:443>
+    SSLEngine on
+    SSLCertificateFile "/usr/local/apache2/conf/certs/fullchain.pem"
+    SSLCertificateKeyFile "/usr/local/apache2/conf/certs/privkey.pem"
+
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'"
+
+    <Proxy *>
+        Require all granted
+    </Proxy>
+
+    Alias "/health" "/usr/local/apache2/htdocs/health.txt"
+    <Location "/health">
+        Require all granted
+    </Location>
+
+    ProxyPass        /api/ http://backend:8000/api/
+    ProxyPassReverse /api/ http://backend:8000/api/
+
+    ProxyPass        / http://client:5173/
+    ProxyPassReverse / http://client:5173/
+</VirtualHost>

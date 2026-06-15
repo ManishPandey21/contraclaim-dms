@@ -436,6 +436,12 @@ async def ensure_indexes(db):
         [("organization_id", 1), ("project_id", 1), ("created_at", -1)],
         background=True,
     )
+    await db.billing_records.create_index("event_id", background=True)
+    await db.billing_webhook_events.create_index("event_id", unique=True, background=True)
+    await db.billing_webhook_events.create_index(
+        [("provider", 1), ("received_at", -1)],
+        background=True,
+    )
     await db.offboarding_exports.create_index(
         [("organization_id", 1), ("project_id", 1), ("status", 1), ("expires_at", 1)],
         background=True,

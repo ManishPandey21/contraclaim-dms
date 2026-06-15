@@ -97,6 +97,29 @@ export interface Document {
   updatedAt?: string;
   references?: DocumentReference[];
   enclosures?: Enclosure[];
+  processing_status?: string | null;
+  processing_job_id?: string | null;
+  processing_metadata?: Record<string, any> | null;
+  processing_error?: Record<string, any> | null;
+  processed_path?: string | null;
+  metadata_source?: string | null;
+  processed_at?: string | null;
+}
+
+export interface DocumentProcessingJobStatus {
+  _id: string;
+  document_id: string;
+  status: string;
+  stage?: string | null;
+  attempts: number;
+  max_attempts: number;
+  error?: Record<string, any> | null;
+  metadata?: Record<string, any> | null;
+  created_at: string;
+  queued_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
 }
 
 export interface DocumentProcessingResult {
@@ -109,6 +132,9 @@ export interface DocumentProcessingResult {
   metadata_extracted?: boolean;
   ocr_completed?: boolean;
   embeddings_created?: number;
+  status?: string;
+  job_id?: string;
+  message?: string;
 }
 
 export interface BulkUploadResponse {
@@ -880,6 +906,14 @@ class EnhancedApiService {
     return this.request<Document>(`/documents/${id}`);
   }
 
+  async getDocumentProcessingStatus(
+    id: string,
+  ): Promise<DocumentProcessingJobStatus> {
+    return this.request<DocumentProcessingJobStatus>(
+      `/documents/${id}/processing-status`,
+    );
+  }
+
   async uploadDocument(documentData: DocumentUploadData): Promise<Document> {
     const formData = new FormData();
     formData.append("file", documentData.file);
@@ -889,6 +923,7 @@ class EnhancedApiService {
     formData.append("date", documentData.date);
     formData.append("subject", documentData.subject ?? documentData.file.name);
     formData.append("status", documentData.status ?? "draft");
+    formData.append("doc_status", documentData.status ?? "draft");
 
     if (documentData.letterNo) {
       formData.append("letterNo", documentData.letterNo);
@@ -1410,6 +1445,12 @@ class EnhancedApiService {
         ? { "X-Step-Up-Token": options.stepUpToken }
         : undefined,
       body: JSON.stringify(roleData),
+    });
+  }
+
+  async processDocument(id: string): Promise<DocumentProcessingResult> {
+    return this.request<DocumentProcessingResult>(`/documents/${id}/process`, {
+      method: "POST",
     });
   }
 

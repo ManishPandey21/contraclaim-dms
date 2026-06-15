@@ -22,6 +22,9 @@ const UsersPage = lazy(() => import("./pages/UsersPage"));
 const PermissionsPage = lazy(() => import("./pages/PermissionsPage"));
 const SettingsPage = lazy(() => import("./pages/SettingsPage"));
 const PlanSettingsPage = lazy(() => import("./pages/PlanSettingsPage"));
+const SubscriptionManagementPage = lazy(
+  () => import("./pages/SubscriptionManagementPage"),
+);
 const NotificationCenterPage = lazy(
   () => import("./pages/NotificationCenterPage"),
 );
@@ -82,13 +85,20 @@ const AppRoutes = () => (
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="documentsearch" element={<EnhancedDocumentsPage />} />
-        <Route path="documents/legacy" element={<DocumentsPage />} />
         <Route path="tags" element={<TagsPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="users" element={<UsersPage />} />
         <Route path="permissions" element={<PermissionsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="plan-settings" element={<PlanSettingsPage />} />
+        <Route
+          path="subscription-management"
+          element={
+            <RoleGuard path="/subscription-management" fallback="/overview">
+              <SubscriptionManagementPage />
+            </RoleGuard>
+          }
+        />
         <Route path="notifications" element={<NotificationCenterPage />} />
         <Route path="upload" element={<UploadPage />} />
         <Route path="/documentviewer/:id" element={<DocumentViewerPage />} />

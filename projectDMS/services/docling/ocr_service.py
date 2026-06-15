@@ -1,5 +1,23 @@
 from __future__ import annotations
 
+# =============================================================================
+# ⚠️  EXPERIMENTAL / NOT DEPLOYED
+# =============================================================================
+# This Docling document-processing microservice is NOT registered in any Docker
+# Compose file, has no gateway proxy route, and is NOT called by the backend.
+#
+# The production OCR/document-processing pipeline lives in the main backend:
+#   - backend/rbac_backend/services/ocr_service.py   (OCR via ocrmypdf)
+#   - backend/rbac_backend/services/document_processor.py
+#   - backend/rbac_backend/services/metadata_processor_service.py
+#
+# This service was prototyped as a multi-format extraction sidecar (PDF, DOCX,
+# PPTX, images) with optional Qdrant vector embedding, but was never wired
+# into the deployment.
+#
+# Do NOT rely on this service for production features.
+# =============================================================================
+
 import asyncio
 import re
 import shutil

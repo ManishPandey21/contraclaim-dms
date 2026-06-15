@@ -1,9 +1,10 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
 import tempfile
 
+from pymongo import ReturnDocument
 from pymongo.database import Database
 from bson.objectid import ObjectId
 from bson.errors import InvalidId
@@ -21,7 +22,6 @@ from ..models.document import (
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
-from .background_jobs import submit_background_job
 from .document_processor import create_document_processor
 from ..utils.exceptions import DocumentProcessingError as DocumentProcessorError
 from ..graph.graph_ingestion_service import GraphIngestionService
@@ -347,12 +347,14 @@ class DocumentService:
                 except Exception:
                     mime = "application/octet-stream"
 
-                # Auto-set status based on upload_type
-                status = "draft"
-                if upload_type and upload_type.lower() == "incoming":
-                    status = "Received"
-                elif upload_type and upload_type.lower() == "outgoing":
-                    status = "Sent"
+                # Honor caller-provided status; default by direction only when omitted.
+                status = kwargs.get("status")
+                if not status:
+                    status = "draft"
+                    if upload_type and upload_type.lower() == "incoming":
+                        status = "Received"
+                    elif upload_type and upload_type.lower() == "outgoing":
+                        status = "Sent"
 
                 generated_id = ObjectId()
                 document = Document(
@@ -664,25 +666,308 @@ class DocumentService:
         await db.documents.update_one({"_id": doc_oid}, {"$push": {"enclosures": enc_doc}})
         return EnclosureResponse(enclosure=enc, message="Enclosure added successfully")
 
-    async def queue_document_processing(self, document: Document, file_path: str) -> str:
-        """Submit a background job to process the uploaded document."""
+    async def queue_document_processing(
+        self,
+        document: Document,
+        file_path: str,
+        *,
+        requested_by: Optional[str] = None,
+        force: bool = False,
+    ) -> str:
+        """Create a durable processing job for an uploaded document."""
 
+        db = await self._get_db()
+        now = datetime.utcnow()
+        active_statuses = ["queued", "processing", "retrying"]
+        if not force:
+            existing = await db.document_processing_jobs.find_one(
+                {
+                    "document_id": document.id,
+                    "status": {"$in": active_statuses},
+                },
+                sort=[("created_at", -1)],
+            )
+            if existing:
+                job_id = str(existing["_id"])
+                await db.documents.update_one(
+                    {"_id": self._validate_document_id(document.id)},
+                    {
+                        "$set": {
+                            "processing_status": existing.get("status", "queued"),
+                            "processing_job_id": job_id,
+                            "updatedAt": now,
+                        }
+                    },
+                )
+                return job_id
+
+        job_id = str(ObjectId())
+        job = {
+            "_id": job_id,
+            "document_id": document.id,
+            "file_path": file_path,
+            "sha256": getattr(document, "sha256", None),
+            "organization_id": document.organization_id,
+            "project_id": document.project_id,
+            "upload_type": document.uploadType,
+            "status": "queued",
+            "stage": "queued",
+            "attempts": 0,
+            "max_attempts": 3,
+            "requested_by": requested_by,
+            "created_at": now,
+            "queued_at": now,
+            "updated_at": now,
+        }
+        await db.document_processing_jobs.insert_one(job)
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document.id)},
+            {
+                "$set": {
+                    "processing_status": "queued",
+                    "processing_job_id": job_id,
+                    "processing_error": None,
+                    "updatedAt": now,
+                }
+            },
+        )
         logger.info(
-            "[document_pipeline] Queueing OCR/metadata pipeline for document %s (file=%s)",
+            "[document_pipeline] Durable processing job queued document_id=%s job_id=%s file=%s",
             document.id,
+            job_id,
             file_path,
         )
-        job_id = await submit_background_job(
-            "document-processing",
-            self.process_document_async,
-            document.id,
-            file_path,
-            organization_id=document.organization_id,
-            project_id=document.project_id,
-            upload_type=document.uploadType,
-        )
-        logger.info("Queued document processing job %s for %s", job_id, document.id)
         return job_id
+
+    async def get_processing_status(self, document_id: str) -> Optional[Dict[str, Any]]:
+        db = await self._get_db()
+        document = await self.get_document(document_id)
+        if not document:
+            return None
+        job = None
+        if getattr(document, "processing_job_id", None):
+            job = await db.document_processing_jobs.find_one({"_id": document.processing_job_id})
+        if not job:
+            job = await db.document_processing_jobs.find_one(
+                {"document_id": document_id},
+                sort=[("created_at", -1)],
+            )
+        if not job:
+            return {
+                "_id": "",
+                "document_id": document_id,
+                "status": getattr(document, "processing_status", None) or "not_queued",
+                "stage": None,
+                "attempts": 0,
+                "max_attempts": 0,
+                "error": getattr(document, "processing_error", None),
+                "metadata": getattr(document, "processing_metadata", None),
+                "created_at": getattr(document, "createdAt", None) or datetime.utcnow(),
+                "updated_at": getattr(document, "updatedAt", None) or datetime.utcnow(),
+            }
+        return job
+
+    async def process_next_processing_jobs(self, *, limit: int = 3) -> int:
+        """Claim and process queued durable jobs. Intended for worker/background loops."""
+
+        processed = 0
+        for _ in range(max(1, limit)):
+            job = await self._claim_next_processing_job()
+            if not job:
+                break
+            await self.process_document_job(str(job["_id"]), claimed_job=job)
+            processed += 1
+        return processed
+
+    async def _claim_next_processing_job(self) -> Optional[Dict[str, Any]]:
+        db = await self._get_db()
+        now = datetime.utcnow()
+        return await db.document_processing_jobs.find_one_and_update(
+            {
+                "status": {"$in": ["queued", "retrying"]},
+                "$or": [
+                    {"run_after": {"$exists": False}},
+                    {"run_after": {"$lte": now}},
+                ],
+            },
+            {
+                "$set": {
+                    "status": "processing",
+                    "stage": "claimed",
+                    "started_at": now,
+                    "updated_at": now,
+                },
+                "$inc": {"attempts": 1},
+            },
+            sort=[("created_at", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+
+    async def process_document_job(
+        self,
+        job_id: str,
+        *,
+        claimed_job: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Run a durable document-processing job and update terminal state."""
+
+        db = await self._get_db()
+        job = claimed_job or await db.document_processing_jobs.find_one({"_id": job_id})
+        if not job:
+            logger.warning("Document processing job %s not found", job_id)
+            return False
+
+        if job.get("status") in {"completed", "dead_lettered"}:
+            return job.get("status") == "completed"
+
+        if job.get("status") != "processing":
+            job = await db.document_processing_jobs.find_one_and_update(
+                {"_id": job_id, "status": {"$in": ["queued", "retrying"]}},
+                {
+                    "$set": {
+                        "status": "processing",
+                        "stage": "started",
+                        "started_at": datetime.utcnow(),
+                        "updated_at": datetime.utcnow(),
+                    },
+                    "$inc": {"attempts": 1},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if not job:
+                return False
+
+        document_id = str(job["document_id"])
+        now = datetime.utcnow()
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": "processing",
+                    "processing_job_id": job_id,
+                    "processing_error": None,
+                    "updatedAt": now,
+                }
+            },
+        )
+        try:
+            ok = await self.process_document_async(
+                document_id=document_id,
+                file_path=str(job.get("file_path") or ""),
+                organization_id=job.get("organization_id"),
+                project_id=job.get("project_id"),
+                upload_type=job.get("upload_type"),
+                job_id=job_id,
+            )
+        except Exception as exc:
+            logger.exception("Document processing job failed document_id=%s job_id=%s", document_id, job_id)
+            ok = False
+            await self._mark_processing_failure(job, str(exc))
+
+        if ok:
+            completed_at = datetime.utcnow()
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "stage": "completed",
+                        "completed_at": completed_at,
+                        "updated_at": completed_at,
+                        "error": None,
+                    }
+                },
+            )
+            await db.documents.update_one(
+                {"_id": self._validate_document_id(document_id)},
+                {
+                    "$set": {
+                        "processing_status": "completed",
+                        "processing_job_id": job_id,
+                        "processed_at": completed_at,
+                        "processing_error": None,
+                        "updatedAt": completed_at,
+                    }
+                },
+            )
+            try:
+                from .document_audit_service import DocumentAuditService
+                from .observability import observability_registry
+
+                document = await self.get_document(document_id)
+                await DocumentAuditService().emit(
+                    resource_type="document",
+                    resource_id=document_id,
+                    event_type="document.processing_completed",
+                    organization_id=getattr(document, "organization_id", None),
+                    project_id=getattr(document, "project_id", None),
+                    metadata={"job_id": job_id},
+                )
+                await observability_registry.record_domain_event(
+                    resource_type="document",
+                    event_type="processing_completed",
+                )
+            except Exception:
+                logger.debug("Failed to emit processing completion audit for %s", document_id, exc_info=True)
+            return True
+
+        latest = await db.document_processing_jobs.find_one({"_id": job_id})
+        if latest and latest.get("status") not in {"failed", "retrying", "dead_lettered"}:
+            await self._mark_processing_failure(latest, "Document processing failed")
+        return False
+
+    async def _mark_processing_failure(self, job: Dict[str, Any], message: str) -> None:
+        db = await self._get_db()
+        now = datetime.utcnow()
+        attempts = int(job.get("attempts") or 0)
+        max_attempts = int(job.get("max_attempts") or 3)
+        terminal = attempts >= max_attempts
+        status_value = "dead_lettered" if terminal else "retrying"
+        error = {
+            "message": message,
+            "timestamp": now,
+            "attempts": attempts,
+            "terminal": terminal,
+        }
+        update: Dict[str, Any] = {
+            "$set": {
+                "status": status_value,
+                "stage": "failed",
+                "error": error,
+                "updated_at": now,
+            }
+        }
+        if not terminal:
+            update["$set"]["run_after"] = (now + timedelta(seconds=min(300, 30 * max(1, attempts)))).replace(microsecond=0)
+        await db.document_processing_jobs.update_one({"_id": job["_id"]}, update)
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(str(job["document_id"]))},
+            {
+                "$set": {
+                    "processing_status": "failed" if terminal else "retrying",
+                    "processing_error": error,
+                    "updatedAt": now,
+                }
+            },
+        )
+        try:
+            from .document_audit_service import DocumentAuditService
+            from .observability import observability_registry
+
+            await DocumentAuditService().emit(
+                resource_type="document",
+                resource_id=str(job["document_id"]),
+                event_type="document.processing_failed",
+                organization_id=job.get("organization_id"),
+                project_id=job.get("project_id"),
+                metadata={"job_id": job.get("_id"), "terminal": terminal, "message": message},
+            )
+            await observability_registry.record_domain_event(
+                resource_type="document",
+                event_type="processing_failed" if terminal else "processing_retrying",
+            )
+        except Exception:
+            logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
     async def process_document_async(
         self,
@@ -692,7 +977,8 @@ class DocumentService:
         organization_id: Optional[str] = None,
         project_id: Optional[str] = None,
         upload_type: Optional[str] = None,
-    ) -> None:
+        job_id: Optional[str] = None,
+    ) -> bool:
         """Background worker entrypoint for OCR/metadata processing."""
 
         logger.info("Processing document %s asynchronously", document_id)
@@ -710,7 +996,7 @@ class DocumentService:
             stored = await db.documents.find_one({"_id": doc_oid})
             if not stored:
                 logger.warning("Document %s not found for processing", document_id)
-                return
+                return False
 
             document = Document(**stored)
             org_id = organization_id or document.organization_id
@@ -723,6 +1009,22 @@ class DocumentService:
                 proj_id,
                 upload,
             )
+            now = datetime.utcnow()
+            await db.documents.update_one(
+                {"_id": doc_oid},
+                {
+                    "$set": {
+                        "processing_status": "processing",
+                        "processing_job_id": job_id or getattr(document, "processing_job_id", None),
+                        "updatedAt": now,
+                    }
+                },
+            )
+            if job_id:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {"$set": {"stage": "materializing", "updated_at": now}},
+                )
 
             local_path = Path(file_path)
             if not local_path.exists():
@@ -747,6 +1049,11 @@ class DocumentService:
 
             processor = create_document_processor()
             try:
+                if job_id:
+                    await db.document_processing_jobs.update_one(
+                        {"_id": job_id},
+                        {"$set": {"stage": "extracting", "updated_at": datetime.utcnow()}},
+                    )
                 logger.info(
                     "[document_pipeline] Submitting document %s to processor (path_structure=%s)",
                     document_id,
@@ -783,11 +1090,17 @@ class DocumentService:
                 )
                 metadata = getattr(result, "metadata", None)
                 update_fields["ocrEnabled"] = True
+                update_fields["processing_status"] = "metadata_extracted"
+                update_fields["metadata_source"] = metadata_source
                 update_fields["processing_metadata"] = {
                     "processed_at": datetime.utcnow(),
                     "processing_time": getattr(result, "processing_time", None),
                     "chunks_created": getattr(result, "chunks_created", None),
+                    "metadata_source": metadata_source,
                 }
+                partial_failures = getattr(result, "partial_failures", None) or {}
+                if partial_failures:
+                    update_fields["processing_metadata"]["partial_failures"] = partial_failures
 
             if metadata:
                 if getattr(metadata, "summary", None):
@@ -842,9 +1155,29 @@ class DocumentService:
 
             await db.documents.update_one({"_id": doc_oid}, {"$set": update_fields})
             logger.info("[document_pipeline] Database record updated for %s", document_id)
+            if job_id:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {
+                        "$set": {
+                            "stage": "metadata_updated" if metadata else "failed",
+                            "metadata": {
+                                "metadata_source": metadata_source,
+                                "chunks_created": getattr(result, "chunks_created", None) if result else None,
+                                "partial_failures": getattr(result, "partial_failures", None) if result else None,
+                            },
+                            "updated_at": datetime.utcnow(),
+                        }
+                    },
+                )
 
             if metadata_references:
                 try:
+                    if job_id:
+                        await db.document_processing_jobs.update_one(
+                            {"_id": job_id},
+                            {"$set": {"stage": "syncing_references", "updated_at": datetime.utcnow()}},
+                        )
                     await self.reference_sync_service.sync_bidirectional(
                         document_id=document_id,
                         references=metadata_references,
@@ -862,8 +1195,10 @@ class DocumentService:
                         "Unexpected error while synchronising references for %s",
                         document_id,
                     )
+            return bool(result and getattr(result, "success", False) and metadata)
         except Exception:
             logger.exception("Unexpected error while processing document %s", document_id)
+            return False
 
     async def list_enclosures(self, document_id: str) -> List[Enclosure]:
         document = await self.get_document(document_id)

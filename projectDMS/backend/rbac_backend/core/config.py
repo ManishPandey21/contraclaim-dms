@@ -159,6 +159,13 @@ class Settings(BaseSettings):
         }
     )
     
+    # Antivirus Configuration
+    ANTIVIRUS_ENABLED: bool = Field(default=False, validation_alias="ANTIVIRUS_ENABLED")
+    CLAMAV_HOST: str = Field(default="localhost", validation_alias="CLAMAV_HOST")
+    CLAMAV_PORT: int = Field(default=3310, validation_alias="CLAMAV_PORT")
+    CLAMAV_TIMEOUT: int = Field(default=30, validation_alias="CLAMAV_TIMEOUT")
+    CLAMAV_FAIL_OPEN: bool = Field(default=True, validation_alias="CLAMAV_FAIL_OPEN")
+    
     # Vector storage toggles
     VECTOR_DUAL_WRITE_ENABLED: bool = Field(default=True, validation_alias="VECTOR_DUAL_WRITE_ENABLED")
     VECTOR_VERIFY_AFTER_WRITE: bool = Field(default=False, validation_alias="VECTOR_VERIFY_AFTER_WRITE")
@@ -167,7 +174,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = Field(default="", validation_alias="OPENAI_API_KEY")
     ASSISTANT_ID: str = Field(default="", validation_alias="ASSISTANT_ID")
     ASSISTANT_ID1: str = Field(default="", validation_alias="SECONDARY_ASSISTANT_ID")
-    LANGGRAPH_ENABLED: bool = Field(default=True, validation_alias="LANGGRAPH_ENABLED")
+    LANGGRAPH_ENABLED: bool = Field(default=False, validation_alias="LANGGRAPH_ENABLED")
     LANGGRAPH_API_TOKEN: Optional[str] = Field(default=None, validation_alias="LANGGRAPH_API_TOKEN")
     LANGGRAPH_MODEL: str = Field(default="gpt-4o-mini", validation_alias="LANGGRAPH_MODEL")
     LANGGRAPH_DRAFTER_MODEL: str = Field(default="gpt-4o", validation_alias="LANGGRAPH_DRAFTER_MODEL")
@@ -215,6 +222,14 @@ class Settings(BaseSettings):
         validation_alias="CONTACT_RECIPIENT_EMAIL",
     )
     
+    # Payment gateway configuration
+    PAYMENT_PROVIDER: str = Field(default="noop", validation_alias="PAYMENT_PROVIDER")
+    RAZORPAY_KEY_ID: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
+    RAZORPAY_KEY_SECRET: str = Field(default="", validation_alias="RAZORPAY_KEY_SECRET")
+    RAZORPAY_WEBHOOK_SECRET: str = Field(default="", validation_alias="RAZORPAY_WEBHOOK_SECRET")
+    STRIPE_API_KEY: str = Field(default="", validation_alias="STRIPE_API_KEY")
+    STRIPE_WEBHOOK_SECRET: str = Field(default="", validation_alias="STRIPE_WEBHOOK_SECRET")
+
     # Rate Limiting Configuration
     USER_RATE_LIMIT_REQUESTS: int = Field(default=10, description="Max requests per user per minute")
     USER_RATE_LIMIT_WINDOW: int = Field(default=60, description="Rate limit window in seconds")
@@ -426,6 +441,8 @@ class Settings(BaseSettings):
                 production_errors.append("APP_REDIS_URL or RUNTIME_STATE_REDIS_URL is required in production")
             if self.METRICS_ENABLED and not str(self.METRICS_TOKEN or "").strip():
                 production_errors.append("METRICS_TOKEN is required when METRICS_ENABLED=true in production")
+            if self.ANTIVIRUS_ENABLED and self.CLAMAV_FAIL_OPEN:
+                production_errors.append("CLAMAV_FAIL_OPEN must be false in production antivirus environments")
             if production_errors:
                 raise ValueError(
                     "Invalid production configuration: " + "; ".join(production_errors)

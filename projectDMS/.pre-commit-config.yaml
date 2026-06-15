@@ -31,3 +31,20 @@ repos:
         language: system
         types: [python]
         files: "^backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$"
+
+      # Prevents reintroducing the archived/scratch/duplicate files removed in the
+      # hotfix #2 dead-code cleanup. Fails if any matching path is staged.
+      - id: forbid-dead-code-paths
+        name: "Forbid archived/scratch/duplicate files"
+        entry: "Reintroducing archived, scratch, or duplicated files is not allowed (see hotfix #2 cleanup)"
+        language: fail
+        files: '(^|/)archive/|(^|/)main_minimal\.py$|New Text Document| - Copy| copy\.py$|_1509\.|_1511\.|_tranculated\.|(^|/)UploadPage1\.|(^|/)UploadPage_check\.|(^|/)DocumentViewerPageOriginal\.|(^|/)PermissionsPageImproved\.|(^|/)Dashboard1\.|(^|/)useLetterWorkflow[0-9]\.'
+
+      # Week-1 authz consolidation: forbid reintroducing the removed legacy
+      # has_permission dependency and any import of the deleted archive package.
+      # Use require_permission / PolicyService instead (see docs/AUTHZ.md).
+      - id: forbid-legacy-authz
+        name: "Forbid legacy has_permission dependency and archive imports"
+        entry: 'Depends\(has_permission\(|(from|import) [\w.]*\barchive\b'
+        language: pygrep
+        files: '\.(py|ts|tsx)$'

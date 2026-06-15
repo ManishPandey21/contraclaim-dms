@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { isUnauthorizedError, isForbiddenError } from "../utils/error-handler";
 import { getCurrentUserProfile } from "../services/session-api";
 import { publicApi } from "../services/http";
+import { logError } from "../lib/error-logger";
 
 export const useAuth = () => {
   const navigate = useNavigate();
@@ -58,17 +59,25 @@ export const useAuth = () => {
   }, []);
 
   const logout = useCallback(() => {
-    void publicApi.post("/logout", undefined, { withCredentials: true }).finally(() => {
-      localStorage.removeItem("accessToken");
-      localStorage.removeItem("user_id");
-      localStorage.removeItem("user_roles");
-      localStorage.removeItem("org_id");
-      localStorage.removeItem("proj_id");
-      setIsAuthenticated(false);
-      window.dispatchEvent(new Event("auth-state-changed"));
-      navigate("/login");
-      toast.success("Logged out successfully");
-    });
+    void publicApi
+      .post("/logout", undefined, { withCredentials: true })
+      .catch((error) => {
+        logError(error, {
+          scope: "auth",
+          action: "logout",
+        });
+      })
+      .finally(() => {
+        localStorage.removeItem("accessToken");
+        localStorage.removeItem("user_id");
+        localStorage.removeItem("user_roles");
+        localStorage.removeItem("org_id");
+        localStorage.removeItem("proj_id");
+        setIsAuthenticated(false);
+        window.dispatchEvent(new Event("auth-state-changed"));
+        navigate("/login");
+        toast.success("Logged out successfully");
+      });
   }, [navigate]);
 
   return {

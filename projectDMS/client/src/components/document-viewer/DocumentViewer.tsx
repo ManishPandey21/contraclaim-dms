@@ -1,10 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { FileText, Search, AlertTriangle, Loader2 } from "lucide-react";
 import { useParams } from "react-router-dom";
-import { Viewer, Worker, SpecialZoomLevel } from "@react-pdf-viewer/core";
+import { Viewer as PdfViewer, Worker, SpecialZoomLevel } from "@react-pdf-viewer/core";
 import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout";
 import { searchPlugin } from "@react-pdf-viewer/search";
 import { zoomPlugin } from "@react-pdf-viewer/zoom";
@@ -68,125 +68,119 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
   const [error, setError] = useState<Error | null>(null);
   const { id } = useParams();
 
-  const isPdfDocument = document.filename?.toLowerCase().endsWith(".pdf");
+  const documentId = id || document.id || document._id;
+  const isPdfDocument =
+    (document.filetype?.toLowerCase()?.includes("pdf") ?? false) ||
+    (document.filename?.toLowerCase()?.endsWith(".pdf") ?? false);
   const defaultLayoutPluginInstance = defaultLayoutPlugin();
   const searchPluginInstance = searchPlugin();
   const zoomPluginInstance = zoomPlugin();
+
+  const plugins = useMemo(() => [
+    defaultLayoutPluginInstance,
+    searchPluginInstance,
+    zoomPluginInstance,
+  ], [defaultLayoutPluginInstance, searchPluginInstance, zoomPluginInstance]);
+
+  const isLikelySignedUrl = useCallback((url: string): boolean => {
+    try {
+      const parsed = new URL(url, window.location.origin);
+      const qp = parsed.searchParams;
+      const signedKeys = [
+        "X-Amz-Algorithm",
+        "X-Amz-Credential",
+        "X-Amz-Signature",
+        "X-Amz-Security-Token",
+        "x-amz-algorithm",
+        "x-amz-credential",
+        "x-amz-signature",
+        "AWSAccessKeyId",
+        "Signature",
+        "Expires",
+      ];
+      return signedKeys.some((key) => qp.has(key));
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const resolveUrl = useCallback((url?: string | null): string | null => {
+    if (!url || typeof url !== "string") return null;
+    const trimmed = url.trim();
+    if (!trimmed) return null;
+
+    const lower = trimmed.toLowerCase();
+    if (lower.startsWith("http://") || lower.startsWith("https://")) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("/api/")) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("/")) {
+      return joinApiUrl(trimmed);
+    }
+    return joinApiUrl(`/${trimmed}`);
+  }, []);
 
   useEffect(() => {
     const localPdfPath = "/letter1.pdf";
     const loadPdf = async () => {
       setLoading(true);
       setError(null);
+
+      if (!isPdfDocument) {
+        setPdfUrl(null);
+        setLoading(false);
+        return;
+      }
+
       try {
-        if (id) {
-          const response = await authenticatedFetch(joinApiUrl(`/documents/${id}`));
+        const candidate = resolveUrl(document.presigned_url);
 
-          if (!response.ok) {
-            const errorText = await response.text();
-            console.error("API Error:", {
-              status: response.status,
-              statusText: response.statusText,
-              body: errorText,
-              headers: Object.fromEntries(response.headers.entries()),
-            });
-
-            if (response.status === 401) {
-              console.warn("Session expired. Loading local PDF");
-              setPdfUrl(localPdfPath);
-              return;
-            } else if (response.status === 403) {
-              console.warn("Permission denied. Loading local PDF");
-              setPdfUrl(localPdfPath);
-              return;
-            } else {
-              console.warn(
-                `Failed to fetch document: ${response.status}. Loading local PDF`
-              );
-              setPdfUrl(localPdfPath);
-              return;
-            }
-          }
-
-          const documentData = await response.json();
-          const rawUrl = documentData.presigned_url as string | undefined;
-          const downloadApi = joinApiUrl(`/documents/${id}/download`);
-
-          const isLikelySigned = (url: string): boolean => {
-            try {
-              const u = new URL(url, window.location.origin);
-              const qp = u.searchParams;
-              const keys = [
-                "X-Amz-Algorithm",
-                "X-Amz-Credential",
-                "X-Amz-Signature",
-                "X-Amz-Security-Token",
-                "x-amz-algorithm",
-                "x-amz-credential",
-                "x-amz-signature",
-              ];
-              return keys.some((k) => qp.has(k));
-            } catch {
-              return false;
-            }
-          };
-
-          const resolveUrl = (u?: string): string | null => {
-            if (!u || typeof u !== "string") return null;
-            const lower = u.toLowerCase();
-            if (lower.startsWith("http://") || lower.startsWith("https://")) {
-              return u;
-            } else if (u.startsWith("/api/")) {
-              return u;
-            } else if (u.startsWith("/")) {
-              return joinApiUrl(u);
-            } else {
-              return joinApiUrl(`/${u}`);
-            }
-          };
-
-          let candidate = resolveUrl(rawUrl);
-
-          if (candidate && isLikelySigned(candidate)) {
-            // Likely a valid pre-signed URL; let the viewer fetch it directly
-            setPdfUrl(candidate);
-          } else {
-            // Fetch via authenticated backend endpoint, then serve as a Blob URL to the viewer
-            try {
-              const fileResp = await authenticatedFetch(downloadApi);
-              if (fileResp.ok) {
-                const blob = await fileResp.blob();
-                const objectUrl = URL.createObjectURL(blob);
-                setPdfUrl(objectUrl);
-              } else if (candidate) {
-                // Try the candidate anyway (may be public)
-                setPdfUrl(candidate);
-              } else {
-                setPdfUrl(localPdfPath);
-              }
-            } catch (e) {
-              if (candidate) {
-                setPdfUrl(candidate);
-              } else {
-                setPdfUrl(localPdfPath);
-              }
-            }
-          }
-        } else if (!id) {
-          setPdfUrl(localPdfPath);
+        if (candidate && isLikelySignedUrl(candidate)) {
+          setPdfUrl(candidate);
+          return;
         }
+
+        if (!documentId) {
+          setPdfUrl(localPdfPath);
+          return;
+        }
+
+        const fileResp = await authenticatedFetch(
+          joinApiUrl(`/documents/${documentId}/download`),
+        );
+        if (!fileResp.ok) {
+          const errorText = await fileResp.text().catch(() => "");
+          throw new Error(
+            errorText ||
+            `Failed to fetch PDF bytes (${fileResp.status} ${fileResp.statusText})`,
+          );
+        }
+
+        const blob = await fileResp.blob();
+        if (blob.size === 0) {
+          throw new Error("The downloaded PDF file is empty");
+        }
+        const objectUrl = URL.createObjectURL(blob);
+        setPdfUrl(objectUrl);
       } catch (err) {
         console.error("Error loading PDF:", err);
-        setPdfUrl(localPdfPath);
+        setPdfUrl(null);
+        setError(err instanceof Error ? err : new Error("Failed to load PDF"));
       } finally {
-        // Small delay to allow pdf.worker to initialize and file to become available
-        await new Promise((r) => setTimeout(r, 500));
         setLoading(false);
       }
     };
 
-    loadPdf();
-  }, [document.id, isPdfDocument, id]);
+    void loadPdf();
+  }, [
+    document.presigned_url,
+    documentId,
+    isLikelySignedUrl,
+    isPdfDocument,
+    resolveUrl,
+  ]);
   // Cleanup any created Blob object URLs when pdfUrl changes or component unmounts
   useEffect(() => {
     return () => {
@@ -247,7 +241,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
       </div>
 
       <div className="flex-1 overflow-auto bg-gray-900 flex items-center justify-center">
-        {isPdfDocument && pdfUrl ? (
+        {isPdfDocument ? (
           <div className="h-full w-full bg-white relative">
             {loading ? (
               <div className="absolute inset-0 flex items-center justify-center">
@@ -267,17 +261,23 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
                   </AlertDescription>
                 </Alert>
               </div>
+            ) : !pdfUrl ? (
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Alert className="w-3/4">
+                  <FileText className="h-4 w-4" />
+                  <AlertTitle>PDF preview unavailable</AlertTitle>
+                  <AlertDescription>
+                    The file could not be resolved to a downloadable PDF URL.
+                  </AlertDescription>
+                </Alert>
+              </div>
             ) : (
-              <Worker workerUrl={`${window.location.origin}/pdf.worker.min.js`}>
+              <Worker workerUrl="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js">
                 <div style={{ height: "100%" }}>
-                  <Viewer
+                  <PdfViewer
                     fileUrl={pdfUrl}
-                    plugins={[
-                      defaultLayoutPluginInstance,
-                      searchPluginInstance,
-                      zoomPluginInstance,
-                    ]}
-                    defaultScale={SpecialZoomLevel.PageFit}
+                    plugins={plugins}
+                    defaultScale={SpecialZoomLevel.PageWidth}
                     renderError={(error: Error) => (
                       <div
                         style={{
@@ -321,10 +321,8 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
                   </p>
                   <p className="text-xs text-gray-400 mt-1">
                     {!isPdfDocument
-                      ? `File type: ${
-                          document.filename?.split(".").pop()?.toUpperCase() ||
-                          "Unknown"
-                        }`
+                      ? `File type: ${document.filename?.split(".").pop()?.toUpperCase() ?? "Unknown"
+                      }`
                       : "Document unavailable"}
                   </p>
                 </div>

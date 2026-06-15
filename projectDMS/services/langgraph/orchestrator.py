@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+# =============================================================================
+# ⚠️  EXPERIMENTAL / NOT DEPLOYED
+# =============================================================================
+# This standalone LangGraph contract-analysis orchestrator is NOT registered in
+# any Docker Compose file and is NOT part of the production deployment.
+#
+# The production AI drafting pipeline lives in the main backend:
+#   - backend/rbac_backend/routers/ai_assistant.py
+#   - backend/rbac_backend/services/letter_drafting/service.py
+#
+# This service was prototyped for a separate ingest→analyze→compliance→risk→report
+# workflow but was superseded by the integrated backend approach.  It also
+# depends on the Graphiti service (also experimental/disabled).
+#
+# Do NOT rely on this service for production features.
+# =============================================================================
+
 import asyncio
 import json
 import os

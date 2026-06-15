@@ -31,6 +31,7 @@ class LlamaIndexVectorService:
         collection_name: str,
         embedding_model: str,
         openai_api_key: Optional[str] = None,
+        existing_mongo_client: Optional[MongoClient] = None,
     ):
         self._mongo_uri = mongo_uri
         self._database_name = database_name
@@ -40,7 +41,8 @@ class LlamaIndexVectorService:
         # FIXED: Actually read OpenAI API key instead of storing the string literal
         self._openai_api_key = openai_api_key or os.environ.get('OPENAI_API_KEY')
         
-        self._mongo_client: Optional[MongoClient] = None
+        self._mongo_client: Optional[MongoClient] = existing_mongo_client
+        self._owns_mongo_client: bool = existing_mongo_client is None
         self._vector_store: Optional[MongoDBAtlasVectorSearch] = None
         self._embedding_model: Optional[OpenAIEmbedding] = None
         self._index: Optional[VectorStoreIndex] = None
@@ -233,57 +235,6 @@ class LlamaIndexVectorService:
         except Exception as exc:
             logger.warning("Vector store delete operation raised: %s", exc)
 
-    async def query(self, query_text: str, top_k: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant chunks using vector similarity search.
-
-        Args:
-            query_text: Query string for semantic search
-            top_k: Number of results to return
-            filters: Optional metadata filters for search
-
-        Returns:
-            List of dicts: {"text": chunk text, "score": similarity score, "metadata": doc metadata}
-        """
-        if not query_text:
-            return []
-
-        vector_store = self._ensure_vector_store()
-        embed_model = self._ensure_embedding_model()
-
-        # Embed query text
-        query_embedding = await asyncio.to_thread(embed_model.get_text_embedding, query_text)
-
-        def _similarity_search():
-            try:
-                nodes = vector_store.similarity_search(
-                    vector=query_embedding,
-                    limit=top_k,
-                    filters=filters or {},
-                    alpha=0.5  # Optional hybrid search param (0=vector only, 1=BM25 text only)
-                )
-                return nodes
-            except Exception as e:
-                logger.error(f"Similarity search failed: {e}")
-                return []
-
-        try:
-            nodes = await asyncio.to_thread(_similarity_search)
-            results = [
-                {
-                    "text": node.text,
-                    "score": getattr(node, 'score', None) or 0.0,  # Similarity score
-                    "metadata": node.metadata,
-                }
-                for node in nodes
-            ]
-
-            logger.debug("Query retrieved %d relevant chunks", len(results))
-            return results
-
-        except Exception as exc:
-            raise DocumentProcessingError(f"Query failed: {exc}") from exc
-
     async def close(self) -> None:
         """Close connections."""
         if self._index:
@@ -292,9 +243,9 @@ class LlamaIndexVectorService:
         if self._vector_store:
             self._vector_store = None
 
-        if self._mongo_client:
+        if self._mongo_client and self._owns_mongo_client:
             await asyncio.to_thread(self._mongo_client.close)
-            self._mongo_client = None
+        self._mongo_client = None
 
         if self._embedding_model:
             # OpenAIEmbedding doesn't have explicit close
@@ -306,65 +257,5 @@ class LlamaIndexVectorService:
         """Generate unique ID for embedding."""
         seed = metadata.get("document_id") or metadata.get("upload_id") or "chunk"
         chunk_index = metadata.get("chunk_index", 0)
-        checksum = hashlib.sha1(text.encode("utf-8")).hexdigest()
+        checksum = hashlib.sha256(text.encode("utf-8")).hexdigest()
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{seed}:{chunk_index}:{checksum}"))
-
-    def create_vector_search_index_command(self, dimensions: int = 1536, similarity: str = "cosine") -> Dict[str, Any]:
-        """
-        Generate the MongoDB command to create a vector search index for local MongoDB 8+.
-        
-        Usage:
-            service = LlamaIndexVectorService(...)
-            command = service.create_vector_search_index_command()
-            # Then run in mongosh: db.runCommand(command)
-        
-        Args:
-            dimensions: Vector dimensions (1536 for text-embedding-3-small)
-            similarity: Similarity metric ("cosine", "euclidean", or "dotProduct")
-            
-        Returns:
-            Dict containing the createSearchIndexes command
-        """
-        return {
-            "createSearchIndexes": self._collection_name,
-            "indexes": [{
-                "name": "vector_index",
-                "definition": {
-                    "type": "vectorSearch",
-                    "fields": [{
-                        "type": "vector",
-                        "path": "embedding",
-                        "numDimensions": dimensions,
-                        "similarity": similarity
-                    }]
-                }
-            }]
-        }
-
-    def get_setup_instructions(self) -> str:
-        """
-        Get setup instructions for local MongoDB 8+ vector search.
-        
-        Returns:
-            String with step-by-step setup instructions
-        """
-        command = self.create_vector_search_index_command()
-        
-        return f"""
-MongoDB 8+ Local Vector Search Setup Instructions:
-
-1. Ensure MongoDB 8.0+ is running with Vector Search enabled
-2. Connect to your MongoDB instance via mongosh
-3. Switch to your database: use {self._database_name}
-4. Run the following command to create the vector search index:
-
-db.runCommand({command})
-
-5. Verify the index was created:
-db.{self._collection_name}.getSearchIndexes()
-
-6. Your LlamaIndexVectorService is now ready to use!
-
-Note: For hybrid search (text + vector), also create a text search index:
-db.{self._collection_name}.createIndex({{ "$**": "text" }})
-"""

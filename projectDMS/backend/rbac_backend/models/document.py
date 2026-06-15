@@ -89,6 +89,13 @@ class Document(BaseModel):
     contractual_clauses: Optional[List[str]] = Field(default=None)
     reference: Optional[List[MetadataReference]] = Field(default=None)
     summary: Optional[str] = Field(default=None)
+    processing_status: Optional[str] = Field(default=None)
+    processing_job_id: Optional[str] = Field(default=None)
+    processing_metadata: Optional[Dict[str, Any]] = Field(default=None)
+    processing_error: Optional[Dict[str, Any]] = Field(default=None)
+    processed_path: Optional[str] = Field(default=None)
+    metadata_source: Optional[str] = Field(default=None)
+    processed_at: Optional[datetime] = Field(default=None)
     contract_upload_id: Optional[str] = Field(default=None)
     contract_categories: List[str] = Field(default_factory=list)
     contract_error: Optional[str] = Field(default=None)
@@ -175,8 +182,42 @@ class DocumentProcessingResult(BaseModel):
     metadata_extracted: bool = Field(default=False)
     ocr_completed: bool = Field(default=False)
     embeddings_created: int = Field(default=0)
+    status: Optional[str] = Field(default=None)
+    job_id: Optional[str] = Field(default=None)
+    message: Optional[str] = Field(default=None)
 
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
+
+
+class DocumentProcessingJobStatus(BaseModel):
+    job_id: str = Field(..., alias="_id")
+    document_id: str
+    status: str = Field(..., description="queued, processing, completed, failed, retrying, dead_lettered")
+    stage: Optional[str] = Field(default=None)
+    file_path: Optional[str] = Field(default=None)
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    error: Optional[Dict[str, Any]] = Field(default=None)
+    metadata: Optional[Dict[str, Any]] = Field(default=None)
+    created_at: datetime = Field(default_factory=now_utc)
+    queued_at: Optional[datetime] = Field(default=None)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+    model_config = ConfigDict(populate_by_name=True, json_encoders={ObjectId: str, datetime: isoformat_z})
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_job_id(cls, data):
+        if isinstance(data, dict):
+            d = dict(data)
+            if isinstance(d.get("_id"), ObjectId):
+                d["_id"] = str(d["_id"])
+            if "_id" not in d and "job_id" in d:
+                d["_id"] = str(d["job_id"])
+            return d
+        return data
 
 class BulkUploadStatus(BaseModel):
     """Status tracking for bulk upload jobs."""
@@ -321,6 +362,5 @@ class DocumentProcessingTask(BaseModel):
     result: Optional[Dict[str, Any]] = Field(default=None)
     
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
-
 
 

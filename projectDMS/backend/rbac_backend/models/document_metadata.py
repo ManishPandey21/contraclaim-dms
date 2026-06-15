@@ -34,6 +34,7 @@ class ProcessingResult(BaseModel):
     processing_time: float = 0.0
     metadata_source: str = "legacy_regex"
     metadata_debug: Optional[Dict[str, Any]] = None
+    partial_failures: Dict[str, Any] = Field(default_factory=dict)
 
 
 __all__ = ["ParsedDocumentMetadata", "ProcessingResult", "ReferenceValue"]

@@ -49,6 +49,7 @@ from ..services.upload_streaming import (
 from ..utils.error_handler import ContractError, handle_exceptions
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
+from ..services.antivirus_service import AntivirusService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -296,6 +297,17 @@ async def upload_contracts_multipart(
                 if not validation.is_valid:
                     raise ContractError(validation.error or "Invalid contract file", status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
 
+                # --- ANTIVIRUS STREAM SCAN ---
+                if settings.ANTIVIRUS_ENABLED:
+                    antivirus = AntivirusService()
+                    is_clean, scan_detail = await antivirus.scan_file(spooled.path)
+                    if not is_clean:
+                        raise ContractError(
+                            f"Antivirus scan rejected this file: {scan_detail}",
+                            status.HTTP_400_BAD_REQUEST
+                        )
+                # ------------------------------
+
                 upload_id = upload_ids[index] if upload_ids else None
                 if not upload_id:
                     session = await contract_service.create_upload_session(file.filename, organization_id, project_id, current_user)
@@ -483,6 +495,22 @@ async def upload_contract_chunk(
             if not validation.is_valid:
                 await file_service.cleanup_upload(upload_id, organization_id=effective_org, user_id=current_user.id)
                 raise ContractError(validation.error or "Invalid contract file", status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+            # --- ANTIVIRUS STREAM SCAN ---
+            if settings.ANTIVIRUS_ENABLED:
+                antivirus = AntivirusService()
+                is_clean, scan_detail = await antivirus.scan_file(spooled.path)
+                if not is_clean:
+                    await file_service.cleanup_upload(upload_id, organization_id=effective_org, user_id=current_user.id)
+                    try:
+                        final_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise ContractError(
+                        f"Antivirus scan rejected this file: {scan_detail}",
+                        status.HTTP_400_BAD_REQUEST
+                    )
+            # ------------------------------
 
             store_result = await _write_spooled_to_providers(
                 spooled=spooled,

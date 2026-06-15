@@ -39,14 +39,14 @@ function getRuntimeBaseUrl(): string | undefined {
 
 /**
  * Derive a sensible default based on the hosting domain when env/runtime override are absent.
- * This guarantees production builds on web.contraclaim.com talk to app.contraclaim.com.
+ * This guarantees production builds on web.contraclaim.com talk to the API host.
  */
 function getHostDerivedBaseUrl(): string | undefined {
   try {
     if (typeof window === "undefined") return undefined;
     const host = window.location.hostname;
     if (host === "web.contraclaim.com") {
-      return "https://app.contraclaim.com/api";
+      return "https://api.contraclaim.com/api";
     }
     return undefined;
   } catch {

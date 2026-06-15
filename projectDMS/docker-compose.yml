@@ -222,6 +222,26 @@ services:
       start_period: 40s
     logging: *default-logging
 
+  clamav:
+    image: clamav/clamav:latest
+    container_name: cc-clamav
+    restart: always
+    ports:
+      - "3310:3310"
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - service-net
+    logging: *default-logging
+
   gateway:
     image: httpd:2.4
     restart: unless-stopped

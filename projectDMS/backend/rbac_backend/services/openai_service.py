@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import mimetypes
 from typing import Any, Iterable, List, Optional
 
 from openai import AsyncOpenAI
@@ -60,8 +61,10 @@ class OpenAIService:
                 filename = os.path.basename(file_path)
                 safe_filename = filename.lower() if filename else "document.pdf"
 
+                mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
                 response = await self._client.files.create(
-                    file=(safe_filename, file_data, "application/pdf"),
+                    file=(safe_filename, file_data, mime_type),
                     purpose="assistants"
                 )
                 

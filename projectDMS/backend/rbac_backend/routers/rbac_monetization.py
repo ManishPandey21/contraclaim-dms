@@ -3,18 +3,27 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..models.rbac_monetization import (
+    AddOnCreate,
+    AddOnUpdate,
+    AddOnActionRequest,
     BillingRecordCreate,
+    CancelSubscriptionRequest,
+    ChangeBillingPeriodRequest,
+    ConvertTrialRequest,
     ExpertAllocationCreate,
     ExpertAllocationUpdate,
     PlanSettingsScopeUpdate,
     PlanCreate,
     PlanUpdate,
+    StartTrialRequest,
     SubscriptionCreate,
     SubscriptionUpdate,
+    UpgradeDowngradeRequest,
     UsageEventCreate,
 )
 from ..services.allocation_service import AllocationService
@@ -37,6 +46,10 @@ async def check_monetization_rate_limit(current_user: CurrentUser = Depends(get_
 async def get_policy_service() -> PolicyService:
     return PolicyService()
 
+
+# ---------------------------------------------------------------------------
+# Expert Allocations (unchanged)
+# ---------------------------------------------------------------------------
 
 @router.get("/expert-allocations", response_model=List[Dict[str, Any]])
 async def list_expert_allocations(
@@ -97,6 +110,18 @@ async def update_expert_allocation(
     return await AllocationService().update_allocation(allocation_id, payload, current_user)
 
 
+# ---------------------------------------------------------------------------
+# Plan Catalog (public-ish — requires basic auth only)
+# ---------------------------------------------------------------------------
+
+@router.get("/plan-catalog", response_model=Dict[str, Any])
+async def get_plan_catalog(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Public plan catalog with pricing tiers and add-on info."""
+    return await MonetizationService().get_plan_catalog()
+
+
 @router.get("/plans", response_model=List[Dict[str, Any]])
 async def list_plans(
     current_user: CurrentUser = Depends(get_current_user),
@@ -105,6 +130,22 @@ async def list_plans(
     await policy.authorize(current_user, Permissions.BILLING_PLAN_VIEW, resource_type="plan")
     return await MonetizationService().list_plans()
 
+
+@router.get("/plans/{plan_code}", response_model=Dict[str, Any])
+async def get_plan_detail(
+    plan_code: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Get single plan detail by code."""
+    plan = await MonetizationService().get_plan_by_code(plan_code)
+    if not plan:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plan not found")
+    return plan
+
+
+# ---------------------------------------------------------------------------
+# Plan Settings (enhanced with billing period / trial / add-on state)
+# ---------------------------------------------------------------------------
 
 @router.get("/plan-settings", response_model=Dict[str, Any])
 async def get_plan_settings(
@@ -188,6 +229,10 @@ async def update_plan_settings_scope(
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# Plan CRUD (admin)
+# ---------------------------------------------------------------------------
+
 @router.post("/plans", response_model=Dict[str, Any])
 async def upsert_plan(
     payload: PlanCreate,
@@ -212,6 +257,47 @@ async def update_plan(
     await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="plan", resource_id=plan_id)
     return await MonetizationService().update_plan(plan_id, payload, current_user)
 
+
+# ---------------------------------------------------------------------------
+# Add-On CRUD
+# ---------------------------------------------------------------------------
+
+@router.get("/add-ons", response_model=List[Dict[str, Any]])
+async def list_addons(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """List all available add-ons."""
+    return await MonetizationService().list_addons()
+
+
+@router.post("/add-ons", response_model=Dict[str, Any])
+async def create_addon(
+    payload: AddOnCreate,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    await require_step_up(request, current_user, action="billing.plan.manage")
+    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="addon", resource_id=payload.code)
+    return await MonetizationService().upsert_addon(payload, current_user)
+
+
+@router.put("/add-ons/{addon_id}", response_model=Dict[str, Any])
+async def update_addon(
+    addon_id: str,
+    payload: AddOnUpdate,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    await require_step_up(request, current_user, action="billing.plan.manage")
+    await policy.authorize(current_user, Permissions.BILLING_PLAN_MANAGE, resource_type="addon", resource_id=addon_id)
+    return await MonetizationService().update_addon(addon_id, payload, current_user)
+
+
+# ---------------------------------------------------------------------------
+# Subscriptions (CRUD + lifecycle)
+# ---------------------------------------------------------------------------
 
 @router.get("/subscriptions", response_model=List[Dict[str, Any]])
 async def list_subscriptions(
@@ -246,6 +332,27 @@ async def list_subscriptions(
     )
 
 
+@router.get("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
+async def get_subscription(
+    subscription_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Get single subscription by ID."""
+    svc = MonetizationService()
+    sub = await svc.get_subscription_by_id(subscription_id)
+    if not sub:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_USAGE_VIEW,
+        organization_id=sub.get("organization_id"),
+        project_id=sub.get("project_id"),
+        resource_type="subscription",
+    )
+    return sub
+
+
 @router.post("/subscriptions", response_model=Dict[str, Any])
 async def create_subscription(
     payload: SubscriptionCreate,
@@ -262,6 +369,49 @@ async def create_subscription(
         resource_type="subscription",
     )
     return await MonetizationService().create_subscription(payload, current_user)
+
+
+class CheckoutRequest(BaseModel):
+    organization_id: str
+    project_id: Optional[str] = None
+    plan_code: str
+    billing_period: str = "monthly"
+    customer_name: Optional[str] = Field(default=None, max_length=200)
+    customer_email: Optional[str] = Field(default=None, max_length=200)
+
+
+@router.post("/subscriptions/checkout", response_model=Dict[str, Any])
+async def start_subscription_checkout(
+    payload: CheckoutRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Provision the subscription on the payment gateway and return a checkout URL.
+
+    The subscription is created in ``pending`` state; the billing webhook promotes
+    it to ``active`` (and enables entitlements) once payment is captured.
+    """
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+        organization_id=payload.organization_id,
+        project_id=payload.project_id,
+        resource_type="subscription",
+    )
+    try:
+        return await MonetizationService().start_checkout(
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+            plan_code=payload.plan_code,
+            billing_period=payload.billing_period,
+            current_user=current_user,
+            customer_name=payload.customer_name,
+            customer_email=payload.customer_email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.put("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
@@ -295,6 +445,243 @@ async def update_subscription(
 
     return await MonetizationService().update_subscription(subscription_id, payload, current_user)
 
+
+# ---------------------------------------------------------------------------
+# Subscription Lifecycle Endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/subscriptions/{subscription_id}/upgrade", response_model=Dict[str, Any])
+async def upgrade_subscription(
+    subscription_id: str,
+    payload: UpgradeDowngradeRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+    _: None = Depends(check_monetization_rate_limit),
+):
+    """Upgrade subscription to a higher-tier plan."""
+    await require_step_up(request, current_user, action="subscription.upgrade")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_UPGRADE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().upgrade_subscription(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/downgrade", response_model=Dict[str, Any])
+async def downgrade_subscription(
+    subscription_id: str,
+    payload: UpgradeDowngradeRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+    _: None = Depends(check_monetization_rate_limit),
+):
+    """Downgrade subscription to a lower-tier plan (effective at period end)."""
+    await require_step_up(request, current_user, action="subscription.downgrade")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_DOWNGRADE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().downgrade_subscription(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/cancel", response_model=Dict[str, Any])
+async def cancel_subscription(
+    subscription_id: str,
+    payload: CancelSubscriptionRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+    _: None = Depends(check_monetization_rate_limit),
+):
+    """Cancel a subscription (immediately or at period end)."""
+    await require_step_up(request, current_user, action="subscription.cancel")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_CANCEL, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().cancel_subscription(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/reactivate", response_model=Dict[str, Any])
+async def reactivate_subscription(
+    subscription_id: str,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Reactivate a cancelled subscription."""
+    await require_step_up(request, current_user, action="subscription.upgrade")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_UPGRADE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().reactivate_subscription(subscription_id, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/change-period", response_model=Dict[str, Any])
+async def change_billing_period(
+    subscription_id: str,
+    payload: ChangeBillingPeriodRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Change subscription billing period (effective at next renewal)."""
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().change_billing_period(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/add-ons/add", response_model=Dict[str, Any])
+async def add_subscription_addon(
+    subscription_id: str,
+    payload: AddOnActionRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Add an add-on to a subscription."""
+    await require_step_up(request, current_user, action="subscription.addon.manage")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ADDON_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().add_addon(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/add-ons/remove", response_model=Dict[str, Any])
+async def remove_subscription_addon(
+    subscription_id: str,
+    payload: AddOnActionRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Remove an add-on from a subscription."""
+    await require_step_up(request, current_user, action="subscription.addon.manage")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ADDON_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().remove_addon(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Subscription History
+# ---------------------------------------------------------------------------
+
+@router.get("/subscriptions/{subscription_id}/history", response_model=List[Dict[str, Any]])
+async def get_subscription_history(
+    subscription_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Get the full history of a subscription."""
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, resource_type="subscription", resource_id=subscription_id)
+    return await MonetizationService().get_subscription_history(subscription_id)
+
+
+@router.get("/subscriptions/{subscription_id}/invoice-preview", response_model=Dict[str, Any])
+async def get_invoice_preview(
+    subscription_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Preview the next invoice for a subscription."""
+    await policy.authorize(current_user, Permissions.BILLING_INVOICE_VIEW, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().get_invoice_preview(subscription_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Trial Management
+# ---------------------------------------------------------------------------
+
+@router.post("/subscriptions/start-trial", response_model=Dict[str, Any])
+async def start_trial(
+    payload: StartTrialRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Start a trial subscription for an org or project."""
+    await require_step_up(request, current_user, action="subscription.trial.manage")
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_TRIAL_MANAGE,
+        organization_id=payload.organization_id,
+        project_id=payload.project_id,
+        resource_type="subscription",
+    )
+    try:
+        return await MonetizationService().start_trial(payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/subscriptions/{subscription_id}/convert-trial", response_model=Dict[str, Any])
+async def convert_trial(
+    subscription_id: str,
+    payload: ConvertTrialRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Convert a trial subscription into a paid subscription."""
+    await require_step_up(request, current_user, action="subscription.trial.manage")
+    await policy.authorize(current_user, Permissions.SUBSCRIPTION_TRIAL_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    try:
+        return await MonetizationService().convert_trial(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Billing Summary & Usage
+# ---------------------------------------------------------------------------
+
+@router.get("/billing/summary/{organization_id}", response_model=Dict[str, Any])
+async def get_billing_summary(
+    organization_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Get billing summary for an organization."""
+    await policy.authorize(
+        current_user,
+        Permissions.BILLING_PLAN_VIEW,
+        organization_id=organization_id,
+        resource_type="billing",
+    )
+    return await MonetizationService().get_billing_summary(organization_id)
+
+
+@router.get("/billing/history/{organization_id}", response_model=List[Dict[str, Any]])
+async def get_organization_billing_history(
+    organization_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Get all subscription history for an organization."""
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_HISTORY_VIEW,
+        organization_id=organization_id,
+        resource_type="subscription",
+    )
+    return await MonetizationService().get_organization_subscription_history(organization_id)
+
+
+# ---------------------------------------------------------------------------
+# Usage & Billing Records (unchanged)
+# ---------------------------------------------------------------------------
 
 @router.post("/usage-events", response_model=Dict[str, Any])
 async def record_usage(

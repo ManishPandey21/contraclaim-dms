@@ -42,7 +42,15 @@ DRAFTING_PERMISSIONS: List[str] = [
 BILLING_PERMISSIONS: List[str] = [
     "billing.plan.view",
     "billing.plan.manage",
+    "billing.invoice.view",
+    "billing.invoice.download",
     "subscription.entitlement.manage",
+    "subscription.upgrade",
+    "subscription.downgrade",
+    "subscription.cancel",
+    "subscription.trial.manage",
+    "subscription.addon.manage",
+    "subscription.history.view",
     "subscription.usage.view",
     "subscription.archive_access",
     "subscription.offboarding_export",
@@ -90,7 +98,15 @@ class Permissions:
 
     BILLING_PLAN_VIEW = "billing.plan.view"
     BILLING_PLAN_MANAGE = "billing.plan.manage"
+    BILLING_INVOICE_VIEW = "billing.invoice.view"
+    BILLING_INVOICE_DOWNLOAD = "billing.invoice.download"
     SUBSCRIPTION_ENTITLEMENT_MANAGE = "subscription.entitlement.manage"
+    SUBSCRIPTION_UPGRADE = "subscription.upgrade"
+    SUBSCRIPTION_DOWNGRADE = "subscription.downgrade"
+    SUBSCRIPTION_CANCEL = "subscription.cancel"
+    SUBSCRIPTION_TRIAL_MANAGE = "subscription.trial.manage"
+    SUBSCRIPTION_ADDON_MANAGE = "subscription.addon.manage"
+    SUBSCRIPTION_HISTORY_VIEW = "subscription.history.view"
     SUBSCRIPTION_USAGE_VIEW = "subscription.usage.view"
     SUBSCRIPTION_ARCHIVE_ACCESS = "subscription.archive_access"
     SUBSCRIPTION_OFFBOARDING_EXPORT = "subscription.offboarding_export"
@@ -139,7 +155,15 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
+    "billing.invoice.view": ["organizations:read"],
+    "billing.invoice.download": ["organizations:read"],
     "subscription.entitlement.manage": ["system:admin"],
+    "subscription.upgrade": ["system:admin"],
+    "subscription.downgrade": ["system:admin"],
+    "subscription.cancel": ["system:admin"],
+    "subscription.trial.manage": ["system:admin"],
+    "subscription.addon.manage": ["system:admin"],
+    "subscription.history.view": ["organizations:read"],
     "subscription.usage.view": ["reports:view"],
     "subscription.archive_access": ["documents:read"],
     "subscription.offboarding_export": ["documents:download_all"],

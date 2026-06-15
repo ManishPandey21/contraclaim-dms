@@ -554,7 +554,7 @@ const UploadPage: React.FC = () => {
       // Reset
       setFiles([]);
       setLetterNo("");
-      setOcrEnabled(false);
+      setOcrEnabled(true);
       setCompressionEnabled(false);
     } catch (error: any) {
       toast({

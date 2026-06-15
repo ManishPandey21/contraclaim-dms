@@ -4,14 +4,14 @@ This directory contains the self-contained Docker environment for the ContractDM
 
 ## Structure
 
-- ackend/ – FastAPI backend copied from the main repository
-- client/ – React front-end copy
-- services/ – Custom microservices (Graphiti, Docling, LangGraph)
-- config/ – Reverse proxy configuration and secrets placeholder
-- scripts/ – Helper automation for deployment and backups
-- docker-compose.yml – Primary compose file
-- docker-compose.prod.yml – Production overrides
-- .env.example – Environment template (copy to .env to configure)
+- ackend/ ï¿½ FastAPI backend copied from the main repository
+- client/ ï¿½ React front-end copy
+- services/ ï¿½ Custom microservices (Graphiti, Docling, LangGraph)
+- config/ ï¿½ Reverse proxy configuration and secrets placeholder
+- scripts/ ï¿½ Helper automation for deployment and backups
+- docker-compose.yml ï¿½ Primary compose file
+- docker-compose.prod.yml ï¿½ Production overrides
+- .env.example ï¿½ Environment template (copy to .env to configure)
 
 ## Getting Started
 
@@ -33,7 +33,7 @@ Once the containers start:
 - The backend build uses ackend/.env. Adjust for Docker context as required.
 - To rebuild after code changes, run docker compose build backend client.
 - WebSocket updates are available at ws://localhost/ws/<job_id> once a workflow is running.
-- Marker CLI is required for Marker-based contract ingestion; install it separately and set `MARKER_CMD` (or set `MARKER_ENABLED=false` to disable). See [Marker CLI setup](docs/marker-cli-setup.md).
+- Marker CLI is required for Marker-based contract ingestion; install it separately and set `MARKER_CMD` (or set `MARKER_ENABLED=false` to disable). See [Marker CLI setup](docs/history/marker-cli-setup.md).
 
 ## Backups
 `

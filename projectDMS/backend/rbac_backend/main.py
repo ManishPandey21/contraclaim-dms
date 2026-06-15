@@ -41,6 +41,7 @@ from .routers import (
     performance,
     representatives,
     rbac_monetization,
+    billing_webhooks,
     reports,
     roles,
     search,
@@ -184,6 +185,7 @@ app.include_router(projects.router, prefix="/api", tags=["projects"])
 app.include_router(roles.router, prefix="/api", tags=["roles"])
 app.include_router(permissions.router, prefix="/api", tags=["permissions"])
 app.include_router(rbac_monetization.router, prefix="/api", tags=["rbac-monetization"])
+app.include_router(billing_webhooks.router, prefix="/api", tags=["billing"])
 app.include_router(reports.router, prefix="/api", tags=["reports"])
 app.include_router(tags.router, prefix="/api", tags=["tags"])
 app.include_router(tasks.router, prefix="/api", tags=["tasks"])

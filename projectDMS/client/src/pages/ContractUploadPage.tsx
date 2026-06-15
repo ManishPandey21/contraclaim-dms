@@ -75,19 +75,6 @@ const ContractUploadPage: React.FC = () => {
       const selectedOrg = mockOrganizations.find(org => org.id === data.organizationId);
       const selectedProject = mockProjects.find(proj => proj.id === data.projectId);
       
-      console.log('Uploading contracts:', {
-        title: data.title,
-        description: data.description,
-        contractType: data.contractType,
-        organization: selectedOrg?.name,
-        project: selectedProject?.name,
-        files: files.map(file => ({
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type
-        }))
-      });
-      
       toast.success("Contracts uploaded successfully", {
         description: `${files.length} file(s) uploaded to ${selectedProject?.name}`
       });

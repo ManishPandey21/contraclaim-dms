@@ -1,4 +1,4 @@
-﻿# services/database_service.py
+# services/database_service.py
 
 import hashlib
 import logging
@@ -45,6 +45,7 @@ class DatabaseService:
         self._vector_service: Optional[LlamaIndexVectorService] = None
         self._langchain_vector_service: Optional[LangChainVectorService] = None
         self._langchain_service_initialized: bool = False
+        self.partial_failures: Dict[str, Any] = {}
 
     async def get_database(self):
         """Get database connection with proper error handling"""
@@ -168,8 +169,22 @@ class DatabaseService:
                 db, document_id, file_path, parsed_metadata, full_text
             )
 
-            # Create and store embeddings
-            chunks_created = await self._create_and_store_embeddings(db, doc, embedding_text)
+            # Create and store embeddings. Indexing failures must not hide a
+            # successful OCR/metadata extraction; record them as partial failures.
+            try:
+                chunks_created = await self._create_and_store_embeddings(db, doc, embedding_text)
+            except Exception as exc:
+                chunks_created = 0
+                self.partial_failures["embeddings"] = {
+                    "stage": "embeddings",
+                    "message": str(exc),
+                    "timestamp": datetime.utcnow(),
+                }
+                logger.warning(
+                    "Embedding/vector indexing failed for document %s after metadata save: %s",
+                    document_id or doc.get("_id"),
+                    exc,
+                )
 
             logger.info(
                 "[document_pipeline] Saved document data and created %s embedding chunks",
@@ -426,7 +441,6 @@ class DatabaseService:
                     "embedding_id": metadata.get("embedding_id"),
                     "embedding_model": vector_service.embedding_model_name,
                     "embedding_dims": len(record["embedding"]),
-                    "embedding": record["embedding"],
                     "text": record["text"],
                     "num_tokens": len(record["text"].split()),
                     "checksum_sha256": metadata.get("checksum_sha256"),
@@ -562,12 +576,17 @@ class DatabaseService:
             api_key = self.config.openai_api_key or self._get_openai_api_key()
             if not api_key:
                 raise DocumentProcessingError("OpenAI API key not configured for embeddings")
+            # Share the Motor client's underlying pymongo.MongoClient to avoid duplicate connections
+            existing_client = None
+            if self._client is not None:
+                existing_client = getattr(self._client, "delegate", None)
             self._vector_service = LlamaIndexVectorService(
                 mongo_uri=self.config.mongo_uri,
                 database_name=self.config.database_name,
                 collection_name=getattr(self.config, "vector_store_collection", "document_vectors"),
                 embedding_model=self.config.openai_embedding_model,
                 openai_api_key=api_key,
+                existing_mongo_client=existing_client,
             )
         return self._vector_service
 
@@ -583,5 +602,4 @@ class DatabaseService:
             pass
 
         return os.getenv("OPENAI_API_KEY")
-
 

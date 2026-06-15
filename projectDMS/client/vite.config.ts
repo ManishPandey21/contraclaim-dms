@@ -36,13 +36,22 @@ export default defineConfig(({ mode }) => ({
     },
   },
   optimizeDeps: {
-    exclude: [
+    include: [
       "@react-pdf-viewer/core",
       "@react-pdf-viewer/default-layout",
       "@react-pdf-viewer/search",
       "@react-pdf-viewer/zoom",
       "pdfjs-dist",
     ],
+    esbuildOptions: {
+      // Force proper CJS → ESM named-export interop.
+      // Without this, esbuild may produce only a default export wrapper
+      // for CommonJS packages like @react-pdf-viewer/core, breaking
+      // named imports (Viewer, Worker, SpecialZoomLevel, etc.).
+      supported: { "dynamic-import": true },
+    },
+    // Force Vite to always re-bundle these deps (bypasses hash-based caching)
+    force: true,
   },
   server: {
     port: 5173,
