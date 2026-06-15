@@ -304,56 +304,13 @@ def require_permission(permission_name: str):
 
     return permission_checker
 
-def has_permission(permission: str):
-    async def has_permission_dependency(current_user: CurrentUser = Depends(get_current_active_user), db = Depends(get_db)):
-        try:
-            # Check if user has superadmin role (bypass permission check)
-            if "superadmin" in current_user.roles:
-                return current_user
-            
-            # Query roles using string IDs (not ObjectIds)
-            try:
-                user_roles = await db.roles.find({"_id": {"$in": current_user.roles}}).to_list(length=None)
-            except Exception as e:
-                # If role query fails, check if user is superadmin
-                if "superadmin" in current_user.roles:
-                    return current_user
-                raise HTTPException(status_code=500, detail="Error checking user permissions")
-            
-            user_permissions = []
-            for role in user_roles:
-                role_permissions = role.get("permissions", [])
-                if role_permissions:
-                    user_permissions.extend(role_permissions)
-
-            if permission not in user_permissions:
-                raise HTTPException(status_code=403, detail="Not enough permissions")
-            
-            return current_user
-            
-        except HTTPException:
-            # Re-raise HTTP exceptions as-is
-            raise
-        except Exception as e:
-            # For superadmin users, grant access even if there's an error
-            if "superadmin" in current_user.roles:
-                return current_user
-            raise HTTPException(status_code=500, detail="Internal server error during permission check")
-    return has_permission_dependency
-
-def require_roles(*roles: str):
-    async def role_dependency(current_user: CurrentUser = Depends(get_current_active_user)):
-        # Superadmin bypass
-        if "superadmin" in current_user.roles:
-            return current_user
-        # If no roles specified, allow any authenticated user
-        if not roles:
-            return current_user
-        # Ensure user has at least one required role
-        if any(role in current_user.roles for role in roles):
-            return current_user
-        raise HTTPException(status_code=403, detail="Insufficient role permissions")
-    return role_dependency
+# NOTE: The legacy `has_permission(permission)` dependency and `require_roles(*roles)`
+# were removed in the Week-1 authorization consolidation. `has_permission` queried
+# `db.roles` directly and swallowed errors into a superadmin-bypass; both diverged
+# from the canonical permission source. Use `require_permission(...)` (canonical
+# dependency) or `PolicyService.authorize(...)` (scoped, entitled, audited gate)
+# instead. For boolean predicates use `PolicyService.has_permission(...)`.
+# See docs/AUTHZ.md.
 
 # RBAC scope helpers
 def effective_project_ids(user: CurrentUser) -> List[str]:
