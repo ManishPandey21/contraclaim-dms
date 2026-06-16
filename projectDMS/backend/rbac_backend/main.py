@@ -64,6 +64,7 @@ from .services.contract_ingest_queue import (
 )
 from .services.runtime_state import get_runtime_state
 from .services.observability import observability_registry
+from .observability.tracing import setup_tracing, current_trace_id
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,9 @@ app = FastAPI(
     openapi_url="/openapi.json" if api_docs_enabled else None,
 )
 _loop_handler_installed = False
+
+# Distributed tracing (opt-in; no-op unless OTEL_ENABLED + libs installed).
+setup_tracing(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -147,8 +151,9 @@ async def request_context_middleware(request: Request, call_next):
             settings.SLOW_REQUEST_THRESHOLD_MS,
         )
     logger.info(
-        "request completed request_id=%s method=%s path=%s status_code=%s duration_ms=%s",
+        "request completed request_id=%s trace_id=%s method=%s path=%s status_code=%s duration_ms=%s",
         request_id,
+        current_trace_id(),
         request.method,
         request.url.path,
         response.status_code,

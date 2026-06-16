@@ -179,7 +179,22 @@ Verify: `https://<host>` scores A on SSL Labs; `curl -sI https://<host>` shows
 - **RAG/agent runs:** persisted to the `rag_runs` / observability collections for
   retrieval traceability.
 - **Audit:** authorization decisions emit `policy.authorize` events; billing
-  events land in `billing_records` + `billing_webhook_events`.
+  events land in `billing_records` + `billing_webhook_events`. Export an
+  arbitration evidence pack via `GET /api/audit/export` (CSV, `dms.audit.view`).
+- **Distributed tracing (OpenTelemetry, opt-in):** install the `opentelemetry-*`
+  packages, set `OTEL_ENABLED=true` and `OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:4318`,
+  and the backend instruments FastAPI + exports OTLP spans. When enabled, request
+  logs include `trace_id=` for log↔trace correlation. Disabled by default (no-op),
+  so it never affects a deployment that hasn't opted in.
+
+### Alerting (wire your monitor to these signals)
+- **5xx rate:** alert when `status_code >= 500` exceeds a threshold — derivable
+  from the request middleware logs (`request completed ... status_code=5xx`) and
+  the metrics surface (`METRICS_ENABLED` + `METRICS_TOKEN`).
+- **Latency:** the middleware logs `slow request` for any request over
+  `SLOW_REQUEST_THRESHOLD_MS`; alert on its rate.
+- **Health:** alert if `/health/ready` fails (compose healthchecks already gate it).
+- **Backups:** alert on a missing nightly object in the backups bucket (see §2).
 
 ---
 
