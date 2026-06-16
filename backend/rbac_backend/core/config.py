@@ -230,6 +230,19 @@ class Settings(BaseSettings):
     STRIPE_API_KEY: str = Field(default="", validation_alias="STRIPE_API_KEY")
     STRIPE_WEBHOOK_SECRET: str = Field(default="", validation_alias="STRIPE_WEBHOOK_SECRET")
 
+    # SSO (generic OpenID Connect)
+    OIDC_ENABLED: bool = Field(default=False, validation_alias="OIDC_ENABLED")
+    OIDC_ISSUER: str = Field(default="", validation_alias="OIDC_ISSUER")
+    OIDC_CLIENT_ID: str = Field(default="", validation_alias="OIDC_CLIENT_ID")
+    OIDC_CLIENT_SECRET: str = Field(default="", validation_alias="OIDC_CLIENT_SECRET")
+    OIDC_REDIRECT_URI: str = Field(default="", validation_alias="OIDC_REDIRECT_URI")
+    OIDC_SCOPES: str = Field(default="openid email profile", validation_alias="OIDC_SCOPES")
+    OIDC_ALLOWED_EMAIL_DOMAINS: str = Field(default="", validation_alias="OIDC_ALLOWED_EMAIL_DOMAINS")
+    OIDC_AUTO_PROVISION: bool = Field(default=True, validation_alias="OIDC_AUTO_PROVISION")
+    OIDC_DEFAULT_ROLE: str = Field(default="orguser", validation_alias="OIDC_DEFAULT_ROLE")
+    OIDC_DEFAULT_ORG_ID: str = Field(default="", validation_alias="OIDC_DEFAULT_ORG_ID")
+    OIDC_POST_LOGIN_REDIRECT: str = Field(default="/", validation_alias="OIDC_POST_LOGIN_REDIRECT")
+
     # Rate Limiting Configuration
     USER_RATE_LIMIT_REQUESTS: int = Field(default=10, description="Max requests per user per minute")
     USER_RATE_LIMIT_WINDOW: int = Field(default=60, description="Rate limit window in seconds")
@@ -433,6 +446,16 @@ class Settings(BaseSettings):
             langgraph_token = str(getattr(self, "LANGGRAPH_API_TOKEN", "") or "").strip()
             if langgraph_enabled and not langgraph_token:
                 production_errors.append("LANGGRAPH_API_TOKEN is required when LANGGRAPH_ENABLED=true in production")
+            if bool(getattr(self, "OIDC_ENABLED", False)):
+                missing_oidc = [
+                    name
+                    for name in ("OIDC_ISSUER", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET", "OIDC_REDIRECT_URI")
+                    if not str(getattr(self, name, "") or "").strip()
+                ]
+                if missing_oidc:
+                    production_errors.append(
+                        "OIDC is enabled but missing: " + ", ".join(missing_oidc)
+                    )
             runtime_redis = (
                 str(getattr(self, "RUNTIME_STATE_REDIS_URL", "") or "").strip()
                 or str(getattr(self, "APP_REDIS_URL", "") or "").strip()
