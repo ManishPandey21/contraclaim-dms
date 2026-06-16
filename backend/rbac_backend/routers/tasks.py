@@ -4,9 +4,25 @@ from datetime import datetime
 
 from ..core.database import get_db
 from ..core.security import get_current_user, CurrentUser
-from ..models.task import Task, TaskCreate, TaskUpdate
+from ..models.task import Task, TaskCreate, TaskUpdate, TaskComment, TaskCommentCreate
 
 router = APIRouter()
+
+
+def _authorize_task_access(task: Dict[str, Any], current_user: CurrentUser) -> None:
+    """Deny cross-tenant access to a task for non-superadmin users."""
+    if "superadmin" in (current_user.roles or []):
+        return
+    roles = set(current_user.roles or [])
+    allowed_projects = [str(p) for p in getattr(current_user, "projects", []) or [] if p]
+    org_ok = (not task.get("organization_id")) or (
+        task.get("organization_id") == getattr(current_user, "organization_id", None)
+    )
+    proj_ok = (not task.get("project_id")) or (str(task.get("project_id")) in allowed_projects)
+    if {"projectadmin", "projectuser"} & roles and not proj_ok:
+        raise HTTPException(status_code=403, detail="Not authorized for this task")
+    if {"orgadmin", "orguser"} & roles and not org_ok:
+        raise HTTPException(status_code=403, detail="Not authorized for this task")
 
 def build_scope_query(current_user: CurrentUser) -> Dict[str, Any]:
     """
@@ -173,6 +189,46 @@ async def update_task(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update task: {str(e)}")
+
+@router.post("/tasks/{task_id}/comments", response_model=Task, status_code=status.HTTP_201_CREATED)
+async def add_task_comment(
+    task_id: str,
+    body: TaskCommentCreate,
+    db = Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Append a comment to a task. Tenant-scoped like the other task routes."""
+    try:
+        existing = await db.tasks.find_one({"_id": task_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Task not found")
+        _authorize_task_access(existing, current_user)
+
+        author_name = " ".join(
+            part for part in (
+                getattr(current_user, "first_name", None),
+                getattr(current_user, "last_name", None),
+            ) if part
+        ).strip() or getattr(current_user, "username", None) or getattr(current_user, "email", None)
+
+        comment = TaskComment(
+            text=body.text,
+            author_id=getattr(current_user, "id", None),
+            author_name=author_name,
+        )
+        updated = await db.tasks.find_one_and_update(
+            {"_id": task_id},
+            {"$push": {"comments": comment.model_dump()}, "$set": {"updated_at": datetime.utcnow()}},
+            return_document=True,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Task not found after comment")
+        return Task(**updated)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add comment: {str(e)}")
+
 
 @router.delete("/tasks/{task_id}", response_model=dict)
 async def delete_task(

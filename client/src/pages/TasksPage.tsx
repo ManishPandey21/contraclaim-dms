@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -51,6 +51,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { getTasks, createTask, type TaskDTO } from "@/services/tasks-api";
 
 // Types
 type TaskStatus = 'To Do' | 'In Progress' | 'Completed' | 'Overdue';
@@ -105,6 +106,14 @@ interface Comment {
   timestamp: string;
 }
 
+// Map backend task status (open/in_progress/done) + due date to the UI status.
+const deriveStatus = (status?: string | null, dueDate?: string | null): TaskStatus => {
+  if (status === "done") return "Completed";
+  if (status === "in_progress") return "In Progress";
+  if (dueDate && new Date(dueDate).getTime() < Date.now()) return "Overdue";
+  return "To Do";
+};
+
 const TasksPage = () => {
   const [activeTab, setActiveTab] = useState<string>("tasks");
   const [isNewTaskDialogOpen, setIsNewTaskDialogOpen] = useState(false);
@@ -126,38 +135,44 @@ const TasksPage = () => {
     { id: '3', title: 'Product Launch Plan', type: 'PDF', createdAt: '2023-12-18T09:15:00Z' },
   ];
   
-  const tasks: Task[] = [
-    { 
-      id: '1', 
-      title: 'Review Financial Report', 
-      description: 'Review the Q4 financial report and provide feedback',
-      assignedTo: users[0],
-      dueDate: '2023-12-25T17:00:00Z',
-      status: 'In Progress',
-      document: documents[0],
-      createdAt: '2023-12-16T09:00:00Z'
-    },
-    { 
-      id: '2', 
-      title: 'Approve Marketing Strategy', 
-      description: 'Review and approve the 2024 marketing strategy',
-      assignedTo: users[1],
-      dueDate: '2023-12-28T17:00:00Z',
-      status: 'To Do',
-      document: documents[1],
-      createdAt: '2023-12-17T11:30:00Z'
-    },
-    { 
-      id: '3', 
-      title: 'Finalize Product Launch Documentation', 
-      description: 'Complete all documentation for the upcoming product launch',
-      assignedTo: users[2],
-      dueDate: '2023-12-20T17:00:00Z',
-      status: 'Overdue',
-      document: documents[2],
-      createdAt: '2023-12-15T14:45:00Z'
-    },
-  ];
+  // Real tasks loaded from the backend (GET /api/tasks, tenant-scoped).
+  const [taskDtos, setTaskDtos] = useState<TaskDTO[]>([]);
+
+  const reloadTasks = useCallback(async () => {
+    try {
+      setTaskDtos(await getTasks());
+    } catch {
+      /* leave the list empty on error; a toast is surfaced on actions */
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadTasks();
+  }, [reloadTasks]);
+
+  // Derive the UI Task shape (nested assignee/document) from the flat DTOs.
+  const tasks: Task[] = taskDtos.map((dto) => ({
+    id: dto.id,
+    title: dto.title,
+    description: dto.description || "",
+    assignedTo:
+      users.find((u) => u.id === dto.assigned_to) || {
+        id: dto.assigned_to || "",
+        name: dto.assigned_to || "Unassigned",
+        email: "",
+      },
+    dueDate: dto.due_date || "",
+    status: deriveStatus(dto.status, dto.due_date),
+    document: dto.document_id
+      ? documents.find((d) => d.id === dto.document_id) || {
+          id: dto.document_id,
+          title: dto.document_id,
+          type: "",
+          createdAt: "",
+        }
+      : undefined,
+    createdAt: dto.created_at,
+  }));
   
   const workflows: WorkflowItem[] = [
     {
@@ -291,33 +306,23 @@ const TasksPage = () => {
     try {
       setIsSubmitting(true);
 
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      
-      // Mock task creation
-      const newTask = {
-        id: `task-${Date.now()}`,
+      await createTask({
         title: values.title,
-        description: values.description,
-        assignedTo: users.find(u => u.id === values.assignedUserId) || users[0],
-        dueDate: values.dueDate.toISOString(),
-        status: 'To Do' as TaskStatus,
-        document: values.documentId ? documents.find(d => d.id === values.documentId) : undefined,
-        createdAt: new Date().toISOString()
-      };
-      
-      toast.success("Task created successfully", {
-        description: `Task assigned to ${newTask.assignedTo.name}`
+        description: values.description || undefined,
+        assigned_to: values.assignedUserId || undefined,
+        due_date: values.dueDate ? values.dueDate.toISOString() : undefined,
+        document_id: values.documentId || undefined,
       });
-      
+      await reloadTasks();
+
+      toast.success("Task created successfully");
       taskForm.reset();
       setIsNewTaskDialogOpen(false);
-      setIsSubmitting(false);
     } catch (error) {
-      console.error('Error creating task:', error);
       toast.error("Failed to create task", {
         description: "Please try again later"
       });
+    } finally {
       setIsSubmitting(false);
     }
   };
@@ -399,7 +404,9 @@ const TasksPage = () => {
   };
   
   const formatDate = (dateString: string) => {
+    if (!dateString) return "—";
     const date = new Date(dateString);
+    if (isNaN(date.getTime())) return "—";
     return format(date, 'MMM dd, yyyy');
   };
   
