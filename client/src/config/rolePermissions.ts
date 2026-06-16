@@ -60,7 +60,9 @@ const DRAFTING_ROLES: Role[] = [
 export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/overview": [], // Open to all authenticated users
   "/dashboard": ["dms.dashboard.view"],
-  "/register": ["admin.user.create"],
+  // C3: align with backend permission names. `admin.user.create` does not exist
+  // on the backend; user creation requires `users:create` (POST /api/users).
+  "/register": ["users:create"],
   "/organizations": ["organizations:read"],
   "/projects": ["projects:read"],
   "/parties": ["parties:read"],
@@ -71,12 +73,17 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/documentsearch": ["dms.document.view"],
   "/documentviewer": ["dms.document.view"],
   "/reference": ["dms.document.view"],
-  "/share": ["dms.document.share"],
-  "/letters": ["draft.request.view"],
-  "/letter-quality": ["draft.request.view"],
+  // C3: backend permission is `documents:share` (routers/email_share.py), not `dms.document.share`.
+  "/share": ["documents:share"],
+  // C3: canonical backend permission is `drafting.request.view` (default_roles.py,
+  // letter_drafting.py), not `draft.request.view`.
+  "/letters": ["drafting.request.view"],
+  "/letter-quality": ["drafting.request.view"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
-  "/folders": ["dms.folder.view"],
+  // C3: no `dms.folder.view` permission exists on the backend; folders organize
+  // documents, so gate on `dms.document.view` (matches /documents and /contracts).
+  "/folders": ["dms.document.view"],
   "/reports": ["reports:view"],
   "/health": ["system:admin"],
   "/users": ["users:read"],

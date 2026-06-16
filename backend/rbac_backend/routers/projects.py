@@ -192,7 +192,18 @@ async def read_projects_simple(
     current_user = Depends(get_current_user),
     _: None = Depends(require_permission("projects:read")),
 ):
-    projects = await db.projects.find().to_list(100)
+    # SECURITY (C1): this endpoint previously returned db.projects.find() with
+    # no tenant scope, leaking projects across organizations to any user holding
+    # "projects:read". Apply the same deny-by-default scope used by /projects so
+    # non-superadmins only ever see projects within their org/project scope.
+    scope_filter = build_scope_query(
+        current_user,
+        organization_id=None,
+        project_id=None,
+        org_field="organization_id",
+        project_field=None,
+    )
+    projects = await db.projects.find(scope_filter or {}).to_list(100)
     return [Project(**proj) for proj in projects]
 
 

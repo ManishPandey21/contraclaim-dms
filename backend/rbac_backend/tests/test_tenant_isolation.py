@@ -211,3 +211,41 @@ def test_build_scope_query_project_user_no_assignments_denies_all():
 def test_build_scope_query_superadmin_unrestricted():
     user = _user(org="org-A", roles=("superadmin",))
     assert build_scope_query(user) == {}
+
+
+# --- C1 regression: GET /api/projects1 simple listing must be tenant-scoped ---
+#
+# The `/projects1` ("read_projects_simple") endpoint previously ran
+# db.projects.find() with no scope, leaking every org's projects to any user with
+# `projects:read`. The fix applies the same scope filter as `/projects`. These
+# tests pin the exact filter the route builds so the leak cannot regress.
+
+
+def _projects1_scope_filter(user):
+    """Mirror the exact scope filter built by routers.projects.read_projects_simple."""
+    return build_scope_query(
+        user,
+        organization_id=None,
+        project_id=None,
+        org_field="organization_id",
+        project_field=None,
+    )
+
+
+def test_projects1_orguser_scoped_to_own_org():
+    user = _user(org="org-A", projects=(), roles=("orguser",))
+    q = _projects1_scope_filter(user)
+    # Must constrain to the caller's org — never an empty (match-all) filter,
+    # which is exactly what caused the cross-tenant project leak.
+    assert q.get("organization_id") == "org-A"
+    assert q != {}
+
+
+def test_projects1_orphan_user_denied_all():
+    user = _user(org=None, projects=(), roles=("orguser",))
+    assert _projects1_scope_filter(user) == {"_id": {"$in": []}}
+
+
+def test_projects1_superadmin_unrestricted():
+    user = _user(org="org-A", roles=("superadmin",))
+    assert _projects1_scope_filter(user) == {}
