@@ -18,7 +18,6 @@ import {
   Calendar,
   ClipboardList,
   Edit,
-  Eye,
   File,
   FileText,
   Filter,
@@ -27,6 +26,7 @@ import {
   MessageSquare,
   PlusCircle,
   Search,
+  Trash2,
   ThumbsDown,
   ThumbsUp,
   UserCheck,
@@ -51,9 +51,26 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getTasks, createTask, addTaskComment, type TaskDTO } from "@/services/tasks-api";
+import { getTasks, createTask, updateTask, deleteTask, addTaskComment, type TaskDTO } from "@/services/tasks-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import { listDocuments } from "@/services/documents-api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 // Types
 type TaskStatus = 'To Do' | 'In Progress' | 'Completed' | 'Overdue';
@@ -202,6 +219,7 @@ const TasksPage = () => {
   const [commentsTask, setCommentsTask] = useState<TaskDTO | null>(null);
   const [taskComment, setTaskComment] = useState("");
   const [isAddingComment, setIsAddingComment] = useState(false);
+  const [editingTask, setEditingTask] = useState<TaskDTO | null>(null);
 
   const submitTaskComment = async () => {
     if (!commentsTask || !taskComment.trim()) return;
@@ -375,20 +393,26 @@ const TasksPage = () => {
     try {
       setIsSubmitting(true);
 
-      await createTask({
+      const payload = {
         title: values.title,
         description: values.description || undefined,
         assigned_to: values.assignedUserId || undefined,
         due_date: values.dueDate ? values.dueDate.toISOString() : undefined,
         document_id: values.documentId || undefined,
-      });
+      };
+      if (editingTask) {
+        await updateTask(editingTask.id, payload);
+      } else {
+        await createTask(payload);
+      }
       await reloadTasks();
 
-      toast.success("Task created successfully");
+      toast.success(editingTask ? "Task updated successfully" : "Task created successfully");
       taskForm.reset();
+      setEditingTask(null);
       setIsNewTaskDialogOpen(false);
     } catch (error) {
-      toast.error("Failed to create task", {
+      toast.error(editingTask ? "Failed to update task" : "Failed to create task", {
         description: "Please try again later"
       });
     } finally {
@@ -484,24 +508,62 @@ const TasksPage = () => {
     return format(date, 'MMM dd, yyyy h:mm a');
   };
   
+  const openEditTask = (task: Task) => {
+    const dto = taskDtos.find((d) => d.id === task.id) || null;
+    setEditingTask(dto);
+    taskForm.reset({
+      title: task.title,
+      assignedUserId: dto?.assigned_to || "",
+      description: task.description || "",
+      documentId: dto?.document_id || "",
+      dueDate: dto?.due_date ? new Date(dto.due_date) : undefined,
+    });
+    setIsNewTaskDialogOpen(true);
+  };
+
+  const handleStatusChange = async (task: Task, backendStatus: string) => {
+    try {
+      await updateTask(task.id, { status: backendStatus });
+      await reloadTasks();
+    } catch {
+      toast.error("Failed to update status");
+    }
+  };
+
+  const handleDeleteTask = async (task: Task) => {
+    try {
+      await deleteTask(task.id);
+      await reloadTasks();
+      toast.success("Task deleted");
+    } catch {
+      toast.error("Failed to delete task");
+    }
+  };
+
   return (
     <div className="container mx-auto p-6">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">Task Management & Workflow</h1>
         
         <div className="flex gap-2">
-          <Dialog open={isNewTaskDialogOpen} onOpenChange={setIsNewTaskDialogOpen}>
+          <Dialog
+            open={isNewTaskDialogOpen}
+            onOpenChange={(open) => {
+              setIsNewTaskDialogOpen(open);
+              if (!open) setEditingTask(null);
+            }}
+          >
             <DialogTrigger asChild>
-              <Button>
+              <Button onClick={() => setEditingTask(null)}>
                 <PlusCircle className="mr-2 h-4 w-4" />
                 New Task
               </Button>
             </DialogTrigger>
             <DialogContent className="sm:max-w-lg">
               <DialogHeader>
-                <DialogTitle>Create New Task</DialogTitle>
+                <DialogTitle>{editingTask ? "Edit Task" : "Create New Task"}</DialogTitle>
                 <DialogDescription>
-                  Assign a new task to a team member.
+                  {editingTask ? "Update the task details." : "Assign a new task to a team member."}
                 </DialogDescription>
               </DialogHeader>
               
@@ -529,7 +591,7 @@ const TasksPage = () => {
                         <FormLabel>Assigned User</FormLabel>
                         <Select 
                           onValueChange={field.onChange} 
-                          defaultValue={field.value}
+                          value={field.value}
                         >
                           <FormControl>
                             <SelectTrigger>
@@ -611,7 +673,7 @@ const TasksPage = () => {
                         <FormLabel>Associated Document</FormLabel>
                         <Select 
                           onValueChange={field.onChange} 
-                          defaultValue={field.value}
+                          value={field.value}
                         >
                           <FormControl>
                             <SelectTrigger>
@@ -647,12 +709,12 @@ const TasksPage = () => {
                       {isSubmitting ? (
                         <>
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Creating...
+                          {editingTask ? "Saving..." : "Creating..."}
                         </>
                       ) : (
                         <>
                           <PlusCircle className="mr-2 h-4 w-4" />
-                          Create Task
+                          {editingTask ? "Save changes" : "Create Task"}
                         </>
                       )}
                     </Button>
@@ -717,9 +779,26 @@ const TasksPage = () => {
                       </TableCell>
                       <TableCell>{formatDate(task.dueDate)}</TableCell>
                       <TableCell>
-                        <Badge className={getStatusBadgeColor(task.status)}>
-                          {task.status}
-                        </Badge>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <button type="button" className="cursor-pointer">
+                              <Badge className={getStatusBadgeColor(task.status)}>
+                                {task.status}
+                              </Badge>
+                            </button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start">
+                            <DropdownMenuItem onClick={() => handleStatusChange(task, "open")}>
+                              To Do
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleStatusChange(task, "in_progress")}>
+                              In Progress
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleStatusChange(task, "done")}>
+                              Completed
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </TableCell>
                       <TableCell>
                         {task.document ? (
@@ -746,12 +825,36 @@ const TasksPage = () => {
                           >
                             <MessageSquare className="h-4 w-4" />
                           </Button>
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
-                            <Eye className="h-4 w-4" />
-                          </Button>
-                          <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title="Edit"
+                            onClick={() => openEditTask(task)}
+                          >
                             <Edit className="h-4 w-4" />
                           </Button>
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete">
+                                <Trash2 className="h-4 w-4 text-destructive" />
+                              </Button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>Delete task?</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  This permanently deletes &quot;{task.title}&quot;. This cannot be undone.
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                <AlertDialogAction onClick={() => handleDeleteTask(task)}>
+                                  Delete
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
                         </div>
                       </TableCell>
                     </TableRow>
