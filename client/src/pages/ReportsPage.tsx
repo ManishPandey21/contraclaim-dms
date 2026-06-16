@@ -204,8 +204,6 @@ const ReportsAnalyticsPage = () => {
     toast.success(`Downloading report in ${format.toUpperCase()} format`);
     
     // In a real app, this would call an API endpoint to generate and download the file
-    console.log(`Downloading ${format} report with columns: ${selectedColumns.join(', ')}`);
-    console.log(`Date range: ${startDate?.toISOString()} to ${endDate?.toISOString()}`);
   };
 
   // Format date for display

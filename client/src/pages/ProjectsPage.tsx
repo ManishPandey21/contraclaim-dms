@@ -87,15 +87,11 @@ const ProjectsPage = () => {
     const fetchData = async () => {
       setLoading(true);
       try {
-        console.log("Fetching projects and organizations...");
         const [projectsData, orgsData, sessionProfile] = await Promise.all([
           enhancedApi.getProjects(),
           enhancedApi.getOrganizations(),
           getCurrentUserProfile().catch(() => null),
         ]);
-
-        console.log("Projects data received:", projectsData);
-        console.log("Organizations data received:", orgsData);
 
         // Restrict visible data for organization-scoped roles (org admin/user)
         const normalizedRoles = roles.map((role) =>

@@ -796,7 +796,6 @@ const DocumentsPage = () => {
         const res = await authenticatedFetch(joinApiUrl("/tags"), { headers });
         if (res.ok) {
           const data = await res.json();
-          console.log("Tags API response:", data); // Debug log
           const mapped = Array.isArray(data)
             ? data
             : Array.isArray((data as any)?.tags)
@@ -806,7 +805,6 @@ const DocumentsPage = () => {
             id: t._id || t.id || "",
             name: t.name || "",
           }));
-          console.log("Processed tags:", tags); // Debug log
           setAvailableTags(tags.filter((t) => t.id && t.name));
 
           // Also load subtags for mapping
@@ -819,7 +817,6 @@ const DocumentsPage = () => {
               );
               if (subtagRes.ok) {
                 const subtagData = await subtagRes.json();
-                console.log(`Subtags for ${tag.name}:`, subtagData); // Debug log
 
                 // Handle different response formats
                 let subtagArray: any[] = [];
@@ -846,7 +843,6 @@ const DocumentsPage = () => {
               );
             }
           }
-          console.log("All subtags loaded:", allSubtags); // Debug log
           setAvailableSubtags(allSubtags);
         } else {
           console.error("Failed to fetch tags:", res.status, res.statusText);

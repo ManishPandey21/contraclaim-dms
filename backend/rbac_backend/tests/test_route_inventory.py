@@ -58,6 +58,9 @@ def test_unsafe_routes_have_explicit_auth_or_public_classification():
         ("/api/contact", "submit_contact_request"),
         ("/api/token", "login_for_access_token"),
         ("/api/logout", "logout_user"),
+        # Provider-called webhook: authenticated by HMAC signature verification
+        # inside BillingWebhookService, not by a logged-in user.
+        ("/api/billing/webhooks/{provider}", "handle_billing_webhook"),
     }
     guard_markers = (
         "get_current_user",

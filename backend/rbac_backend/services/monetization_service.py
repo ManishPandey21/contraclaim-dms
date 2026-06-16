@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
 
+from ..core.config import settings
 from ..core.database import get_database
+from .payment_gateway import get_payment_gateway
 from ..models.rbac_monetization import (
     AddOnCreate,
     AddOnUpdate,
@@ -17,6 +19,7 @@ from ..models.rbac_monetization import (
     PlanUpdate,
     SubscriptionCreate,
     SubscriptionUpdate,
+    SubscriptionStatus,
     SubscriptionChangeType,
     SubscriptionHistoryCreate,
     UsageEventCreate,
@@ -516,6 +519,74 @@ class MonetizationService:
             after=saved,
         )
         return self._normalize(saved)
+
+    async def start_checkout(
+        self,
+        *,
+        organization_id: str,
+        project_id: Optional[str],
+        plan_code: str,
+        billing_period: str,
+        current_user: Any,
+        customer_name: Optional[str] = None,
+        customer_email: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Provision a customer + subscription on the payment gateway and create a
+        local subscription in ``pending`` state. The webhook flips it to ``active``
+        once payment is captured, which in turn enables entitlements.
+        """
+        db = await self._get_db()
+        if not await self.validate_plan_code(plan_code):
+            raise ValueError(f"Plan '{plan_code}' not found")
+
+        gateway = get_payment_gateway()
+        customer = await gateway.create_customer(
+            organization_id=str(organization_id),
+            name=customer_name or str(organization_id),
+            email=customer_email,
+        )
+        gateway_sub = await gateway.create_subscription(
+            gateway_customer_id=customer.gateway_customer_id,
+            plan_code=plan_code,
+            billing_period=billing_period,
+            metadata={"organization_id": str(organization_id), "project_id": str(project_id or "")},
+        )
+
+        now = datetime.utcnow()
+        doc = {
+            "organization_id": str(organization_id),
+            "project_id": str(project_id) if project_id else None,
+            "plan_code": plan_code,
+            "billing_period": billing_period,
+            "status": SubscriptionStatus.PENDING.value,
+            "billing_status": "pending",
+            "auto_renew": True,
+            "payment_provider": str(settings.PAYMENT_PROVIDER),
+            "payment_gateway_customer_id": customer.gateway_customer_id,
+            "payment_gateway_subscription_id": gateway_sub.gateway_subscription_id,
+            "created_at": now,
+            "updated_at": now,
+            "created_by": getattr(current_user, "id", None),
+            "updated_by": getattr(current_user, "id", None),
+        }
+        result = await db.subscriptions.insert_one(doc)
+
+        await self.audit_service.emit(
+            action="subscription.checkout_started",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="subscription",
+            resource_id=str(result.inserted_id),
+            organization_id=str(organization_id),
+            project_id=str(project_id) if project_id else None,
+            metadata={"plan_code": plan_code, "provider": str(settings.PAYMENT_PROVIDER)},
+        )
+        return {
+            "subscription_id": str(result.inserted_id),
+            "provider": str(settings.PAYMENT_PROVIDER),
+            "gateway_subscription_id": gateway_sub.gateway_subscription_id,
+            "checkout_url": (gateway_sub.metadata or {}).get("short_url"),
+            "status": SubscriptionStatus.PENDING.value,
+        }
 
     async def update_subscription(self, subscription_id: str, payload: SubscriptionUpdate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()

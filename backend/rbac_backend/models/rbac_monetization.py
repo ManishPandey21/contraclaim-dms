@@ -32,6 +32,7 @@ class AssignmentStatus(str, Enum):
 
 
 class SubscriptionStatus(str, Enum):
+    PENDING = "pending"
     TRIAL = "trial"
     PILOT = "pilot"
     ACTIVE = "active"
@@ -268,6 +269,8 @@ class SubscriptionBase(BaseModel):
     active_add_ons: List[str] = Field(default_factory=list)
     entitlement_overrides: Dict[str, Any] = Field(default_factory=dict)
     payment_gateway_subscription_id: Optional[str] = None
+    payment_gateway_customer_id: Optional[str] = None
+    payment_provider: Optional[str] = None
     cancelled_at: Optional[datetime] = None
     cancellation_reason: Optional[str] = None
 

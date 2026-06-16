@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
@@ -368,6 +369,49 @@ async def create_subscription(
         resource_type="subscription",
     )
     return await MonetizationService().create_subscription(payload, current_user)
+
+
+class CheckoutRequest(BaseModel):
+    organization_id: str
+    project_id: Optional[str] = None
+    plan_code: str
+    billing_period: str = "monthly"
+    customer_name: Optional[str] = Field(default=None, max_length=200)
+    customer_email: Optional[str] = Field(default=None, max_length=200)
+
+
+@router.post("/subscriptions/checkout", response_model=Dict[str, Any])
+async def start_subscription_checkout(
+    payload: CheckoutRequest,
+    request: Request,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Provision the subscription on the payment gateway and return a checkout URL.
+
+    The subscription is created in ``pending`` state; the billing webhook promotes
+    it to ``active`` (and enables entitlements) once payment is captured.
+    """
+    await require_step_up(request, current_user, action="subscription.entitlement.manage")
+    await policy.authorize(
+        current_user,
+        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+        organization_id=payload.organization_id,
+        project_id=payload.project_id,
+        resource_type="subscription",
+    )
+    try:
+        return await MonetizationService().start_checkout(
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+            plan_code=payload.plan_code,
+            billing_period=payload.billing_period,
+            current_user=current_user,
+            customer_name=payload.customer_name,
+            customer_email=payload.customer_email,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.put("/subscriptions/{subscription_id}", response_model=Dict[str, Any])

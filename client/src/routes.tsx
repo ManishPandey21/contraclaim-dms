@@ -85,7 +85,6 @@ const AppRoutes = () => (
         <Route path="projects" element={<ProjectsPage />} />
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="documentsearch" element={<EnhancedDocumentsPage />} />
-        <Route path="documents/legacy" element={<DocumentsPage />} />
         <Route path="tags" element={<TagsPage />} />
         <Route path="profile" element={<ProfilePage />} />
         <Route path="users" element={<UsersPage />} />

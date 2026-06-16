@@ -96,13 +96,6 @@ const parseOrganizationsResponse = (payload: any): Organization[] => {
     }
   }
 
-  console.log("[parseOrganizationsResponse] Parsing organizations:", {
-    payloadType: typeof payload,
-    isArray: Array.isArray(payload),
-    hasOrganizations: payload?.organizations ? "yes" : "no",
-    collectionLength: collection.length,
-  });
-
   return collection
     .map((org: any) => {
       // Handle both _id and id fields from backend
@@ -345,15 +338,7 @@ export const useLetterWorkflow = () => {
         }
 
         if (orgsRes.status === "fulfilled") {
-          console.log(
-            "[useLetterWorkflow] Organizations response:",
-            orgsRes.value.data
-          );
           const parsed = parseOrganizationsResponse(orgsRes.value.data);
-          console.log(
-            "[useLetterWorkflow] Parsed organizations:",
-            parsed.length
-          );
           setOrganizations(parsed);
         } else {
           console.warn("Failed to load organizations:", orgsRes.reason);
@@ -368,12 +353,6 @@ export const useLetterWorkflow = () => {
             : Array.isArray(rawProjects?.projects)
             ? rawProjects.projects
             : [];
-
-          console.log(
-            "[useLetterWorkflow] Projects response:",
-            pdata.length,
-            "projects"
-          );
 
           setProjects(
             pdata.map((p: any) => ({
