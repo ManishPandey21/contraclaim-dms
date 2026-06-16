@@ -51,7 +51,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getTasks, createTask, type TaskDTO } from "@/services/tasks-api";
+import { getTasks, createTask, addTaskComment, type TaskDTO } from "@/services/tasks-api";
+import { enhancedApi } from "@/services/enhanced-api";
+import { listDocuments } from "@/services/documents-api";
 
 // Types
 type TaskStatus = 'To Do' | 'In Progress' | 'Completed' | 'Overdue';
@@ -150,13 +152,80 @@ const TasksPage = () => {
     void reloadTasks();
   }, [reloadTasks]);
 
+  // Real org members + documents for the create dialog and list resolution.
+  const [orgUsers, setOrgUsers] = useState<User[]>([]);
+  const [orgDocuments, setOrgDocuments] = useState<Document[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const raw = await enhancedApi.getUsers();
+        if (active) {
+          setOrgUsers(
+            (raw || []).map((u) => ({
+              id: String(u.id || u._id || ""),
+              name:
+                [u.first_name, u.last_name].filter(Boolean).join(" ") ||
+                u.username ||
+                u.email ||
+                "User",
+              email: u.email || "",
+            }))
+          );
+        }
+      } catch {
+        /* dropdown falls back to empty */
+      }
+      try {
+        const res = await listDocuments({ limit: 100 });
+        if (active) {
+          setOrgDocuments(
+            (res?.documents || []).map((d) => ({
+              id: String(d._id || ""),
+              title: d.name || d.filename || "Untitled",
+              type: d.uploadType || "",
+              createdAt: d.createdAt || "",
+            }))
+          );
+        }
+      } catch {
+        /* dropdown falls back to empty */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Per-task comments view
+  const [commentsTask, setCommentsTask] = useState<TaskDTO | null>(null);
+  const [taskComment, setTaskComment] = useState("");
+  const [isAddingComment, setIsAddingComment] = useState(false);
+
+  const submitTaskComment = async () => {
+    if (!commentsTask || !taskComment.trim()) return;
+    try {
+      setIsAddingComment(true);
+      const updated = await addTaskComment(commentsTask.id, taskComment.trim());
+      setCommentsTask(updated);
+      setTaskComment("");
+      await reloadTasks();
+      toast.success("Comment added");
+    } catch {
+      toast.error("Failed to add comment");
+    } finally {
+      setIsAddingComment(false);
+    }
+  };
+
   // Derive the UI Task shape (nested assignee/document) from the flat DTOs.
   const tasks: Task[] = taskDtos.map((dto) => ({
     id: dto.id,
     title: dto.title,
     description: dto.description || "",
     assignedTo:
-      users.find((u) => u.id === dto.assigned_to) || {
+      orgUsers.find((u) => u.id === dto.assigned_to) || {
         id: dto.assigned_to || "",
         name: dto.assigned_to || "Unassigned",
         email: "",
@@ -164,7 +233,7 @@ const TasksPage = () => {
     dueDate: dto.due_date || "",
     status: deriveStatus(dto.status, dto.due_date),
     document: dto.document_id
-      ? documents.find((d) => d.id === dto.document_id) || {
+      ? orgDocuments.find((d) => d.id === dto.document_id) || {
           id: dto.document_id,
           title: dto.document_id,
           type: "",
@@ -468,7 +537,7 @@ const TasksPage = () => {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            {users.map(user => (
+                            {orgUsers.map(user => (
                               <SelectItem key={user.id} value={user.id}>
                                 {user.name}
                               </SelectItem>
@@ -550,7 +619,7 @@ const TasksPage = () => {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            {documents.map(doc => (
+                            {orgDocuments.map(doc => (
                               <SelectItem key={doc.id} value={doc.id}>
                                 {doc.title}
                               </SelectItem>
@@ -666,6 +735,17 @@ const TasksPage = () => {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title="Comments"
+                            onClick={() =>
+                              setCommentsTask(taskDtos.find((d) => d.id === task.id) || null)
+                            }
+                          >
+                            <MessageSquare className="h-4 w-4" />
+                          </Button>
                           <Button variant="ghost" size="icon" className="h-8 w-8">
                             <Eye className="h-4 w-4" />
                           </Button>
@@ -874,6 +954,58 @@ const TasksPage = () => {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Per-task comments */}
+      <Dialog open={!!commentsTask} onOpenChange={(open) => !open && setCommentsTask(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Comments</DialogTitle>
+            <DialogDescription>{commentsTask?.title}</DialogDescription>
+          </DialogHeader>
+
+          <ScrollArea className="max-h-72 pr-3">
+            {(commentsTask?.comments?.length ?? 0) === 0 ? (
+              <p className="text-sm text-muted-foreground py-4">No comments yet.</p>
+            ) : (
+              <div className="space-y-3 py-2">
+                {commentsTask?.comments?.map((c) => (
+                  <div key={c.id} className="rounded-md border p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm font-medium">{c.author_name || "User"}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {formatDateTime(c.created_at)}
+                      </span>
+                    </div>
+                    <p className="text-sm whitespace-pre-wrap">{c.text}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </ScrollArea>
+
+          <div className="space-y-2">
+            <Textarea
+              placeholder="Add a comment..."
+              value={taskComment}
+              onChange={(e) => setTaskComment(e.target.value)}
+              rows={3}
+            />
+            <DialogFooter>
+              <Button
+                onClick={submitTaskComment}
+                disabled={isAddingComment || !taskComment.trim()}
+              >
+                {isAddingComment ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <MessageSquare className="mr-2 h-4 w-4" />
+                )}
+                Add comment
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
