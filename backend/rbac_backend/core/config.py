@@ -243,6 +243,11 @@ class Settings(BaseSettings):
     OIDC_DEFAULT_ORG_ID: str = Field(default="", validation_alias="OIDC_DEFAULT_ORG_ID")
     OIDC_POST_LOGIN_REDIRECT: str = Field(default="/", validation_alias="OIDC_POST_LOGIN_REDIRECT")
 
+    # Observability / distributed tracing (OpenTelemetry; opt-in)
+    OTEL_ENABLED: bool = Field(default=False, validation_alias="OTEL_ENABLED")
+    OTEL_SERVICE_NAME: str = Field(default="contraclaim-backend", validation_alias="OTEL_SERVICE_NAME")
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = Field(default="", validation_alias="OTEL_EXPORTER_OTLP_ENDPOINT")
+
     # Rate Limiting Configuration
     USER_RATE_LIMIT_REQUESTS: int = Field(default=10, description="Max requests per user per minute")
     USER_RATE_LIMIT_WINDOW: int = Field(default=60, description="Rate limit window in seconds")
