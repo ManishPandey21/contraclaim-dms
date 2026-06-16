@@ -138,7 +138,7 @@ class RetrievalService:
     async def rag(self, request: RagRequest, current_user: Optional[CurrentUser]) -> RagResponse:
         search_response = await self.search(request, current_user, log_run=False)
         context_chunks = search_response.results
-        context_text = "\n\n".join([res.payload.get("text_enriched") or res.payload.get("text") or res.snippet for res in context_chunks])
+        context_text = self._assemble_context(context_chunks)
         prompt = self._build_rag_prompt(request.query, context_text, request.answer_style)
         gen_start = time.perf_counter()
         answer = await self.llm_generator.generate(prompt, max_tokens=request.max_tokens)
@@ -330,7 +330,7 @@ class RetrievalService:
         scored: List[Dict[str, Any]] = []
         for doc in docs:
             text = doc.get("text_enriched") if request.use_enriched_text else doc.get("text_original") or doc.get("text")
-            score = 1.0 if request.query.lower() in (text or "").lower() else 0.2
+            score = self._lexical_score(request.query, text)
             scored.append(
                 {
                     "score": score,
@@ -479,6 +479,59 @@ class RetrievalService:
         fused = [{"payload": data["payload"], "score": data["score"]} for data in scores.values()]
         fused.sort(key=lambda x: x["score"], reverse=True)
         return fused[:limit]
+
+    # Token-budget proxy for assembled RAG context (~4 chars/token). Keeps the
+    # prompt within typical model context windows instead of dumping every chunk.
+    CONTEXT_CHAR_BUDGET = 12000
+
+    @staticmethod
+    def _lexical_score(query: str, text: str) -> float:
+        """Dependency-free BM25-lite relevance for the Mongo fallback path.
+
+        Combines query-term coverage with saturating term frequency and an
+        exact-phrase bonus, replacing the previous binary substring score
+        (1.0/0.2) so the fallback can actually rank results.
+        """
+        text_l = (text or "").lower()
+        if not text_l:
+            return 0.0
+        terms = re.findall(r"[a-z0-9][a-z0-9._-]{1,}", (query or "").lower())
+        unique = set(terms)
+        if not unique:
+            return 0.1
+        present = sum(1 for term in unique if term in text_l)
+        coverage = present / len(unique)
+        freq = 0.0
+        for term in unique:
+            count = text_l.count(term)
+            freq += count / (count + 1.0)  # saturates toward 1.0 per term
+        freq_norm = freq / len(unique)
+        phrase_bonus = 0.5 if (query or "").lower().strip() and (query or "").lower().strip() in text_l else 0.0
+        return round(0.6 * coverage + 0.4 * freq_norm + phrase_bonus, 6)
+
+    def _assemble_context(self, chunks: List[SearchResult], char_budget: Optional[int] = None) -> str:
+        """Assemble RAG context from ranked chunks within a character budget.
+
+        Chunks are already ordered by relevance; we accumulate from the top until
+        the budget is reached (token-budgeting by proxy) rather than concatenating
+        everything and relying on downstream truncation.
+        """
+        budget = char_budget or self.CONTEXT_CHAR_BUDGET
+        parts: List[str] = []
+        used = 0
+        for res in chunks:
+            payload = res.payload or {}
+            text = payload.get("text_enriched") or payload.get("text") or res.snippet or ""
+            if not text:
+                continue
+            if used + len(text) > budget:
+                remaining = budget - used
+                if remaining > 200:  # include a partial leading slice if useful room remains
+                    parts.append(text[:remaining].rstrip())
+                break
+            parts.append(text)
+            used += len(text) + 2
+        return "\n\n".join(parts)
 
     def _build_snippet(self, payload: Dict[str, Any], use_enriched: bool) -> str:
         text = payload.get("text_enriched") if use_enriched else None
