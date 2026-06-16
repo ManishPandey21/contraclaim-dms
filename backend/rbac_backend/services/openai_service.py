@@ -54,20 +54,22 @@ class OpenAIService:
         """
         for attempt in range(max_retries):
             try:
-                # Use async file reading
                 loop = asyncio.get_event_loop()
-                file_data = await loop.run_in_executor(None, lambda: open(file_path, 'rb').read())
-                
                 filename = os.path.basename(file_path)
                 safe_filename = filename.lower() if filename else "document.pdf"
-
                 mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
 
-                response = await self._client.files.create(
-                    file=(safe_filename, file_data, mime_type),
-                    purpose="assistants"
-                )
-                
+                # Stream the file to the API via an open handle instead of reading
+                # the entire file into memory (M9): the SDK reads it incrementally.
+                file_handle = await loop.run_in_executor(None, lambda: open(file_path, "rb"))
+                try:
+                    response = await self._client.files.create(
+                        file=(safe_filename, file_handle, mime_type),
+                        purpose="assistants"
+                    )
+                finally:
+                    await loop.run_in_executor(None, file_handle.close)
+
                 return response.id
                 
             except Exception as e:
