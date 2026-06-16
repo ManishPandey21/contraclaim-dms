@@ -9,6 +9,7 @@ to access.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -257,10 +258,14 @@ async def get_dashboard_stats(
 
         # Optional search filter
         if search:
+            # SECURITY (H6): escape user input before using it in a Mongo $regex.
+            # Unescaped input let a user inject regex metacharacters (ReDoS / broad
+            # matches). re.escape keeps this a literal substring search.
+            safe_search = re.escape(search)
             base_query["$or"] = [
-                {"filename": {"$regex": search, "$options": "i"}},
-                {"subject": {"$regex": search, "$options": "i"}},
-                {"letterNo": {"$regex": search, "$options": "i"}},
+                {"filename": {"$regex": safe_search, "$options": "i"}},
+                {"subject": {"$regex": safe_search, "$options": "i"}},
+                {"letterNo": {"$regex": safe_search, "$options": "i"}},
             ]
 
         # Optional status filter
@@ -294,12 +299,13 @@ async def get_dashboard_stats(
         # 3. Compute overview statistics
         # -----------------------------------------------------------------
         total_documents = len(documents)
-        total_letters = total_documents
 
         # Direction counts for document-based summary cards
         incoming_count = 0
         outgoing_count = 0
+        letter_count = 0
         for document in documents:
+            upload_type = _safe_str(document.get("uploadType")).strip().lower()
             direction = _normalise_direction(
                 document.get("uploadType") or document.get("direction")
             )
@@ -307,6 +313,14 @@ async def get_dashboard_stats(
                 incoming_count += 1
             elif direction == "Outgoing":
                 outgoing_count += 1
+            # H6: "letters" are correspondence documents (incoming/outgoing),
+            # distinct from contract uploads (uploadType == "contract"). Previously
+            # total_letters was hard-set equal to total_documents, which counted
+            # contracts as letters and produced misleading business metrics.
+            if upload_type != "contract":
+                letter_count += 1
+
+        total_letters = letter_count
 
         # Count by status
         status_counts: Dict[str, int] = {}

@@ -253,7 +253,12 @@ async def search_documents(
             response["facets"] = facets
         
         return response
-        
+
+    except HTTPException:
+        # BUGFIX (H4): client validation errors (e.g. invalid date_from/date_to or
+        # upload_type) raise HTTPException(400). Without re-raising here, the broad
+        # `except Exception` below swallowed them and returned a misleading 500.
+        raise
     except Exception as e:
         logger.error(f"Search error: {str(e)}")
         raise HTTPException(status_code=500, detail="Search failed")
