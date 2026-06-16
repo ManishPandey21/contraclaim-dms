@@ -1,10 +1,15 @@
-from typing import List
+from datetime import datetime
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from ..core.database import get_db
+from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..models.report import ReportDefinition, ReportPreview, ReportRequest
+from ..services.audit_event_service import AuditEventService
+from ..services.audit_export import audit_events_to_csv
 from ..services.policy_service import PolicyService
 from ..services.report_service import ReportService, ReportServiceError
 
@@ -13,6 +18,46 @@ router = APIRouter()
 
 def get_report_service() -> ReportService:
     return ReportService()
+
+
+@router.get("/audit/export")
+async def export_audit_events(
+    organization_id: str = Query(...),
+    project_id: Optional[str] = Query(None),
+    action: Optional[str] = Query(None),
+    from_ts: Optional[datetime] = Query(None, alias="from"),
+    to_ts: Optional[datetime] = Query(None, alias="to"),
+    limit: int = Query(5000, ge=1, le=50000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Export tenant-scoped audit events as a CSV evidence pack.
+
+    Requires ``dms.audit.view`` and is constrained (deny-by-default) to the
+    caller's organization/project scope by PolicyService.
+    """
+    await PolicyService().authorize(
+        current_user,
+        Permissions.AUDIT_VIEW,
+        resource_type="audit",
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    events = await AuditEventService(db).query_events(
+        organization_id=organization_id,
+        project_id=project_id,
+        start=from_ts,
+        end=to_ts,
+        action=action,
+        limit=limit,
+    )
+    csv_text = audit_events_to_csv(events)
+    filename = f"audit-export-{organization_id}-{datetime.utcnow().strftime('%Y%m%d')}.csv"
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/reports", response_model=List[ReportDefinition])
