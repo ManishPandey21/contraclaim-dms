@@ -39,10 +39,17 @@ def _normalize_role_name(value: Any) -> str:
 class AuthorizationService:
     """Lightweight authorization helper used by routers.
 
-    The implementation intentionally errs on the side of allowing the request so that
-    flows continue to work while the real RBAC logic is rebuilt.  All methods accept
-    the shapes expected by routers/services and either return sanitized filters or
-    raise :class:`AuthorizationError` when the caller explicitly requires it.
+    The implementation is deny-by-default: methods either return sanitized,
+    tenant-scoped filters or raise :class:`AuthorizationError`. A method must never
+    grant access broader than the caller's organization/project scope. New and
+    sensitive routes should prefer :class:`PolicyService`; this helper remains for
+    legacy callers and is being migrated route-by-route.
+
+    NOTE (C2): several list-query builders below still contain permissive scope
+    stubs (marked "permissive"). These are safe only where the calling router
+    additionally enforces scope via PolicyService/build_scope_query. They should be
+    tightened as each route is migrated, with the tenant-isolation test suite
+    (tests/test_tenant_isolation.py) run to prevent lockout regressions.
     """
 
     def __init__(self) -> None:
@@ -447,8 +454,18 @@ class AuthorizationService:
                 raise AuthorizationError("Access denied to this user")
             return
 
-        # Permissive default
-        return
+        # SECURITY (C2): deny-by-default. This branch previously returned
+        # unconditionally, granting any role outside the known set (e.g. custom
+        # roles) cross-tenant access to any user record. Confine remaining roles
+        # to their own organization and deny when same-org cannot be proven.
+        current_org = getattr(current_user, "organization_id", None)
+        if (
+            current_org is not None
+            and target_org is not None
+            and str(target_org) == str(current_org)
+        ):
+            return
+        raise AuthorizationError("Access denied to this user", 403)
 
     async def validate_role_assignment(
         self, current_user: Any, roles: Optional[Any]

@@ -8,6 +8,13 @@ import { Viewer as PdfViewer, Worker, SpecialZoomLevel } from "@react-pdf-viewer
 import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout";
 import { searchPlugin } from "@react-pdf-viewer/search";
 import { zoomPlugin } from "@react-pdf-viewer/zoom";
+// SECURITY (H3): bundle the pdf.js worker as a same-origin asset instead of
+// loading it from cdnjs. The production CSP (config/httpd.conf) sets
+// `script-src 'self'` and `worker-src 'self' blob:`, which blocks the CDN
+// worker and breaks PDF preview. Vite's `?url` import emits the worker from the
+// installed pdfjs-dist (version-matched to @react-pdf-viewer) served from our
+// own origin, so it loads under the strict CSP without weakening it.
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 
@@ -272,7 +279,7 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
                 </Alert>
               </div>
             ) : (
-              <Worker workerUrl="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js">
+              <Worker workerUrl={pdfWorkerUrl}>
                 <div style={{ height: "100%" }}>
                   <PdfViewer
                     fileUrl={pdfUrl}

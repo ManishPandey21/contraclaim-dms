@@ -443,6 +443,13 @@ class Settings(BaseSettings):
                 production_errors.append("METRICS_TOKEN is required when METRICS_ENABLED=true in production")
             if self.ANTIVIRUS_ENABLED and self.CLAMAV_FAIL_OPEN:
                 production_errors.append("CLAMAV_FAIL_OPEN must be false in production antivirus environments")
+            if getattr(self, "OBSERVABILITY_STORE_RAW_QUERIES", False):
+                # M10: raw RAG/search queries can contain sensitive contract/claim
+                # content. Redaction is the default; forbid opting back into raw
+                # storage in production so it can't be enabled by accident.
+                production_errors.append(
+                    "OBSERVABILITY_STORE_RAW_QUERIES must be false in production (raw queries may contain sensitive content)"
+                )
             if production_errors:
                 raise ValueError(
                     "Invalid production configuration: " + "; ".join(production_errors)

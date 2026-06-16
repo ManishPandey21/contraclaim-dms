@@ -1174,15 +1174,18 @@ class DocumentController:
     ) -> BulkUploadStatus:
         """Get bulk upload job status."""
         try:
-            status = await self.bulk_upload_service.get_job_status(job_id)
-            
-            if not status:
+            # BUGFIX (H2): a local variable named `status` previously shadowed the
+            # imported FastAPI `status` module, so the not-found branch raised an
+            # AttributeError that surfaced as a 500 instead of a clean 404.
+            job_status = await self.bulk_upload_service.get_job_status(job_id)
+
+            if not job_status:
                 raise DocumentError("Bulk upload job not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Verify user has access (basic security check)
             # In production, you might want more sophisticated access control
-            
-            return status
+
+            return job_status
 
         except DocumentError:
             raise
@@ -2705,16 +2708,20 @@ async def bulk_upload_documents(
             status.HTTP_400_BAD_REQUEST
         )
 
-    total_size = sum(file.file._file.tell() for file in files)
+    # SECURITY (H1): the previous check used `file.file._file.tell()` before the
+    # stream had been read, so it evaluated to ~0 and enforced no cap at all.
+    # Measure each file's real size by seeking to the end, then rewind so the
+    # downstream read starts from the beginning.
+    total_size = 0
+    for file in files:
+        file.file.seek(0, 2)  # 2 == os.SEEK_END
+        total_size += file.file.tell()
+        file.file.seek(0)
     if total_size > settings.BULK_UPLOAD_MAX_SIZE_MB * 1024 * 1024:
         raise DocumentError(
             f"Bulk upload exceeds maximum total size ({settings.BULK_UPLOAD_MAX_SIZE_MB}MB)",
             status.HTTP_400_BAD_REQUEST
         )
-
-    # Reset file pointers
-    for file in files:
-        file.file.seek(0)
 
     return await controller.bulk_upload_documents(
         background_tasks=background_tasks,

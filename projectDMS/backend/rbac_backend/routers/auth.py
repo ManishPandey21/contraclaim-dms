@@ -134,6 +134,20 @@ class AuthController:
             
             # Check account status
             if not user:
+                # SECURITY (H5): increment the per-account failed-attempt counter
+                # on this (primary) login path. authenticate_user_secure() returns
+                # None on a bad password without touching the counter, so account
+                # lockout in AuthenticationService never fired for the main app
+                # route. Look up the account by email and, if it exists, record the
+                # failed attempt so lockout engages after the configured threshold.
+                # The response stays generic to avoid user enumeration.
+                try:
+                    known_user = await self.user_service.get_user_by_email(validated_email)
+                    if known_user is not None and getattr(known_user, "id", None):
+                        await self.auth_service.increment_failed_attempts(known_user.id)
+                except Exception:
+                    # Never let lockout bookkeeping break the login response.
+                    pass
                 await self.audit_logger.log_login_failed(
                     validated_email,
                     "invalid_credentials",

@@ -582,6 +582,12 @@ const UploadPage: React.FC = () => {
   if (isLoading) return <div>Loading...</div>;
   if (error) return <div>Error: {error}</div>;
 
+  // H7: the "From URL" / cloud-import UI is not wired to any backend import
+  // service. Shipping it as-is is a misleading dead-end, and building it for real
+  // requires SSRF protection (URL allow-listing, content validation, AV scan).
+  // Feature-flag it off until a secure import endpoint exists; flip to true then.
+  const URL_IMPORT_ENABLED = false;
+
   return (
     <div className="container mx-auto py-8 animate-fade-in">
       <div className="flex justify-between items-center mb-6">
@@ -589,9 +595,13 @@ const UploadPage: React.FC = () => {
       </div>
 
       <Tabs defaultValue="upload" className="mb-8">
-        <TabsList className="grid w-full md:w-[400px] grid-cols-3">
+        <TabsList
+          className={`grid w-full md:w-[400px] ${
+            URL_IMPORT_ENABLED ? "grid-cols-3" : "grid-cols-2"
+          }`}
+        >
           <TabsTrigger value="upload">Upload</TabsTrigger>
-          <TabsTrigger value="url">From URL</TabsTrigger>
+          {URL_IMPORT_ENABLED && <TabsTrigger value="url">From URL</TabsTrigger>}
           <TabsTrigger value="bulk">Bulk Upload</TabsTrigger>
         </TabsList>
 
@@ -835,7 +845,8 @@ const UploadPage: React.FC = () => {
           </div>
         </TabsContent>
 
-        {/* From URL (UI only for now) */}
+        {/* From URL (H7: disabled — not wired to a backend import service) */}
+        {URL_IMPORT_ENABLED && (
         <TabsContent value="url" className="mt-6">
           <Card>
             <CardHeader>
@@ -961,6 +972,7 @@ const UploadPage: React.FC = () => {
             </CardContent>
           </Card>
         </TabsContent>
+        )}
 
         {/* Bulk Upload */}
         <TabsContent value="bulk" className="mt-6">
