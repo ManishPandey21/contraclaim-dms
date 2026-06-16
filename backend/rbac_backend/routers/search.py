@@ -75,19 +75,10 @@ async def search_documents(
             else:
                 return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
         
-        # Text search
+        # Text search. Uses the wildcard text index created once at startup in
+        # core/database.py (ensure_indexes); per-request index creation was removed
+        # (M5) — it added latency and silently failed against the existing index.
         if q and q.strip():
-            # Create text search index if it doesn't exist
-            try:
-                await db.documents.create_index([
-                    ("name", "text"),
-                    ("filename", "text"),
-                    ("content", "text"),
-                    ("categories", "text")
-                ])
-            except Exception:
-                pass  # Index might already exist
-            
             match_conditions["$text"] = {"$search": q.strip()}
         
         # Date range filter
