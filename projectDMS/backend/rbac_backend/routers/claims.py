@@ -7,9 +7,11 @@ filtered with build_scope_query, so Org A can never see Org B's claims.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -17,7 +19,9 @@ from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
 from ..models.claim import Claim, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
 from ..services.approval_service import ApprovalError, ApprovalService
+from ..services.audit_event_service import AuditEventService
 from ..services.claim_service import ClaimService
+from ..services.evidence_bundle_service import EvidenceBundleService
 from ..services.policy_service import PolicyService
 
 router = APIRouter()
@@ -154,6 +158,52 @@ async def _approval_for(claim: dict, db) -> dict:
         organization_id=claim.get("organization_id"),
         project_id=claim.get("project_id"),
         drafter_id=claim.get("created_by"),
+    )
+
+
+@router.get("/claims/{claim_id}/evidence-bundle")
+async def export_evidence_bundle(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Stream a ZIP evidence bundle: claim record + in-scope linked correspondence
+    + the claim's audit trail (CSV) + a manifest. Requires claim-view to read the
+    claim and audit-view for the export; the export action is itself audited."""
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    await policy.authorize(
+        current_user,
+        Permissions.AUDIT_VIEW,
+        resource_type="claim",
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+    )
+    audit = AuditEventService(db)
+    events = await audit.query_events(
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        limit=50000,
+    )
+    events = [e for e in events if str(e.get("resource_id")) == str(claim_id)]
+    content = await EvidenceBundleService(db).build(
+        claim, events, generated_by=getattr(current_user, "id", None)
+    )
+    await audit.emit(
+        action="claim.evidence_exported",
+        actor_id=getattr(current_user, "id", None),
+        resource_type="claim",
+        resource_id=str(claim_id),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        after={"audit_event_count": len(events), "bytes": len(content)},
+    )
+    ref = claim.get("claim_ref") or claim_id
+    filename = f"evidence-{ref}-{datetime.utcnow().strftime('%Y%m%d')}.zip"
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

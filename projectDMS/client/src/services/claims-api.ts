@@ -166,3 +166,32 @@ export async function returnClaim(id: string, comment?: string): Promise<Approva
   const { data } = await api.post(`/claims/${id}/return`, { comment });
   return data as ApprovalRecord;
 }
+
+// ---------------------------------------------------------------------------
+// Evidence bundle / data-room export (Phase 4 / Module 4). Downloads a ZIP.
+// ---------------------------------------------------------------------------
+
+export async function downloadEvidenceBundle(id: string): Promise<string> {
+  const res = await api.get(`/claims/${id}/evidence-bundle`, { responseType: "blob" });
+  const blob =
+    res.data instanceof Blob ? res.data : new Blob([res.data], { type: "application/zip" });
+
+  const disposition = (res.headers as Record<string, string> | undefined)?.[
+    "content-disposition"
+  ];
+  let filename = `evidence-${id}.zip`;
+  if (disposition) {
+    const match = disposition.match(/filename="?([^";]+)"?/i);
+    if (match && match[1]) filename = match[1];
+  }
+
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+  return filename;
+}
