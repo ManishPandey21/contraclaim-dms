@@ -349,6 +349,19 @@ async def ensure_indexes(db):
         [("claim_id", 1), ("created_at", -1)], background=True
     )
 
+    # Contract appraisal (Contract Appraisal Report — v2)
+    await db.contract_appraisal_jobs.create_index(
+        [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.contract_appraisal_reports.create_index(
+        [("organization_id", 1), ("project_id", 1), ("report_version", -1)], background=True
+    )
+    await db.contract_appraisal_reports.create_index("job_id", background=True)
+    await db.contract_appraisal_review_comments.create_index(
+        [("report_id", 1), ("created_at", -1)], background=True
+    )
+
     # SLA / time-bar rules (per-org notice-window overrides)
     await db.sla_rules.create_index("organization_id", background=True, unique=True)
 

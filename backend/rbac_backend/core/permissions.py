@@ -26,6 +26,13 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.claim.delete",
     "dms.claim.manage",
     "dms.claim.assess",
+    "dms.contract.appraisal.view",
+    "dms.contract.appraisal.generate",
+    "dms.contract.appraisal.edit",
+    "dms.contract.appraisal.approve",
+    "dms.contract.appraisal.reject",
+    "dms.contract.appraisal.export",
+    "dms.contract.appraisal.create_registers",
     "dms.admin",
 ]
 
@@ -92,6 +99,13 @@ class Permissions:
     CLAIM_DELETE = "dms.claim.delete"
     CLAIM_MANAGE = "dms.claim.manage"
     CLAIM_ASSESS = "dms.claim.assess"
+    CONTRACT_APPRAISAL_VIEW = "dms.contract.appraisal.view"
+    CONTRACT_APPRAISAL_GENERATE = "dms.contract.appraisal.generate"
+    CONTRACT_APPRAISAL_EDIT = "dms.contract.appraisal.edit"
+    CONTRACT_APPRAISAL_APPROVE = "dms.contract.appraisal.approve"
+    CONTRACT_APPRAISAL_REJECT = "dms.contract.appraisal.reject"
+    CONTRACT_APPRAISAL_EXPORT = "dms.contract.appraisal.export"
+    CONTRACT_APPRAISAL_CREATE_REGISTERS = "dms.contract.appraisal.create_registers"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -170,6 +184,13 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.claim.delete": ["documents:delete"],
     "dms.claim.manage": ["documents:update", "projects:update"],
     "dms.claim.assess": ["documents:read"],
+    "dms.contract.appraisal.view": ["documents:read"],
+    "dms.contract.appraisal.generate": ["documents:read"],
+    "dms.contract.appraisal.edit": ["documents:update"],
+    "dms.contract.appraisal.approve": ["documents:update", "projects:update"],
+    "dms.contract.appraisal.reject": ["documents:update", "projects:update"],
+    "dms.contract.appraisal.export": ["documents:read"],
+    "dms.contract.appraisal.create_registers": ["documents:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
