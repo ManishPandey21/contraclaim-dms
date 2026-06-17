@@ -20,6 +20,9 @@ from ...models.contract_appraisal import (
     AppraisalJobStatus,
     AppraisalReport,
     CompletenessStatus,
+    ContractKeyDate,
+    ContractObligation,
+    ContractRisk,
     ReportStatus,
     ReviewComment,
 )
@@ -162,6 +165,7 @@ class AppraisalService:
                 executive_summary=result.get("executive_summary", ""),
                 full_report_markdown=result.get("full_report_markdown", ""),
                 sections=result.get("sections", []),
+                structured_output=result.get("structured_output", {}),
                 citations=result.get("citations", []),
                 confidence_score=result.get("confidence_score", 0.0),
                 overall_risk_rating=result.get("overall_risk_rating"),
@@ -267,7 +271,132 @@ class AppraisalService:
             project_id=report.get("project_id"),
         )
 
+    # --- registers (Phase 2) ----------------------------------------------
+
+    @staticmethod
+    def _register_rows(report: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """Build register rows from the report's structured_output (each row keeps
+        its citation provenance; no invented entries)."""
+        so = report.get("structured_output") or {}
+        org = report.get("organization_id")
+        proj = report.get("project_id")
+        rid = str(report.get("_id"))
+
+        def _stamp(model_cls, items):
+            rows = []
+            for item in items or []:
+                rows.append(model_cls(organization_id=org, project_id=proj, report_id=rid, **item).model_dump(by_alias=True))
+            return rows
+
+        return {
+            "obligations": _stamp(ContractObligation, so.get("obligations")),
+            "risks": _stamp(ContractRisk, so.get("risks")),
+            "key_dates": _stamp(ContractKeyDate, so.get("key_dates")),
+        }
+
+    async def create_registers(self, report: Dict[str, Any], current_user: Any) -> Dict[str, int]:
+        rows = self._register_rows(report)
+        repo = self._repo()
+        counts: Dict[str, int] = {}
+        for register, register_rows in rows.items():
+            counts[register] = await repo.replace_register(register, str(report["_id"]), register_rows)
+        await self.audit.emit(
+            action="contract_appraisal.register_created",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="contract_appraisal_report",
+            resource_id=str(report["_id"]),
+            organization_id=report.get("organization_id"),
+            project_id=report.get("project_id"),
+            after=counts,
+        )
+        return counts
+
+    async def list_register(self, register: str, scope_filter: Dict[str, Any], *, report_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return await self._repo().list_register(register, scope_filter, report_id=report_id)
+
+    async def get_register_item(self, register: str, item_id: str) -> Optional[Dict[str, Any]]:
+        return await self._repo().get_register_item(register, item_id)
+
+    async def update_register_item(self, register: str, item_id: str, fields: Dict[str, Any], current_user: Any, *, before: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        updated = await self._repo().update_register_item(register, item_id, {k: v for k, v in fields.items() if v is not None})
+        await self.audit.emit(
+            action="contract_appraisal.register_updated",
+            actor_id=getattr(current_user, "id", None),
+            resource_type=f"contract_{register}",
+            resource_id=str(item_id),
+            organization_id=(updated or before or {}).get("organization_id"),
+            project_id=(updated or before or {}).get("project_id"),
+            after=updated,
+        )
+        return updated
+
+    # --- clause library (read-only over existing chunks) ------------------
+
+    async def list_clauses(self, scope_filter: Dict[str, Any], *, q: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        db = await self._get_db()
+        query: Dict[str, Any] = dict(scope_filter or {})
+        query["clause_number"] = {"$nin": [None, ""]}
+        if q:
+            query["$or"] = [
+                {"clause_number": {"$regex": q, "$options": "i"}},
+                {"clause_title": {"$regex": q, "$options": "i"}},
+                {"text": {"$regex": q, "$options": "i"}},
+            ]
+        out: List[Dict[str, Any]] = []
+        seen: set = set()
+        try:
+            cursor = db.document_vectors.find(query).limit(limit * 3)
+            async for doc in cursor:
+                clause = doc.get("clause_number")
+                doc_id = doc.get("document_id")
+                dedupe = (doc_id, clause)
+                if clause in (None, "") or dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                out.append(
+                    {
+                        "document_id": doc_id,
+                        "document_name": doc.get("document_name") or doc.get("file_name"),
+                        "clause_number": clause,
+                        "clause_title": doc.get("clause_title"),
+                        "page_numbers": doc.get("page_numbers") or [],
+                        "snippet": str(doc.get("text") or doc.get("text_enriched") or "")[:300],
+                    }
+                )
+                if len(out) >= limit:
+                    break
+        except Exception:  # pragma: no cover - clause library is best-effort
+            logger.exception("Clause library query failed")
+        return out
+
     # --- export -----------------------------------------------------------
+
+    @staticmethod
+    def build_pdf(report: Dict[str, Any]) -> bytes:
+        """Render the markdown report to a PDF byte stream (reportlab)."""
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+        from xml.sax.saxutils import escape
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, title="Contract Appraisal Report")
+        styles = getSampleStyleSheet()
+        flow = []
+        for raw in (report.get("full_report_markdown") or "").split("\n"):
+            line = raw.rstrip()
+            if not line or line.startswith("---"):
+                flow.append(Spacer(1, 6))
+            elif line.startswith("## "):
+                flow.append(Paragraph(escape(line[3:]), styles["Heading2"]))
+            elif line.startswith("# "):
+                flow.append(Paragraph(escape(line[2:]), styles["Heading1"]))
+            elif line.startswith("*") and line.endswith("*"):
+                flow.append(Paragraph(f"<i>{escape(line.strip('*'))}</i>", styles["Italic"]))
+            else:
+                flow.append(Paragraph(escape(line), styles["BodyText"]))
+        doc.build(flow)
+        return buffer.getvalue()
 
     @staticmethod
     def build_docx(report: Dict[str, Any]) -> bytes:

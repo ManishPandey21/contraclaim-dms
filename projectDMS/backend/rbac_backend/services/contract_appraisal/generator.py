@@ -125,16 +125,103 @@ class AppraisalGenerator:
 
         supported_count = sum(1 for s in sections if s["supported"])
         confidence_score = round(supported_count / total, 3) if total else 0.0
+        structured_output = build_structured_output(sections, confidence_score)
 
         return {
             "sections": sections,
             "full_report_markdown": "\n".join(md_parts),
             "executive_summary": executive_summary,
             "citations": all_citations,
+            "structured_output": structured_output,
             "confidence_score": confidence_score,
-            "overall_risk_rating": None,  # Phase 2 derives this from structured_output
+            "overall_risk_rating": structured_output["overall_appraisal"]["overall_risk_rating"],
             "ai_prompt_version": APPRAISAL_PROMPT_VERSION,
         }
+
+
+# Which sections feed which register, and any fixed attributes for their rows.
+_OBLIGATION_SECTIONS = {"employer_obligations": "employer", "contractor_obligations": "contractor"}
+_RISK_SECTIONS = {"risk_register"}
+_KEY_DATE_SECTIONS = {"time_and_delay", "contract_particulars"}
+_TRIGGER_SECTIONS = {"claim_variation_opportunities"}
+
+_CONFIDENCE_REVIEW_THRESHOLD = 0.75  # spec §12: below this → requires human review
+
+
+def _snippet(c: Dict[str, Any]) -> str:
+    text = str(c.get("snippet") or c.get("clause_title") or "").strip()
+    return text[:400]
+
+
+def _page(c: Dict[str, Any]) -> Optional[int]:
+    if c.get("page") is not None:
+        return c.get("page")
+    pages = c.get("page_numbers") or []
+    return pages[0] if pages else None
+
+
+def _provenance(c: Dict[str, Any], section_conf: float) -> Dict[str, Any]:
+    score = c.get("score") if isinstance(c.get("score"), (int, float)) else section_conf
+    return {
+        "clause_reference": c.get("clause_number"),
+        "document_name": c.get("document_title") or c.get("file_name") or c.get("document_id"),
+        "page_number": _page(c),
+        "source_quote": _snippet(c),
+        "confidence_score": round(float(score), 3),
+        "verification_status": "ai_generated" if score >= _CONFIDENCE_REVIEW_THRESHOLD else "requires_human_review",
+    }
+
+
+def build_structured_output(sections: List[Dict[str, Any]], confidence_score: float) -> Dict[str, Any]:
+    """Derive register-ready evidence items from each section's citations.
+
+    Every row is anchored to a real citation (no invented entries); rows below the
+    confidence threshold are flagged ``requires_human_review`` per spec §12.
+    """
+    obligations: List[Dict[str, Any]] = []
+    risks: List[Dict[str, Any]] = []
+    key_dates: List[Dict[str, Any]] = []
+    triggers: List[Dict[str, Any]] = []
+
+    for section in sections:
+        key = section["key"]
+        section_conf = float(section.get("confidence") or 0.0)
+        for c in section.get("citations", []):
+            prov = _provenance(c, section_conf)
+            title = (c.get("clause_title") or _snippet(c) or "").strip()[:160] or "See source"
+            if key in _OBLIGATION_SECTIONS:
+                obligations.append(
+                    {**prov, "party": _OBLIGATION_SECTIONS[key], "obligation_title": title, "obligation_description": _snippet(c), "status": "open"}
+                )
+            elif key in _RISK_SECTIONS:
+                risks.append({**prov, "risk_title": title, "risk_description": _snippet(c), "risk_category": "other", "severity": None, "status": "open"})
+            elif key in _KEY_DATE_SECTIONS:
+                key_dates.append({**prov, "date_title": title, "date_type": "other", "status": "open"})
+            elif key in _TRIGGER_SECTIONS:
+                triggers.append({**prov, "trigger": title})
+
+    overall_risk_rating = _coverage_to_risk(confidence_score)
+    return {
+        "obligations": obligations,
+        "risks": risks,
+        "key_dates": key_dates,
+        "claim_variation_opportunities": triggers,
+        "overall_appraisal": {
+            "confidence_score": confidence_score,
+            "overall_risk_rating": overall_risk_rating,
+        },
+    }
+
+
+def _coverage_to_risk(coverage: float) -> str:
+    """Lower contract-coverage → higher documentation/administration risk."""
+    if coverage >= 0.85:
+        return "low"
+    if coverage >= 0.70:
+        return "medium"
+    if coverage >= 0.50:
+        return "high"
+    return "critical"
 
 
 def _human_citation(c: Dict[str, Any]) -> str:

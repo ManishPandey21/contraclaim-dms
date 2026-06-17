@@ -29,6 +29,7 @@ import {
   AppraisalJob,
   AppraisalReport,
   exportAppraisalDocx,
+  exportAppraisalPdf,
   generateAppraisal,
   getAppraisal,
   getAppraisalJob,
@@ -36,6 +37,8 @@ import {
   regenerateAppraisal,
   rejectAppraisal,
 } from "@/services/contracts-api";
+import AppraisalRegisters from "@/components/contract-appraisal/AppraisalRegisters";
+import ClauseLibrary from "@/components/contract-appraisal/ClauseLibrary";
 
 const TERMINAL_JOB = new Set(["completed", "failed", "cancelled"]);
 
@@ -173,18 +176,31 @@ const ContractAppraisalPage: React.FC = () => {
     }
   };
 
-  const onExport = async () => {
+  const downloadBlob = (blob: Blob, ext: string) => {
+    if (!selected) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `contract-appraisal-v${selected.report_version}.${ext}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const onExportDocx = async () => {
     if (!selected) return;
     try {
-      const blob = await exportAppraisalDocx(selected._id);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `contract-appraisal-v${selected.report_version}.docx`;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(await exportAppraisalDocx(selected._id), "docx");
     } catch {
-      toast.error("Export failed");
+      toast.error("DOCX export failed");
+    }
+  };
+
+  const onExportPdf = async () => {
+    if (!selected) return;
+    try {
+      downloadBlob(await exportAppraisalPdf(selected._id), "pdf");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "PDF export failed");
     }
   };
 
@@ -341,9 +357,13 @@ const ContractAppraisalPage: React.FC = () => {
                 <RefreshCw className="mr-2 h-4 w-4" />
                 Regenerate (new version)
               </Button>
-              <Button variant="outline" onClick={onExport} disabled={busy}>
+              <Button variant="outline" onClick={onExportDocx} disabled={busy}>
                 <Download className="mr-2 h-4 w-4" />
                 Export DOCX
+              </Button>
+              <Button variant="outline" onClick={onExportPdf} disabled={busy}>
+                <Download className="mr-2 h-4 w-4" />
+                Export PDF
               </Button>
             </div>
 
@@ -378,6 +398,14 @@ const ContractAppraisalPage: React.FC = () => {
               ))}
             </div>
 
+            <div className="border-t pt-3">
+              <AppraisalRegisters
+                reportId={selected._id}
+                organizationId={selected.organization_id || undefined}
+                projectId={selected.project_id || undefined}
+              />
+            </div>
+
             <div className="space-y-2 border-t pt-3">
               <Label>Add review comment</Label>
               <Textarea value={comment} onChange={(e) => setComment(e.target.value)} rows={2} />
@@ -388,6 +416,8 @@ const ContractAppraisalPage: React.FC = () => {
           </CardContent>
         </Card>
       )}
+
+      <ClauseLibrary organizationId={orgId.trim() || undefined} projectId={projectId.trim() || undefined} />
     </div>
   );
 };
