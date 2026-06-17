@@ -96,3 +96,20 @@ class Claim(ClaimBase):
     updated_by: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class SlaItem(BaseModel):
+    """A derived correspondence deadline (Phase 4 / Module 2)."""
+
+    claim_id: str
+    claim_ref: Optional[str] = None
+    title: Optional[str] = None
+    type: Optional[str] = None
+    status: Optional[str] = None
+    kind: str  # "response" | "time_bar"
+    due_date: Optional[datetime] = None
+    days_remaining: int
+    state: str  # "ok" | "approaching" | "breached"
+    organization_id: Optional[str] = None
+    project_id: Optional[str] = None
+    responsible_party_id: Optional[str] = None

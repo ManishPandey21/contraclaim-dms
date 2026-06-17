@@ -67,6 +67,8 @@ _TYPE_DEFAULT_CATEGORY: dict[NotificationType, NotificationCategory] = {
     NotificationType.PERMISSION_CHANGED: NotificationCategory.SECURITY,
     NotificationType.UNUSUAL_LOGIN: NotificationCategory.SECURITY,
     NotificationType.STORAGE_THRESHOLD_CROSSED: NotificationCategory.SYSTEM,
+    NotificationType.CLAIM_DEADLINE_APPROACHING: NotificationCategory.REMINDERS,
+    NotificationType.CLAIM_DEADLINE_BREACHED: NotificationCategory.REMINDERS,
 }
 
 _IMMEDIATE_EMAIL_EVENTS = {

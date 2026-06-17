@@ -36,6 +36,8 @@ class NotificationType(str, Enum):
     PERMISSION_CHANGED = "permission_changed"
     UNUSUAL_LOGIN = "unusual_login"
     STORAGE_THRESHOLD_CROSSED = "storage_threshold_crossed"
+    CLAIM_DEADLINE_APPROACHING = "claim_deadline_approaching"
+    CLAIM_DEADLINE_BREACHED = "claim_deadline_breached"
 
 
 class NotificationCategory(str, Enum):

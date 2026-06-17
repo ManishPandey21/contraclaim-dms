@@ -22,6 +22,7 @@ from .routers import (
     concerns,
     contracts,
     claims,
+    sla,
     dashboard,
     deep_planning,
     documents,
@@ -172,6 +173,7 @@ app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])
+app.include_router(sla.router, prefix="/api", tags=["sla"])
 app.include_router(letters.router, prefix="/api", tags=["letters"])
 app.include_router(letter_drafting.router, prefix="/api", tags=["letter-drafting"])
 app.include_router(letter_drafting.session_router, prefix="/api", tags=["letter-drafting"])
@@ -249,6 +251,13 @@ async def startup_event() -> None:
         email_service.send_weekly_digests,
         CronTrigger(day_of_week="sun", hour=9, minute=0),
         id="weekly_digests",
+    )
+    from .services.sla_service import run_sla_scan
+
+    scheduler.add_job(
+        run_sla_scan,
+        CronTrigger(hour=8, minute=0),
+        id="sla_deadline_scan",
     )
     scheduler.start()
 
