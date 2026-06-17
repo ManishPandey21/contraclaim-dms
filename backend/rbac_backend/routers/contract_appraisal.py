@@ -19,8 +19,13 @@ from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.contract_appraisal import (
     AppraisalJob,
     AppraisalReport,
+    ClauseEntry,
+    ContractKeyDate,
+    ContractObligation,
+    ContractRisk,
     DecisionRequest,
     GenerateAppraisalRequest,
+    RegisterItemUpdate,
     ReportEditRequest,
     ReviewComment,
     ReviewCommentRequest,
@@ -198,6 +203,164 @@ async def get_appraisal_citations(
 ):
     report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_VIEW, db, current_user, policy)
     return {"report_id": report_id, "citations": report.get("citations", [])}
+
+
+@router.post("/contracts/appraisal/{report_id}/create-registers")
+async def create_registers(
+    report_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_CREATE_REGISTERS, db, current_user, policy)
+    counts = await AppraisalService(db).create_registers(report, current_user)
+    return {"report_id": report_id, "created": counts}
+
+
+@router.get("/contracts/appraisal/{report_id}/export/pdf")
+async def export_appraisal_pdf(
+    report_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_EXPORT, db, current_user, policy)
+    content = AppraisalService(db).build_pdf(report)
+    await AppraisalService(db)._emit(report, "exported", current_user)
+    filename = f"contract-appraisal-v{report.get('report_version', 1)}.pdf"
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# --- registers + clause library (Phase 2) ---------------------------------
+
+_REGISTER_MODELS = {
+    "obligations": ContractObligation,
+    "risks": ContractRisk,
+    "key_dates": ContractKeyDate,
+}
+
+
+async def _list_register(
+    register: str, organization_id, project_id, report_id, db, current_user, policy
+):
+    await policy.authorize(
+        current_user,
+        Permissions.CONTRACT_APPRAISAL_VIEW,
+        resource_type="contract_appraisal",
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=False,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    rows = await AppraisalService(db).list_register(register, scope, report_id=report_id)
+    model = _REGISTER_MODELS[register]
+    return [model(**r) for r in rows]
+
+
+async def _update_register(register: str, item_id, payload, db, current_user, policy):
+    svc = AppraisalService(db)
+    item = await svc.get_register_item(register, item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Register item not found")
+    await policy.authorize_document(current_user, Permissions.CONTRACT_APPRAISAL_EDIT, item, resource_type=f"contract_{register}")
+    updated = await svc.update_register_item(register, item_id, payload.model_dump(exclude_unset=True), current_user, before=item)
+    return _REGISTER_MODELS[register](**(updated or item))
+
+
+@router.get("/contracts/obligations", response_model=List[ContractObligation])
+async def list_obligations(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    report_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _list_register("obligations", organization_id, project_id, report_id, db, current_user, policy)
+
+
+@router.put("/contracts/obligations/{item_id}", response_model=ContractObligation)
+async def update_obligation(
+    item_id: str,
+    payload: RegisterItemUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _update_register("obligations", item_id, payload, db, current_user, policy)
+
+
+@router.get("/contracts/risks", response_model=List[ContractRisk])
+async def list_risks(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    report_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _list_register("risks", organization_id, project_id, report_id, db, current_user, policy)
+
+
+@router.put("/contracts/risks/{item_id}", response_model=ContractRisk)
+async def update_risk(
+    item_id: str,
+    payload: RegisterItemUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _update_register("risks", item_id, payload, db, current_user, policy)
+
+
+@router.get("/contracts/key-dates", response_model=List[ContractKeyDate])
+async def list_key_dates(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    report_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _list_register("key_dates", organization_id, project_id, report_id, db, current_user, policy)
+
+
+@router.put("/contracts/key-dates/{item_id}", response_model=ContractKeyDate)
+async def update_key_date(
+    item_id: str,
+    payload: RegisterItemUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return await _update_register("key_dates", item_id, payload, db, current_user, policy)
+
+
+@router.get("/contracts/clauses", response_model=List[ClauseEntry])
+async def list_clauses(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user,
+        Permissions.CONTRACT_APPRAISAL_VIEW,
+        resource_type="contract_clauses",
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=False,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    clauses = await AppraisalService(db).list_clauses(scope, q=q, limit=limit)
+    return [ClauseEntry(**c) for c in clauses]
 
 
 @router.get("/contracts/appraisal/{report_id}/export/docx")

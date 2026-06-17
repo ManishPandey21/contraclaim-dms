@@ -20,6 +20,18 @@ class AppraisalRepository:
         self.jobs = db.contract_appraisal_jobs
         self.reports = db.contract_appraisal_reports
         self.comments = db.contract_appraisal_review_comments
+        self.obligations = db.contract_obligations
+        self.risks = db.contract_risks
+        self.key_dates = db.contract_key_dates
+
+    _REGISTERS = {
+        "obligations": "obligations",
+        "risks": "risks",
+        "key_dates": "key_dates",
+    }
+
+    def _register_coll(self, register: str):
+        return getattr(self, self._REGISTERS[register])
 
     # --- jobs -------------------------------------------------------------
 
@@ -72,3 +84,32 @@ class AppraisalRepository:
     async def list_comments(self, report_id: str) -> List[Dict[str, Any]]:
         cursor = self.comments.find({"report_id": str(report_id)}).sort("created_at", -1)
         return [c async for c in cursor]
+
+    # --- registers --------------------------------------------------------
+
+    async def replace_register(self, register: str, report_id: str, rows: List[Dict[str, Any]]) -> int:
+        """Idempotent: drop this report's existing rows, then insert the new set."""
+        coll = self._register_coll(register)
+        await coll.delete_many({"report_id": str(report_id)})
+        if rows:
+            await coll.insert_many(rows)
+        return len(rows)
+
+    async def list_register(self, register: str, scope_filter: Dict[str, Any], *, report_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        coll = self._register_coll(register)
+        query = dict(scope_filter or {})
+        if report_id:
+            query["report_id"] = str(report_id)
+        cursor = coll.find(query).sort("created_at", -1)
+        return [r async for r in cursor]
+
+    async def get_register_item(self, register: str, item_id: str) -> Optional[Dict[str, Any]]:
+        return await self._register_coll(register).find_one({"_id": item_id})
+
+    async def update_register_item(self, register: str, item_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        from datetime import datetime as _dt
+
+        fields = {**fields, "updated_at": _dt.utcnow()}
+        return await self._register_coll(register).find_one_and_update(
+            {"_id": item_id}, {"$set": fields}, return_document=True
+        )

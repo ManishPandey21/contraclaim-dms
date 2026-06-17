@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from rbac_backend.models.contract_appraisal import GenerateAppraisalRequest, ReportEditRequest
 from rbac_backend.routers.contract_appraisal import edit_appraisal, generate_appraisal
-from rbac_backend.services.contract_appraisal.generator import AppraisalGenerator
+from rbac_backend.services.contract_appraisal.generator import AppraisalGenerator, build_structured_output
 from rbac_backend.services.contract_appraisal.service import AppraisalService, assess_completeness
 from rbac_backend.services.contract_appraisal.prompts import STANDARD_DISCLAIMER, section_questions
 from rbac_backend.services.policy_service import PolicyService
@@ -145,6 +145,17 @@ class _Coll:
             for k, v in update.get("$inc", {}).items():
                 d[k] = (d.get(k) or 0) + v
 
+    async def delete_many(self, query):
+        to_drop = [k for k, d in self.docs.items() if all(d.get(f) == v for f, v in query.items())]
+        for k in to_drop:
+            del self.docs[k]
+        return SimpleNamespace(deleted_count=len(to_drop))
+
+    async def insert_many(self, docs):
+        for d in docs:
+            self.docs[d["_id"]] = dict(d)
+        return SimpleNamespace(inserted_ids=[d["_id"] for d in docs])
+
     def find(self, query):
         docs = [d for d in self.docs.values() if all(d.get(k) == v for k, v in query.items() if not isinstance(v, dict))]
 
@@ -188,6 +199,9 @@ class _DB:
         self.contract_appraisal_jobs = _Coll()
         self.contract_appraisal_reports = _Coll()
         self.contract_appraisal_review_comments = _Coll()
+        self.contract_obligations = _Coll()
+        self.contract_risks = _Coll()
+        self.contract_key_dates = _Coll()
         self.documents = _Docs()
 
 
@@ -297,3 +311,72 @@ async def test_edit_locked_report_returns_409():
             "r1", ReportEditRequest(executive_summary="x"), db=db, current_user=_user(org="org-A"), policy=_policy()
         )
     assert exc.value.status_code == 409
+
+
+# --- Phase 2: structured output + registers -------------------------------
+
+
+def _section(key, citations, confidence=0.9):
+    return {"key": key, "title": key, "markdown": "x", "citations": citations, "supported": bool(citations), "confidence": confidence}
+
+
+def test_structured_output_maps_citations_to_register_rows():
+    cite_high = {"clause_number": "8.4", "score": 0.92, "document_title": "GCC", "page": 45, "snippet": "EOT clause"}
+    cite_low = {"clause_number": "60.1", "score": 0.6, "document_title": "GCC", "page": 80, "snippet": "payment"}
+    sections = [
+        _section("employer_obligations", [cite_high]),
+        _section("contractor_obligations", [cite_low], confidence=0.6),
+        _section("risk_register", [cite_high]),
+        _section("time_and_delay", [cite_high]),
+        _section("scope_of_work", [cite_high]),  # not register-bearing
+    ]
+    so = build_structured_output(sections, confidence_score=0.8)
+    assert len(so["obligations"]) == 2
+    assert {o["party"] for o in so["obligations"]} == {"employer", "contractor"}
+    assert len(so["risks"]) == 1 and len(so["key_dates"]) == 1
+    # every row keeps a citation; low-confidence flagged for human review
+    assert so["obligations"][0]["clause_reference"] == "8.4"
+    low = next(o for o in so["obligations"] if o["party"] == "contractor")
+    assert low["verification_status"] == "requires_human_review"
+    assert so["overall_appraisal"]["overall_risk_rating"] == "medium"  # coverage 0.8
+
+
+@pytest.mark.asyncio
+async def test_create_registers_populates_and_is_idempotent():
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    report = {
+        "_id": "rep1", "organization_id": "org-A", "project_id": "proj-A",
+        "structured_output": {
+            "obligations": [{"party": "employer", "obligation_title": "Give access", "clause_reference": "2.1", "confidence_score": 0.9, "verification_status": "ai_generated"}],
+            "risks": [{"risk_title": "Time-bar", "clause_reference": "20.1", "confidence_score": 0.9, "verification_status": "ai_generated"}],
+            "key_dates": [],
+        },
+    }
+    counts = await svc.create_registers(report, user)
+    assert counts == {"obligations": 1, "risks": 1, "key_dates": 0}
+    rows = await svc.list_register("obligations", {"organization_id": "org-A"})
+    assert len(rows) == 1 and rows[0]["report_id"] == "rep1"
+
+    # re-running replaces, never duplicates
+    await svc.create_registers(report, user)
+    rows2 = await svc.list_register("obligations", {"organization_id": "org-A"})
+    assert len(rows2) == 1
+
+
+@pytest.mark.asyncio
+async def test_update_register_item_verification():
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    db.contract_risks.docs["x1"] = {"_id": "x1", "organization_id": "org-A", "project_id": "proj-A", "report_id": "rep1", "verification_status": "requires_human_review"}
+    updated = await svc.update_register_item("risks", "x1", {"verification_status": "verified"}, user)
+    assert updated["verification_status"] == "verified"
+
+
+def test_build_pdf_returns_pdf_bytes():
+    pytest.importorskip("reportlab")  # shipped via requirements.txt; skip if not installed locally
+    report = {"full_report_markdown": "# Title\n\n## 1. Executive Summary\nHello.", "report_version": 1}
+    data = AppraisalService.build_pdf(report)
+    assert data[:4] == b"%PDF"

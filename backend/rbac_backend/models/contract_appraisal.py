@@ -106,6 +106,63 @@ class AppraisalReport(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class RegisterItemBase(BaseModel):
+    """Shared provenance for every register row — each maps to a contract citation."""
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
+    organization_id: Optional[str] = None
+    project_id: Optional[str] = None
+    report_id: str
+    clause_reference: Optional[str] = None
+    document_name: Optional[str] = None
+    page_number: Optional[int] = None
+    source_quote: Optional[str] = None
+    confidence_score: float = 0.0
+    verification_status: str = "ai_generated"  # ai_generated | verified | rejected | requires_human_review
+    owner_user_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ContractObligation(RegisterItemBase):
+    party: str = "other"  # employer | contractor | engineer | other
+    obligation_title: str = ""
+    obligation_description: str = ""
+    status: str = "open"  # open | in_progress | complied | overdue | closed | requires_review
+
+
+class ContractRisk(RegisterItemBase):
+    risk_title: str = ""
+    risk_description: str = ""
+    risk_category: str = "other"
+    severity: Optional[str] = None  # low | medium | high | critical
+    status: str = "open"  # open | mitigated | closed
+
+
+class ContractKeyDate(RegisterItemBase):
+    date_title: str = ""
+    date_type: str = "other"
+    status: str = "open"  # open | due_soon | overdue | completed | requires_review
+
+
+class ClauseEntry(BaseModel):
+    document_id: Optional[str] = None
+    document_name: Optional[str] = None
+    clause_number: Optional[str] = None
+    clause_title: Optional[str] = None
+    page_numbers: List[int] = Field(default_factory=list)
+    snippet: str = ""
+
+
+class RegisterItemUpdate(BaseModel):
+    verification_status: Optional[str] = None
+    status: Optional[str] = None
+    owner_user_id: Optional[str] = None
+    severity: Optional[str] = None
+
+
 class ReviewComment(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     organization_id: Optional[str] = None

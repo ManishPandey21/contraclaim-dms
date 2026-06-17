@@ -476,3 +476,81 @@ export async function exportAppraisalDocx(reportId: string): Promise<Blob> {
   });
   return data instanceof Blob ? data : new Blob([data]);
 }
+
+export async function exportAppraisalPdf(reportId: string): Promise<Blob> {
+  const { data } = await api.get(`/contracts/appraisal/${reportId}/export/pdf`, {
+    responseType: "blob",
+  });
+  return data instanceof Blob ? data : new Blob([data]);
+}
+
+// --- registers + clause library (Phase 2) ---------------------------------
+
+export type RegisterKind = "obligations" | "risks" | "key-dates";
+
+export interface RegisterItem {
+  _id: string;
+  report_id: string;
+  clause_reference?: string | null;
+  document_name?: string | null;
+  page_number?: number | null;
+  source_quote?: string | null;
+  confidence_score: number;
+  verification_status: string;
+  status?: string;
+  // obligation
+  party?: string;
+  obligation_title?: string;
+  obligation_description?: string;
+  // risk
+  risk_title?: string;
+  risk_description?: string;
+  risk_category?: string;
+  severity?: string | null;
+  // key date
+  date_title?: string;
+  date_type?: string;
+}
+
+export interface ClauseEntry {
+  document_id?: string | null;
+  document_name?: string | null;
+  clause_number?: string | null;
+  clause_title?: string | null;
+  page_numbers: number[];
+  snippet: string;
+}
+
+export async function createAppraisalRegisters(
+  reportId: string,
+): Promise<{ report_id: string; created: Record<string, number> }> {
+  const { data } = await api.post(`/contracts/appraisal/${reportId}/create-registers`, {});
+  return data;
+}
+
+export async function listRegister(
+  kind: RegisterKind,
+  params: { organization_id?: string; project_id?: string; report_id?: string },
+): Promise<RegisterItem[]> {
+  const { data } = await api.get(`/contracts/${kind}`, { params });
+  return Array.isArray(data) ? (data as RegisterItem[]) : [];
+}
+
+export async function updateRegisterItem(
+  kind: RegisterKind,
+  itemId: string,
+  fields: Partial<Pick<RegisterItem, "verification_status" | "status" | "severity">>,
+): Promise<RegisterItem> {
+  const { data } = await api.put(`/contracts/${kind}/${itemId}`, fields);
+  return data as RegisterItem;
+}
+
+export async function listClauses(params: {
+  organization_id?: string;
+  project_id?: string;
+  q?: string;
+  limit?: number;
+}): Promise<ClauseEntry[]> {
+  const { data } = await api.get("/contracts/clauses", { params });
+  return Array.isArray(data) ? (data as ClauseEntry[]) : [];
+}
