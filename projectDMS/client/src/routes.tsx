@@ -50,6 +50,7 @@ const LetterQualityDashboardPage = lazy(
 const LetterSummaryPage = lazy(() => import("./pages/LetterSummaryPage"));
 const ReportsAnalyticsPage = lazy(() => import("./pages/ReportsAnalyticsPage"));
 const ClaimsRegisterPage = lazy(() => import("./pages/ClaimsRegisterPage"));
+const SLATrackerPage = lazy(() => import("./pages/SLATrackerPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
   () => import("./pages/LetterTemplateEditorPage"),
@@ -141,6 +142,7 @@ const AppRoutes = () => (
         <Route path="letter-quality" element={<LetterQualityDashboardPage />} />
         <Route path="reports" element={<ReportsAnalyticsPage />} />
         <Route path="claims" element={<ClaimsRegisterPage />} />
+        <Route path="sla" element={<SLATrackerPage />} />
         <Route path="letter-templates" element={<LetterTemplatePage />} />
         <Route
           path="letter-templates/:id/edit"
