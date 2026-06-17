@@ -1,0 +1,138 @@
+"""Claim register API (Phase 4 / Module 1).
+
+Tenant-scoped CRUD + status transitions for claims. Every endpoint is gated by
+PolicyService (permission + entitlement + org/project scope) and lists are
+filtered with build_scope_query, so Org A can never see Org B's claims.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from ..core.database import get_db
+from ..core.permissions import Permissions
+from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..models.claim import Claim, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
+from ..services.claim_service import ClaimService
+from ..services.policy_service import PolicyService
+
+router = APIRouter()
+
+
+async def get_policy(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db=db)
+
+
+@router.get("/claims", response_model=List[Claim])
+async def list_claims(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    claim_type: Optional[str] = Query(None, alias="type"),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    responsible_party_id: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user,
+        Permissions.CLAIM_VIEW,
+        resource_type="claims",
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=False,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    claims = await ClaimService(db).list(
+        scope,
+        claim_type=claim_type,
+        status=status_filter,
+        responsible_party_id=responsible_party_id,
+        skip=skip,
+        limit=limit,
+    )
+    return [Claim(**c) for c in claims]
+
+
+@router.post("/claims", response_model=Claim, status_code=status.HTTP_201_CREATED)
+async def create_claim(
+    payload: ClaimCreate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = payload.organization_id or getattr(current_user, "organization_id", None)
+    await policy.authorize(
+        current_user,
+        Permissions.CLAIM_CREATE,
+        resource_type="claim",
+        organization_id=org,
+        project_id=payload.project_id,
+    )
+    created = await ClaimService(db).create(payload, current_user)
+    return Claim(**created)
+
+
+async def _load_authorized(claim_id: str, permission: str, db, current_user, policy) -> dict:
+    claim = await ClaimService(db).get(claim_id)
+    if not claim:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Claim not found")
+    await policy.authorize_document(current_user, permission, claim, resource_type="claim")
+    return claim
+
+
+@router.get("/claims/{claim_id}", response_model=Claim)
+async def get_claim(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    return Claim(**claim)
+
+
+@router.put("/claims/{claim_id}", response_model=Claim)
+async def update_claim(
+    claim_id: str,
+    payload: ClaimUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
+    updated = await ClaimService(db).update(
+        claim_id, payload.model_dump(exclude_unset=True), current_user, before=claim
+    )
+    return Claim(**(updated or claim))
+
+
+@router.post("/claims/{claim_id}/status", response_model=Claim)
+async def set_claim_status(
+    claim_id: str,
+    body: ClaimStatusUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
+    updated = await ClaimService(db).update(
+        claim_id, {"status": body.status.value}, current_user, before=claim
+    )
+    return Claim(**(updated or claim))
+
+
+@router.delete("/claims/{claim_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_claim(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_DELETE, db, current_user, policy)
+    await ClaimService(db).delete(claim_id, current_user, before=claim)
+    return None
