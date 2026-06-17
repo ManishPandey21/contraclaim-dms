@@ -168,6 +168,44 @@ export async function returnClaim(id: string, comment?: string): Promise<Approva
 }
 
 // ---------------------------------------------------------------------------
+// Clause-grounded AI assessment (Phase 4 / Module 5).
+// ---------------------------------------------------------------------------
+
+export interface AssessmentCitation {
+  document_id?: string | null;
+  chunk_id?: string | null;
+  clause_number?: string | null;
+  clause_title?: string | null;
+  section_heading?: string | null;
+  page?: number | null;
+  snippet?: string | null;
+  document_title?: string | null;
+  file_name?: string | null;
+}
+
+export interface ClaimAssessment {
+  id?: string;
+  claim_id: string;
+  claim_type?: string | null;
+  query?: string | null;
+  answer: string;
+  citations: AssessmentCitation[];
+  trace: Record<string, unknown>[];
+  created_at?: string | null;
+  created_by?: string | null;
+}
+
+export async function assessClaim(id: string): Promise<ClaimAssessment> {
+  const { data } = await api.post(`/claims/${id}/assess`, {});
+  return data as ClaimAssessment;
+}
+
+export async function getClaimAssessments(id: string): Promise<ClaimAssessment[]> {
+  const { data } = await api.get(`/claims/${id}/assessments`);
+  return Array.isArray(data) ? (data as ClaimAssessment[]) : [];
+}
+
+// ---------------------------------------------------------------------------
 // Evidence bundle / data-room export (Phase 4 / Module 4). Downloads a ZIP.
 // ---------------------------------------------------------------------------
 

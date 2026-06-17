@@ -51,7 +51,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Download, Edit, Loader2, PlusCircle, ShieldCheck, Trash2 } from "lucide-react";
+import { Download, Edit, Loader2, PlusCircle, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ClaimDTO,
@@ -67,6 +67,7 @@ import {
 } from "@/services/claims-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
+import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
   { value: "eot", label: "Extension of Time" },
@@ -136,6 +137,7 @@ const ClaimsRegisterPage: React.FC = () => {
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
+  const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
   const [exportingId, setExportingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -341,6 +343,9 @@ const ClaimsRegisterPage: React.FC = () => {
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Export evidence bundle" disabled={exportingId === c.id} onClick={() => exportBundle(c)}>
                           {exportingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                         </Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="AI assessment" onClick={() => setAssessClaim(c)}>
+                          <Sparkles className="h-4 w-4 text-indigo-500" />
+                        </Button>
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Approval workflow" onClick={() => setApprovalClaim(c)}>
                           <ShieldCheck className="h-4 w-4" />
                         </Button>
@@ -467,6 +472,15 @@ const ClaimsRegisterPage: React.FC = () => {
         open={approvalClaim !== null}
         onOpenChange={(o) => {
           if (!o) setApprovalClaim(null);
+        }}
+      />
+
+      <ClaimAssessmentDialog
+        claimId={assessClaim?.id ?? null}
+        claimTitle={assessClaim?.title}
+        open={assessClaim !== null}
+        onOpenChange={(o) => {
+          if (!o) setAssessClaim(null);
         }}
       />
     </div>

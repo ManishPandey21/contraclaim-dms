@@ -10,7 +10,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,6 +55,9 @@ class ClaimBase(BaseModel):
     contract_clauses: List[str] = Field(default_factory=list)
     linked_document_ids: List[str] = Field(default_factory=list)
     linked_letter_ids: List[str] = Field(default_factory=list)
+    # Type-specific structured detail (delay events for EOT, CE/VO refs +
+    # valuation for variation, IPC line items for payment, etc.).
+    type_metadata: Dict[str, Any] = Field(default_factory=dict)
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
 
@@ -82,6 +85,7 @@ class ClaimUpdate(BaseModel):
     contract_clauses: Optional[List[str]] = None
     linked_document_ids: Optional[List[str]] = None
     linked_letter_ids: Optional[List[str]] = None
+    type_metadata: Optional[Dict[str, Any]] = None
 
 
 class ClaimStatusUpdate(BaseModel):
@@ -94,6 +98,30 @@ class Claim(ClaimBase):
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class ClaimAssessment(BaseModel):
+    """A clause-grounded AI assessment of a claim (Phase 4 / Module 5).
+
+    Produced by running the citation-enforced contract-QA engine over the
+    project's contract scoped to the claim. Citations + the iteration trace are
+    persisted for traceability — every assertion is anchored to a contract clause
+    or the engine answers "Information not found".
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
+    claim_id: str
+    organization_id: Optional[str] = None
+    project_id: Optional[str] = None
+    claim_type: Optional[str] = None
+    query: Optional[str] = None
+    answer: str = ""
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    trace: List[Dict[str, Any]] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_by: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

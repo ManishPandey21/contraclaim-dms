@@ -17,9 +17,10 @@ from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
-from ..models.claim import Claim, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
+from ..models.claim import Claim, ClaimAssessment, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
 from ..services.approval_service import ApprovalError, ApprovalService
 from ..services.audit_event_service import AuditEventService
+from ..services.claim_assessment_service import ClaimAssessmentService
 from ..services.claim_service import ClaimService
 from ..services.evidence_bundle_service import EvidenceBundleService
 from ..services.policy_service import PolicyService
@@ -159,6 +160,38 @@ async def _approval_for(claim: dict, db) -> dict:
         project_id=claim.get("project_id"),
         drafter_id=claim.get("created_by"),
     )
+
+
+@router.post("/claims/{claim_id}/assess", response_model=ClaimAssessment)
+async def assess_claim(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Run a clause-grounded AI assessment of the claim against the project's
+    contract (reuses the citation-enforced contract-QA engine). Gated by
+    claims.assess; the assessment + its citations + trace are persisted."""
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_ASSESS, db, current_user, policy)
+    # Imported lazily — keeps the retrieval stack out of this router's import path.
+    from .retrieval_engine import get_observability, get_retrieval_service
+
+    observability = await get_observability(db=db)
+    retrieval_service = await get_retrieval_service(db=db, observability=observability)
+    record = await ClaimAssessmentService(db).assess(claim, current_user, retrieval_service)
+    return ClaimAssessment(**record)
+
+
+@router.get("/claims/{claim_id}/assessments", response_model=List[ClaimAssessment])
+async def list_claim_assessments(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    records = await ClaimAssessmentService(db).list(str(claim["_id"]))
+    return [ClaimAssessment(**r) for r in records]
 
 
 @router.get("/claims/{claim_id}/evidence-bundle")
