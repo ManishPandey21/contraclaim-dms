@@ -349,6 +349,14 @@ async def ensure_indexes(db):
     # SLA / time-bar rules (per-org notice-window overrides)
     await db.sla_rules.create_index("organization_id", background=True, unique=True)
 
+    # Approval workflow records (one per resource)
+    await db.approvals.create_index(
+        [("resource_type", 1), ("resource_id", 1)], background=True, unique=True
+    )
+    await db.approvals.create_index(
+        [("organization_id", 1), ("project_id", 1), ("state", 1)], background=True
+    )
+
     # Emails/logs (if present)
     await db.email_logs.create_index("organization_id", background=True)
     await db.email_logs.create_index("project_id", background=True)

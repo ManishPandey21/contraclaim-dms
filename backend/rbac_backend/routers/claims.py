@@ -14,7 +14,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..models.approval import ApprovalRecord, AssignBody, DecisionBody
 from ..models.claim import Claim, ClaimCreate, ClaimStatusUpdate, ClaimUpdate
+from ..services.approval_service import ApprovalError, ApprovalService
 from ..services.claim_service import ClaimService
 from ..services.policy_service import PolicyService
 
@@ -136,3 +138,101 @@ async def delete_claim(
     claim = await _load_authorized(claim_id, Permissions.CLAIM_DELETE, db, current_user, policy)
     await ClaimService(db).delete(claim_id, current_user, before=claim)
     return None
+
+
+# --- approval workflow (Phase 4 / Module 3) -------------------------------
+#
+# Generic review/approval state machine bound to the claim. The drafter (claim
+# creator) can assign + submit; a manager approves or returns and can never be
+# the drafter (no self-approval — enforced in ApprovalService).
+
+
+async def _approval_for(claim: dict, db) -> dict:
+    return await ApprovalService(db).get_or_create(
+        "claim",
+        str(claim["_id"]),
+        organization_id=claim.get("organization_id"),
+        project_id=claim.get("project_id"),
+        drafter_id=claim.get("created_by"),
+    )
+
+
+@router.get("/claims/{claim_id}/approval", response_model=ApprovalRecord)
+async def get_claim_approval(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_VIEW, db, current_user, policy)
+    return ApprovalRecord(**await _approval_for(claim, db))
+
+
+@router.post("/claims/{claim_id}/assign", response_model=ApprovalRecord)
+async def assign_claim_reviewer(
+    claim_id: str,
+    body: AssignBody,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    record = await _approval_for(claim, db)
+    try:
+        updated = await ApprovalService(db).assign(
+            record, body.reviewer_id, getattr(current_user, "id", None),
+            due_at=body.due_at, note=body.note,
+        )
+    except ApprovalError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return ApprovalRecord(**updated)
+
+
+@router.post("/claims/{claim_id}/submit-for-review", response_model=ApprovalRecord)
+async def submit_claim_for_review(
+    claim_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_EDIT, db, current_user, policy)
+    record = await _approval_for(claim, db)
+    try:
+        updated = await ApprovalService(db).submit_for_review(record, getattr(current_user, "id", None))
+    except ApprovalError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return ApprovalRecord(**updated)
+
+
+@router.post("/claims/{claim_id}/approve", response_model=ApprovalRecord)
+async def approve_claim(
+    claim_id: str,
+    body: DecisionBody,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    record = await _approval_for(claim, db)
+    try:
+        updated = await ApprovalService(db).approve(record, getattr(current_user, "id", None), comment=body.comment)
+    except ApprovalError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return ApprovalRecord(**updated)
+
+
+@router.post("/claims/{claim_id}/return", response_model=ApprovalRecord)
+async def return_claim(
+    claim_id: str,
+    body: DecisionBody,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    claim = await _load_authorized(claim_id, Permissions.CLAIM_MANAGE, db, current_user, policy)
+    record = await _approval_for(claim, db)
+    try:
+        updated = await ApprovalService(db).return_for_changes(record, getattr(current_user, "id", None), comment=body.comment)
+    except ApprovalError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    return ApprovalRecord(**updated)
