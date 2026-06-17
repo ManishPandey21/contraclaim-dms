@@ -100,3 +100,69 @@ export async function setClaimStatus(id: string, status: ClaimStatus): Promise<C
 export async function deleteClaim(id: string): Promise<void> {
   await api.delete(`/claims/${id}`);
 }
+
+// ---------------------------------------------------------------------------
+// Approval workflow (Phase 4 / Module 3). Mirrors the claim approval endpoints.
+// ---------------------------------------------------------------------------
+
+export type ApprovalState =
+  | "draft"
+  | "assigned"
+  | "in_review"
+  | "approved"
+  | "returned";
+
+export interface ApprovalEvent {
+  action: string;
+  actor_id?: string | null;
+  at?: string | null;
+  from_state?: string | null;
+  to_state?: string | null;
+  comment?: string | null;
+}
+
+export interface ApprovalRecord {
+  resource_type: string;
+  resource_id: string;
+  state: ApprovalState;
+  drafter_id?: string | null;
+  reviewer_id?: string | null;
+  assigned_by?: string | null;
+  assigned_at?: string | null;
+  due_at?: string | null;
+  submitted_by?: string | null;
+  submitted_at?: string | null;
+  decided_by?: string | null;
+  decided_at?: string | null;
+  decision_comment?: string | null;
+  history: ApprovalEvent[];
+}
+
+export async function getClaimApproval(id: string): Promise<ApprovalRecord> {
+  const { data } = await api.get(`/claims/${id}/approval`);
+  return data as ApprovalRecord;
+}
+
+export async function assignClaimReviewer(
+  id: string,
+  reviewer_id: string,
+  opts?: { due_at?: string; note?: string },
+): Promise<ApprovalRecord> {
+  const { data } = await api.post(`/claims/${id}/assign`, { reviewer_id, ...opts });
+  return data as ApprovalRecord;
+}
+
+export async function submitClaimForReview(id: string): Promise<ApprovalRecord> {
+  const { data } = await api.post(`/claims/${id}/submit-for-review`, {});
+  return data as ApprovalRecord;
+}
+
+export async function approveClaim(id: string, comment?: string): Promise<ApprovalRecord> {
+  const { data } = await api.post(`/claims/${id}/approve`, { comment });
+  return data as ApprovalRecord;
+}
+
+export async function returnClaim(id: string, comment?: string): Promise<ApprovalRecord> {
+  const { data } = await api.post(`/claims/${id}/return`, { comment });
+  return data as ApprovalRecord;
+}

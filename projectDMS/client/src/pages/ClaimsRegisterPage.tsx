@@ -51,7 +51,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Edit, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { Edit, Loader2, PlusCircle, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ClaimDTO,
@@ -65,6 +65,7 @@ import {
   updateClaim,
 } from "@/services/claims-api";
 import { enhancedApi } from "@/services/enhanced-api";
+import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
   { value: "eot", label: "Extension of Time" },
@@ -133,6 +134,7 @@ const ClaimsRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
+  const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -322,6 +324,9 @@ const ClaimsRegisterPage: React.FC = () => {
                     <TableCell>{fmtDate(c.response_due_date)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Approval workflow" onClick={() => setApprovalClaim(c)}>
+                          <ShieldCheck className="h-4 w-4" />
+                        </Button>
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(c)}>
                           <Edit className="h-4 w-4" />
                         </Button>
@@ -438,6 +443,15 @@ const ClaimsRegisterPage: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ClaimApprovalDialog
+        claimId={approvalClaim?.id ?? null}
+        claimTitle={approvalClaim?.title}
+        open={approvalClaim !== null}
+        onOpenChange={(o) => {
+          if (!o) setApprovalClaim(null);
+        }}
+      />
     </div>
   );
 };
