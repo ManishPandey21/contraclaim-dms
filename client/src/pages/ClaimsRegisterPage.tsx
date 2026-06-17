@@ -51,7 +51,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Edit, Loader2, PlusCircle, ShieldCheck, Trash2 } from "lucide-react";
+import { Download, Edit, Loader2, PlusCircle, ShieldCheck, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   ClaimDTO,
@@ -60,6 +60,7 @@ import {
   ClaimType,
   createClaim,
   deleteClaim,
+  downloadEvidenceBundle,
   getClaims,
   setClaimStatus,
   updateClaim,
@@ -135,6 +136,7 @@ const ClaimsRegisterPage: React.FC = () => {
   const [form, setForm] = useState<ClaimForm>({ ...EMPTY_FORM });
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
+  const [exportingId, setExportingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -231,6 +233,18 @@ const ClaimsRegisterPage: React.FC = () => {
     }
   };
 
+  const exportBundle = async (c: ClaimDTO) => {
+    try {
+      setExportingId(c.id);
+      await downloadEvidenceBundle(c.id);
+      toast.success("Evidence bundle downloaded");
+    } catch {
+      toast.error("Failed to export evidence bundle");
+    } finally {
+      setExportingId(null);
+    }
+  };
+
   const remove = async (c: ClaimDTO) => {
     try {
       await deleteClaim(c.id);
@@ -324,6 +338,9 @@ const ClaimsRegisterPage: React.FC = () => {
                     <TableCell>{fmtDate(c.response_due_date)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Export evidence bundle" disabled={exportingId === c.id} onClick={() => exportBundle(c)}>
+                          {exportingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        </Button>
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Approval workflow" onClick={() => setApprovalClaim(c)}>
                           <ShieldCheck className="h-4 w-4" />
                         </Button>
