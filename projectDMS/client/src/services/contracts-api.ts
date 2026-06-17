@@ -337,3 +337,142 @@ export async function askIterativeContractQuestion(
   const { data } = await api.post("/v1/retrieval/contract-qa", payload, { signal });
   return data;
 }
+
+// ---------------------------------------------------------------------------
+// Contract Document Appraisal (Contract Appraisal Report — v2 Phase 1).
+// Mirrors backend routers/contract_appraisal.py.
+// ---------------------------------------------------------------------------
+
+export type AppraisalJobStatus =
+  | "queued"
+  | "running"
+  | "generating"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ReportStatus =
+  | "draft"
+  | "under_review"
+  | "approved"
+  | "superseded"
+  | "rejected";
+
+export interface AppraisalJob {
+  _id: string;
+  organization_id?: string | null;
+  project_id?: string | null;
+  document_ids: string[];
+  status: AppraisalJobStatus;
+  current_step?: string | null;
+  progress: number;
+  error_message?: string | null;
+  report_id?: string | null;
+}
+
+export interface AppraisalSection {
+  key: string;
+  title: string;
+  markdown: string;
+  citations: ContractCitation[];
+  supported: boolean;
+  confidence: number;
+}
+
+export interface AppraisalReport {
+  _id: string;
+  organization_id?: string | null;
+  project_id?: string | null;
+  job_id?: string | null;
+  document_ids: string[];
+  report_version: number;
+  status: ReportStatus;
+  document_completeness_status: "complete" | "incomplete" | "requires_review";
+  missing_documents: string[];
+  executive_summary: string;
+  full_report_markdown: string;
+  sections: AppraisalSection[];
+  citations: ContractCitation[];
+  overall_risk_rating?: string | null;
+  confidence_score: number;
+  review_comments_count: number;
+  approved_by?: string | null;
+  is_locked: boolean;
+  created_at?: string | null;
+}
+
+export interface AppraisalReviewComment {
+  _id: string;
+  report_id: string;
+  commented_by?: string | null;
+  comment_text: string;
+  section_reference?: string | null;
+  status: string;
+  created_at?: string | null;
+}
+
+export async function generateAppraisal(payload: {
+  organization_id?: string;
+  project_id: string;
+  document_ids?: string[];
+}): Promise<AppraisalJob> {
+  const { data } = await api.post("/contracts/appraisal/generate", payload);
+  return data as AppraisalJob;
+}
+
+export async function getAppraisalJob(jobId: string): Promise<AppraisalJob> {
+  const { data } = await api.get(`/contracts/appraisal/jobs/${jobId}`);
+  return data as AppraisalJob;
+}
+
+export async function listAppraisals(params?: {
+  organization_id?: string;
+  project_id?: string;
+}): Promise<AppraisalReport[]> {
+  const { data } = await api.get("/contracts/appraisal", { params });
+  return Array.isArray(data) ? (data as AppraisalReport[]) : [];
+}
+
+export async function getAppraisal(reportId: string): Promise<AppraisalReport> {
+  const { data } = await api.get(`/contracts/appraisal/${reportId}`);
+  return data as AppraisalReport;
+}
+
+export async function approveAppraisal(reportId: string): Promise<AppraisalReport> {
+  const { data } = await api.post(`/contracts/appraisal/${reportId}/approve`, {});
+  return data as AppraisalReport;
+}
+
+export async function rejectAppraisal(reportId: string): Promise<AppraisalReport> {
+  const { data } = await api.post(`/contracts/appraisal/${reportId}/reject`, {});
+  return data as AppraisalReport;
+}
+
+export async function regenerateAppraisal(reportId: string): Promise<AppraisalJob> {
+  const { data } = await api.post(`/contracts/appraisal/${reportId}/regenerate`, {});
+  return data as AppraisalJob;
+}
+
+export async function addAppraisalComment(
+  reportId: string,
+  comment_text: string,
+  section_reference?: string,
+): Promise<AppraisalReviewComment> {
+  const { data } = await api.post(`/contracts/appraisal/${reportId}/review-comments`, {
+    comment_text,
+    section_reference,
+  });
+  return data as AppraisalReviewComment;
+}
+
+export async function listAppraisalComments(reportId: string): Promise<AppraisalReviewComment[]> {
+  const { data } = await api.get(`/contracts/appraisal/${reportId}/review-comments`);
+  return Array.isArray(data) ? (data as AppraisalReviewComment[]) : [];
+}
+
+export async function exportAppraisalDocx(reportId: string): Promise<Blob> {
+  const { data } = await api.get(`/contracts/appraisal/${reportId}/export/docx`, {
+    responseType: "blob",
+  });
+  return data instanceof Blob ? data : new Blob([data]);
+}
