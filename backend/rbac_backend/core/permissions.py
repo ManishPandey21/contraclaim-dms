@@ -25,6 +25,7 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.claim.edit",
     "dms.claim.delete",
     "dms.claim.manage",
+    "dms.claim.assess",
     "dms.admin",
 ]
 
@@ -90,6 +91,7 @@ class Permissions:
     CLAIM_EDIT = "dms.claim.edit"
     CLAIM_DELETE = "dms.claim.delete"
     CLAIM_MANAGE = "dms.claim.manage"
+    CLAIM_ASSESS = "dms.claim.assess"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -167,6 +169,7 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.claim.edit": ["documents:update"],
     "dms.claim.delete": ["documents:delete"],
     "dms.claim.manage": ["documents:update", "projects:update"],
+    "dms.claim.assess": ["documents:read"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],

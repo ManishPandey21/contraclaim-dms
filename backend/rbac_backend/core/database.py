@@ -345,6 +345,9 @@ async def ensure_indexes(db):
     await db.claims.create_index("response_due_date", background=True)
     await db.claims.create_index("event_date", background=True)
     await db.claims.create_index("claim_ref", background=True)
+    await db.claim_assessments.create_index(
+        [("claim_id", 1), ("created_at", -1)], background=True
+    )
 
     # SLA / time-bar rules (per-org notice-window overrides)
     await db.sla_rules.create_index("organization_id", background=True, unique=True)
