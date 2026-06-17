@@ -20,6 +20,11 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.user.manage",
     "dms.project.manage",
     "dms.audit.view",
+    "dms.claim.view",
+    "dms.claim.create",
+    "dms.claim.edit",
+    "dms.claim.delete",
+    "dms.claim.manage",
     "dms.admin",
 ]
 
@@ -80,6 +85,11 @@ class Permissions:
     USER_MANAGE = "dms.user.manage"
     PROJECT_MANAGE = "dms.project.manage"
     AUDIT_VIEW = "dms.audit.view"
+    CLAIM_VIEW = "dms.claim.view"
+    CLAIM_CREATE = "dms.claim.create"
+    CLAIM_EDIT = "dms.claim.edit"
+    CLAIM_DELETE = "dms.claim.delete"
+    CLAIM_MANAGE = "dms.claim.manage"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -152,6 +162,11 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.user.manage": ["users:create", "users:update", "users:delete"],
     "dms.project.manage": ["projects:create", "projects:update", "projects:delete", "projects:assign"],
     "dms.audit.view": ["audit:read", "documents:read"],
+    "dms.claim.view": ["documents:read"],
+    "dms.claim.create": ["documents:create"],
+    "dms.claim.edit": ["documents:update"],
+    "dms.claim.delete": ["documents:delete"],
+    "dms.claim.manage": ["documents:update", "projects:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],

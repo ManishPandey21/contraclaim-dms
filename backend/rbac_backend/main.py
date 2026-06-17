@@ -21,6 +21,7 @@ from .routers import (
     contact,
     concerns,
     contracts,
+    claims,
     dashboard,
     deep_planning,
     documents,
@@ -170,6 +171,7 @@ app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
+app.include_router(claims.router, prefix="/api", tags=["claims"])
 app.include_router(letters.router, prefix="/api", tags=["letters"])
 app.include_router(letter_drafting.router, prefix="/api", tags=["letter-drafting"])
 app.include_router(letter_drafting.session_router, prefix="/api", tags=["letter-drafting"])

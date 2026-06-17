@@ -335,6 +335,16 @@ async def ensure_indexes(db):
     await db.tasks.create_index("organization_id", background=True)
     await db.tasks.create_index("project_id", background=True)
 
+    # Claims (Phase 4)
+    await db.claims.create_index(
+        [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.claims.create_index([("organization_id", 1), ("project_id", 1), ("type", 1)], background=True)
+    await db.claims.create_index("responsible_party_id", background=True)
+    await db.claims.create_index("response_due_date", background=True)
+    await db.claims.create_index("claim_ref", background=True)
+
     # Emails/logs (if present)
     await db.email_logs.create_index("organization_id", background=True)
     await db.email_logs.create_index("project_id", background=True)
