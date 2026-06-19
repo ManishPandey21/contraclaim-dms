@@ -24,6 +24,7 @@ class TaskBase(BaseModel):
     assigned_to: Optional[str] = None  # user id
     due_date: Optional[datetime] = None
     document_id: Optional[str] = None  # linked document
+    linked_claim_id: Optional[str] = None  # claim this task follows up on
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
 
@@ -40,6 +41,7 @@ class TaskUpdate(BaseModel):
     assigned_to: Optional[str] = None
     due_date: Optional[datetime] = None
     document_id: Optional[str] = None
+    linked_claim_id: Optional[str] = None
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
 

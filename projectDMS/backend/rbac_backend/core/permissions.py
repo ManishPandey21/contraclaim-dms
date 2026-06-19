@@ -33,6 +33,11 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.contract.appraisal.reject",
     "dms.contract.appraisal.export",
     "dms.contract.appraisal.create_registers",
+    "dms.task.view",
+    "dms.task.create",
+    "dms.task.edit",
+    "dms.task.delete",
+    "dms.task.manage",
     "dms.admin",
 ]
 
@@ -106,6 +111,11 @@ class Permissions:
     CONTRACT_APPRAISAL_REJECT = "dms.contract.appraisal.reject"
     CONTRACT_APPRAISAL_EXPORT = "dms.contract.appraisal.export"
     CONTRACT_APPRAISAL_CREATE_REGISTERS = "dms.contract.appraisal.create_registers"
+    TASK_VIEW = "dms.task.view"
+    TASK_CREATE = "dms.task.create"
+    TASK_EDIT = "dms.task.edit"
+    TASK_DELETE = "dms.task.delete"
+    TASK_MANAGE = "dms.task.manage"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -191,6 +201,11 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.contract.appraisal.reject": ["documents:update", "projects:update"],
     "dms.contract.appraisal.export": ["documents:read"],
     "dms.contract.appraisal.create_registers": ["documents:update"],
+    "dms.task.view": ["documents:read"],
+    "dms.task.create": ["documents:create"],
+    "dms.task.edit": ["documents:update"],
+    "dms.task.delete": ["documents:delete"],
+    "dms.task.manage": ["documents:update", "projects:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
