@@ -9,7 +9,11 @@ import pytest
 from fastapi import HTTPException
 
 from rbac_backend.models.contract_appraisal import GenerateAppraisalRequest, ReportEditRequest
-from rbac_backend.routers.contract_appraisal import edit_appraisal, generate_appraisal
+from rbac_backend.routers.contract_appraisal import (
+    delete_appraisal,
+    edit_appraisal,
+    generate_appraisal,
+)
 from rbac_backend.services.contract_appraisal.generator import AppraisalGenerator, build_structured_output
 from rbac_backend.services.contract_appraisal.service import AppraisalService, assess_completeness
 from rbac_backend.services.contract_appraisal.prompts import STANDARD_DISCLAIMER, section_questions
@@ -144,6 +148,11 @@ class _Coll:
             d.update(update.get("$set", {}))
             for k, v in update.get("$inc", {}).items():
                 d[k] = (d.get(k) or 0) + v
+
+    async def delete_one(self, query):
+        existed = query.get("_id") in self.docs
+        self.docs.pop(query.get("_id"), None)
+        return SimpleNamespace(deleted_count=1 if existed else 0)
 
     async def delete_many(self, query):
         to_drop = [k for k, d in self.docs.items() if all(d.get(f) == v for f, v in query.items())]
@@ -380,3 +389,82 @@ def test_build_pdf_returns_pdf_bytes():
     report = {"full_report_markdown": "# Title\n\n## 1. Executive Summary\nHello.", "report_version": 1}
     data = AppraisalService.build_pdf(report)
     assert data[:4] == b"%PDF"
+
+
+# --- Phase 3+: generate-once lifecycle ------------------------------------
+
+
+def test_generator_request_uses_full_coverage_and_doc_scope():
+    gen = AppraisalGenerator(_RetrievalSupported())
+    req = gen._build_request("q", "org-A", "proj-A", ["d1"])
+    assert req.limit == 50
+    assert req.filters.document_id == "d1"
+    req2 = gen._build_request("q", "org-A", "proj-A", [])
+    assert req2.filters.document_id is None
+
+
+@pytest.mark.asyncio
+async def test_find_existing_report_matches_document_set():
+    db = _DB()
+    db.contract_appraisal_reports.docs["r1"] = {
+        "_id": "r1", "organization_id": "org-A", "project_id": "proj-A", "document_ids": ["d1"], "status": "draft",
+    }
+    db.contract_appraisal_reports.docs["r2"] = {
+        "_id": "r2", "organization_id": "org-A", "project_id": "proj-A", "document_ids": [], "status": "draft",
+    }
+    svc = AppraisalService(db)
+    assert (await svc.find_existing_report("org-A", "proj-A", ["d1"]))["_id"] == "r1"
+    assert (await svc.find_existing_report("org-A", "proj-A", []))["_id"] == "r2"  # whole-project is distinct
+    assert await svc.find_existing_report("org-A", "proj-A", ["d9"]) is None
+
+
+@pytest.mark.asyncio
+async def test_find_existing_ignores_superseded_and_rejected():
+    db = _DB()
+    db.contract_appraisal_reports.docs["r1"] = {
+        "_id": "r1", "organization_id": "org-A", "project_id": "proj-A", "document_ids": ["d1"], "status": "superseded",
+    }
+    svc = AppraisalService(db)
+    assert await svc.find_existing_report("org-A", "proj-A", ["d1"]) is None
+
+
+@pytest.mark.asyncio
+async def test_generate_denied_when_report_exists():
+    db = _DB()
+    db.contract_appraisal_reports.docs["r1"] = {
+        "_id": "r1", "organization_id": "org-A", "project_id": "proj-A", "document_ids": ["d1"], "status": "draft",
+    }
+    payload = GenerateAppraisalRequest(organization_id="org-A", project_id="proj-A", document_ids=["d1"])
+    with pytest.raises(HTTPException) as exc:
+        await generate_appraisal(payload, db=db, current_user=_user(org="org-A"), policy=_policy())
+    assert exc.value.status_code == 409
+    assert exc.value.detail["report_id"] == "r1"
+
+
+@pytest.mark.asyncio
+async def test_delete_report_cascades_registers_and_comments():
+    db = _DB()
+    report = {"_id": "r1", "organization_id": "org-A", "project_id": "proj-A"}
+    db.contract_appraisal_reports.docs["r1"] = dict(report)
+    db.contract_obligations.docs["o1"] = {"_id": "o1", "report_id": "r1"}
+    db.contract_risks.docs["x1"] = {"_id": "x1", "report_id": "r1"}
+    db.contract_appraisal_review_comments.docs["c1"] = {"_id": "c1", "report_id": "r1"}
+
+    await AppraisalService(db).delete_report(report, _user(org="org-A"))
+    assert "r1" not in db.contract_appraisal_reports.docs
+    assert db.contract_obligations.docs == {}
+    assert db.contract_risks.docs == {}
+    assert db.contract_appraisal_review_comments.docs == {}
+
+
+@pytest.mark.asyncio
+async def test_delete_endpoint_then_generate_allowed():
+    db = _DB()
+    db.contract_appraisal_reports.docs["r1"] = {
+        "_id": "r1", "organization_id": "org-A", "project_id": "proj-A", "document_ids": ["d1"], "status": "draft",
+    }
+    # delete clears the report so the selection is free again
+    await delete_appraisal("r1", db=db, current_user=_user(org="org-A"), policy=_policy())
+    assert "r1" not in db.contract_appraisal_reports.docs
+    svc = AppraisalService(db)
+    assert await svc.find_existing_report("org-A", "proj-A", ["d1"]) is None

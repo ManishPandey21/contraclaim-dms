@@ -438,6 +438,32 @@ export async function getAppraisal(reportId: string): Promise<AppraisalReport> {
   return data as AppraisalReport;
 }
 
+/** The live report for an (org, project, document) selection, or null. */
+export async function getExistingAppraisal(params: {
+  organization_id?: string;
+  project_id: string;
+  document_id?: string;
+}): Promise<AppraisalReport | null> {
+  const { data } = await api.get("/contracts/appraisal/existing", { params });
+  return data ? (data as AppraisalReport) : null;
+}
+
+export async function editAppraisal(
+  reportId: string,
+  fields: {
+    full_report_markdown?: string;
+    executive_summary?: string;
+    overall_risk_rating?: string;
+  },
+): Promise<AppraisalReport> {
+  const { data } = await api.put(`/contracts/appraisal/${reportId}`, fields);
+  return data as AppraisalReport;
+}
+
+export async function deleteAppraisal(reportId: string): Promise<void> {
+  await api.delete(`/contracts/appraisal/${reportId}`);
+}
+
 export async function approveAppraisal(reportId: string): Promise<AppraisalReport> {
   const { data } = await api.post(`/contracts/appraisal/${reportId}/approve`, {});
   return data as AppraisalReport;

@@ -25,23 +25,40 @@ import {
   Download,
   FileText,
   Loader2,
+  Pencil,
   RefreshCw,
+  Save,
   Sparkles,
+  Trash2,
   XCircle,
 } from "lucide-react";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import {
   addAppraisalComment,
   approveAppraisal,
   AppraisalJob,
   AppraisalReport,
+  deleteAppraisal,
+  editAppraisal,
   exportAppraisalDocx,
   exportAppraisalPdf,
   generateAppraisal,
   getAppraisal,
   getAppraisalJob,
+  getExistingAppraisal,
   listAppraisals,
-  regenerateAppraisal,
   rejectAppraisal,
 } from "@/services/contracts-api";
 import AppraisalRegisters from "@/components/contract-appraisal/AppraisalRegisters";
@@ -86,8 +103,12 @@ const ContractAppraisalPage: React.FC = () => {
   const [job, setJob] = useState<AppraisalJob | null>(null);
   const [reports, setReports] = useState<AppraisalReport[]>([]);
   const [selected, setSelected] = useState<AppraisalReport | null>(null);
+  const [existingForSelection, setExistingForSelection] = useState<AppraisalReport | null>(null);
   const [comment, setComment] = useState("");
   const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editSummary, setEditSummary] = useState("");
+  const [editMarkdown, setEditMarkdown] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadReports = useCallback(async () => {
@@ -163,6 +184,33 @@ const ContractAppraisalPage: React.FC = () => {
     };
   }, [orgId, projectId]);
 
+  // Generate-once: whenever the selection changes, look for an already-saved
+  // report and show it. Generation is blocked while one exists.
+  useEffect(() => {
+    let active = true;
+    if (!projectId) {
+      setExistingForSelection(null);
+      return;
+    }
+    (async () => {
+      try {
+        const report = await getExistingAppraisal({
+          organization_id: orgId || undefined,
+          project_id: projectId,
+          document_id: contractDocId !== ALL_CONTRACTS ? contractDocId : undefined,
+        });
+        if (!active) return;
+        setExistingForSelection(report);
+        if (report) setSelected(report);
+      } catch {
+        if (active) setExistingForSelection(null);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [orgId, projectId, contractDocId]);
+
   const projectsForOrg = orgId
     ? projects.filter((p) => p.organization_id === orgId)
     : projects;
@@ -180,6 +228,7 @@ const ContractAppraisalPage: React.FC = () => {
               toast.success("Appraisal report generated");
               const report = await getAppraisal(j.report_id);
               setSelected(report);
+              setExistingForSelection(report);
               await loadReports();
             } else if (j.status === "failed") {
               toast.error(j.error_message || "Appraisal generation failed");
@@ -198,6 +247,11 @@ const ContractAppraisalPage: React.FC = () => {
       toast.error("Select a project");
       return;
     }
+    if (existingForSelection) {
+      toast.info("An appraisal already exists for this selection. Delete it to regenerate.");
+      setSelected(existingForSelection);
+      return;
+    }
     setBusy(true);
     try {
       const ids = contractDocId && contractDocId !== ALL_CONTRACTS ? [contractDocId] : [];
@@ -210,7 +264,56 @@ const ContractAppraisalPage: React.FC = () => {
       setSelected(null);
       pollJob(j._id);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to start appraisal");
+      // Server enforces generate-once: a 409 means a report already exists.
+      const existingId = e?.response?.data?.detail?.report_id;
+      if (e?.response?.status === 409 && existingId) {
+        try {
+          const report = await getAppraisal(existingId);
+          setSelected(report);
+          setExistingForSelection(report);
+          toast.info("An appraisal already exists for this selection.");
+        } catch {
+          toast.error("An appraisal already exists for this selection.");
+        }
+      } else {
+        toast.error(e?.response?.data?.detail || "Failed to start appraisal");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onSaveEdit = async () => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const updated = await editAppraisal(selected._id, {
+        executive_summary: editSummary,
+        full_report_markdown: editMarkdown,
+      });
+      setSelected(updated);
+      setExistingForSelection(updated);
+      setEditing(false);
+      toast.success("Appraisal saved");
+      await loadReports();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to save");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDelete = async () => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      await deleteAppraisal(selected._id);
+      toast.success("Appraisal deleted — you can generate again");
+      setSelected(null);
+      setExistingForSelection(null);
+      await loadReports();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to delete");
     } finally {
       setBusy(false);
     }
@@ -224,21 +327,6 @@ const ContractAppraisalPage: React.FC = () => {
       await loadReports();
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Action failed");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const onRegenerate = async () => {
-    if (!selected) return;
-    setBusy(true);
-    try {
-      const j = await regenerateAppraisal(selected._id);
-      setJob(j);
-      pollJob(j._id);
-      toast.info("Regenerating — a new version will be created");
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Regenerate failed");
     } finally {
       setBusy(false);
     }
@@ -365,8 +453,8 @@ const ContractAppraisalPage: React.FC = () => {
               )}
             </div>
           </div>
-          <div className="flex gap-2">
-            <Button onClick={onGenerate} disabled={busy || !!jobActive || !projectId}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={onGenerate} disabled={busy || !!jobActive || !projectId || !!existingForSelection}>
               {busy || jobActive ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
@@ -378,6 +466,11 @@ const ContractAppraisalPage: React.FC = () => {
               <RefreshCw className="mr-2 h-4 w-4" />
               Load existing
             </Button>
+            {existingForSelection && (
+              <span className="text-sm text-amber-600">
+                An appraisal already exists for this selection — shown below. Delete it to regenerate.
+              </span>
+            )}
           </div>
 
           {jobActive && (
@@ -466,10 +559,20 @@ const ContractAppraisalPage: React.FC = () => {
                   </Button>
                 </>
               )}
-              <Button variant="outline" onClick={onRegenerate} disabled={busy || !!jobActive}>
-                <RefreshCw className="mr-2 h-4 w-4" />
-                Regenerate (new version)
-              </Button>
+              {!selected.is_locked && !editing && (
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setEditSummary(selected.executive_summary || "");
+                    setEditMarkdown(selected.full_report_markdown || "");
+                    setEditing(true);
+                  }}
+                  disabled={busy}
+                >
+                  <Pencil className="mr-2 h-4 w-4" />
+                  Edit
+                </Button>
+              )}
               <Button variant="outline" onClick={onExportDocx} disabled={busy}>
                 <Download className="mr-2 h-4 w-4" />
                 Export DOCX
@@ -478,8 +581,55 @@ const ContractAppraisalPage: React.FC = () => {
                 <Download className="mr-2 h-4 w-4" />
                 Export PDF
               </Button>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" className="text-destructive" disabled={busy}>
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete this appraisal?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This permanently removes the report and its registers. You can then
+                      generate a fresh appraisal for this selection.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={onDelete}>Delete</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </div>
 
+            {editing ? (
+              <div className="space-y-3 rounded-md border p-3">
+                <div>
+                  <Label>Executive summary</Label>
+                  <Textarea value={editSummary} onChange={(e) => setEditSummary(e.target.value)} rows={4} />
+                </div>
+                <div>
+                  <Label>Full report (markdown)</Label>
+                  <Textarea
+                    value={editMarkdown}
+                    onChange={(e) => setEditMarkdown(e.target.value)}
+                    rows={18}
+                    className="font-mono text-xs"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={onSaveEdit} disabled={busy}>
+                    {busy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                    Save
+                  </Button>
+                  <Button variant="outline" onClick={() => setEditing(false)} disabled={busy}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
             <div className="space-y-4">
               {selected.sections.map((s) => (
                 <div key={s.key} className="rounded-md border p-3">
@@ -527,6 +677,7 @@ const ContractAppraisalPage: React.FC = () => {
                 </div>
               ))}
             </div>
+            )}
 
             <div className="border-t pt-3">
               <AppraisalRegisters

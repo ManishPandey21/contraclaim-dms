@@ -212,6 +212,29 @@ class AppraisalService:
     async def get_report(self, report_id: str) -> Optional[Dict[str, Any]]:
         return await self._repo().get_report(report_id)
 
+    async def find_existing_report(
+        self, organization_id: Optional[str], project_id: Optional[str], document_ids: List[str]
+    ) -> Optional[Dict[str, Any]]:
+        """Return the live report for an (org, project, document-set) selection, if
+        any. "Live" excludes superseded/rejected reports — those don't block a
+        fresh generation. The document set must match exactly so a per-document
+        appraisal and a whole-project appraisal are treated as distinct."""
+        scope = {"organization_id": organization_id, "project_id": project_id}
+        wanted = set(str(d) for d in (document_ids or []))
+        terminal = {ReportStatus.SUPERSEDED.value, ReportStatus.REJECTED.value}
+        for report in await self._repo().list_reports(scope):
+            if report.get("status") in terminal:
+                continue
+            if set(str(d) for d in (report.get("document_ids") or [])) == wanted:
+                return report
+        return None
+
+    async def delete_report(self, report: Dict[str, Any], current_user: Any) -> None:
+        """Delete a report and its derived registers + comments so the selection
+        becomes available to generate again."""
+        await self._repo().delete_report_cascade(str(report["_id"]))
+        await self._emit(report, "deleted", current_user)
+
     async def edit_report(self, report: Dict[str, Any], fields: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         updated = await self._repo().update_report(report["_id"], {k: v for k, v in fields.items() if v is not None})
         await self._emit(report, "edited", current_user)

@@ -67,6 +67,17 @@ async def generate_appraisal(
         project_id=payload.project_id,
     )
     svc = AppraisalService(db)
+    # Generate-once: a live report already exists for this exact selection. The
+    # caller should view/edit it, or delete it to regenerate.
+    existing = await svc.find_existing_report(org, payload.project_id, payload.document_ids)
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": "An appraisal already exists for this selection. Open it, or delete it to regenerate.",
+                "report_id": str(existing["_id"]),
+            },
+        )
     job = await svc.create_job(
         organization_id=org,
         project_id=payload.project_id,
@@ -75,6 +86,30 @@ async def generate_appraisal(
     )
     svc.schedule(job["_id"], current_user)
     return AppraisalJob(**job)
+
+
+@router.get("/contracts/appraisal/existing", response_model=Optional[AppraisalReport])
+async def existing_appraisal(
+    organization_id: Optional[str] = Query(None),
+    project_id: str = Query(...),
+    document_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Return the live report for an (org, project, document) selection, or null."""
+    org = organization_id or getattr(current_user, "organization_id", None)
+    await policy.authorize(
+        current_user,
+        Permissions.CONTRACT_APPRAISAL_VIEW,
+        resource_type="contract_appraisal",
+        organization_id=org,
+        project_id=project_id,
+        audit=False,
+    )
+    document_ids = [document_id] if document_id else []
+    report = await AppraisalService(db).find_existing_report(org, project_id, document_ids)
+    return AppraisalReport(**report) if report else None
 
 
 @router.get("/contracts/appraisal/jobs/{job_id}", response_model=AppraisalJob)
@@ -154,6 +189,21 @@ async def edit_appraisal(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved report is locked; regenerate to create a new version")
     updated = await AppraisalService(db).edit_report(report, payload.model_dump(exclude_unset=True), current_user)
     return AppraisalReport(**(updated or report))
+
+
+@router.delete("/contracts/appraisal/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_appraisal(
+    report_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Delete a report (and its registers/comments) so the selection can be
+    generated again. Gated by the generate permission — whoever may regenerate
+    may delete-to-regenerate."""
+    report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_GENERATE, db, current_user, policy)
+    await AppraisalService(db).delete_report(report, current_user)
+    return None
 
 
 @router.post("/contracts/appraisal/{report_id}/approve", response_model=AppraisalReport)
