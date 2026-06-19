@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -7,11 +8,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -39,6 +46,10 @@ import {
 } from "@/services/contracts-api";
 import AppraisalRegisters from "@/components/contract-appraisal/AppraisalRegisters";
 import ClauseLibrary from "@/components/contract-appraisal/ClauseLibrary";
+import { enhancedApi } from "@/services/enhanced-api";
+import { listContractUploads, type ContractUpload } from "@/services/contracts-api";
+
+const ALL_CONTRACTS = "__all__";
 
 const TERMINAL_JOB = new Set(["completed", "failed", "cancelled"]);
 
@@ -68,7 +79,10 @@ function completenessBadge(status: string) {
 const ContractAppraisalPage: React.FC = () => {
   const [orgId, setOrgId] = useState("");
   const [projectId, setProjectId] = useState("");
-  const [documentIds, setDocumentIds] = useState("");
+  const [contractDocId, setContractDocId] = useState(ALL_CONTRACTS);
+  const [orgs, setOrgs] = useState<{ id: string; name: string }[]>([]);
+  const [projects, setProjects] = useState<{ id: string; name: string; organization_id: string }[]>([]);
+  const [contracts, setContracts] = useState<ContractUpload[]>([]);
   const [job, setJob] = useState<AppraisalJob | null>(null);
   const [reports, setReports] = useState<AppraisalReport[]>([]);
   const [selected, setSelected] = useState<AppraisalReport | null>(null);
@@ -95,6 +109,63 @@ const ContractAppraisalPage: React.FC = () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
+
+  // Organisations + projects the user can access (cascading dropdowns).
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const [os, ps] = await Promise.all([
+          enhancedApi.getOrganizations().catch(() => []),
+          enhancedApi.getProjects().catch(() => []),
+        ]);
+        if (!active) return;
+        setOrgs((os || []).map((o: any) => ({ id: String(o._id || o.id || ""), name: o.name || "Organization" })));
+        setProjects(
+          (ps || []).map((p: any) => ({
+            id: String(p._id || p.id || ""),
+            name: p.name || "Project",
+            organization_id: String(p.organization_id || ""),
+          })),
+        );
+      } catch {
+        /* selectors are best-effort */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Uploaded contract documents for the selected org/project (the appraisal
+  // source). Only completed contracts are appraisable.
+  useEffect(() => {
+    let active = true;
+    setContractDocId(ALL_CONTRACTS);
+    if (!projectId) {
+      setContracts([]);
+      return;
+    }
+    (async () => {
+      try {
+        const list = await listContractUploads({
+          organization_id: orgId || undefined,
+          project_id: projectId,
+          limit: 200,
+        });
+        if (active) setContracts(list.filter((c) => String(c.status).toLowerCase() === "completed"));
+      } catch {
+        if (active) setContracts([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [orgId, projectId]);
+
+  const projectsForOrg = orgId
+    ? projects.filter((p) => p.organization_id === orgId)
+    : projects;
 
   const pollJob = useCallback(
     (jobId: string) => {
@@ -123,19 +194,16 @@ const ContractAppraisalPage: React.FC = () => {
   );
 
   const onGenerate = async () => {
-    if (!projectId.trim()) {
-      toast.error("Project ID is required");
+    if (!projectId) {
+      toast.error("Select a project");
       return;
     }
     setBusy(true);
     try {
-      const ids = documentIds
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const ids = contractDocId && contractDocId !== ALL_CONTRACTS ? [contractDocId] : [];
       const j = await generateAppraisal({
-        organization_id: orgId.trim() || undefined,
-        project_id: projectId.trim(),
+        organization_id: orgId || undefined,
+        project_id: projectId,
         document_ids: ids,
       });
       setJob(j);
@@ -240,20 +308,65 @@ const ContractAppraisalPage: React.FC = () => {
         <CardContent className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
-              <Label>Organisation ID (optional)</Label>
-              <Input value={orgId} onChange={(e) => setOrgId(e.target.value)} placeholder="defaults to yours" />
+              <Label>Organisation</Label>
+              <Select
+                value={orgId}
+                onValueChange={(v) => {
+                  setOrgId(v);
+                  setProjectId("");
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select organisation" />
+                </SelectTrigger>
+                <SelectContent>
+                  {orgs.map((o) => (
+                    <SelectItem key={o.id} value={o.id}>
+                      {o.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
-              <Label>Project ID</Label>
-              <Input value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="required" />
+              <Label>Project</Label>
+              <Select value={projectId} onValueChange={setProjectId} disabled={projectsForOrg.length === 0}>
+                <SelectTrigger>
+                  <SelectValue placeholder={orgId ? "Select project" : "Select organisation first"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {projectsForOrg.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      {p.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div>
-              <Label>Document IDs (optional, comma-separated)</Label>
-              <Input value={documentIds} onChange={(e) => setDocumentIds(e.target.value)} placeholder="d1, d2" />
+              <Label>Contract document</Label>
+              <Select value={contractDocId} onValueChange={setContractDocId} disabled={!projectId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="All project contracts" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_CONTRACTS}>All project contracts</SelectItem>
+                  {contracts.map((c) => (
+                    <SelectItem key={c.document_id} value={c.document_id}>
+                      {c.filename || c.document_id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {projectId && contracts.length === 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  No completed contracts. Upload one under “Upload Contract”.
+                </p>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
-            <Button onClick={onGenerate} disabled={busy || !!jobActive || !projectId.trim()}>
+            <Button onClick={onGenerate} disabled={busy || !!jobActive || !projectId}>
               {busy || jobActive ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
@@ -261,7 +374,7 @@ const ContractAppraisalPage: React.FC = () => {
               )}
               Generate Appraisal Report
             </Button>
-            <Button variant="outline" onClick={() => void loadReports()} disabled={!projectId.trim()}>
+            <Button variant="outline" onClick={() => void loadReports()} disabled={!projectId}>
               <RefreshCw className="mr-2 h-4 w-4" />
               Load existing
             </Button>
@@ -385,13 +498,30 @@ const ContractAppraisalPage: React.FC = () => {
                   <p className="whitespace-pre-wrap text-sm">{s.markdown}</p>
                   {s.citations.length > 0 && (
                     <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-                      {s.citations.map((c, i) => (
-                        <li key={i}>
-                          {[c.document_title || c.file_name, c.clause_number ? `Clause ${c.clause_number}` : null, c.page != null ? `p.${c.page}` : null]
-                            .filter(Boolean)
-                            .join(" · ")}
-                        </li>
-                      ))}
+                      {s.citations.map((c, i) => {
+                        const label = [
+                          c.document_title || c.file_name,
+                          c.clause_number ? `Clause ${c.clause_number}` : null,
+                          c.page != null ? `p.${c.page}` : null,
+                        ]
+                          .filter(Boolean)
+                          .join(" · ");
+                        return (
+                          <li key={i}>
+                            {c.document_id ? (
+                              <Link
+                                to={`/documentviewer/${c.document_id}`}
+                                className="text-blue-600 hover:underline"
+                                title="Open source document"
+                              >
+                                {label}
+                              </Link>
+                            ) : (
+                              label
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>

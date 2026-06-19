@@ -554,3 +554,23 @@ export async function listClauses(params: {
   const { data } = await api.get("/contracts/clauses", { params });
   return Array.isArray(data) ? (data as ClauseEntry[]) : [];
 }
+
+// --- uploaded contract documents (for the appraisal source dropdown) ------
+
+export interface ContractUpload {
+  document_id: string;
+  upload_id?: string | null;
+  filename?: string | null;
+  status: string;
+  createdAt?: string | null;
+}
+
+export async function listContractUploads(params?: {
+  organization_id?: string;
+  project_id?: string;
+  limit?: number;
+}): Promise<ContractUpload[]> {
+  const { data } = await api.get("/contracts/list", { params });
+  const uploads = data?.uploads;
+  return Array.isArray(uploads) ? (uploads as ContractUpload[]) : [];
+}
