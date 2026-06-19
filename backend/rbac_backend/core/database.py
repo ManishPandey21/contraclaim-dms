@@ -334,6 +334,8 @@ async def ensure_indexes(db):
     # Tasks
     await db.tasks.create_index("organization_id", background=True)
     await db.tasks.create_index("project_id", background=True)
+    await db.tasks.create_index("assigned_to", background=True)
+    await db.tasks.create_index("linked_claim_id", background=True)
 
     # Claims (Phase 4)
     await db.claims.create_index(
