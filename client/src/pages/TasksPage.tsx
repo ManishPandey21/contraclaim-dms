@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -52,6 +53,7 @@ import { format } from "date-fns";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getTasks, createTask, updateTask, deleteTask, addTaskComment, type TaskDTO } from "@/services/tasks-api";
+import { getCurrentUserProfile } from "@/services/session-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import { listDocuments } from "@/services/documents-api";
 import {
@@ -156,6 +158,14 @@ const TasksPage = () => {
   
   // Real tasks loaded from the backend (GET /api/tasks, tenant-scoped).
   const [taskDtos, setTaskDtos] = useState<TaskDTO[]>([]);
+  const [taskFilter, setTaskFilter] = useState<"all" | "mine" | "overdue">("all");
+  const [myUserId, setMyUserId] = useState<string>("");
+
+  useEffect(() => {
+    getCurrentUserProfile()
+      .then((p) => setMyUserId(p?.id || ""))
+      .catch(() => {});
+  }, []);
 
   const reloadTasks = useCallback(async () => {
     try {
@@ -260,7 +270,15 @@ const TasksPage = () => {
       : undefined,
     createdAt: dto.created_at,
   }));
-  
+
+  const isOverdue = (t: Task) =>
+    !!t.dueDate && new Date(t.dueDate) < new Date() && t.status !== "Completed";
+  const visibleTasks = tasks.filter((t) => {
+    if (taskFilter === "mine") return myUserId && t.assignedTo.id === myUserId;
+    if (taskFilter === "overdue") return isOverdue(t);
+    return true;
+  });
+
   const workflows: WorkflowItem[] = [
     {
       id: '1',
@@ -751,6 +769,22 @@ const TasksPage = () => {
             <CardHeader>
               <CardTitle className="text-lg">Assigned Tasks</CardTitle>
               <CardDescription>View and manage assigned tasks</CardDescription>
+              <div className="flex gap-2 pt-2">
+                {([
+                  { key: "all", label: "All" },
+                  { key: "mine", label: "My Tasks" },
+                  { key: "overdue", label: "Overdue" },
+                ] as const).map((f) => (
+                  <Button
+                    key={f.key}
+                    size="sm"
+                    variant={taskFilter === f.key ? "default" : "outline"}
+                    onClick={() => setTaskFilter(f.key)}
+                  >
+                    {f.label}
+                  </Button>
+                ))}
+              </div>
             </CardHeader>
             <CardContent>
               <Table>
@@ -765,9 +799,24 @@ const TasksPage = () => {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {tasks.map(task => (
+                  {visibleTasks.map(task => {
+                    const dto = taskDtos.find((d) => d.id === task.id);
+                    return (
                     <TableRow key={task.id}>
-                      <TableCell className="font-medium">{task.title}</TableCell>
+                      <TableCell className="font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>{task.title}</span>
+                          {dto?.linked_claim_id && (
+                            <Link
+                              to={`/claims/${dto.linked_claim_id}`}
+                              className="text-xs text-blue-600 hover:underline"
+                              title="Linked claim"
+                            >
+                              claim
+                            </Link>
+                          )}
+                        </div>
+                      </TableCell>
                       <TableCell>
                         <div className="flex items-center gap-2">
                           <Avatar className="h-6 w-6">
@@ -858,7 +907,8 @@ const TasksPage = () => {
                         </div>
                       </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                 </TableBody>
               </Table>
             </CardContent>

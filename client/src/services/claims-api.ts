@@ -82,6 +82,11 @@ export async function getClaims(params?: {
   return Array.isArray(data) ? data.map(normalize) : [];
 }
 
+export async function getClaim(id: string): Promise<ClaimDTO> {
+  const { data } = await api.get(`/claims/${id}`);
+  return normalize(data);
+}
+
 export async function createClaim(payload: ClaimPayload): Promise<ClaimDTO> {
   const { data } = await api.post("/claims", payload);
   return normalize(data);

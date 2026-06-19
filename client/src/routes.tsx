@@ -50,6 +50,7 @@ const LetterQualityDashboardPage = lazy(
 const LetterSummaryPage = lazy(() => import("./pages/LetterSummaryPage"));
 const ReportsAnalyticsPage = lazy(() => import("./pages/ReportsAnalyticsPage"));
 const ClaimsRegisterPage = lazy(() => import("./pages/ClaimsRegisterPage"));
+const ClaimDetailPage = lazy(() => import("./pages/ClaimDetailPage"));
 const SLATrackerPage = lazy(() => import("./pages/SLATrackerPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
@@ -154,6 +155,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/claims" fallback="/overview">
               <ClaimsRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="claims/:id"
+          element={
+            <RoleGuard path="/claims" fallback="/overview">
+              <ClaimDetailPage />
             </RoleGuard>
           }
         />
