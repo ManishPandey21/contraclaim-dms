@@ -9,7 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CheckCircle2, ListChecks, Loader2 } from "lucide-react";
+import { CheckCircle2, ClipboardList, ListChecks, Loader2, Scale } from "lucide-react";
 import { toast } from "sonner";
 import {
   createAppraisalRegisters,
@@ -18,6 +18,8 @@ import {
   RegisterKind,
   updateRegisterItem,
 } from "@/services/contracts-api";
+import { createTask } from "@/services/tasks-api";
+import { createClaim } from "@/services/claims-api";
 
 interface Props {
   reportId: string;
@@ -98,6 +100,39 @@ const AppraisalRegisters: React.FC<Props> = ({ reportId, organizationId, project
     }
   };
 
+  const sourceNote = (r: RegisterItem) =>
+    [r.clause_reference ? `Clause ${r.clause_reference}` : null, r.document_name, r.source_quote]
+      .filter(Boolean)
+      .join(" — ") || undefined;
+
+  const createTaskFrom = async (kind: RegisterKind, r: RegisterItem) => {
+    try {
+      await createTask({
+        title: titleOf(kind, r).slice(0, 160),
+        description: sourceNote(r),
+        project_id: projectId,
+        organization_id: organizationId,
+      });
+      toast.success("Task created from finding");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to create task");
+    }
+  };
+
+  const raiseClaimFrom = async (r: RegisterItem) => {
+    try {
+      await createClaim({
+        title: (r.risk_title || "Contract risk").slice(0, 300),
+        type: "other",
+        description: r.risk_description || sourceNote(r),
+        project_id: projectId,
+      });
+      toast.success("Claim raised from risk");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to raise claim");
+    }
+  };
+
   const totalRows = data.obligations.length + data.risks.length + data["key-dates"].length;
 
   return (
@@ -151,7 +186,7 @@ const AppraisalRegisters: React.FC<Props> = ({ reportId, organizationId, project
                       </TableCell>
                       <TableCell>{Math.round((r.confidence_score || 0) * 100)}%</TableCell>
                       <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-end gap-1">
                           {verificationBadge(r.verification_status)}
                           {r.verification_status !== "verified" && (
                             <Button
@@ -162,6 +197,26 @@ const AppraisalRegisters: React.FC<Props> = ({ reportId, organizationId, project
                               onClick={() => verify(kind, r, "verified")}
                             >
                               <CheckCircle2 className="h-4 w-4 text-green-600" />
+                            </Button>
+                          )}
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-7 w-7"
+                            title="Create task from finding"
+                            onClick={() => createTaskFrom(kind, r)}
+                          >
+                            <ClipboardList className="h-4 w-4" />
+                          </Button>
+                          {kind === "risks" && (
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-7 w-7"
+                              title="Raise claim from risk"
+                              onClick={() => raiseClaimFrom(r)}
+                            >
+                              <Scale className="h-4 w-4 text-indigo-600" />
                             </Button>
                           )}
                         </div>
