@@ -62,6 +62,10 @@ class AppraisalGenerator:
             filters=filters,
             require_citations=True,
             max_iterations=3,
+            # Pull the widest evidence window the engine allows so each section
+            # reasons over (as much as possible of) the complete selected
+            # document rather than a thin top-k slice.
+            limit=50,
         )
 
     async def generate(

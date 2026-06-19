@@ -67,6 +67,14 @@ class AppraisalRepository:
         cursor = self.reports.find(scope_filter).sort("created_at", -1).limit(limit)
         return [r async for r in cursor]
 
+    async def delete_report_cascade(self, report_id: str) -> None:
+        """Remove a report plus its derived register rows and review comments."""
+        rid = str(report_id)
+        await self.reports.delete_one({"_id": rid})
+        await self.comments.delete_many({"report_id": rid})
+        for reg in ("obligations", "risks", "key_dates"):
+            await self._register_coll(reg).delete_many({"report_id": rid})
+
     async def next_version(self, organization_id: Optional[str], project_id: Optional[str], document_ids: List[str]) -> int:
         query: Dict[str, Any] = {"organization_id": organization_id, "project_id": project_id}
         latest = await self.reports.find_one(query, sort=[("report_version", -1)])
