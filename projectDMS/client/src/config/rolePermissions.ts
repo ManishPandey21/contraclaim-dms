@@ -81,6 +81,17 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/letter-quality": ["drafting.request.view"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
+  // Contract Appraisal (CAR): canonical backend permission is
+  // `dms.contract.appraisal.view`, which is legacy-aliased to `documents:read`
+  // on the backend. The frontend permission set does not expand that alias, so we
+  // also accept `dms.document.view` to match the population the backend authorizes.
+  // Must be listed explicitly so it wins over the `/contracts` prefix match.
+  "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
+  // Claims register + SLA tracker (Phase 4). Backend `dms.claim.view` is
+  // legacy-aliased to `documents:read`; accept `dms.document.view` as the
+  // frontend-visible equivalent so the links surface for document viewers.
+  "/claims": ["dms.claim.view", "dms.document.view"],
+  "/sla": ["dms.claim.view", "dms.document.view"],
   // C3: no `dms.folder.view` permission exists on the backend; folders organize
   // documents, so gate on `dms.document.view` (matches /documents and /contracts).
   "/folders": ["dms.document.view"],
@@ -94,7 +105,10 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/notifications": [],
   "/profile": ["profile:read"],
   "/tags": ["tags:read"],
-  "/tasks": ["tasks:read"],
+  // Tasks: backend currently gates by ownership/scope, not a task permission
+  // (a `dms.task.*` family is planned for Phase 2). Accept `tasks:read` or any
+  // document viewer so the (functional) Tasks module is reachable in the meantime.
+  "/tasks": ["tasks:read", "dms.document.view"],
 };
 
 export function isRouteAllowedByPermission(

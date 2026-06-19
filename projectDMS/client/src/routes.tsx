@@ -116,7 +116,14 @@ const AppRoutes = () => (
           }
         />
         <Route path="folders" element={<FolderStructurePage />} />
-        <Route path="tasks" element={<TasksPage />} />
+        <Route
+          path="tasks"
+          element={
+            <RoleGuard path="/tasks" fallback="/overview">
+              <TasksPage />
+            </RoleGuard>
+          }
+        />
         <Route path="parties" element={<PartiesInvolvedPage />} />
         <Route
           path="letters"
@@ -142,8 +149,22 @@ const AppRoutes = () => (
         <Route path="letters/:id/completed" element={<LetterCompletedPage />} />
         <Route path="letter-quality" element={<LetterQualityDashboardPage />} />
         <Route path="reports" element={<ReportsAnalyticsPage />} />
-        <Route path="claims" element={<ClaimsRegisterPage />} />
-        <Route path="sla" element={<SLATrackerPage />} />
+        <Route
+          path="claims"
+          element={
+            <RoleGuard path="/claims" fallback="/overview">
+              <ClaimsRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="sla"
+          element={
+            <RoleGuard path="/sla" fallback="/overview">
+              <SLATrackerPage />
+            </RoleGuard>
+          }
+        />
         <Route path="letter-templates" element={<LetterTemplatePage />} />
         <Route
           path="letter-templates/:id/edit"
@@ -154,7 +175,14 @@ const AppRoutes = () => (
         <Route path="contracts/upload" element={<ContractsUploadPage />} />
         <Route path="contracts/search" element={<ContractsSearchPage />} />
         <Route path="contracts/qa" element={<ContractQAPage />} />
-        <Route path="contracts/appraisal" element={<ContractAppraisalPage />} />
+        <Route
+          path="contracts/appraisal"
+          element={
+            <RoleGuard path="/contracts/appraisal" fallback="/overview">
+              <ContractAppraisalPage />
+            </RoleGuard>
+          }
+        />
         <Route path="reference/:id" element={<ReferencePage />} />
         <Route
           path="health"
