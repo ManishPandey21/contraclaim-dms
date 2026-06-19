@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -51,7 +52,19 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Download, Edit, Loader2, PlusCircle, ShieldCheck, Sparkles, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  ClipboardList,
+  Clock,
+  Download,
+  Edit,
+  Eye,
+  Loader2,
+  PlusCircle,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   ClaimDTO,
@@ -68,6 +81,9 @@ import {
 import { enhancedApi } from "@/services/enhanced-api";
 import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
 import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
+import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
+import { getUpcoming } from "@/services/sla-api";
+import { buildSlaStateMap, type ClaimSla } from "@/lib/claims-helpers";
 
 const CLAIM_TYPES: { value: ClaimType; label: string }[] = [
   { value: "eot", label: "Extension of Time" },
@@ -138,7 +154,10 @@ const ClaimsRegisterPage: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [approvalClaim, setApprovalClaim] = useState<ClaimDTO | null>(null);
   const [assessClaim, setAssessClaim] = useState<ClaimDTO | null>(null);
+  const [taskClaim, setTaskClaim] = useState<ClaimDTO | null>(null);
+  const [slaMap, setSlaMap] = useState<Record<string, ClaimSla>>({});
   const [exportingId, setExportingId] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const load = useCallback(async () => {
     try {
@@ -148,6 +167,11 @@ const ClaimsRegisterPage: React.FC = () => {
       setClaims(await getClaims(params));
     } catch {
       toast.error("Failed to load claims");
+    }
+    try {
+      setSlaMap(buildSlaStateMap(await getUpcoming({ days: 30 })));
+    } catch {
+      /* SLA badges are best-effort */
     }
   }, [typeFilter, statusFilter]);
 
@@ -337,11 +361,33 @@ const ClaimsRegisterPage: React.FC = () => {
                       </DropdownMenu>
                     </TableCell>
                     <TableCell>{fmtAmount(c.amount_claimed)}</TableCell>
-                    <TableCell>{fmtDate(c.response_due_date)}</TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <span>{fmtDate(c.response_due_date)}</span>
+                        {slaMap[c.id] &&
+                          (slaMap[c.id].state === "breached" ? (
+                            <Badge variant="destructive" className="gap-1">
+                              <AlertTriangle className="h-3 w-3" />
+                              {Math.abs(slaMap[c.id].days_remaining)}d over
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="gap-1 border-amber-500 text-amber-600">
+                              <Clock className="h-3 w-3" />
+                              {slaMap[c.id].days_remaining}d
+                            </Badge>
+                          ))}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Export evidence bundle" disabled={exportingId === c.id} onClick={() => exportBundle(c)}>
                           {exportingId === c.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Open claim" onClick={() => navigate(`/claims/${c.id}`)}>
+                          <Eye className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="New task from claim" onClick={() => setTaskClaim(c)}>
+                          <ClipboardList className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="AI assessment" onClick={() => setAssessClaim(c)}>
                           <Sparkles className="h-4 w-4 text-indigo-500" />
@@ -481,6 +527,14 @@ const ClaimsRegisterPage: React.FC = () => {
         open={assessClaim !== null}
         onOpenChange={(o) => {
           if (!o) setAssessClaim(null);
+        }}
+      />
+
+      <ClaimTaskDialog
+        claim={taskClaim}
+        open={taskClaim !== null}
+        onOpenChange={(o) => {
+          if (!o) setTaskClaim(null);
         }}
       />
     </div>

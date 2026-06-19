@@ -23,6 +23,7 @@ export interface TaskDTO {
   assigned_to?: string | null;
   due_date?: string | null;
   document_id?: string | null;
+  linked_claim_id?: string | null;
   organization_id?: string | null;
   project_id?: string | null;
   comments: TaskComment[];
@@ -38,6 +39,7 @@ export interface CreateTaskPayload {
   assigned_to?: string;
   due_date?: string; // ISO 8601
   document_id?: string;
+  linked_claim_id?: string;
   organization_id?: string;
   project_id?: string;
 }
@@ -55,6 +57,7 @@ export async function getTasks(params?: {
   assigned_to?: string;
   project_id?: string;
   organization_id?: string;
+  linked_claim_id?: string;
 }): Promise<TaskDTO[]> {
   const { data } = await api.get("/tasks", { params });
   return Array.isArray(data) ? data.map(normalize) : [];
