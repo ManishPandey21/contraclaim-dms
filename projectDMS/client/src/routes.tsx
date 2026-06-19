@@ -25,6 +25,7 @@ const PlanSettingsPage = lazy(() => import("./pages/PlanSettingsPage"));
 const SubscriptionManagementPage = lazy(
   () => import("./pages/SubscriptionManagementPage"),
 );
+const BillingReturnPage = lazy(() => import("./pages/BillingReturnPage"));
 const NotificationCenterPage = lazy(
   () => import("./pages/NotificationCenterPage"),
 );
@@ -104,6 +105,14 @@ const AppRoutes = () => (
           }
         />
         <Route path="notifications" element={<NotificationCenterPage />} />
+        <Route
+          path="billing/return"
+          element={
+            <RoleGuard path="/billing/return" fallback="/overview">
+              <BillingReturnPage />
+            </RoleGuard>
+          }
+        />
         <Route path="upload" element={<UploadPage />} />
         <Route path="/documentviewer/:id" element={<DocumentViewerPage />} />
         <Route path="share/:id" element={<ShareDocumentPage />} />

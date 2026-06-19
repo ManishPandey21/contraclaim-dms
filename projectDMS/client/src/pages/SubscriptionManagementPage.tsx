@@ -72,6 +72,8 @@ import {
   type InvoicePreview,
   type BillingPeriod,
 } from "@/services/plan-settings-api";
+import { startSubscriptionCheckout, redirectToCheckout } from "@/services/billing-api";
+import { getCurrentUserProfile } from "@/services/session-api";
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -225,6 +227,55 @@ const SubscriptionManagementPage: React.FC = () => {
       await loadData();
     } catch (err: any) {
       toast.error(`${isDowngrade ? "Downgrade" : "Upgrade"} failed`, {
+        description: err?.response?.data?.detail || err?.message,
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Razorpay hosted checkout. Provisions a *pending* subscription on the gateway
+  // and redirects to the hosted page; the backend billing webhook (not this
+  // redirect) activates the subscription and entitlements once payment captures.
+  const handleCheckout = async () => {
+    if (!selectedPlanCode) return;
+    setActionLoading(true);
+    try {
+      let organizationId =
+        activeSub?.organization_id || subscriptions[0]?.organization_id || "";
+      if (!organizationId) {
+        const me = await getCurrentUserProfile().catch(() => null);
+        organizationId = (me as any)?.organization_id || "";
+      }
+      if (!organizationId) {
+        toast.error("No organisation found for checkout");
+        return;
+      }
+      const token = await requestToken(
+        "subscription.entitlement.manage",
+        "Confirm Subscription",
+        "Enter your password to start a secure payment checkout."
+      );
+      const checkout = await startSubscriptionCheckout(
+        {
+          organization_id: organizationId,
+          plan_code: selectedPlanCode,
+          billing_period: selectedPeriod as any,
+        },
+        token
+      );
+      setUpgradeDialogOpen(false);
+      if (checkout.checkout_url) {
+        toast.success("Redirecting to secure checkout…");
+        redirectToCheckout(checkout);
+      } else {
+        toast.info("Checkout created. Complete payment to activate your plan.", {
+          description: `Subscription ${checkout.subscription_id} is ${checkout.status}.`,
+        });
+        await loadData();
+      }
+    } catch (err: any) {
+      toast.error("Could not start checkout", {
         description: err?.response?.data?.detail || err?.message,
       });
     } finally {
@@ -864,9 +915,16 @@ const SubscriptionManagementPage: React.FC = () => {
               </Select>
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="flex-col gap-2 sm:flex-row">
             <Button variant="outline" onClick={() => setUpgradeDialogOpen(false)}>
               Cancel
+            </Button>
+            <Button
+              variant="outline"
+              disabled={!selectedPlanCode || actionLoading}
+              onClick={handleCheckout}
+            >
+              {actionLoading ? "Processing..." : "Pay with Razorpay"}
             </Button>
             <Button
               disabled={!selectedPlanCode || actionLoading}
