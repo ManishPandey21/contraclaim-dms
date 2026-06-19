@@ -23,6 +23,11 @@ import {
   TextSearch,
   Files,
   MessageSquare,
+  Scale,
+  Clock,
+  Sparkles,
+  Bell,
+  CreditCard,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -191,12 +196,19 @@ const Sidebar = () => {
       icon: <MessageSquare size={20} />,
       label: "Contract Q&A",
     },
+    {
+      path: "/contracts/appraisal",
+      icon: <Sparkles size={20} />,
+      label: "Contract Appraisal",
+    },
 
-    // {
-    //  path: "/tasks",
-    //  icon: <ClipboardList size={20} />,
-    //  label: "Tasks Allocation",
-    // },
+    { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
+    { path: "/sla", icon: <Clock size={20} />, label: "SLA Tracker" },
+    {
+      path: "/tasks",
+      icon: <ClipboardList size={20} />,
+      label: "Tasks",
+    },
     {
       path: "/folders",
       icon: <FolderClosed size={20} />,
@@ -206,6 +218,11 @@ const Sidebar = () => {
       path: "/reports",
       icon: <BarChart size={20} />,
       label: "Reports & Analytics",
+    },
+    {
+      path: "/notifications",
+      icon: <Bell size={20} />,
+      label: "Notifications",
     },
     {
       path: "/health",
@@ -218,6 +235,12 @@ const Sidebar = () => {
       path: "/plan-settings",
       icon: <Settings size={20} />,
       label: "Plan Settings",
+      permission: "subscription.entitlement.manage",
+    },
+    {
+      path: "/subscription-management",
+      icon: <CreditCard size={20} />,
+      label: "Subscription",
       permission: "subscription.entitlement.manage",
     },
     { path: "/settings", icon: <Settings size={20} />, label: "Settings" },
@@ -275,7 +298,8 @@ const Sidebar = () => {
               "Email Groups", // After Add Stakeholder
               "Search Letters", // After Search letter
               "Create Template", // After Letter Templates
-              "Contract Q&A", // After Search clauses
+              "Contract Appraisal", // After the Contracts group
+              "Tasks", // After the Claims / SLA / Tasks group
             ]);
 
             return (
