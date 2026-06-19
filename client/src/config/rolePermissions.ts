@@ -101,6 +101,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/permissions": ["roles:read"],
   "/plan-settings": ["subscription.entitlement.manage"],
   "/subscription-management": ["subscription.entitlement.manage", "subscription.upgrade"],
+  // Razorpay hosted-checkout return landing (Phase 4). Same billing audience.
+  "/billing/return": ["subscription.entitlement.manage", "subscription.upgrade"],
   "/settings": ["settings:view"],
   "/notifications": [],
   "/profile": ["profile:read"],
