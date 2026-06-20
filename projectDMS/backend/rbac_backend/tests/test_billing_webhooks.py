@@ -78,6 +78,7 @@ class _FakeDB:
         self.billing_webhook_events = _FakeColl(unique_key="event_id")
         self.billing_records = _FakeColl()
         self.subscription_history = _FakeColl()
+        self.plans = _FakeColl()
 
 
 def _seed_subscription(db, *, sub_id="sub-1", gateway_sub_id="sub_rzp_1", status="pending"):
@@ -87,10 +88,18 @@ def _seed_subscription(db, *, sub_id="sub-1", gateway_sub_id="sub_rzp_1", status
             "organization_id": "org-A",
             "project_id": "proj-A",
             "plan_code": "dms_pro",
+            "billing_period": "monthly",
             "status": status,
             "billing_status": "pending",
             "payment_gateway_subscription_id": gateway_sub_id,
         }
+    )
+
+
+def _seed_plan(db, *, code="dms_pro", monthly=50000, currency="INR"):
+    db.plans.docs.append(
+        {"code": code, "currency": currency, "base_price_minor": monthly,
+         "pricing_tiers": {"monthly": monthly, "quarterly": monthly * 3, "annual": monthly * 12}},
     )
 
 
@@ -219,3 +228,48 @@ async def test_webhook_unknown_subscription_is_recorded_but_unmatched():
     result = await svc.process(raw_body=raw, signature=_sign(raw), event_id_header="evt_unknown")
     assert result["status"] == "processed"
     assert result["matched"] is False
+
+
+# --- Phase 4: webhook financial validation (money-safety) -----------------
+
+
+@pytest.mark.asyncio
+async def test_webhook_matching_amount_activates():
+    db = _FakeDB()
+    _seed_subscription(db, status="pending")
+    _seed_plan(db, monthly=50000)  # matches the _event amount
+    svc = BillingWebhookService(db=db, gateway=_razorpay(), provider="razorpay")
+    raw = json.dumps(_event("subscription.charged", amount=50000)).encode()
+    result = await svc.process(raw_body=raw, signature=_sign(raw), event_id_header="evt_ok")
+    assert result["applied"] == {"status": "active", "billing_status": "active"}
+    sub = await db.subscriptions.find_one({"_id": "sub-1"})
+    assert sub["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_webhook_amount_mismatch_does_not_activate():
+    db = _FakeDB()
+    _seed_subscription(db, status="pending")
+    _seed_plan(db, monthly=50000)  # plan price 50000…
+    svc = BillingWebhookService(db=db, gateway=_razorpay(), provider="razorpay")
+    raw = json.dumps(_event("subscription.charged", amount=4999)).encode()  # …but only 4999 captured
+    result = await svc.process(raw_body=raw, signature=_sign(raw), event_id_header="evt_short")
+
+    assert result["validation"] == "amount_mismatch"
+    sub = await db.subscriptions.find_one({"_id": "sub-1"})
+    # Entitlement is never enabled: status stays pending; flagged for review.
+    assert sub["status"] == "pending"
+    assert sub["billing_status"] == "review"
+    assert sub["payment_review_required"] is True
+    assert db.billing_records.docs[-1]["record_status"] == "amount_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_webhook_skips_validation_when_plan_unresolvable():
+    # No plan seeded → expected charge can't be resolved → activation not blocked.
+    db = _FakeDB()
+    _seed_subscription(db, status="pending")
+    svc = BillingWebhookService(db=db, gateway=_razorpay(), provider="razorpay")
+    raw = json.dumps(_event("subscription.charged", amount=4999)).encode()
+    result = await svc.process(raw_body=raw, signature=_sign(raw), event_id_header="evt_noplan")
+    assert result["applied"] == {"status": "active", "billing_status": "active"}

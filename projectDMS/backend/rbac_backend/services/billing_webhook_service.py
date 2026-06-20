@@ -113,6 +113,21 @@ class BillingWebhookService:
         if not update:
             return {"matched": True, "changed": False}
 
+        # Money-safety: an activating event must carry the amount/currency the
+        # plan was priced at. A mismatch never enables entitlement (entitlement
+        # derives from status == "active"); it is flagged for admin review.
+        activates = update.get("status") == "active" or update.get("billing_status") == "active"
+        if activates and event.amount_minor is not None:
+            expected = await self._expected_charge(db, subscription)
+            if expected and expected["amount_minor"]:
+                bad: Optional[str] = None
+                if int(event.amount_minor) != expected["amount_minor"]:
+                    bad = f"amount {event.amount_minor} != expected {expected['amount_minor']}"
+                elif event.currency and str(event.currency).upper() != expected["currency"].upper():
+                    bad = f"currency {event.currency} != expected {expected['currency']}"
+                if bad:
+                    return await self._record_mismatch(db, subscription, event, bad, now)
+
         update.update({"updated_at": now, "updated_by": f"system:webhook:{self.provider}"})
         await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
 
@@ -156,4 +171,85 @@ class BillingWebhookService:
             "changed": True,
             "subscription_id": str(subscription["_id"]),
             "applied": {k: v for k, v in update.items() if k in {"status", "billing_status"}},
+        }
+
+    async def _expected_charge(self, db: Any, subscription: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Authoritative expected charge for the subscription's plan + period.
+
+        Resolves the plan the subscription was created against and returns
+        ``{amount_minor, currency}``. Returns ``None`` when it can't be resolved
+        (plan not seeded / no price); the caller then skips amount validation and
+        logs, rather than blocking a legitimately-priced activation on a config gap.
+        """
+        plan_code = subscription.get("plan_code")
+        if not plan_code:
+            return None
+        try:
+            plan = await db.plans.find_one({"code": plan_code})
+        except Exception:  # pragma: no cover - defensive (collection absent in some test DBs)
+            plan = None
+        if not plan:
+            return None
+        period = subscription.get("billing_period") or "monthly"
+        tiers = plan.get("pricing_tiers") or {}
+        amount = tiers.get(period)
+        if amount is None:
+            amount = plan.get("base_price_minor")
+        if amount is None:
+            return None
+        return {"amount_minor": int(amount), "currency": str(plan.get("currency") or "INR")}
+
+    async def _record_mismatch(self, db: Any, subscription: Dict[str, Any], event: WebhookEvent,
+                               detail: str, now: datetime) -> Dict[str, Any]:
+        """Flag an amount/currency mismatch without enabling entitlement.
+
+        The subscription is left un-activated (status unchanged) and marked for
+        admin review; a billing record captures the discrepancy for the queue.
+        """
+        logger.warning(
+            "Billing webhook %s rejected for subscription %s: %s",
+            event.event_id, subscription["_id"], detail,
+        )
+        await db.subscriptions.update_one(
+            {"_id": subscription["_id"]},
+            {"$set": {
+                "billing_status": "review",
+                "payment_review_required": True,
+                "updated_at": now,
+                "updated_by": f"system:webhook:{self.provider}",
+            }},
+        )
+        await db.billing_records.insert_one({
+            "subscription_id": str(subscription["_id"]),
+            "organization_id": str(subscription.get("organization_id", "")),
+            "project_id": subscription.get("project_id"),
+            "provider": self.provider,
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "gateway_payment_id": event.gateway_payment_id,
+            "gateway_subscription_id": event.gateway_subscription_id,
+            "amount_minor": event.amount_minor,
+            "currency": event.currency,
+            "record_status": "amount_mismatch",
+            "validation_error": detail,
+            "created_at": now,
+        })
+        await db.subscription_history.insert_one({
+            "subscription_id": str(subscription["_id"]),
+            "organization_id": str(subscription.get("organization_id", "")),
+            "project_id": subscription.get("project_id"),
+            "change_type": "webhook_rejected",
+            "from_status": str(subscription.get("status", "")),
+            "to_status": str(subscription.get("status", "")),
+            "metadata": {"event_type": event.event_type, "event_id": event.event_id,
+                         "validation_error": detail},
+            "changed_by": f"system:webhook:{self.provider}",
+            "changed_at": now,
+        })
+        return {
+            "matched": True,
+            "changed": False,
+            "validation": "amount_mismatch",
+            "detail": detail,
+            "subscription_id": str(subscription["_id"]),
         }
