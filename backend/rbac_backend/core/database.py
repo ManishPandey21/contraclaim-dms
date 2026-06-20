@@ -337,6 +337,22 @@ async def ensure_indexes(db):
     await db.tasks.create_index("assigned_to", background=True)
     await db.tasks.create_index("linked_claim_id", background=True)
 
+    # Key Date / Milestone Tracker
+    await db.key_date_milestones.create_index(
+        [("organization_id", 1), ("project_id", 1), ("current_approved_key_date", 1)], background=True
+    )
+    await db.key_date_milestones.create_index("responsible_party_id", background=True)
+    await db.key_date_eot_applications.create_index(
+        [("milestone_id", 1), ("created_at", 1)], background=True
+    )
+    await db.key_date_extension_history.create_index(
+        [("milestone_id", 1), ("revision_number", 1)], background=True
+    )
+    await db.key_date_achievements.create_index("milestone_id", background=True)
+    await db.key_date_notifications.create_index(
+        [("milestone_id", 1), ("notification_type", 1)], background=True
+    )
+
     # Claims (Phase 4)
     await db.claims.create_index(
         [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)],
