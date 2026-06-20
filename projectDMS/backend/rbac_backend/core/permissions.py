@@ -38,6 +38,15 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.task.edit",
     "dms.task.delete",
     "dms.task.manage",
+    "dms.keydate.view",
+    "dms.keydate.create",
+    "dms.keydate.edit",
+    "dms.keydate.delete",
+    "dms.keydate.eot_submit",
+    "dms.keydate.eot_approve",
+    "dms.keydate.achievement",
+    "dms.keydate.export",
+    "dms.keydate.manage",
     "dms.admin",
 ]
 
@@ -116,6 +125,15 @@ class Permissions:
     TASK_EDIT = "dms.task.edit"
     TASK_DELETE = "dms.task.delete"
     TASK_MANAGE = "dms.task.manage"
+    KEYDATE_VIEW = "dms.keydate.view"
+    KEYDATE_CREATE = "dms.keydate.create"
+    KEYDATE_EDIT = "dms.keydate.edit"
+    KEYDATE_DELETE = "dms.keydate.delete"
+    KEYDATE_EOT_SUBMIT = "dms.keydate.eot_submit"
+    KEYDATE_EOT_APPROVE = "dms.keydate.eot_approve"
+    KEYDATE_ACHIEVEMENT = "dms.keydate.achievement"
+    KEYDATE_EXPORT = "dms.keydate.export"
+    KEYDATE_MANAGE = "dms.keydate.manage"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -206,6 +224,15 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.task.edit": ["documents:update"],
     "dms.task.delete": ["documents:delete"],
     "dms.task.manage": ["documents:update", "projects:update"],
+    "dms.keydate.view": ["documents:read"],
+    "dms.keydate.create": ["documents:create"],
+    "dms.keydate.edit": ["documents:update"],
+    "dms.keydate.delete": ["documents:delete"],
+    "dms.keydate.eot_submit": ["documents:update"],
+    "dms.keydate.eot_approve": ["documents:update", "projects:update"],
+    "dms.keydate.achievement": ["documents:update"],
+    "dms.keydate.export": ["documents:read"],
+    "dms.keydate.manage": ["documents:update", "projects:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
