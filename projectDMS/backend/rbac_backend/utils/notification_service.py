@@ -78,7 +78,20 @@ _IMMEDIATE_EMAIL_EVENTS = {
     NotificationType.DRAFT_REJECTED,
     NotificationType.NEW_UPLOAD,
     NotificationType.BULK_UPLOAD_COMPLETED,
+    # Deadline / time-bar reminders — the core value of the contract-control
+    # registers. The key-date, SLA/claim and BG-expiry scanners emit these
+    # (BG reuses the KEYDATE types); they must reach the user by email, not just
+    # in-app, or a missed contractual deadline goes unseen.
+    NotificationType.KEYDATE_DUE,
+    NotificationType.KEYDATE_OVERDUE,
+    NotificationType.CLAIM_DEADLINE_APPROACHING,
+    NotificationType.CLAIM_DEADLINE_BREACHED,
 }
+
+
+def should_send_immediate_email(event_type: NotificationType, requested_channels: Iterable[str]) -> bool:
+    """Whether an emitted event should also fire an immediate email (pure)."""
+    return event_type in _IMMEDIATE_EMAIL_EVENTS and "email" in set(requested_channels)
 
 _UPLOAD_EVENTS = {
     NotificationType.NEW_UPLOAD,
@@ -270,7 +283,7 @@ class NotificationService:
             }
             await self.manager.broadcast(recipients, payload)
 
-            if self.email_service and event_type in _IMMEDIATE_EMAIL_EVENTS and "email" in requested_channels:
+            if self.email_service and should_send_immediate_email(event_type, requested_channels):
                 await self._fanout_emails(notification, recipients)
         else:
             logger.debug("No recipients resolved for %s on %s", event_type, resource_id)

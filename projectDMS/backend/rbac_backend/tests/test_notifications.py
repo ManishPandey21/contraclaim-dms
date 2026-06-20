@@ -8,6 +8,22 @@ from backend.rbac_backend.models.notification import (
     NotificationType,
 )
 from backend.rbac_backend.services.rbac_service import RBACService
+from backend.rbac_backend.utils.notification_service import should_send_immediate_email
+
+
+def test_deadline_reminders_trigger_immediate_email():
+    # The contract-control deadline reminders must reach the user by email.
+    for event in (
+        NotificationType.KEYDATE_DUE,
+        NotificationType.KEYDATE_OVERDUE,
+        NotificationType.CLAIM_DEADLINE_APPROACHING,
+        NotificationType.CLAIM_DEADLINE_BREACHED,
+    ):
+        assert should_send_immediate_email(event, ["in_app", "websocket", "email"]) is True
+    # Honour the channel set: no email channel → no immediate email.
+    assert should_send_immediate_email(NotificationType.KEYDATE_OVERDUE, ["in_app"]) is False
+    # Non-allowlisted informational events do not email.
+    assert should_send_immediate_email(NotificationType.APPROVAL_COMPLETED, ["email"]) is False
 
 
 class FakeCursor:
