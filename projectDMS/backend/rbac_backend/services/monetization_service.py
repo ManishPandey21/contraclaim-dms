@@ -950,6 +950,16 @@ class MonetizationService:
         ).sort("changed_at", -1).to_list(length=500)
         return [self._normalize(row) for row in rows]
 
+    async def get_organization_billing_records(self, organization_id: str) -> List[Dict[str, Any]]:
+        """Return the financial billing records (payments / failures / mismatches)
+        for an organization, newest first. These are the webhook-written rows that
+        back the billing-history UI and the failed-payment / mismatch review queue."""
+        db = await self._get_db()
+        rows = await db.billing_records.find(
+            {"organization_id": str(organization_id)}
+        ).sort("created_at", -1).to_list(length=500)
+        return [self._normalize(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Invoice / Proration helpers
     # ------------------------------------------------------------------

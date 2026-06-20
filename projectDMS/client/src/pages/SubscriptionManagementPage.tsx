@@ -12,6 +12,7 @@ import {
   Pause,
   Play,
   Plus,
+  Receipt,
   RefreshCw,
   Settings2,
   Shield,
@@ -72,7 +73,17 @@ import {
   type InvoicePreview,
   type BillingPeriod,
 } from "@/services/plan-settings-api";
-import { startSubscriptionCheckout, redirectToCheckout } from "@/services/billing-api";
+import {
+  startSubscriptionCheckout,
+  redirectToCheckout,
+  getBillingRecords,
+  type BillingRecord,
+} from "@/services/billing-api";
+import {
+  formatMinorAmount,
+  billingRecordStatusColor,
+  billingRecordStatusLabel,
+} from "@/lib/billing-helpers";
 import { getCurrentUserProfile } from "@/services/session-api";
 
 /* ------------------------------------------------------------------ */
@@ -132,6 +143,8 @@ const SubscriptionManagementPage: React.FC = () => {
   const [catalog, setCatalog] = useState<PlanCatalogResponse | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [history, setHistory] = useState<SubscriptionHistoryEntry[]>([]);
+  const [billingRecords, setBillingRecords] = useState<BillingRecord[]>([]);
+  const [billingDialogOpen, setBillingDialogOpen] = useState(false);
   const [invoicePreview, setInvoicePreview] = useState<InvoicePreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -430,6 +443,21 @@ const SubscriptionManagementPage: React.FC = () => {
     }
   };
 
+  const openBillingRecords = async (sub: Subscription) => {
+    setSelectedSub(sub);
+    const orgId = sub.organization_id || "";
+    if (!orgId) {
+      toast.error("No organization for this subscription");
+      return;
+    }
+    try {
+      setBillingRecords(await getBillingRecords(orgId));
+      setBillingDialogOpen(true);
+    } catch {
+      toast.error("Failed to load billing history");
+    }
+  };
+
   if (rbacLoading) return <div className="container mx-auto p-6">Loading...</div>;
 
   if (!canManage) {
@@ -647,6 +675,14 @@ const SubscriptionManagementPage: React.FC = () => {
               onClick={() => openHistory(activeSub)}
             >
               <History className="h-3.5 w-3.5" /> History
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1"
+              onClick={() => openBillingRecords(activeSub)}
+            >
+              <Receipt className="h-3.5 w-3.5" /> Billing History
             </Button>
             {activeSub.status === "cancelled" ? (
               <Button
@@ -1134,6 +1170,57 @@ const SubscriptionManagementPage: React.FC = () => {
                   <p className="text-xs text-muted-foreground mt-1">
                     {new Date(entry.changed_at).toLocaleString()}
                   </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Billing History (financial records) Dialog */}
+      <Dialog open={billingDialogOpen} onOpenChange={setBillingDialogOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Billing History</DialogTitle>
+            <DialogDescription>
+              Payments, failures and amounts captured by the payment provider.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[400px] overflow-y-auto space-y-3 py-4">
+            {billingRecords.length === 0 && (
+              <p className="text-sm text-muted-foreground text-center py-8">
+                No billing records yet.
+              </p>
+            )}
+            {billingRecords.map((rec) => (
+              <div
+                key={rec.id}
+                className="flex items-start gap-3 rounded-lg border p-3"
+              >
+                <div className="h-8 w-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0 mt-0.5">
+                  <Receipt className="h-4 w-4 text-primary" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium">
+                      {formatMinorAmount(rec.amount_minor, rec.currency || "INR")}
+                    </p>
+                    <Badge className={billingRecordStatusColor(rec.record_status)}>
+                      {billingRecordStatusLabel(rec.record_status)}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {rec.event_type || "—"}
+                    {rec.gateway_payment_id ? ` · ${rec.gateway_payment_id}` : ""}
+                  </p>
+                  {rec.validation_error && (
+                    <p className="text-xs text-amber-600 mt-1">{rec.validation_error}</p>
+                  )}
+                  {rec.created_at && (
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {new Date(rec.created_at).toLocaleString()}
+                    </p>
+                  )}
                 </div>
               </div>
             ))}

@@ -55,3 +55,31 @@ export function redirectToCheckout(checkout: CheckoutResponse): void {
     window.location.assign(checkout.checkout_url);
   }
 }
+
+// --- Billing records (financial history) ----------------------------------
+
+export interface BillingRecord {
+  id: string;
+  subscription_id?: string | null;
+  organization_id?: string | null;
+  project_id?: string | null;
+  provider?: string | null;
+  event_type?: string | null;
+  gateway_payment_id?: string | null;
+  amount_minor?: number | null;
+  currency?: string | null;
+  record_status?: string | null; // paid | failed | amount_mismatch | <event_type>
+  validation_error?: string | null;
+  created_at?: string | null;
+}
+
+const normBillingRecord = (raw: any): BillingRecord => ({
+  ...raw,
+  id: raw?._id ?? raw?.id,
+});
+
+/** Financial billing records (payments / failures / amount-mismatch) for an org. */
+export async function getBillingRecords(organizationId: string): Promise<BillingRecord[]> {
+  const { data } = await api.get(`/rbac-monetization/billing/records/${organizationId}`);
+  return Array.isArray(data) ? data.map(normBillingRecord) : [];
+}

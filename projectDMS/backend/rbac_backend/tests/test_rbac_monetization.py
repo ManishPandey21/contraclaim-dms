@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from datetime import datetime, timedelta
+from rbac_backend.services.monetization_service import MonetizationService
 from rbac_backend.services.subscription_lifecycle_service import SubscriptionLifecycleService
 
 class FakeCollection:
@@ -27,6 +28,9 @@ class FakeCollection:
                 item = self.items[self.index]
                 self.index += 1
                 return item
+
+            def sort(self, *args, **kwargs):
+                return self
 
             async def to_list(self, length=None):
                 return self.items
@@ -55,6 +59,7 @@ class FakeDB:
         self.subscription_history = FakeCollection()
         self.usage_counters = FakeCollection()
         self.usage_counters_archive = FakeCollection()
+        self.billing_records = FakeCollection()
 
 
 @pytest.mark.asyncio
@@ -124,6 +129,24 @@ async def test_execute_renewals() -> None:
     assert history["change_type"] == "renewal"
     assert history["from_status"] == "active"
     assert history["to_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_get_organization_billing_records() -> None:
+    db = FakeDB()
+    db.billing_records.data = [
+        {"_id": "br1", "organization_id": "org_1", "record_status": "paid",
+         "amount_minor": 50000, "currency": "INR", "event_type": "payment.succeeded"},
+        {"_id": "br2", "organization_id": "org_1", "record_status": "amount_mismatch",
+         "amount_minor": 4999, "currency": "INR", "validation_error": "amount 4999 != expected 50000"},
+    ]
+    rows = await MonetizationService(db).get_organization_billing_records("org_1")
+    assert len(rows) == 2
+    # ids normalised to id; mismatch row carries the validation detail for the queue.
+    statuses = {r["record_status"] for r in rows}
+    assert statuses == {"paid", "amount_mismatch"}
+    mismatch = next(r for r in rows if r["record_status"] == "amount_mismatch")
+    assert "validation_error" in mismatch
 
 
 @pytest.mark.asyncio

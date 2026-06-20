@@ -679,6 +679,22 @@ async def get_organization_billing_history(
     return await MonetizationService().get_organization_subscription_history(organization_id)
 
 
+@router.get("/billing/records/{organization_id}", response_model=List[Dict[str, Any]])
+async def get_organization_billing_records(
+    organization_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Financial billing records (payments / failures / amount-mismatch review)."""
+    await policy.authorize(
+        current_user,
+        Permissions.BILLING_PLAN_VIEW,
+        organization_id=organization_id,
+        resource_type="billing",
+    )
+    return await MonetizationService().get_organization_billing_records(organization_id)
+
+
 # ---------------------------------------------------------------------------
 # Usage & Billing Records (unchanged)
 # ---------------------------------------------------------------------------
