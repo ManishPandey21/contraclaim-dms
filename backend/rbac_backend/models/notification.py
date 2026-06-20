@@ -38,6 +38,8 @@ class NotificationType(str, Enum):
     STORAGE_THRESHOLD_CROSSED = "storage_threshold_crossed"
     CLAIM_DEADLINE_APPROACHING = "claim_deadline_approaching"
     CLAIM_DEADLINE_BREACHED = "claim_deadline_breached"
+    KEYDATE_DUE = "keydate_due"
+    KEYDATE_OVERDUE = "keydate_overdue"
 
 
 class NotificationCategory(str, Enum):

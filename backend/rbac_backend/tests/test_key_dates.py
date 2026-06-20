@@ -163,6 +163,7 @@ class _DB:
         self.key_date_eot_applications = _Coll()
         self.key_date_extension_history = _Coll()
         self.key_date_achievements = _Coll()
+        self.key_date_notifications = _Coll()
         self.projects = _Coll()
 
 
@@ -323,3 +324,53 @@ async def test_create_milestone_denies_cross_tenant():
     with pytest.raises(HTTPException) as exc:
         await create_milestone(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
     assert exc.value.status_code == 403
+
+
+# --- notifications + export (KDT-3) ---------------------------------------
+
+
+def test_due_notification_types_thresholds():
+    from rbac_backend.services.key_date_service import due_notification_types
+
+    def m(days):
+        return {"current_approved_key_date": NOW + timedelta(days=days)}
+    assert due_notification_types(m(30), NOW) == ["T-30"]
+    assert due_notification_types(m(15), NOW) == ["T-15"]
+    assert due_notification_types(m(1), NOW) == ["T-1"]
+    assert due_notification_types(m(0), NOW) == ["T-0"]
+    assert due_notification_types(m(-2), NOW) == ["overdue"]
+    assert due_notification_types(m(7), NOW) == []  # not a threshold day
+    assert due_notification_types({"actual_achievement_date": NOW, "current_approved_key_date": NOW}, NOW) == []
+
+
+@pytest.mark.asyncio
+async def test_scan_emits_and_dedupes():
+    from rbac_backend.services.key_date_service import scan_key_date_notifications
+
+    db = _DB()
+    db.key_date_milestones.docs["m1"] = {
+        "_id": "m1", "title": "Due in 15", "organization_id": "org-A", "project_id": "proj-A",
+        "responsible_party_id": "u9", "current_approved_key_date": NOW + timedelta(days=15),
+        "actual_achievement_date": None,
+    }
+    sent = []
+
+    class _Notif:
+        async def emit(self, event_type, rid, rtype, **kw):
+            sent.append((event_type, rid))
+
+    first = await scan_key_date_notifications(db, _Notif(), now=NOW)
+    assert first["emitted"] == 1 and len(sent) == 1
+    # second run on the same day is deduped via the notification log
+    second = await scan_key_date_notifications(db, _Notif(), now=NOW)
+    assert second["emitted"] == 0 and len(sent) == 1
+
+
+def test_csv_export_has_header_and_rows():
+    from rbac_backend.services.key_date_export import milestones_to_csv
+
+    rows = [{"milestone_ref": "MS-1", "title": "Foundation", "status": "overdue", "days_remaining": -3}]
+    csv_text = milestones_to_csv(rows)
+    lines = csv_text.strip().splitlines()
+    assert lines[0].startswith("Ref,Title,Week")
+    assert "MS-1" in lines[1] and "Foundation" in lines[1] and "overdue" in lines[1]

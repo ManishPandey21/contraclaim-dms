@@ -210,6 +210,17 @@ export async function getExtensionHistory(milestoneId: string): Promise<Extensio
   return Array.isArray(data) ? data.map(normHist) : [];
 }
 
+export async function exportKeyDates(
+  format: "csv" | "xlsx" | "pdf",
+  params?: { project_id?: string },
+): Promise<Blob> {
+  const { data } = await api.get("/key-dates/export", {
+    params: { format, ...params },
+    responseType: "blob",
+  });
+  return data instanceof Blob ? data : new Blob([data]);
+}
+
 export async function recordAchievement(
   milestoneId: string,
   payload: {

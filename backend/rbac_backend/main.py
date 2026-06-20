@@ -263,6 +263,13 @@ async def startup_event() -> None:
         CronTrigger(hour=8, minute=0),
         id="sla_deadline_scan",
     )
+    from .services.key_date_service import run_key_date_notification_scan
+
+    scheduler.add_job(
+        run_key_date_notification_scan,
+        CronTrigger(hour=8, minute=15),
+        id="key_date_notification_scan",
+    )
     scheduler.start()
 
 
