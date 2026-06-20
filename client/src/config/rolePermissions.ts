@@ -98,6 +98,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Contract Controls registers (backend perms aliased to documents:read).
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
+  // Contract Master (backend dms.contract.master.view aliased to projects:read).
+  // Explicit so it wins over the /contracts prefix mapping.
+  "/contracts/master": ["dms.contract.master.view", "dms.document.view"],
   // C3: no `dms.folder.view` permission exists on the backend; folders organize
   // documents, so gate on `dms.document.view` (matches /documents and /contracts).
   "/folders": ["dms.document.view"],

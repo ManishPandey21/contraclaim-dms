@@ -59,6 +59,7 @@ import {
   VariationSummaryDTO,
 } from "@/services/variations-api";
 import { enhancedApi } from "@/services/enhanced-api";
+import { getContractMasterForProject } from "@/services/contract-master-api";
 import { variationStatusColor, variationStatusLabel, fmtAmount } from "@/lib/contract-controls-helpers";
 
 const STATUS = ["draft", "submitted", "under_review", "recommended", "approved", "rejected", "superseded"];
@@ -315,7 +316,19 @@ const VariationRegisterPage: React.FC = () => {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Project</Label>
-                <Select value={form.project_id} onValueChange={(v) => setForm({ ...form, project_id: v })}>
+                <Select
+                  value={form.project_id}
+                  onValueChange={async (v) => {
+                    setForm((f) => ({ ...f, project_id: v }));
+                    // Auto-fill original contract value from the contract master.
+                    try {
+                      const cm = await getContractMasterForProject(v);
+                      if (cm?.original_contract_value != null) {
+                        setForm((f) => (f.original_contract_value ? f : { ...f, original_contract_value: String(cm.original_contract_value) }));
+                      }
+                    } catch { /* best-effort */ }
+                  }}
+                >
                   <SelectTrigger><SelectValue placeholder="Select project" /></SelectTrigger>
                   <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
