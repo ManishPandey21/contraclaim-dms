@@ -102,9 +102,17 @@ async def revise_completion(
     policy: PolicyService = Depends(get_policy),
 ):
     cm = await _load(master_id, Permissions.CONTRACT_MASTER_MANAGE, db, current_user, policy)
-    return ContractMaster(**await ContractMasterService(db).revise_completion(
+    revised = await ContractMasterService(db).revise_completion(
         cm, req.revised_completion_date, current_user, remarks=req.remarks,
-    ))
+    )
+    # Cascade: BG required-up-to dates move with the contract completion date, so
+    # extension-required and the 45/30-day alerts re-evaluate automatically.
+    from ..services.bank_guarantee_service import BankGuaranteeService
+
+    await BankGuaranteeService(db).recompute_required_dates(
+        revised.get("organization_id"), revised.get("project_id"), revised.get("contract_id"), current_user,
+    )
+    return ContractMaster(**revised)
 
 
 @router.get("/contracts/master/{master_id}/bg-required-dates", response_model=List[BGRequiredDate])

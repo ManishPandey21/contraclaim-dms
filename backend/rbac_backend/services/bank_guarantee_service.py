@@ -37,6 +37,11 @@ def _as_dt(value: Any) -> Optional[datetime]:
     return None
 
 
+def _sv(value: Any) -> str:
+    """Normalise an enum member (or string) to its plain string value."""
+    return value.value if hasattr(value, "value") else str(value or "")
+
+
 def days_to_expiry(bg: Dict[str, Any], now: Optional[datetime] = None) -> Optional[int]:
     now = now or datetime.utcnow()
     exp = _as_dt(bg.get("bg_expiry_date"))
@@ -46,7 +51,7 @@ def days_to_expiry(bg: Dict[str, Any], now: Optional[datetime] = None) -> Option
 def extension_required(bg: Dict[str, Any], now: Optional[datetime] = None) -> bool:
     """Required when the BG expires before it is contractually required and it is
     not released/encashed. Per spec §11."""
-    status = str(bg.get("bg_status") or "")
+    status = _sv(bg.get("bg_status"))
     if status in {BGStatus.RELEASED.value, BGStatus.ENCASHED.value}:
         return False
     exp = _as_dt(bg.get("bg_expiry_date"))
@@ -69,7 +74,7 @@ def due_alert_types(bg: Dict[str, Any], now: Optional[datetime] = None) -> List[
     if not extension_required(bg, now):
         # Past expiry while still required is handled below; otherwise no alert.
         pass
-    status = str(bg.get("bg_status") or "")
+    status = _sv(bg.get("bg_status"))
     if status in {BGStatus.RELEASED.value, BGStatus.ENCASHED.value}:
         return []
     exp = _as_dt(bg.get("bg_expiry_date"))
@@ -101,7 +106,7 @@ def bg_summary(bgs: List[Dict[str, Any]], now: Optional[datetime] = None) -> Dic
     for b in bgs:
         out["total"] += 1
         total_amount += float(b.get("bg_amount") or 0.0)
-        status = str(b.get("bg_status") or "")
+        status = _sv(b.get("bg_status"))
         if status == BGStatus.RELEASED.value:
             out["released"] += 1
             continue
@@ -129,17 +134,63 @@ class BankGuaranteeService:
     async def _get_db(self) -> Any:
         return self.db if self.db is not None else await get_database()
 
+    async def _contract_master(self, org: Any, project_id: Any, contract_id: Any) -> Optional[Dict[str, Any]]:
+        from .contract_master_service import ContractMasterService
+
+        if not project_id:
+            return None
+        return await ContractMasterService(self.db).get_for_scope(org, project_id, contract_id or "primary")
+
     async def create(self, payload: BankGuaranteeCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
         doc = BankGuarantee(**payload.model_dump()).model_dump(by_alias=True)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
+        if not doc.get("contract_id"):
+            doc["contract_id"] = "primary"
+        # Default the contractual required-up-to date from the contract master
+        # (per BG-type validity rule) when omitted.
+        if not doc.get("contractual_required_up_to"):
+            cm = await self._contract_master(doc.get("organization_id"), doc.get("project_id"), doc.get("contract_id"))
+            if cm:
+                from .contract_master_service import bg_required_up_to
+
+                req = bg_required_up_to(cm, _sv(doc.get("bg_type")))
+                if req is not None:
+                    doc["contractual_required_up_to"] = req
         doc["created_at"] = datetime.utcnow()
         doc["created_by"] = getattr(current_user, "id", None)
         res = await db.bank_guarantees.insert_one(doc)
         created = await db.bank_guarantees.find_one({"_id": res.inserted_id}) or doc
         await self._emit("bank_guarantee.created", current_user, created, after=created)
         return decorate(created)
+
+    async def recompute_required_dates(self, organization_id: Any, project_id: Any, contract_id: Any, current_user: Any) -> int:
+        """Recompute contractual_required_up_to for every non-released BG under a
+        contract from the contract master. Called when the contract completion date
+        moves (e.g. EOT granted), so extension_required + alerts re-evaluate."""
+        db = await self._get_db()
+        cm = await self._contract_master(organization_id, project_id, contract_id)
+        if not cm:
+            return 0
+        from .contract_master_service import bg_required_up_to
+
+        query: Dict[str, Any] = {"project_id": project_id, "bg_status": {"$nin": [BGStatus.RELEASED.value, BGStatus.ENCASHED.value]}}
+        if organization_id:
+            query["organization_id"] = organization_id
+        if contract_id:
+            query["contract_id"] = contract_id
+        changed = 0
+        async for bg in db.bank_guarantees.find(query):
+            req = bg_required_up_to(cm, _sv(bg.get("bg_type")))
+            if req is None or req == _as_dt(bg.get("contractual_required_up_to")):
+                continue
+            await db.bank_guarantees.update_one(
+                {"_id": bg["_id"]}, {"$set": {"contractual_required_up_to": req, "updated_at": datetime.utcnow()}}
+            )
+            await self._emit("bank_guarantee.required_date_recomputed", current_user, bg, after={"required_up_to": str(req)})
+            changed += 1
+        return changed
 
     async def get(self, bg_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()

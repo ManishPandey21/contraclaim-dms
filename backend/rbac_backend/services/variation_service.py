@@ -21,13 +21,18 @@ PENDING_STATUSES = {
 }
 
 
+def _sv(value: Any) -> Any:
+    """Normalise an enum member (or string) to its plain string value."""
+    return value.value if hasattr(value, "value") else value
+
+
 def signed_approved(variation: Dict[str, Any]) -> float:
     """Approved amount with sign from the variation type (negative reduces value)."""
     amount = variation.get("approved_amount")
     if amount is None:
         return 0.0
     amount = abs(float(amount))
-    return -amount if str(variation.get("variation_type")) == VariationType.NEGATIVE.value else amount
+    return -amount if _sv(variation.get("variation_type")) == VariationType.NEGATIVE.value else amount
 
 
 def variation_summary(variations: List[Dict[str, Any]], original_contract_value: Optional[float] = None) -> Dict[str, Any]:
@@ -42,9 +47,9 @@ def variation_summary(variations: List[Dict[str, Any]], original_contract_value:
 
     total_submitted = sum(float(v.get("submitted_amount") or 0.0) for v in variations)
     total_approved = sum(float(v.get("approved_amount") or 0.0) for v in variations
-                         if str(v.get("status")) == VariationStatus.APPROVED.value)
+                         if _sv(v.get("status")) == VariationStatus.APPROVED.value)
     cumulative = sum(signed_approved(v) for v in variations
-                     if str(v.get("status")) == VariationStatus.APPROVED.value)
+                     if _sv(v.get("status")) == VariationStatus.APPROVED.value)
     revised = ocv + cumulative
     pct = (cumulative / ocv * 100.0) if ocv else 0.0
     return {
@@ -54,9 +59,9 @@ def variation_summary(variations: List[Dict[str, Any]], original_contract_value:
         "cumulative_approved_variation": round(cumulative, 2),
         "revised_contract_value": round(revised, 2),
         "percentage_variation": round(pct, 4),
-        "pending_variation_count": sum(1 for v in variations if str(v.get("status")) in PENDING_STATUSES),
-        "approved_variation_count": sum(1 for v in variations if str(v.get("status")) == VariationStatus.APPROVED.value),
-        "rejected_variation_count": sum(1 for v in variations if str(v.get("status")) == VariationStatus.REJECTED.value),
+        "pending_variation_count": sum(1 for v in variations if _sv(v.get("status")) in PENDING_STATUSES),
+        "approved_variation_count": sum(1 for v in variations if _sv(v.get("status")) == VariationStatus.APPROVED.value),
+        "rejected_variation_count": sum(1 for v in variations if _sv(v.get("status")) == VariationStatus.REJECTED.value),
     }
 
 
@@ -76,16 +81,48 @@ class VariationService:
     async def _get_db(self) -> Any:
         return self.db if self.db is not None else await get_database()
 
+    async def _contract_master(self, org: Optional[str], project_id: Optional[str], contract_id: Optional[str]) -> Optional[Dict[str, Any]]:
+        from .contract_master_service import ContractMasterService
+
+        if not project_id:
+            return None
+        return await ContractMasterService(self.db).get_for_scope(org, project_id, contract_id or "primary")
+
+    async def _sync_contract_value(self, org: Optional[str], project_id: Optional[str], contract_id: Optional[str]) -> None:
+        """Keep contract_master.current_contract_value = original + cumulative approved."""
+        cm = await self._contract_master(org, project_id, contract_id)
+        if not cm:
+            return
+        db = await self._get_db()
+        query: Dict[str, Any] = {"project_id": project_id}
+        if org:
+            query["organization_id"] = org
+        if contract_id:
+            query["contract_id"] = contract_id
+        variations = [v async for v in db.variations.find(query)]
+        summary = variation_summary(variations, cm.get("original_contract_value"))
+        from .contract_master_service import ContractMasterService
+
+        await ContractMasterService(db).sync_current_value(org, project_id, contract_id or "primary", summary["revised_contract_value"])
+
     async def create(self, payload: VariationCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
         doc = Variation(**payload.model_dump()).model_dump(by_alias=True)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
+        if not doc.get("contract_id"):
+            doc["contract_id"] = "primary"
+        # Default the original contract value from the contract master when omitted.
+        if doc.get("original_contract_value") is None:
+            cm = await self._contract_master(doc.get("organization_id"), doc.get("project_id"), doc.get("contract_id"))
+            if cm and cm.get("original_contract_value") is not None:
+                doc["original_contract_value"] = cm["original_contract_value"]
         doc["created_at"] = datetime.utcnow()
         doc["created_by"] = getattr(current_user, "id", None)
         res = await db.variations.insert_one(doc)
         created = await db.variations.find_one({"_id": res.inserted_id}) or doc
         await self._emit("variation.created", current_user, created, after=created)
+        await self._sync_contract_value(created.get("organization_id"), created.get("project_id"), created.get("contract_id"))
         return decorate(created)
 
     async def get(self, variation_id: str) -> Optional[Dict[str, Any]]:
@@ -118,12 +155,15 @@ class VariationService:
             {"_id": variation["_id"]}, {"$set": update}, return_document=True
         )
         await self._emit("variation.updated", current_user, variation, before=variation, after=updated)
-        return decorate(updated or variation)
+        target = updated or variation
+        await self._sync_contract_value(target.get("organization_id"), target.get("project_id"), target.get("contract_id"))
+        return decorate(target)
 
     async def delete(self, variation: Dict[str, Any], current_user: Any) -> bool:
         db = await self._get_db()
         res = await db.variations.delete_one({"_id": variation["_id"]})
         await self._emit("variation.deleted", current_user, variation, before=variation)
+        await self._sync_contract_value(variation.get("organization_id"), variation.get("project_id"), variation.get("contract_id"))
         return res.deleted_count > 0
 
     async def summary(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
