@@ -2,9 +2,32 @@ from __future__ import annotations
 
 import pytest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
+from rbac_backend.models.rbac_monetization import (
+    CancelSubscriptionRequest,
+    UpgradeDowngradeRequest,
+)
 from rbac_backend.services.billing_receipt import build_receipt, receipt_to_html
 from rbac_backend.services.monetization_service import MonetizationService
 from rbac_backend.services.subscription_lifecycle_service import SubscriptionLifecycleService
+
+
+class _FakeGateway:
+    """Records the gateway calls the lifecycle ops make (C2)."""
+    def __init__(self):
+        self.calls = []
+
+    async def cancel_subscription(self, *, gateway_subscription_id, immediate=False):
+        self.calls.append(("cancel", gateway_subscription_id, immediate))
+        return True
+
+    async def reactivate_subscription(self, *, gateway_subscription_id):
+        self.calls.append(("reactivate", gateway_subscription_id))
+        return None
+
+    async def update_subscription(self, *, gateway_subscription_id, new_plan_code=None, new_billing_period=None):
+        self.calls.append(("update", gateway_subscription_id, new_plan_code, new_billing_period))
+        return None
 
 class FakeCollection:
     def __init__(self, data=None):
@@ -57,6 +80,10 @@ class FakeCollection:
 
     async def update_one(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
+        for d in self.data:
+            if all(d.get(k) == v for k, v in filter_doc.items() if not isinstance(v, dict)):
+                d.update(update_doc.get("$set", {}))
+                break
         return type("FakeResult", (), {"modified_count": 1})()
 
     async def insert_one(self, doc):
@@ -78,6 +105,7 @@ class FakeDB:
         self.usage_counters = FakeCollection()
         self.usage_counters_archive = FakeCollection()
         self.billing_records = FakeCollection()
+        self.plans = FakeCollection()
 
 
 @pytest.mark.asyncio
@@ -189,6 +217,70 @@ async def test_billing_review_queue_filters_and_enriches() -> None:
     # enriched with the subscription's plan + current billing status.
     assert all(r["plan_code"] == "dms_pro" for r in queue)
     assert all(r["subscription_billing_status"] == "review" for r in queue)
+
+
+@pytest.mark.asyncio
+async def test_cancel_calls_gateway_and_updates_local() -> None:
+    db = FakeDB()
+    db.subscriptions.data = [{
+        "_id": "sub_1", "organization_id": "org_1", "status": "active",
+        "plan_code": "dms_pro", "payment_gateway_subscription_id": "gw_sub_1",
+    }]
+    gw = _FakeGateway()
+    await MonetizationService(db, gateway=gw).cancel_subscription(
+        "sub_1", CancelSubscriptionRequest(reason="x", immediate=True), SimpleNamespace(id="u1"),
+    )
+    assert ("cancel", "gw_sub_1", True) in gw.calls
+    sub = await db.subscriptions.find_one({"_id": "sub_1"})
+    assert sub["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_reactivate_calls_gateway() -> None:
+    db = FakeDB()
+    db.subscriptions.data = [{
+        "_id": "sub_3", "organization_id": "org_1", "status": "cancelled",
+        "plan_code": "dms_pro", "payment_gateway_subscription_id": "gw_3",
+    }]
+    gw = _FakeGateway()
+    await MonetizationService(db, gateway=gw).reactivate_subscription("sub_3", SimpleNamespace(id="u1"))
+    assert ("reactivate", "gw_3") in gw.calls
+    sub = await db.subscriptions.find_one({"_id": "sub_3"})
+    assert sub["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_upgrade_calls_gateway_update() -> None:
+    db = FakeDB()
+    db.plans.data = [
+        {"code": "dms_basic", "tier": 1, "pricing_tiers": {"monthly": 1000}, "base_price_minor": 1000},
+        {"code": "dms_pro", "tier": 2, "pricing_tiers": {"monthly": 2000}, "base_price_minor": 2000},
+    ]
+    db.subscriptions.data = [{
+        "_id": "sub_u", "organization_id": "org_1", "status": "active", "plan_code": "dms_basic",
+        "billing_period": "monthly", "payment_gateway_subscription_id": "gw_u",
+    }]
+    gw = _FakeGateway()
+    await MonetizationService(db, gateway=gw).upgrade_subscription(
+        "sub_u", UpgradeDowngradeRequest(new_plan_code="dms_pro", billing_period="monthly"),
+        SimpleNamespace(id="u1"),
+    )
+    assert any(c[0] == "update" and c[1] == "gw_u" and c[2] == "dms_pro" for c in gw.calls)
+
+
+@pytest.mark.asyncio
+async def test_cancel_without_gateway_id_skips_gateway_but_updates_local() -> None:
+    db = FakeDB()
+    db.subscriptions.data = [{
+        "_id": "sub_2", "organization_id": "org_1", "status": "active", "plan_code": "dms_pro",
+    }]  # no payment_gateway_subscription_id (trial / manual)
+    gw = _FakeGateway()
+    await MonetizationService(db, gateway=gw).cancel_subscription(
+        "sub_2", CancelSubscriptionRequest(reason="x", immediate=False), SimpleNamespace(id="u1"),
+    )
+    assert gw.calls == []  # no gateway call when there is no gateway subscription
+    sub = await db.subscriptions.find_one({"_id": "sub_2"})
+    assert sub["status"] == "cancelled"
 
 
 def test_build_receipt_assembles_fields() -> None:

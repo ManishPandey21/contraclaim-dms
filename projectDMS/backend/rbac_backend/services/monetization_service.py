@@ -270,9 +270,41 @@ class MonetizationService:
         },
     ]
 
-    def __init__(self, db: Any = None) -> None:
+    def __init__(self, db: Any = None, gateway: Any = None) -> None:
         self.db = db
         self.audit_service = AuditEventService(db)
+        self._gateway_override = gateway
+
+    def _gateway(self) -> Any:
+        return self._gateway_override or get_payment_gateway()
+
+    async def _gateway_cancel(self, sub: Dict[str, Any], *, immediate: bool) -> None:
+        """Propagate a cancel to the payment gateway so it stops billing.
+
+        No-op when the subscription has no gateway id (trial / manually created /
+        noop provider). A gateway failure propagates and aborts the local change.
+        """
+        gid = sub.get("payment_gateway_subscription_id")
+        if not gid:
+            return
+        await self._gateway().cancel_subscription(gateway_subscription_id=gid, immediate=immediate)
+
+    async def _gateway_reactivate(self, sub: Dict[str, Any]) -> None:
+        gid = sub.get("payment_gateway_subscription_id")
+        if not gid:
+            return
+        await self._gateway().reactivate_subscription(gateway_subscription_id=gid)
+
+    async def _gateway_change(self, sub: Dict[str, Any], *, new_plan_code: Optional[str] = None,
+                              new_billing_period: Optional[str] = None) -> None:
+        gid = sub.get("payment_gateway_subscription_id")
+        if not gid:
+            return
+        await self._gateway().update_subscription(
+            gateway_subscription_id=gid,
+            new_plan_code=new_plan_code,
+            new_billing_period=new_billing_period,
+        )
 
     async def _get_db(self) -> Any:
         if self.db is not None:
@@ -638,6 +670,8 @@ class MonetizationService:
             current_period_start=now if request.effective_immediately else None,
             current_period_end=self._compute_period_end(now, billing_period) if request.effective_immediately else None,
         )
+        # Propagate to the gateway first; if it fails, the local state is untouched.
+        await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
         result = await self.update_subscription(subscription_id, update, current_user)
 
         await self._record_history(
@@ -674,6 +708,7 @@ class MonetizationService:
             plan_code=request.new_plan_code,
             billing_period=billing_period,
         )
+        await self._gateway_change(sub, new_plan_code=request.new_plan_code, new_billing_period=billing_period)
         result = await self.update_subscription(subscription_id, update, current_user)
 
         await self._record_history(
@@ -696,6 +731,7 @@ class MonetizationService:
             raise ValueError("Subscription not found")
 
         update = SubscriptionUpdate(billing_period=request.new_billing_period)
+        await self._gateway_change(sub, new_billing_period=request.new_billing_period)
         result = await self.update_subscription(subscription_id, update, current_user)
 
         await self._record_history(
@@ -726,6 +762,8 @@ class MonetizationService:
         if request.immediate:
             update.ends_at = now
 
+        # Cancel on the gateway so it stops billing; abort locally if that fails.
+        await self._gateway_cancel(sub, immediate=bool(request.immediate))
         result = await self.update_subscription(subscription_id, update, current_user)
 
         await self._record_history(
@@ -755,6 +793,7 @@ class MonetizationService:
             cancellation_reason=None,
             auto_renew=True,
         )
+        await self._gateway_reactivate(sub)
         result = await self.update_subscription(subscription_id, update, current_user)
 
         await self._record_history(
