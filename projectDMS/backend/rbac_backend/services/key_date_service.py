@@ -34,9 +34,26 @@ class KeyDateError(Exception):
 # --- pure domain functions (trivially testable) ---------------------------
 
 
-def calculate_key_date(project_start_date: datetime, contractual_week_number: int) -> datetime:
-    """Calculated Key Date = Start + ((week - 1) * 7 days)."""
-    return project_start_date + timedelta(days=(int(contractual_week_number) - 1) * 7)
+# Key-date calculation basis (configured per contract on the Contract Master).
+WEEK_BASIS_LOA_PLUS = "loa_plus_weeks"  # default — matches the contract sheets
+WEEK_BASIS_LOA_PLUS_MINUS_1 = "loa_plus_weeks_minus_1"  # FIDIC-style fallback
+
+
+def calculate_key_date(
+    project_start_date: datetime,
+    contractual_week_number: int,
+    week_basis: str = WEEK_BASIS_LOA_PLUS,
+) -> datetime:
+    """Calculated Key Date from the LOA / contract start date.
+
+    Default basis ``loa_plus_weeks`` matches the real contract key-date sheets:
+    ``Contractual Date = LOA + (week * 7)`` (e.g. week 4 → LOA + 28 days). The
+    ``loa_plus_weeks_minus_1`` basis is the FIDIC-style ``(week - 1) * 7``.
+    """
+    weeks = int(contractual_week_number)
+    if week_basis == WEEK_BASIS_LOA_PLUS_MINUS_1:
+        weeks -= 1
+    return project_start_date + timedelta(days=weeks * 7)
 
 
 def _as_dt(value: Any) -> Optional[datetime]:
@@ -164,25 +181,47 @@ class KeyDateService:
     async def _get_db(self) -> Any:
         return self.db if self.db is not None else await get_database()
 
-    async def _project_start(self, project_id: str, override: Optional[datetime]) -> datetime:
-        if override:
-            return override
+    async def _start_and_basis(
+        self, project_id: str, override: Optional[datetime],
+        organization_id: Optional[str] = None,
+    ) -> Tuple[datetime, str]:
+        """Resolve (start date, week basis) for the key-date calculation.
+
+        The Contract Master is the source of truth: ``contract_start_date`` is the
+        LOA date and ``week_basis`` selects the formula. Falls back to the project
+        record's start date when no Contract Master exists; an explicit override
+        (e.g. an LOA that states a different commencement date) always wins.
+        """
         db = await self._get_db()
         try:
-            proj = await db.projects.find_one({"_id": project_id})
+            cm_query: Dict[str, Any] = {"project_id": project_id, "contract_id": "primary"}
+            if organization_id:
+                cm_query["organization_id"] = organization_id
+            cm = await db.contract_master.find_one(cm_query)
         except Exception:
-            proj = None
-        start = _as_dt((proj or {}).get("project_start_date") or (proj or {}).get("start_date"))
+            cm = None
+        basis = (cm or {}).get("week_basis") or WEEK_BASIS_LOA_PLUS
+        if override:
+            return override, basis
+        start = _as_dt((cm or {}).get("contract_start_date"))
         if not start:
-            raise KeyDateError("Project start date is required to calculate the key date")
-        return start
+            try:
+                proj = await db.projects.find_one({"_id": project_id})
+            except Exception:
+                proj = None
+            start = _as_dt((proj or {}).get("project_start_date") or (proj or {}).get("start_date"))
+        if not start:
+            raise KeyDateError("Contract start date (LOA) is required to calculate the key date")
+        return start, basis
 
     # --- milestones -------------------------------------------------------
 
     async def create_milestone(self, payload: KeyDateMilestoneCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
-        start = await self._project_start(payload.project_id, payload.project_start_date)
-        calc = calculate_key_date(start, payload.contractual_week_number)
+        start, basis = await self._start_and_basis(
+            payload.project_id, payload.project_start_date, getattr(current_user, "organization_id", None)
+        )
+        calc = calculate_key_date(start, payload.contractual_week_number, basis)
         doc = KeyDateMilestone(**payload.model_dump(exclude={"project_start_date"})).model_dump(by_alias=True)
         doc["calculated_key_date"] = calc
         doc["original_planned_key_date"] = doc.get("original_planned_key_date") or calc
@@ -223,8 +262,10 @@ class KeyDateService:
         # and only while no approved extension is in force.
         week = payload.get("contractual_week_number") or milestone.get("contractual_week_number")
         if payload.get("contractual_week_number") or payload.get("project_start_date"):
-            start = await self._project_start(milestone.get("project_id"), payload.get("project_start_date"))
-            calc = calculate_key_date(start, week)
+            start, basis = await self._start_and_basis(
+                milestone.get("project_id"), payload.get("project_start_date"), milestone.get("organization_id")
+            )
+            calc = calculate_key_date(start, week, basis)
             update["calculated_key_date"] = calc
             if int(milestone.get("current_revision") or 0) == 0:
                 update["current_approved_key_date"] = calc
@@ -241,6 +282,47 @@ class KeyDateService:
         res = await db.key_date_milestones.delete_one({"_id": milestone["_id"]})
         await self._emit("keydate.milestone.deleted", current_user, milestone, before=milestone)
         return res.deleted_count > 0
+
+    async def recalculate_project(self, scope_filter: Dict[str, Any], project_id: str,
+                                  current_user: Any, *, override_start: Optional[datetime] = None) -> Dict[str, Any]:
+        """Re-derive milestone key dates from the current LOA + week basis (opt-in).
+
+        Refreshes ``calculated_key_date`` for every milestone in the project. For
+        milestones with no approved revision (``current_revision == 0``) it also
+        re-derives the original/current baseline — this is the explicit, audited
+        path to correct baselines computed under a wrong basis. Milestones that
+        already carry an approved EOT revision keep their baseline and in-force
+        date untouched (the original is never overwritten by this action).
+        """
+        db = await self._get_db()
+        start, basis = await self._start_and_basis(
+            project_id, override_start, getattr(current_user, "organization_id", None)
+        )
+        query: Dict[str, Any] = dict(scope_filter or {})
+        query["project_id"] = project_id
+        cursor = db.key_date_milestones.find(query)
+        milestones = [m async for m in cursor]
+        updated = 0
+        for m in milestones:
+            calc = calculate_key_date(start, m.get("contractual_week_number"), basis)
+            set_doc: Dict[str, Any] = {
+                "calculated_key_date": calc,
+                "updated_at": datetime.utcnow(),
+                "updated_by": getattr(current_user, "id", None),
+            }
+            if int(m.get("current_revision") or 0) == 0:
+                set_doc["original_planned_key_date"] = calc
+                set_doc["current_approved_key_date"] = calc
+            await db.key_date_milestones.update_one({"_id": m["_id"]}, {"$set": set_doc})
+            updated += 1
+        await self.audit.emit(
+            action="keydate.recalculated", actor_id=getattr(current_user, "id", None),
+            resource_type="key_dates", resource_id=str(project_id),
+            organization_id=getattr(current_user, "organization_id", None), project_id=project_id,
+            after={"start_date": str(start), "week_basis": basis, "updated": updated},
+        )
+        return {"project_id": project_id, "start_date": start, "week_basis": basis,
+                "updated": updated, "scanned": len(milestones)}
 
     # --- EOT --------------------------------------------------------------
 

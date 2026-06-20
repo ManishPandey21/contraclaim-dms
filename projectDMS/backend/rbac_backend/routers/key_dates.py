@@ -153,6 +153,31 @@ async def create_milestone(
     return KeyDateMilestone(**created)
 
 
+@router.post("/key-dates/recalculate")
+async def recalculate_key_dates(
+    project_id: str = Query(..., min_length=1),
+    organization_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Re-derive a project's milestone key dates from the current LOA + week basis.
+
+    Opt-in admin action used after correcting the contract start date / week basis.
+    Baselines under an approved EOT revision are left untouched.
+    """
+    await policy.authorize(
+        current_user, Permissions.KEYDATE_EDIT, resource_type="key_dates",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    try:
+        return await KeyDateService(db).recalculate_project(scope, project_id, current_user)
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
 @router.get("/key-dates/{milestone_id}", response_model=KeyDateMilestone)
 async def get_milestone(
     milestone_id: str,

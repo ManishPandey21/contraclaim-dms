@@ -46,7 +46,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   createMilestone,
@@ -57,6 +57,7 @@ import {
   KeyDateDashboardDTO,
   MilestoneDTO,
   MilestonePayload,
+  recalculateKeyDates,
   updateMilestone,
 } from "@/services/key-dates-api";
 import { enhancedApi } from "@/services/enhanced-api";
@@ -209,6 +210,24 @@ const KeyDateRegisterPage: React.FC = () => {
     }
   };
 
+  const onRecalculate = async () => {
+    if (projectFilter === "all") {
+      toast.error("Select a project to recalculate its key dates");
+      return;
+    }
+    if (!window.confirm(
+      "Re-derive key dates from the contract start date (LOA) and week basis? " +
+      "Milestones with an approved EOT revision keep their dates; others are recalculated."
+    )) return;
+    try {
+      const res = await recalculateKeyDates(projectFilter);
+      toast.success(`Recalculated ${res.updated} milestone(s) using "${res.week_basis}"`);
+      await load();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Recalculation failed");
+    }
+  };
+
   return (
     <div className="container mx-auto space-y-6 p-6">
       <div className="flex items-center justify-between">
@@ -222,6 +241,15 @@ const KeyDateRegisterPage: React.FC = () => {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={onRecalculate}
+            disabled={projectFilter === "all"}
+            title={projectFilter === "all" ? "Select a project first" : "Recalculate key dates from LOA + week basis"}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />Recalculate
+          </Button>
           <Button variant="outline" size="sm" onClick={() => onExport("csv")}>
             <Download className="mr-2 h-4 w-4" />CSV
           </Button>

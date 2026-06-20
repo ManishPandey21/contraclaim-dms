@@ -18,6 +18,8 @@ export interface ContractMasterDTO {
   revised_completion_date?: string | null;
   defect_liability_period_days?: number | null;
   reporting_period?: string | null;
+  // Key-date calc basis: "loa_plus_weeks" (LOA + weeks*7) | "loa_plus_weeks_minus_1".
+  week_basis?: string | null;
   bg_validity_rules: Record<string, { basis: string; offset_days: number }>;
   organization_id?: string | null;
   project_id?: string | null;
@@ -39,6 +41,7 @@ export interface ContractMasterPayload {
   original_completion_date?: string;
   defect_liability_period_days?: number;
   reporting_period?: string;
+  week_basis?: string;
   bg_validity_rules?: Record<string, { basis: string; offset_days: number }>;
 }
 

@@ -168,6 +168,23 @@ export async function deleteMilestone(id: string): Promise<void> {
   await api.delete(`/key-dates/${id}`);
 }
 
+export interface RecalculateResult {
+  project_id: string;
+  start_date?: string | null;
+  week_basis: string;
+  updated: number;
+  scanned: number;
+}
+
+/** Re-derive a project's milestone key dates from the current LOA + week basis.
+ *  Baselines under an approved EOT revision are left untouched. */
+export async function recalculateKeyDates(projectId: string): Promise<RecalculateResult> {
+  const { data } = await api.post("/key-dates/recalculate", null, {
+    params: { project_id: projectId },
+  });
+  return data as RecalculateResult;
+}
+
 export async function submitEOT(
   milestoneId: string,
   payload: {

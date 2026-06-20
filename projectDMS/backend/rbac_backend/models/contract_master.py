@@ -39,11 +39,14 @@ class ContractMasterBase(BaseModel):
     currency: str = "INR"
     original_contract_value: Optional[float] = None
     current_contract_value: Optional[float] = None
-    contract_start_date: Optional[datetime] = None
+    contract_start_date: Optional[datetime] = None  # = Letter of Acceptance (LOA) date
     original_completion_date: Optional[datetime] = None
     revised_completion_date: Optional[datetime] = None
     defect_liability_period_days: Optional[int] = None
     reporting_period: Optional[str] = None
+    # Key-date calculation basis (see WEEK_BASIS_* in key_date_service). Default
+    # "loa_plus_weeks" matches the contract key-date sheets: date = LOA + weeks*7.
+    week_basis: str = "loa_plus_weeks"
     bg_validity_rules: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -65,6 +68,7 @@ class ContractMasterUpdate(BaseModel):
     original_completion_date: Optional[datetime] = None
     defect_liability_period_days: Optional[int] = None
     reporting_period: Optional[str] = None
+    week_basis: Optional[str] = None
     bg_validity_rules: Optional[Dict[str, Dict[str, Any]]] = None
 
 

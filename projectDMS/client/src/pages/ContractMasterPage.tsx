@@ -48,11 +48,12 @@ interface CForm {
   contract_name: string; contract_code: string; client_name: string; contractor_name: string;
   engineer_name: string; currency: string; original_contract_value: string; contract_start_date: string;
   original_completion_date: string; defect_liability_period_days: string; reporting_period: string;
+  week_basis: string;
 }
 const EMPTY: CForm = {
   contract_name: "", contract_code: "", client_name: "", contractor_name: "", engineer_name: "",
   currency: "INR", original_contract_value: "", contract_start_date: "", original_completion_date: "",
-  defect_liability_period_days: "", reporting_period: "",
+  defect_liability_period_days: "", reporting_period: "", week_basis: "loa_plus_weeks",
 };
 
 const ContractMasterPage: React.FC = () => {
@@ -87,6 +88,7 @@ const ContractMasterPage: React.FC = () => {
       original_completion_date: m.original_completion_date ? m.original_completion_date.slice(0, 10) : "",
       defect_liability_period_days: m.defect_liability_period_days != null ? String(m.defect_liability_period_days) : "",
       reporting_period: m.reporting_period || "",
+      week_basis: m.week_basis || "loa_plus_weeks",
     });
   };
 
@@ -126,6 +128,7 @@ const ContractMasterPage: React.FC = () => {
         original_completion_date: toISO(form.original_completion_date),
         defect_liability_period_days: form.defect_liability_period_days ? Number(form.defect_liability_period_days) : undefined,
         reporting_period: form.reporting_period || undefined,
+        week_basis: form.week_basis || undefined,
       };
       if (master) await updateContractMaster(master.id, payload);
       else await createContractMaster(payload);
@@ -206,10 +209,21 @@ const ContractMasterPage: React.FC = () => {
                   <div><Label>Contractor</Label><Input value={form.contractor_name} onChange={(e) => setForm({ ...form, contractor_name: e.target.value })} /></div>
                   <div><Label>Engineer / PM</Label><Input value={form.engineer_name} onChange={(e) => setForm({ ...form, engineer_name: e.target.value })} /></div>
                   <div><Label>Original contract value</Label><Input type="number" value={form.original_contract_value} onChange={(e) => setForm({ ...form, original_contract_value: e.target.value })} /></div>
-                  <div><Label>Contract start date</Label><Input type="date" value={form.contract_start_date} onChange={(e) => setForm({ ...form, contract_start_date: e.target.value })} /></div>
+                  <div><Label>Contract start date (LOA)</Label><Input type="date" value={form.contract_start_date} onChange={(e) => setForm({ ...form, contract_start_date: e.target.value })} /></div>
                   <div><Label>Original completion date</Label><Input type="date" value={form.original_completion_date} onChange={(e) => setForm({ ...form, original_completion_date: e.target.value })} /></div>
                   <div><Label>Defect liability (days)</Label><Input type="number" value={form.defect_liability_period_days} onChange={(e) => setForm({ ...form, defect_liability_period_days: e.target.value })} /></div>
                   <div><Label>Reporting period</Label><Input value={form.reporting_period} onChange={(e) => setForm({ ...form, reporting_period: e.target.value })} placeholder="monthly" /></div>
+                  <div>
+                    <Label>Key-date week basis</Label>
+                    <select
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                      value={form.week_basis}
+                      onChange={(e) => setForm({ ...form, week_basis: e.target.value })}
+                    >
+                      <option value="loa_plus_weeks">LOA + (weeks × 7) — contractual date</option>
+                      <option value="loa_plus_weeks_minus_1">LOA + ((weeks − 1) × 7) — FIDIC style</option>
+                    </select>
+                  </div>
                 </div>
                 <Button onClick={save} disabled={saving}>
                   {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}

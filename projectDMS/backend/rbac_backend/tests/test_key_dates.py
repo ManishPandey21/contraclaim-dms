@@ -37,9 +37,12 @@ START = datetime(2026, 1, 5)
 
 
 def test_calculate_key_date_from_week():
-    # week 1 → start; week 5 → start + 28 days
-    assert calculate_key_date(START, 1) == START
-    assert calculate_key_date(START, 5) == START + timedelta(days=28)
+    # Default basis matches the contract sheets: Contractual Date = LOA + weeks*7.
+    assert calculate_key_date(START, 1) == START + timedelta(days=7)
+    assert calculate_key_date(START, 4) == START + timedelta(days=28)
+    # FIDIC-style fallback basis: (week - 1) * 7.
+    assert calculate_key_date(START, 1, "loa_plus_weeks_minus_1") == START
+    assert calculate_key_date(START, 5, "loa_plus_weeks_minus_1") == START + timedelta(days=28)
 
 
 def test_current_key_date_prefers_approved_revision():
@@ -165,6 +168,7 @@ class _DB:
         self.key_date_achievements = _Coll()
         self.key_date_notifications = _Coll()
         self.projects = _Coll()
+        self.contract_master = _Coll()
 
 
 def _user(org="org-A"):
@@ -185,9 +189,73 @@ async def test_create_milestone_calculates_dates():
         project_start_date=START,
     )
     m = await svc.create_milestone(payload, _user())
-    assert m["calculated_key_date"] == START + timedelta(days=28)
-    assert m["original_planned_key_date"] == START + timedelta(days=28)
+    # Default basis: week 5 → LOA + 35 days.
+    assert m["calculated_key_date"] == START + timedelta(days=35)
+    assert m["original_planned_key_date"] == START + timedelta(days=35)
     assert m["current_approved_key_date"] == m["original_planned_key_date"]
+
+
+@pytest.mark.asyncio
+async def test_create_milestone_uses_contract_master_loa_and_basis():
+    db = _DB()
+    # Contract Master supplies the LOA (contract_start_date) and a non-default basis.
+    await db.contract_master.insert_one({
+        "_id": "cm1", "project_id": "proj-A", "contract_id": "primary",
+        "organization_id": "org-A", "contract_start_date": START,
+        "week_basis": "loa_plus_weeks_minus_1",
+    })
+    svc = KeyDateService(db)
+    # No project_start_date override → start + basis come from the Contract Master.
+    m = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="M", project_id="proj-A", contractual_week_number=5),
+        _user(),
+    )
+    # (week-1)*7 = 28 days under the FIDIC-style basis.
+    assert m["calculated_key_date"] == START + timedelta(days=28)
+
+
+@pytest.mark.asyncio
+async def test_recalculate_project_refreshes_baseline_but_not_revised():
+    db = _DB()
+    svc = KeyDateService(db)
+    # Two milestones created under the default basis (week*7).
+    a = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="A", project_id="proj-A", contractual_week_number=4, project_start_date=START),
+        _user(),
+    )
+    b = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="B", project_id="proj-A", contractual_week_number=4, project_start_date=START),
+        _user(),
+    )
+    # Approve an EOT on B so it carries a revision in force.
+    eot = await svc.submit_eot(
+        b, EOTApplicationCreate(requested_extension_days=14, eot_letter_reference="EOT/1",
+                                requested_revised_key_date=START + timedelta(days=60), submit=True),
+        _user(),
+    )
+    fresh_b = await svc.get(b["_id"])
+    await svc.review_eot(
+        fresh_b, eot,
+        EOTReview(decision="approved", approved_extension_days=14,
+                  approved_revised_key_date=START + timedelta(days=60), approval_letter_reference="APP/1"),
+        _user(),
+    )
+    # Recalculate the project under the FIDIC-style basis via the Contract Master.
+    await db.contract_master.insert_one({
+        "_id": "cm1", "project_id": "proj-A", "contract_id": "primary",
+        "organization_id": "org-A", "contract_start_date": START,
+        "week_basis": "loa_plus_weeks_minus_1",
+    })
+    result = await svc.recalculate_project({}, "proj-A", _user())
+    assert result["updated"] == 2 and result["week_basis"] == "loa_plus_weeks_minus_1"
+    after_a = await svc.get(a["_id"])
+    after_b = await svc.get(b["_id"])
+    # A (no revision): baseline re-derived to (4-1)*7 = 21 days.
+    assert after_a["original_planned_key_date"] == START + timedelta(days=21)
+    assert after_a["current_approved_key_date"] == START + timedelta(days=21)
+    # B (approved revision): in-force revised date untouched; only calc refreshed.
+    assert after_b["current_approved_key_date"] == START + timedelta(days=60)
+    assert after_b["calculated_key_date"] == START + timedelta(days=21)
 
 
 @pytest.mark.asyncio
@@ -267,10 +335,11 @@ async def test_record_achievement_delay_and_client_notice_rule():
         KeyDateMilestoneCreate(title="M", project_id="proj-A", contractual_week_number=1, project_start_date=START),
         _user(),
     )
+    # week 1 → current key date = LOA + 7 days; achieving on LOA + 10 is a 3-day delay.
     # client notification required but no ref → rejected
     with pytest.raises(KeyDateError):
-        await svc.record_achievement(m, AchievementRecord(actual_achievement_date=START + timedelta(days=3), client_notification_required=True), _user())
-    updated = await svc.record_achievement(m, AchievementRecord(actual_achievement_date=START + timedelta(days=3)), _user())
+        await svc.record_achievement(m, AchievementRecord(actual_achievement_date=START + timedelta(days=10), client_notification_required=True), _user())
+    updated = await svc.record_achievement(m, AchievementRecord(actual_achievement_date=START + timedelta(days=10)), _user())
     assert updated["delay_days"] == 3 and updated["early_completion_days"] == 0
     assert updated["status"] == "achieved"
 
