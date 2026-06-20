@@ -715,29 +715,36 @@ async def get_billing_review_queue(
 async def download_billing_receipt(
     record_id: str,
     organization_id: str = Query(..., min_length=1),
+    format: str = Query("receipt", pattern="^(receipt|tax_invoice)$"),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ):
-    """Download a print-optimized receipt / tax invoice for a paid billing record."""
+    """Download a print-optimized receipt or GST tax invoice for a paid record."""
     await policy.authorize(
         current_user,
         Permissions.BILLING_PLAN_VIEW,
         organization_id=organization_id,
         resource_type="billing",
     )
-    from ..services.billing_receipt import receipt_to_html
+    from ..services.billing_receipt import receipt_to_html, tax_invoice_to_html
 
+    svc = MonetizationService()
     try:
-        data = await MonetizationService().build_billing_receipt(record_id, organization_id)
+        if format == "tax_invoice":
+            data = await svc.build_billing_tax_invoice(record_id, organization_id)
+            render, prefix = tax_invoice_to_html, "tax-invoice"
+        else:
+            data = await svc.build_billing_receipt(record_id, organization_id)
+            render, prefix = receipt_to_html, "receipt"
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not data:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Billing record not found")
-    filename = f"receipt-{data.get('receipt_no') or record_id}.html"
+    ref = data.get("invoice_number") or data.get("receipt_no") or record_id
     return Response(
-        content=receipt_to_html(data),
+        content=render(data),
         media_type="text/html",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{prefix}-{ref}.html"'},
     )
 
 

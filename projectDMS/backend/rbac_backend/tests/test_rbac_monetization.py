@@ -7,7 +7,14 @@ from rbac_backend.models.rbac_monetization import (
     CancelSubscriptionRequest,
     UpgradeDowngradeRequest,
 )
-from rbac_backend.services.billing_receipt import build_receipt, receipt_to_html
+from rbac_backend.services.billing_receipt import (
+    build_receipt,
+    build_tax_invoice,
+    financial_year,
+    format_invoice_number,
+    receipt_to_html,
+    tax_invoice_to_html,
+)
 from rbac_backend.services.monetization_service import MonetizationService
 from rbac_backend.services.subscription_lifecycle_service import SubscriptionLifecycleService
 
@@ -301,6 +308,45 @@ def test_build_receipt_assembles_fields() -> None:
     assert data["buyer_name"] == "Acme Infra"
     assert data["buyer_gstin"] == "29ABCDE1234F1Z5"
     assert data["status"] == "paid"
+
+
+def test_financial_year_and_invoice_number() -> None:
+    assert financial_year(datetime(2026, 6, 20)) == "2026-27"
+    assert financial_year(datetime(2026, 2, 1)) == "2025-26"  # Jan–Mar → prior FY
+    assert format_invoice_number("2026-27", 1) == "INV/2026-27/00001"
+    assert format_invoice_number("2026-27", 42) == "INV/2026-27/00042"
+
+
+def test_tax_invoice_intra_state_splits_cgst_sgst() -> None:
+    # Seller default state code is "29" (Karnataka); buyer GSTIN also "29..." → intra.
+    inv = build_tax_invoice(
+        {"amount_minor": 50000, "currency": "INR", "record_status": "paid",
+         "gateway_payment_id": "pay_1"},
+        plan={"name": "DMS Pro"},
+        organization={"name": "Acme", "gstin": "29ABCDE1234F1Z5"},
+        invoice_number="INV/2026-27/00001",
+    )
+    assert inv["intra_state"] is True
+    assert inv["igst_minor"] == 0
+    # taxable + tax reconstitute the tax-inclusive total; CGST+SGST == total tax.
+    assert inv["taxable_minor"] + inv["tax_minor"] == 50000
+    assert inv["cgst_minor"] + inv["sgst_minor"] == inv["tax_minor"]
+    assert inv["sac_code"] and inv["seller_gstin"]
+
+
+def test_tax_invoice_inter_state_uses_igst() -> None:
+    # Buyer GSTIN "27..." (Maharashtra) differs from seller "29" → inter-state.
+    inv = build_tax_invoice(
+        {"amount_minor": 118000, "currency": "INR", "record_status": "paid"},
+        plan={"name": "DMS Pro"},
+        organization={"name": "Acme", "gstin": "27ABCDE1234F1Z5"},
+    )
+    assert inv["intra_state"] is False
+    assert inv["cgst_minor"] == 0 and inv["sgst_minor"] == 0
+    assert inv["igst_minor"] == inv["tax_minor"]
+    assert inv["taxable_minor"] + inv["igst_minor"] == 118000
+    html = tax_invoice_to_html(inv)
+    assert "Tax Invoice" in html and "IGST" in html and "SAC" in html
 
 
 def test_receipt_to_html_renders_amount_and_payment() -> None:

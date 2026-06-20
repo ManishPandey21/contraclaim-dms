@@ -93,17 +93,21 @@ export async function getBillingReviewQueue(organizationId: string): Promise<Bil
   return Array.isArray(data) ? data.map(normBillingRecord) : [];
 }
 
-/** Download the receipt / tax invoice (HTML, print-to-PDF) for a paid record. */
-export async function downloadBillingReceipt(recordId: string, organizationId: string): Promise<void> {
+/** Download the receipt / GST tax invoice (HTML, print-to-PDF) for a paid record. */
+export async function downloadBillingReceipt(
+  recordId: string,
+  organizationId: string,
+  format: "receipt" | "tax_invoice" = "receipt",
+): Promise<void> {
   const { data } = await api.get(`/rbac-monetization/billing/records/${recordId}/receipt`, {
-    params: { organization_id: organizationId },
+    params: { organization_id: organizationId, format },
     responseType: "blob",
   });
   const blob = data instanceof Blob ? data : new Blob([data], { type: "text/html" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `receipt-${recordId}.html`;
+  a.download = `${format === "tax_invoice" ? "tax-invoice" : "receipt"}-${recordId}.html`;
   a.click();
   URL.revokeObjectURL(url);
 }

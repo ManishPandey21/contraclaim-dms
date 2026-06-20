@@ -475,16 +475,19 @@ const SubscriptionManagementPage: React.FC = () => {
     }
   };
 
-  const onDownloadReceipt = async (rec: BillingRecord) => {
+  const onDownloadReceipt = async (
+    rec: BillingRecord,
+    format: "receipt" | "tax_invoice" = "receipt",
+  ) => {
     const orgId = rec.organization_id || selectedSub?.organization_id || "";
     if (!orgId) {
       toast.error("No organization for this record");
       return;
     }
     try {
-      await downloadBillingReceipt(rec.id, orgId);
+      await downloadBillingReceipt(rec.id, orgId, format);
     } catch {
-      toast.error("Failed to download receipt");
+      toast.error(format === "tax_invoice" ? "Failed to download tax invoice" : "Failed to download receipt");
     }
   };
 
@@ -1304,14 +1307,24 @@ const SubscriptionManagementPage: React.FC = () => {
                       <span />
                     )}
                     {rec.record_status === "paid" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 gap-1 px-2 text-xs"
-                        onClick={() => onDownloadReceipt(rec)}
-                      >
-                        <Download className="h-3.5 w-3.5" /> Receipt
-                      </Button>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-xs"
+                          onClick={() => onDownloadReceipt(rec)}
+                        >
+                          <Download className="h-3.5 w-3.5" /> Receipt
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 gap-1 px-2 text-xs"
+                          onClick={() => onDownloadReceipt(rec, "tax_invoice")}
+                        >
+                          <Receipt className="h-3.5 w-3.5" /> Tax invoice
+                        </Button>
+                      </div>
                     )}
                   </div>
                 </div>

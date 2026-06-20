@@ -1027,23 +1027,18 @@ class MonetizationService:
             out.append(item)
         return out
 
-    async def build_billing_receipt(self, record_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
-        """Assemble the receipt for a paid billing record (scoped to the org).
-
-        Returns ``None`` if the record doesn't exist in the org; raises
-        ``ValueError`` if it isn't a successful payment (receipts only for paid).
-        """
-        from .billing_receipt import build_receipt
-
-        db = await self._get_db()
+    async def _paid_record_or_raise(self, db: Any, record_id: str, organization_id: str,
+                                    *, kind: str) -> Optional[Dict[str, Any]]:
         record = await db.billing_records.find_one(
             {"_id": self._lookup_id(record_id), "organization_id": str(organization_id)}
         )
         if not record:
             return None
         if record.get("record_status") != "paid":
-            raise ValueError("A receipt is only available for a successful payment")
+            raise ValueError(f"A {kind} is only available for a successful payment")
+        return record
 
+    async def _receipt_context(self, db: Any, record: Dict[str, Any], organization_id: str):
         subscription = None
         if record.get("subscription_id"):
             try:
@@ -1060,8 +1055,49 @@ class MonetizationService:
             organization = await db.organizations.find_one({"_id": self._lookup_id(organization_id)})
         except Exception:  # pragma: no cover - defensive
             organization = None
+        return subscription, plan, organization
 
+    async def build_billing_receipt(self, record_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
+        """Assemble the receipt for a paid billing record (scoped to the org).
+
+        Returns ``None`` if the record doesn't exist in the org; raises
+        ``ValueError`` if it isn't a successful payment (receipts only for paid).
+        """
+        from .billing_receipt import build_receipt
+
+        db = await self._get_db()
+        record = await self._paid_record_or_raise(db, record_id, organization_id, kind="receipt")
+        if not record:
+            return None
+        subscription, plan, organization = await self._receipt_context(db, record, organization_id)
         return build_receipt(record, subscription, plan, organization)
+
+    async def build_billing_tax_invoice(self, record_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
+        """Assemble a GST tax invoice for a paid record, allocating a stable,
+        financial-year-scoped invoice number on first generation (idempotent —
+        re-downloads reuse the same number)."""
+        from pymongo import ReturnDocument
+
+        from .billing_receipt import build_tax_invoice, financial_year, format_invoice_number
+
+        db = await self._get_db()
+        record = await self._paid_record_or_raise(db, record_id, organization_id, kind="tax invoice")
+        if not record:
+            return None
+
+        invoice_number = record.get("invoice_number")
+        if not invoice_number:
+            fy = financial_year(record.get("created_at"))
+            counter = await db.billing_invoice_counters.find_one_and_update(
+                {"_id": fy}, {"$inc": {"seq": 1}}, upsert=True, return_document=ReturnDocument.AFTER,
+            )
+            invoice_number = format_invoice_number(fy, (counter or {}).get("seq", 1))
+            await db.billing_records.update_one(
+                {"_id": record["_id"]}, {"$set": {"invoice_number": invoice_number}}
+            )
+
+        subscription, plan, organization = await self._receipt_context(db, record, organization_id)
+        return build_tax_invoice(record, subscription, plan, organization, invoice_number=invoice_number)
 
     # ------------------------------------------------------------------
     # Invoice / Proration helpers
