@@ -14,7 +14,18 @@ class FakeCollection:
         self.deleted = []
 
     def find(self, query):
-        # Simply return elements or everything for mock purposes
+        # Filter on scalar equality and $in; ignore range operators ($lt/$lte/$gte).
+        def matches(doc):
+            for key, cond in (query or {}).items():
+                if isinstance(cond, dict):
+                    if "$in" in cond and doc.get(key) not in cond["$in"]:
+                        return False
+                elif doc.get(key) != cond:
+                    return False
+            return True
+
+        items = [d for d in self.data if matches(d)]
+
         class FakeCursor:
             def __init__(self, items):
                 self.items = items
@@ -36,7 +47,13 @@ class FakeCollection:
             async def to_list(self, length=None):
                 return self.items
 
-        return FakeCursor(self.data)
+        return FakeCursor(items)
+
+    async def find_one(self, query):
+        for d in self.data:
+            if all(d.get(k) == v for k, v in (query or {}).items() if not isinstance(v, dict)):
+                return d
+        return None
 
     async def update_one(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
@@ -148,6 +165,30 @@ async def test_get_organization_billing_records() -> None:
     assert statuses == {"paid", "amount_mismatch"}
     mismatch = next(r for r in rows if r["record_status"] == "amount_mismatch")
     assert "validation_error" in mismatch
+
+
+@pytest.mark.asyncio
+async def test_billing_review_queue_filters_and_enriches() -> None:
+    db = FakeDB()
+    db.subscriptions.data = [
+        {"_id": "sub_1", "organization_id": "org_1", "plan_code": "dms_pro", "billing_status": "review"},
+    ]
+    db.billing_records.data = [
+        {"_id": "br_paid", "organization_id": "org_1", "record_status": "paid",
+         "amount_minor": 50000, "subscription_id": "sub_1"},
+        {"_id": "br_fail", "organization_id": "org_1", "record_status": "failed",
+         "amount_minor": 50000, "subscription_id": "sub_1"},
+        {"_id": "br_mismatch", "organization_id": "org_1", "record_status": "amount_mismatch",
+         "amount_minor": 4999, "subscription_id": "sub_1", "validation_error": "amount 4999 != expected 50000"},
+        {"_id": "br_other_org", "organization_id": "org_2", "record_status": "failed"},
+    ]
+    queue = await MonetizationService(db).get_billing_review_queue("org_1")
+
+    ids = {r["id"] for r in queue}
+    assert ids == {"br_fail", "br_mismatch"}  # paid + other-org excluded
+    # enriched with the subscription's plan + current billing status.
+    assert all(r["plan_code"] == "dms_pro" for r in queue)
+    assert all(r["subscription_billing_status"] == "review" for r in queue)
 
 
 def test_build_receipt_assembles_fields() -> None:

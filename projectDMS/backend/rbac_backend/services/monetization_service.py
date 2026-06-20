@@ -960,6 +960,34 @@ class MonetizationService:
         ).sort("created_at", -1).to_list(length=500)
         return [self._normalize(row) for row in rows]
 
+    async def get_billing_review_queue(self, organization_id: str) -> List[Dict[str, Any]]:
+        """Billing records that need admin attention — failed payments and
+        amount/currency mismatches (the rows the webhook flags but never activates
+        on). Enriched with the subscription's plan + current billing status so the
+        admin can see whether it's still unresolved. Newest first."""
+        db = await self._get_db()
+        rows = await db.billing_records.find(
+            {"organization_id": str(organization_id),
+             "record_status": {"$in": ["failed", "amount_mismatch"]}}
+        ).sort("created_at", -1).to_list(length=500)
+
+        sub_cache: Dict[str, Any] = {}
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            sub_id = row.get("subscription_id")
+            sub = sub_cache.get(sub_id) if sub_id else None
+            if sub_id and sub_id not in sub_cache:
+                try:
+                    sub = await db.subscriptions.find_one({"_id": self._lookup_id(sub_id)})
+                except Exception:  # pragma: no cover - defensive
+                    sub = None
+                sub_cache[sub_id] = sub
+            item = self._normalize(row)
+            item["plan_code"] = (sub or {}).get("plan_code")
+            item["subscription_billing_status"] = (sub or {}).get("billing_status")
+            out.append(item)
+        return out
+
     async def build_billing_receipt(self, record_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
         """Assemble the receipt for a paid billing record (scoped to the org).
 

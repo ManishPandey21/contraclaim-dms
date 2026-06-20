@@ -71,6 +71,9 @@ export interface BillingRecord {
   record_status?: string | null; // paid | failed | amount_mismatch | <event_type>
   validation_error?: string | null;
   created_at?: string | null;
+  // Present on review-queue items (enriched from the subscription).
+  plan_code?: string | null;
+  subscription_billing_status?: string | null;
 }
 
 const normBillingRecord = (raw: any): BillingRecord => ({
@@ -81,6 +84,12 @@ const normBillingRecord = (raw: any): BillingRecord => ({
 /** Financial billing records (payments / failures / amount-mismatch) for an org. */
 export async function getBillingRecords(organizationId: string): Promise<BillingRecord[]> {
   const { data } = await api.get(`/rbac-monetization/billing/records/${organizationId}`);
+  return Array.isArray(data) ? data.map(normBillingRecord) : [];
+}
+
+/** Failed-payment / amount-mismatch records needing admin attention. */
+export async function getBillingReviewQueue(organizationId: string): Promise<BillingRecord[]> {
+  const { data } = await api.get(`/rbac-monetization/billing/review-queue/${organizationId}`);
   return Array.isArray(data) ? data.map(normBillingRecord) : [];
 }
 

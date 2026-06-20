@@ -78,6 +78,7 @@ import {
   startSubscriptionCheckout,
   redirectToCheckout,
   getBillingRecords,
+  getBillingReviewQueue,
   downloadBillingReceipt,
   type BillingRecord,
 } from "@/services/billing-api";
@@ -147,6 +148,7 @@ const SubscriptionManagementPage: React.FC = () => {
   const [history, setHistory] = useState<SubscriptionHistoryEntry[]>([]);
   const [billingRecords, setBillingRecords] = useState<BillingRecord[]>([]);
   const [billingDialogOpen, setBillingDialogOpen] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<BillingRecord[]>([]);
   const [invoicePreview, setInvoicePreview] = useState<InvoicePreview | null>(null);
   const [loading, setLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
@@ -180,6 +182,19 @@ const SubscriptionManagementPage: React.FC = () => {
       ]);
       setCatalog(catalogData);
       setSubscriptions(subsData);
+      const orgId =
+        subsData.find((s) => !s.project_id)?.organization_id ||
+        subsData[0]?.organization_id ||
+        "";
+      if (orgId) {
+        try {
+          setReviewQueue(await getBillingReviewQueue(orgId));
+        } catch {
+          /* review queue is non-fatal */
+        }
+      } else {
+        setReviewQueue([]);
+      }
     } catch (err: any) {
       toast.error("Failed to load subscription data", {
         description: err?.response?.data?.detail || err?.message,
@@ -515,6 +530,55 @@ const SubscriptionManagementPage: React.FC = () => {
           Refresh
         </Button>
       </div>
+
+      {/* Needs attention — failed payments / amount mismatches */}
+      {reviewQueue.length > 0 && (
+        <Card className="border-amber-500/40 bg-amber-50/60 dark:bg-amber-950/20">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-amber-700 dark:text-amber-400">
+              <XCircle className="h-5 w-5" />
+              Needs attention ({reviewQueue.length})
+            </CardTitle>
+            <CardDescription>
+              Payments that failed or did not match the plan price. These did not
+              enable the subscription — review and re-collect payment.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {reviewQueue.map((rec) => (
+              <div
+                key={rec.id}
+                className="flex items-start justify-between gap-3 rounded-md border border-amber-500/30 bg-background/60 p-3"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium">
+                      {formatMinorAmount(rec.amount_minor, rec.currency || "INR")}
+                    </span>
+                    <Badge className={billingRecordStatusColor(rec.record_status)}>
+                      {billingRecordStatusLabel(rec.record_status)}
+                    </Badge>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {rec.plan_code || "—"}
+                    {rec.gateway_payment_id ? ` · ${rec.gateway_payment_id}` : ""}
+                  </p>
+                  {rec.validation_error && (
+                    <p className="text-xs text-amber-700 dark:text-amber-400 mt-1">
+                      {rec.validation_error}
+                    </p>
+                  )}
+                </div>
+                {rec.created_at && (
+                  <p className="text-xs text-muted-foreground whitespace-nowrap">
+                    {new Date(rec.created_at).toLocaleDateString()}
+                  </p>
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Current Plan Card */}
       {activeSub && currentPlan && (

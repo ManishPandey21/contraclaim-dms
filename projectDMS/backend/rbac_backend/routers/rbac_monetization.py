@@ -695,6 +695,22 @@ async def get_organization_billing_records(
     return await MonetizationService().get_organization_billing_records(organization_id)
 
 
+@router.get("/billing/review-queue/{organization_id}", response_model=List[Dict[str, Any]])
+async def get_billing_review_queue(
+    organization_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Failed-payment / amount-mismatch records needing admin attention."""
+    await policy.authorize(
+        current_user,
+        Permissions.BILLING_PLAN_VIEW,
+        organization_id=organization_id,
+        resource_type="billing",
+    )
+    return await MonetizationService().get_billing_review_queue(organization_id)
+
+
 @router.get("/billing/records/{record_id}/receipt")
 async def download_billing_receipt(
     record_id: str,
