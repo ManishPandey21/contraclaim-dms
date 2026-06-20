@@ -61,7 +61,7 @@ import {
   updateMilestone,
 } from "@/services/key-dates-api";
 import { enhancedApi } from "@/services/enhanced-api";
-import { statusColor, statusLabel, alertText, achievementText } from "@/lib/key-date-helpers";
+import { statusColor, statusLabel, alertText, achievementText, maxRevisionCount, revisionAt } from "@/lib/key-date-helpers";
 
 const STATUS_OPTIONS = [
   "not_started", "upcoming", "due_soon", "due_today", "overdue",
@@ -228,6 +228,8 @@ const KeyDateRegisterPage: React.FC = () => {
     }
   };
 
+  const eotCols = maxRevisionCount(items);
+
   return (
     <div className="container mx-auto space-y-6 p-6">
       <div className="flex items-center justify-between">
@@ -307,7 +309,11 @@ const KeyDateRegisterPage: React.FC = () => {
               <TableRow>
                 <TableHead>Ref</TableHead>
                 <TableHead>Description</TableHead>
+                <TableHead className="text-center">Weeks</TableHead>
                 <TableHead>Original</TableHead>
+                {Array.from({ length: eotCols }, (_, i) => (
+                  <TableHead key={`eot-h-${i}`} className="whitespace-nowrap">EOT-{i + 1}</TableHead>
+                ))}
                 <TableHead>Current</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>EOT</TableHead>
@@ -319,7 +325,7 @@ const KeyDateRegisterPage: React.FC = () => {
             <TableBody>
               {items.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">
+                  <TableCell colSpan={10 + eotCols} className="py-8 text-center text-muted-foreground">
                     No milestones yet.
                   </TableCell>
                 </TableRow>
@@ -328,7 +334,20 @@ const KeyDateRegisterPage: React.FC = () => {
                   <TableRow key={m.id}>
                     <TableCell className="font-mono text-xs">{m.milestone_ref || "—"}</TableCell>
                     <TableCell className="max-w-[220px] truncate font-medium" title={m.title}>{m.title}</TableCell>
+                    <TableCell className="text-center">{m.contractual_week_number ?? "—"}</TableCell>
                     <TableCell>{fmtDate(m.original_planned_key_date)}</TableCell>
+                    {Array.from({ length: eotCols }, (_, i) => {
+                      const rev = revisionAt(m, i + 1);
+                      return (
+                        <TableCell
+                          key={`eot-c-${m.id}-${i}`}
+                          className="whitespace-nowrap text-xs"
+                          title={rev ? [rev.eot_letter_reference, rev.approval_letter_reference].filter(Boolean).join(" → ") : undefined}
+                        >
+                          {rev ? fmtDate(rev.approved_revised_key_date) : "—"}
+                        </TableCell>
+                      );
+                    })}
                     <TableCell>{fmtDate(m.current_approved_key_date)}</TableCell>
                     <TableCell><Badge className={statusColor(m.status)}>{statusLabel(m.status)}</Badge></TableCell>
                     <TableCell className="text-xs">{m.eot_status || "—"}</TableCell>

@@ -78,10 +78,22 @@ class KeyDateMilestoneUpdate(BaseModel):
     project_start_date: Optional[datetime] = None  # triggers a recalculation
 
 
+class MilestoneRevision(BaseModel):
+    """One approved EOT revision, surfaced as a column on the register (CM-4b)."""
+    revision_number: int
+    approved_revised_key_date: Optional[datetime] = None
+    eot_letter_reference: Optional[str] = None
+    approval_letter_reference: Optional[str] = None
+    approval_date: Optional[datetime] = None
+    status: str = "approved"
+
+
 class KeyDateMilestone(KeyDateMilestoneBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     eot_status: Optional[str] = None  # latest EOT lifecycle state
     current_revision: int = 0
+    # Derived: one entry per approved EOT (original date + these = the per-EOT columns).
+    revisions: List[MilestoneRevision] = Field(default_factory=list)
     # Achievement summary (full record also stored in key_date_achievements).
     actual_achievement_date: Optional[datetime] = None
     achieved_by: Optional[str] = None

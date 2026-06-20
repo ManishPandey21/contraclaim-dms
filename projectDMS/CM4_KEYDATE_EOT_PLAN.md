@@ -6,7 +6,7 @@
 >
 > **Decisions (2026-06-20):** (1) Week basis default = `loa_plus_weeks` (LOA + weeks×7); LOA is the contract start date unless the LOA states a different commencement date (overridable). (2) Contract completion date stays **manually editable** (CM-3 revise-completion) — CM-4c is an *optional, off-by-default* convenience, not an auto-cascade.
 >
-> **Status: CM-4a DONE** ✅ — `week_basis` on Contract Master, corrected `calculate_key_date`, Key Date reads LOA+basis from the master, `POST /key-dates/recalculate` (opt-in), Contract Master form basis selector + register "Recalculate" button, tests green. CM-4b / CM-4c pending.
+> **Status: CM-4a + CM-4b DONE** ✅ — CM-4a: `week_basis` on Contract Master, corrected `calculate_key_date`, Key Date reads LOA+basis from the master, `POST /key-dates/recalculate` (opt-in), Contract Master form basis selector + register "Recalculate" button. CM-4b: milestone responses carry a `revisions[]` projection (one per approved EOT); the register renders `Weeks | Original | EOT-1..N | Current` dynamic columns. Tests green. CM-4c pending (optional, off by default).
 
 ---
 
@@ -74,7 +74,7 @@ When an EOT is **approved** on a milestone that represents contract completion, 
 | Phase | Scope | Acceptance |
 |---|---|---|
 | **CM-4a** ✅ | `week_basis` on contract master + `calculate_key_date(basis)` + KeyDate reads start+basis from master + recalculate endpoint + FE selector/button + tests | KD-01 (4 wk) = LOA + 28 d, matching the sheets |
-| **CM-4b** | `revisions` projection on milestone responses + columnar EOT view (one column per EOT) + weeks toggle on `KeyDateRegisterPage` + helper test | Register shows Original + EOT-1..N + Current columns, like the spreadsheet |
+| **CM-4b** ✅ | `revisions` projection on milestone responses + columnar EOT view (one column per EOT) + weeks column on `KeyDateRegisterPage` + helper test | Register shows Weeks + Original + EOT-1..N + Current columns, like the spreadsheet |
 | **CM-4c** | `milestone_kind` + auto EOT→`revise-completion` cascade (flagged) + test | Approving an EOT on the completion milestone moves the contract completion date and recomputes BG required-up-to |
 | **CM-4d** *(optional)* | LD register (§6) | Delay + LD amount per milestone from achievement vs revised date |
 

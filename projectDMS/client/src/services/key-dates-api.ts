@@ -25,6 +25,15 @@ export type EOTStatus =
   | "rejected"
   | "withdrawn";
 
+export interface MilestoneRevision {
+  revision_number: number;
+  approved_revised_key_date?: string | null;
+  eot_letter_reference?: string | null;
+  approval_letter_reference?: string | null;
+  approval_date?: string | null;
+  status: string;
+}
+
 export interface MilestoneDTO {
   id: string;
   milestone_ref?: string | null;
@@ -51,6 +60,7 @@ export interface MilestoneDTO {
   final_status?: string | null;
   status?: MilestoneStatus | null;
   days_remaining?: number | null;
+  revisions?: MilestoneRevision[];
   created_at?: string | null;
 }
 

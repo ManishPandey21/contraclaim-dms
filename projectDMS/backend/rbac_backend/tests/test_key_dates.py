@@ -156,8 +156,15 @@ class _Coll:
         return SimpleNamespace(deleted_count=1 if existed else 0)
 
     def find(self, query):
-        scalar = {k: v for k, v in query.items() if not isinstance(v, dict)}
-        return _Cursor([d for d in self.docs.values() if all(d.get(k) == v for k, v in scalar.items())])
+        def match(d):
+            for k, v in query.items():
+                if isinstance(v, dict):
+                    if "$in" in v and d.get(k) not in v["$in"]:
+                        return False
+                elif d.get(k) != v:
+                    return False
+            return True
+        return _Cursor([d for d in self.docs.values() if match(d)])
 
 
 class _DB:
@@ -307,6 +314,48 @@ async def test_eot_approval_extends_and_preserves_original():
     assert len(history) == 1 and history[0]["revision_number"] == 1
     assert history[0]["original_key_date"] == original
     assert history[0]["approved_revised_key_date"] == START + timedelta(days=14)
+    # CM-4b: the milestone response carries one revision per approved EOT (a column).
+    assert len(after["revisions"]) == 1
+    assert after["revisions"][0]["revision_number"] == 1
+    assert after["revisions"][0]["approved_revised_key_date"] == START + timedelta(days=14)
+    assert after["revisions"][0]["approval_letter_reference"] == "APP/001"
+
+
+@pytest.mark.asyncio
+async def test_milestone_revisions_one_column_per_approved_eot():
+    db = _DB()
+    svc = KeyDateService(db)
+    m = await svc.create_milestone(
+        KeyDateMilestoneCreate(title="M", project_id="proj-A", contractual_week_number=1, project_start_date=START),
+        _user(),
+    )
+    # Two successive approved EOTs → two revision columns; one rejected EOT is excluded.
+    for n, days, ref in ((1, 14, "EOT/1"), (2, 30, "EOT/2")):
+        eot = await svc.submit_eot(
+            m, EOTApplicationCreate(requested_extension_days=days, eot_letter_reference=ref,
+                                    requested_revised_key_date=START + timedelta(days=days), submit=True),
+            _user(),
+        )
+        fresh = await svc.get(m["_id"])
+        await svc.review_eot(
+            fresh, eot,
+            EOTReview(decision="approved", approved_extension_days=days,
+                      approved_revised_key_date=START + timedelta(days=days),
+                      approval_letter_reference=f"APP/{n}"),
+            _user(),
+        )
+    rej = await svc.submit_eot(m, EOTApplicationCreate(requested_extension_days=5, eot_letter_reference="EOT/3", submit=True), _user())
+    fresh = await svc.get(m["_id"])
+    await svc.review_eot(fresh, rej, EOTReview(decision="rejected"), _user())
+
+    after = await svc.get(m["_id"])
+    revs = after["revisions"]
+    assert [r["revision_number"] for r in revs] == [1, 2]  # only approved, ordered
+    assert revs[0]["approved_revised_key_date"] == START + timedelta(days=14)
+    assert revs[1]["approved_revised_key_date"] == START + timedelta(days=30)
+    # The list endpoint attaches revisions too (batched).
+    listed = await svc.list({}, project_id="proj-A")
+    assert any(len(x["revisions"]) == 2 for x in listed)
 
 
 @pytest.mark.asyncio

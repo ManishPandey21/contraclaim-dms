@@ -4,6 +4,8 @@ import {
   statusLabel,
   alertText,
   achievementText,
+  maxRevisionCount,
+  revisionAt,
 } from "../key-date-helpers";
 
 describe("key-date-helpers", () => {
@@ -35,5 +37,19 @@ describe("key-date-helpers", () => {
     expect(achievementText({ actual_achievement_date: "2026-01-01", delay_days: 4 })).toBe("Late +4d");
     expect(achievementText({ actual_achievement_date: "2026-01-01", early_completion_days: 2 })).toBe("Early -2d");
     expect(achievementText({ actual_achievement_date: "2026-01-01" })).toBe("On time");
+  });
+
+  it("derives one EOT column per approved revision (CM-4b)", () => {
+    const rows = [
+      { revisions: [] },
+      { revisions: [{ revision_number: 1, status: "approved" }] },
+      { revisions: [{ revision_number: 1, status: "approved" }, { revision_number: 2, status: "approved" }] },
+    ];
+    expect(maxRevisionCount(rows)).toBe(2);
+    expect(maxRevisionCount([{ revisions: undefined }])).toBe(0);
+    expect(revisionAt(rows[2], 1)?.revision_number).toBe(1);
+    expect(revisionAt(rows[2], 2)?.revision_number).toBe(2);
+    expect(revisionAt(rows[2], 3)).toBeUndefined();
+    expect(revisionAt(rows[0], 1)).toBeUndefined();
   });
 });

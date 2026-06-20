@@ -1,4 +1,4 @@
-import type { MilestoneStatus, MilestoneDTO } from "@/services/key-dates-api";
+import type { MilestoneStatus, MilestoneDTO, MilestoneRevision } from "@/services/key-dates-api";
 
 // Pure helpers for the Key Date Tracker (status colour-coding + labels).
 // Colour scheme per spec §10: green achieved, amber ≤30d, orange ≤15d,
@@ -56,4 +56,20 @@ export function achievementText(
   if (m.delay_days) return `Late +${m.delay_days}d`;
   if (m.early_completion_days) return `Early -${m.early_completion_days}d`;
   return "On time";
+}
+
+// --- CM-4b: one register column per EOT -----------------------------------
+
+/** Max approved-EOT count across the rows → how many EOT columns to render. */
+export function maxRevisionCount(items: Pick<MilestoneDTO, "revisions">[]): number {
+  return items.reduce((max, m) => Math.max(max, m.revisions?.length ?? 0), 0);
+}
+
+/** The k-th approved EOT revision for a milestone (1-based), or undefined. */
+export function revisionAt(
+  m: Pick<MilestoneDTO, "revisions">,
+  k: number,
+): MilestoneRevision | undefined {
+  const revs = m.revisions ?? [];
+  return revs[k - 1];
 }

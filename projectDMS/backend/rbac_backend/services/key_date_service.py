@@ -235,10 +235,39 @@ class KeyDateService:
         await self._emit("keydate.milestone.created", current_user, created, after=created)
         return decorate(created)
 
+    async def _revisions_for(self, milestone_ids: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Approved EOT revisions per milestone (the per-EOT register columns).
+
+        Reads the immutable extension history; only approved revisions move the
+        key date, so those are the columns. Batched to avoid an N+1 on lists.
+        """
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        ids = [str(m) for m in milestone_ids if m is not None]
+        if not ids:
+            return out
+        db = await self._get_db()
+        cursor = db.key_date_extension_history.find(
+            {"milestone_id": {"$in": ids}, "status": "approved"}
+        ).sort("revision_number", 1)
+        async for h in cursor:
+            out.setdefault(str(h.get("milestone_id")), []).append({
+                "revision_number": h.get("revision_number"),
+                "approved_revised_key_date": h.get("approved_revised_key_date"),
+                "eot_letter_reference": h.get("eot_letter_reference"),
+                "approval_letter_reference": h.get("approval_letter_reference"),
+                "approval_date": h.get("approval_date"),
+                "status": h.get("status", "approved"),
+            })
+        return out
+
     async def get(self, milestone_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
         m = await db.key_date_milestones.find_one({"_id": milestone_id})
-        return decorate(m) if m else None
+        if not m:
+            return None
+        d = decorate(m)
+        d["revisions"] = (await self._revisions_for([str(milestone_id)])).get(str(milestone_id), [])
+        return d
 
     async def list(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
                    status: Optional[str] = None, responsible_party_id: Optional[str] = None,
@@ -253,6 +282,9 @@ class KeyDateService:
         items = [decorate(m) async for m in cursor]
         if status:
             items = [m for m in items if m["status"] == status]
+        revisions = await self._revisions_for([str(it.get("_id")) for it in items])
+        for it in items:
+            it["revisions"] = revisions.get(str(it.get("_id")), [])
         return items
 
     async def update(self, milestone: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
