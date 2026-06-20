@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -88,6 +88,50 @@ async def key_date_dashboard(
     )
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     return KeyDateDashboard(**await KeyDateService(db).dashboard(scope, project_id=project_id))
+
+
+@router.get("/key-dates/export")
+async def export_key_dates(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user, Permissions.KEYDATE_EXPORT, resource_type="key_dates",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id, audit=False,
+    )
+    from ..services import key_date_export as kx
+
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    rows = await KeyDateService(db).list(scope, project_id=project_id, limit=5000)
+    name = "key-date-register"
+    if format == "csv":
+        return Response(
+            content=kx.milestones_to_csv(rows), media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{name}.csv"'},
+        )
+    if format == "xlsx":
+        try:
+            content = kx.milestones_to_xlsx(rows)
+        except ImportError:
+            raise HTTPException(status_code=501, detail="XLSX export is not available on this server")
+        return Response(
+            content=content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{name}.xlsx"'},
+        )
+    try:
+        content = kx.milestones_to_pdf(rows)
+    except ImportError:
+        raise HTTPException(status_code=501, detail="PDF export is not available on this server")
+    return Response(
+        content=content, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}.pdf"'},
+    )
 
 
 @router.post("/key-dates", response_model=KeyDateMilestone, status_code=status.HTTP_201_CREATED)

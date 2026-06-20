@@ -427,3 +427,121 @@ class KeyDateService:
             before=before,
             after=after,
         )
+
+
+# --- notification rules + scan (background job) ---------------------------
+
+# Days-before thresholds at which an approaching-deadline reminder fires.
+NOTIFY_THRESHOLDS = (30, 15, 10, 1, 0)
+
+
+def due_notification_types(milestone: Dict[str, Any], now: Optional[datetime] = None) -> List[str]:
+    """Notification tags that should fire today for a milestone (pure).
+
+    Uses the current approved key date (else the original). Achieved milestones
+    never notify. Returns e.g. ["T-15"] on the 15-days-before day, or ["overdue"].
+    """
+    if milestone.get("actual_achievement_date"):
+        return []
+    days = days_remaining(milestone, now)
+    if days is None:
+        return []
+    if days < 0:
+        return ["overdue"]
+    if days in NOTIFY_THRESHOLDS:
+        return [f"T-{days}"]
+    return []
+
+
+async def scan_key_date_notifications(db: Any, notification_service: Any = None, *, now: Optional[datetime] = None) -> Dict[str, int]:
+    """Background scan: emit reminders for key dates hitting a threshold today.
+
+    Deduped via the key_date_notifications log so each (milestone, type, day)
+    notifies once. Best-effort; one failure can't abort the sweep.
+    """
+    now = now or datetime.utcnow()
+    cursor = db.key_date_milestones.find({"actual_achievement_date": None})
+    milestones = [m async for m in cursor]
+    emitted = 0
+    for m in milestones:
+        for tag in due_notification_types(m, now):
+            trigger_day = now.date().isoformat()
+            dedupe = f"keydate:{m.get('_id')}:{tag}:{trigger_day}"
+            try:
+                existing = await db.key_date_notifications.find_one({"_id": dedupe})
+            except Exception:  # pragma: no cover - defensive
+                existing = None
+            if existing:
+                continue
+            overdue = tag == "overdue"
+            recipients = [r for r in [m.get("responsible_party_id")] if r]
+            log = {
+                "_id": dedupe,
+                "milestone_id": str(m.get("_id")),
+                "project_id": m.get("project_id"),
+                "organization_id": m.get("organization_id"),
+                "notification_type": tag,
+                "trigger_date": now,
+                "recipients": recipients,
+                "delivery_status": "pending",
+                "read_status": False,
+                "created_at": now,
+            }
+            try:
+                await db.key_date_notifications.insert_one(log)
+            except Exception:  # pragma: no cover
+                continue
+            if notification_service is None:
+                continue
+            try:
+                from ..models.notification import (
+                    NotificationContext,
+                    NotificationPriority,
+                    NotificationSeverity,
+                    NotificationType,
+                )
+
+                cur = current_key_date(m)
+                cur_str = cur.date().isoformat() if isinstance(cur, datetime) else str(cur)
+                msg = (
+                    f"Milestone '{m.get('title') or m.get('_id')}' key date {cur_str} "
+                    + ("has passed and is not achieved." if overdue else f"is due in {days_remaining(m, now)} day(s).")
+                )
+                await notification_service.emit(
+                    NotificationType.KEYDATE_OVERDUE if overdue else NotificationType.KEYDATE_DUE,
+                    str(m.get("_id")),
+                    "key_date_milestones",
+                    context=NotificationContext.PROJECT,
+                    include_users=recipients,
+                    priority=NotificationPriority.URGENT if overdue else NotificationPriority.HIGH,
+                    severity=NotificationSeverity.ERROR if overdue else NotificationSeverity.WARNING,
+                    data={
+                        "title": "Key date overdue" if overdue else "Key date approaching",
+                        "message": msg,
+                        "milestone_id": str(m.get("_id")),
+                        "current_approved_key_date": cur_str,
+                        "eot_status": m.get("eot_status"),
+                        "organization_id": m.get("organization_id"),
+                        "project_id": m.get("project_id"),
+                    },
+                    resource_link="/key-dates",
+                    dedupe_key=dedupe,
+                )
+                await db.key_date_notifications.update_one({"_id": dedupe}, {"$set": {"delivery_status": "sent"}})
+                emitted += 1
+            except Exception:  # pragma: no cover - notifications best-effort
+                pass
+    return {"scanned": len(milestones), "emitted": emitted}
+
+
+async def run_key_date_notification_scan() -> Dict[str, int]:
+    """Scheduler entry point — resolves its own DB + notification service."""
+    from ..core.database import get_database
+    from ..dependencies import get_notification_service
+
+    db = await get_database()
+    try:
+        notification_service = await get_notification_service(db)
+    except Exception:  # pragma: no cover
+        notification_service = None
+    return await scan_key_date_notifications(db, notification_service)

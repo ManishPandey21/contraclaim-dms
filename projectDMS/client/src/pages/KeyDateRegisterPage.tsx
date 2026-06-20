@@ -46,11 +46,12 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { CalendarClock, Edit, Eye, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   createMilestone,
   deleteMilestone,
+  exportKeyDates,
   getKeyDateDashboard,
   getMilestones,
   KeyDateDashboardDTO,
@@ -184,6 +185,20 @@ const KeyDateRegisterPage: React.FC = () => {
     }
   };
 
+  const onExport = async (format: "csv" | "xlsx" | "pdf") => {
+    try {
+      const blob = await exportKeyDates(format, projectFilter !== "all" ? { project_id: projectFilter } : undefined);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `key-date-register.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Export failed");
+    }
+  };
+
   const remove = async (m: MilestoneDTO) => {
     try {
       await deleteMilestone(m.id);
@@ -206,10 +221,21 @@ const KeyDateRegisterPage: React.FC = () => {
             </p>
           </div>
         </div>
-        <Button onClick={openCreate}>
-          <PlusCircle className="mr-2 h-4 w-4" />
-          New Milestone
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => onExport("csv")}>
+            <Download className="mr-2 h-4 w-4" />CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}>
+            <Download className="mr-2 h-4 w-4" />Excel
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => onExport("pdf")}>
+            <Download className="mr-2 h-4 w-4" />PDF
+          </Button>
+          <Button onClick={openCreate}>
+            <PlusCircle className="mr-2 h-4 w-4" />
+            New Milestone
+          </Button>
+        </div>
       </div>
 
       {dash && (
