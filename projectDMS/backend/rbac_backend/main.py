@@ -24,6 +24,8 @@ from .routers import (
     contract_appraisal,
     claims,
     key_dates,
+    variations,
+    bank_guarantees,
     sla,
     dashboard,
     deep_planning,
@@ -177,6 +179,8 @@ app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])
 app.include_router(contract_appraisal.router, prefix="/api", tags=["contract-appraisal"])
 app.include_router(key_dates.router, prefix="/api", tags=["key-dates"])
+app.include_router(variations.router, prefix="/api", tags=["variations"])
+app.include_router(bank_guarantees.router, prefix="/api", tags=["bank-guarantees"])
 app.include_router(sla.router, prefix="/api", tags=["sla"])
 app.include_router(letters.router, prefix="/api", tags=["letters"])
 app.include_router(letter_drafting.router, prefix="/api", tags=["letter-drafting"])
@@ -269,6 +273,13 @@ async def startup_event() -> None:
         run_key_date_notification_scan,
         CronTrigger(hour=8, minute=15),
         id="key_date_notification_scan",
+    )
+    from .services.bank_guarantee_service import run_bg_expiry_scan
+
+    scheduler.add_job(
+        run_bg_expiry_scan,
+        CronTrigger(hour=8, minute=30),
+        id="bg_expiry_scan",
     )
     scheduler.start()
 
