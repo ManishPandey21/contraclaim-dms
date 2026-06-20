@@ -1,0 +1,150 @@
+"""Variation Register service.
+
+Pure roll-up calculations (cumulative approved variation, revised contract value,
+percentage variation) plus tenant-scoped persistence + audit. Authorization is
+enforced by the router via PolicyService.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from ..core.database import get_database
+from ..models.variation import Variation, VariationCreate, VariationStatus, VariationType
+from .audit_event_service import AuditEventService
+
+# Statuses still in flight (not approved/rejected/superseded).
+PENDING_STATUSES = {
+    VariationStatus.DRAFT.value, VariationStatus.SUBMITTED.value,
+    VariationStatus.UNDER_REVIEW.value, VariationStatus.RECOMMENDED.value,
+}
+
+
+def signed_approved(variation: Dict[str, Any]) -> float:
+    """Approved amount with sign from the variation type (negative reduces value)."""
+    amount = variation.get("approved_amount")
+    if amount is None:
+        return 0.0
+    amount = abs(float(amount))
+    return -amount if str(variation.get("variation_type")) == VariationType.NEGATIVE.value else amount
+
+
+def variation_summary(variations: List[Dict[str, Any]], original_contract_value: Optional[float] = None) -> Dict[str, Any]:
+    """Compute the contract-value roll-up from a set of variations (pure)."""
+    ocv = original_contract_value
+    if ocv is None:
+        for v in variations:
+            if v.get("original_contract_value"):
+                ocv = float(v["original_contract_value"])
+                break
+    ocv = float(ocv or 0.0)
+
+    total_submitted = sum(float(v.get("submitted_amount") or 0.0) for v in variations)
+    total_approved = sum(float(v.get("approved_amount") or 0.0) for v in variations
+                         if str(v.get("status")) == VariationStatus.APPROVED.value)
+    cumulative = sum(signed_approved(v) for v in variations
+                     if str(v.get("status")) == VariationStatus.APPROVED.value)
+    revised = ocv + cumulative
+    pct = (cumulative / ocv * 100.0) if ocv else 0.0
+    return {
+        "original_contract_value": round(ocv, 2),
+        "total_submitted_amount": round(total_submitted, 2),
+        "total_approved_amount": round(total_approved, 2),
+        "cumulative_approved_variation": round(cumulative, 2),
+        "revised_contract_value": round(revised, 2),
+        "percentage_variation": round(pct, 4),
+        "pending_variation_count": sum(1 for v in variations if str(v.get("status")) in PENDING_STATUSES),
+        "approved_variation_count": sum(1 for v in variations if str(v.get("status")) == VariationStatus.APPROVED.value),
+        "rejected_variation_count": sum(1 for v in variations if str(v.get("status")) == VariationStatus.REJECTED.value),
+    }
+
+
+def decorate(variation: Dict[str, Any]) -> Dict[str, Any]:
+    v = dict(variation)
+    sub = v.get("submitted_amount")
+    app = v.get("approved_amount")
+    v["difference_amount"] = (float(sub) - float(app)) if sub is not None and app is not None else None
+    return v
+
+
+class VariationService:
+    def __init__(self, db: Any = None) -> None:
+        self.db = db
+        self.audit = AuditEventService(db)
+
+    async def _get_db(self) -> Any:
+        return self.db if self.db is not None else await get_database()
+
+    async def create(self, payload: VariationCreate, current_user: Any) -> Dict[str, Any]:
+        db = await self._get_db()
+        doc = Variation(**payload.model_dump()).model_dump(by_alias=True)
+        if not doc.get("organization_id"):
+            doc["organization_id"] = getattr(current_user, "organization_id", None)
+        doc["created_at"] = datetime.utcnow()
+        doc["created_by"] = getattr(current_user, "id", None)
+        res = await db.variations.insert_one(doc)
+        created = await db.variations.find_one({"_id": res.inserted_id}) or doc
+        await self._emit("variation.created", current_user, created, after=created)
+        return decorate(created)
+
+    async def get(self, variation_id: str) -> Optional[Dict[str, Any]]:
+        db = await self._get_db()
+        v = await db.variations.find_one({"_id": variation_id})
+        return decorate(v) if v else None
+
+    async def list(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
+                   contract_id: Optional[str] = None, status: Optional[str] = None,
+                   variation_type: Optional[str] = None, skip: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
+        db = await self._get_db()
+        query: Dict[str, Any] = dict(scope_filter or {})
+        if project_id:
+            query["project_id"] = project_id
+        if contract_id:
+            query["contract_id"] = contract_id
+        if status:
+            query["status"] = status
+        if variation_type:
+            query["variation_type"] = variation_type
+        cursor = db.variations.find(query).sort("created_at", -1).skip(skip).limit(limit)
+        return [decorate(v) async for v in cursor]
+
+    async def update(self, variation: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
+        db = await self._get_db()
+        update = {k: v for k, v in payload.items() if v is not None}
+        update["updated_at"] = datetime.utcnow()
+        update["updated_by"] = getattr(current_user, "id", None)
+        updated = await db.variations.find_one_and_update(
+            {"_id": variation["_id"]}, {"$set": update}, return_document=True
+        )
+        await self._emit("variation.updated", current_user, variation, before=variation, after=updated)
+        return decorate(updated or variation)
+
+    async def delete(self, variation: Dict[str, Any], current_user: Any) -> bool:
+        db = await self._get_db()
+        res = await db.variations.delete_one({"_id": variation["_id"]})
+        await self._emit("variation.deleted", current_user, variation, before=variation)
+        return res.deleted_count > 0
+
+    async def summary(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
+                      contract_id: Optional[str] = None, original_contract_value: Optional[float] = None) -> Dict[str, Any]:
+        db = await self._get_db()
+        query: Dict[str, Any] = dict(scope_filter or {})
+        if project_id:
+            query["project_id"] = project_id
+        if contract_id:
+            query["contract_id"] = contract_id
+        variations = [v async for v in db.variations.find(query)]
+        return variation_summary(variations, original_contract_value)
+
+    async def _emit(self, action: str, current_user: Any, variation: Dict[str, Any], *, before: Any = None, after: Any = None) -> None:
+        await self.audit.emit(
+            action=action,
+            actor_id=getattr(current_user, "id", None),
+            resource_type="variation",
+            resource_id=str(variation.get("_id")),
+            organization_id=variation.get("organization_id"),
+            project_id=variation.get("project_id"),
+            before=before,
+            after=after,
+        )

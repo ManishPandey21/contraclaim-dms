@@ -353,6 +353,22 @@ async def ensure_indexes(db):
         [("milestone_id", 1), ("notification_type", 1)], background=True
     )
 
+    # Contract Controls: Variation Register + Bank Guarantee Register
+    await db.variations.create_index(
+        [("organization_id", 1), ("project_id", 1), ("contract_id", 1), ("status", 1)], background=True
+    )
+    await db.variations.create_index("variation_number", background=True)
+    await db.bank_guarantees.create_index(
+        [("organization_id", 1), ("project_id", 1), ("bg_status", 1), ("bg_expiry_date", 1)], background=True
+    )
+    await db.bank_guarantees.create_index("contract_id", background=True)
+    await db.bg_extension_history.create_index(
+        [("bg_id", 1), ("revision_number", 1)], background=True
+    )
+    await db.bg_notifications.create_index(
+        [("bg_id", 1), ("notification_type", 1)], background=True
+    )
+
     # Claims (Phase 4)
     await db.claims.create_index(
         [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)],

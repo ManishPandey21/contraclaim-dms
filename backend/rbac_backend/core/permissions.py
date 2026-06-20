@@ -47,6 +47,19 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.keydate.achievement",
     "dms.keydate.export",
     "dms.keydate.manage",
+    "dms.variation.view",
+    "dms.variation.create",
+    "dms.variation.edit",
+    "dms.variation.delete",
+    "dms.variation.approve",
+    "dms.variation.export",
+    "dms.bankguarantee.view",
+    "dms.bankguarantee.create",
+    "dms.bankguarantee.edit",
+    "dms.bankguarantee.delete",
+    "dms.bankguarantee.extend",
+    "dms.bankguarantee.release",
+    "dms.bankguarantee.export",
     "dms.admin",
 ]
 
@@ -134,6 +147,19 @@ class Permissions:
     KEYDATE_ACHIEVEMENT = "dms.keydate.achievement"
     KEYDATE_EXPORT = "dms.keydate.export"
     KEYDATE_MANAGE = "dms.keydate.manage"
+    VARIATION_VIEW = "dms.variation.view"
+    VARIATION_CREATE = "dms.variation.create"
+    VARIATION_EDIT = "dms.variation.edit"
+    VARIATION_DELETE = "dms.variation.delete"
+    VARIATION_APPROVE = "dms.variation.approve"
+    VARIATION_EXPORT = "dms.variation.export"
+    BG_VIEW = "dms.bankguarantee.view"
+    BG_CREATE = "dms.bankguarantee.create"
+    BG_EDIT = "dms.bankguarantee.edit"
+    BG_DELETE = "dms.bankguarantee.delete"
+    BG_EXTEND = "dms.bankguarantee.extend"
+    BG_RELEASE = "dms.bankguarantee.release"
+    BG_EXPORT = "dms.bankguarantee.export"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -233,6 +259,19 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.keydate.achievement": ["documents:update"],
     "dms.keydate.export": ["documents:read"],
     "dms.keydate.manage": ["documents:update", "projects:update"],
+    "dms.variation.view": ["documents:read"],
+    "dms.variation.create": ["documents:create"],
+    "dms.variation.edit": ["documents:update"],
+    "dms.variation.delete": ["documents:delete"],
+    "dms.variation.approve": ["documents:update", "projects:update"],
+    "dms.variation.export": ["documents:read"],
+    "dms.bankguarantee.view": ["documents:read"],
+    "dms.bankguarantee.create": ["documents:create"],
+    "dms.bankguarantee.edit": ["documents:update"],
+    "dms.bankguarantee.delete": ["documents:delete"],
+    "dms.bankguarantee.extend": ["documents:update"],
+    "dms.bankguarantee.release": ["documents:update", "projects:update"],
+    "dms.bankguarantee.export": ["documents:read"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
