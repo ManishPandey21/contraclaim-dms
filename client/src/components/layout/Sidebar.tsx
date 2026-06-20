@@ -28,6 +28,7 @@ import {
   Sparkles,
   Bell,
   CreditCard,
+  CalendarClock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -204,6 +205,7 @@ const Sidebar = () => {
 
     { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
     { path: "/sla", icon: <Clock size={20} />, label: "SLA Tracker" },
+    { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
     {
       path: "/tasks",
       icon: <ClipboardList size={20} />,

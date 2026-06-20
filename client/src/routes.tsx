@@ -53,6 +53,8 @@ const ReportsAnalyticsPage = lazy(() => import("./pages/ReportsAnalyticsPage"));
 const ClaimsRegisterPage = lazy(() => import("./pages/ClaimsRegisterPage"));
 const ClaimDetailPage = lazy(() => import("./pages/ClaimDetailPage"));
 const SLATrackerPage = lazy(() => import("./pages/SLATrackerPage"));
+const KeyDateRegisterPage = lazy(() => import("./pages/KeyDateRegisterPage"));
+const KeyDateDetailPage = lazy(() => import("./pages/KeyDateDetailPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
   () => import("./pages/LetterTemplateEditorPage"),
@@ -180,6 +182,22 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/sla" fallback="/overview">
               <SLATrackerPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="key-dates"
+          element={
+            <RoleGuard path="/key-dates" fallback="/overview">
+              <KeyDateRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="key-dates/:id"
+          element={
+            <RoleGuard path="/key-dates" fallback="/overview">
+              <KeyDateDetailPage />
             </RoleGuard>
           }
         />

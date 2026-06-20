@@ -92,6 +92,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // frontend-visible equivalent so the links surface for document viewers.
   "/claims": ["dms.claim.view", "dms.document.view"],
   "/sla": ["dms.claim.view", "dms.document.view"],
+  // Key Date / Milestone Tracker. Backend dms.keydate.view is aliased to
+  // documents:read; accept dms.document.view as the frontend-visible equivalent.
+  "/key-dates": ["dms.keydate.view", "dms.document.view"],
   // C3: no `dms.folder.view` permission exists on the backend; folders organize
   // documents, so gate on `dms.document.view` (matches /documents and /contracts).
   "/folders": ["dms.document.view"],
