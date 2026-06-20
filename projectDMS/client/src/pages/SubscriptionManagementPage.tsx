@@ -9,6 +9,7 @@ import {
   Crown,
   History,
   Package,
+  Download,
   Pause,
   Play,
   Plus,
@@ -77,6 +78,7 @@ import {
   startSubscriptionCheckout,
   redirectToCheckout,
   getBillingRecords,
+  downloadBillingReceipt,
   type BillingRecord,
 } from "@/services/billing-api";
 import {
@@ -455,6 +457,19 @@ const SubscriptionManagementPage: React.FC = () => {
       setBillingDialogOpen(true);
     } catch {
       toast.error("Failed to load billing history");
+    }
+  };
+
+  const onDownloadReceipt = async (rec: BillingRecord) => {
+    const orgId = rec.organization_id || selectedSub?.organization_id || "";
+    if (!orgId) {
+      toast.error("No organization for this record");
+      return;
+    }
+    try {
+      await downloadBillingReceipt(rec.id, orgId);
+    } catch {
+      toast.error("Failed to download receipt");
     }
   };
 
@@ -1216,11 +1231,25 @@ const SubscriptionManagementPage: React.FC = () => {
                   {rec.validation_error && (
                     <p className="text-xs text-amber-600 mt-1">{rec.validation_error}</p>
                   )}
-                  {rec.created_at && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {new Date(rec.created_at).toLocaleString()}
-                    </p>
-                  )}
+                  <div className="flex items-center justify-between gap-2 mt-1">
+                    {rec.created_at ? (
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(rec.created_at).toLocaleString()}
+                      </p>
+                    ) : (
+                      <span />
+                    )}
+                    {rec.record_status === "paid" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 gap-1 px-2 text-xs"
+                        onClick={() => onDownloadReceipt(rec)}
+                      >
+                        <Download className="h-3.5 w-3.5" /> Receipt
+                      </Button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

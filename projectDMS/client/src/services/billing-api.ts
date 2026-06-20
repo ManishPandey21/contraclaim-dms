@@ -83,3 +83,18 @@ export async function getBillingRecords(organizationId: string): Promise<Billing
   const { data } = await api.get(`/rbac-monetization/billing/records/${organizationId}`);
   return Array.isArray(data) ? data.map(normBillingRecord) : [];
 }
+
+/** Download the receipt / tax invoice (HTML, print-to-PDF) for a paid record. */
+export async function downloadBillingReceipt(recordId: string, organizationId: string): Promise<void> {
+  const { data } = await api.get(`/rbac-monetization/billing/records/${recordId}/receipt`, {
+    params: { organization_id: organizationId },
+    responseType: "blob",
+  });
+  const blob = data instanceof Blob ? data : new Blob([data], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `receipt-${recordId}.html`;
+  a.click();
+  URL.revokeObjectURL(url);
+}

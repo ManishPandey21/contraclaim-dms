@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
 from ..core.permissions import Permissions
@@ -693,6 +693,36 @@ async def get_organization_billing_records(
         resource_type="billing",
     )
     return await MonetizationService().get_organization_billing_records(organization_id)
+
+
+@router.get("/billing/records/{record_id}/receipt")
+async def download_billing_receipt(
+    record_id: str,
+    organization_id: str = Query(..., min_length=1),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
+):
+    """Download a print-optimized receipt / tax invoice for a paid billing record."""
+    await policy.authorize(
+        current_user,
+        Permissions.BILLING_PLAN_VIEW,
+        organization_id=organization_id,
+        resource_type="billing",
+    )
+    from ..services.billing_receipt import receipt_to_html
+
+    try:
+        data = await MonetizationService().build_billing_receipt(record_id, organization_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if not data:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Billing record not found")
+    filename = f"receipt-{data.get('receipt_no') or record_id}.html"
+    return Response(
+        content=receipt_to_html(data),
+        media_type="text/html",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------

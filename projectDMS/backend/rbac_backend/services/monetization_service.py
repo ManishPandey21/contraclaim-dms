@@ -960,6 +960,42 @@ class MonetizationService:
         ).sort("created_at", -1).to_list(length=500)
         return [self._normalize(row) for row in rows]
 
+    async def build_billing_receipt(self, record_id: str, organization_id: str) -> Optional[Dict[str, Any]]:
+        """Assemble the receipt for a paid billing record (scoped to the org).
+
+        Returns ``None`` if the record doesn't exist in the org; raises
+        ``ValueError`` if it isn't a successful payment (receipts only for paid).
+        """
+        from .billing_receipt import build_receipt
+
+        db = await self._get_db()
+        record = await db.billing_records.find_one(
+            {"_id": self._lookup_id(record_id), "organization_id": str(organization_id)}
+        )
+        if not record:
+            return None
+        if record.get("record_status") != "paid":
+            raise ValueError("A receipt is only available for a successful payment")
+
+        subscription = None
+        if record.get("subscription_id"):
+            try:
+                subscription = await db.subscriptions.find_one(
+                    {"_id": self._lookup_id(record["subscription_id"])}
+                )
+            except Exception:  # pragma: no cover - defensive
+                subscription = None
+        plan = None
+        if subscription and subscription.get("plan_code"):
+            plan = await self.get_plan_by_code(subscription["plan_code"])
+        organization = None
+        try:
+            organization = await db.organizations.find_one({"_id": self._lookup_id(organization_id)})
+        except Exception:  # pragma: no cover - defensive
+            organization = None
+
+        return build_receipt(record, subscription, plan, organization)
+
     # ------------------------------------------------------------------
     # Invoice / Proration helpers
     # ------------------------------------------------------------------

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from datetime import datetime, timedelta
+from rbac_backend.services.billing_receipt import build_receipt, receipt_to_html
 from rbac_backend.services.monetization_service import MonetizationService
 from rbac_backend.services.subscription_lifecycle_service import SubscriptionLifecycleService
 
@@ -147,6 +148,37 @@ async def test_get_organization_billing_records() -> None:
     assert statuses == {"paid", "amount_mismatch"}
     mismatch = next(r for r in rows if r["record_status"] == "amount_mismatch")
     assert "validation_error" in mismatch
+
+
+def test_build_receipt_assembles_fields() -> None:
+    record = {
+        "_id": "br1", "organization_id": "org_1", "record_status": "paid",
+        "amount_minor": 50000, "currency": "INR", "gateway_payment_id": "pay_abc",
+        "provider": "razorpay",
+    }
+    data = build_receipt(
+        record,
+        subscription={"plan_code": "dms_pro", "billing_period": "monthly"},
+        plan={"name": "DMS Pro"},
+        organization={"name": "Acme Infra", "gstin": "29ABCDE1234F1Z5"},
+    )
+    assert data["receipt_no"] == "pay_abc"
+    assert data["amount_display"] == "INR 500.00"
+    assert data["description"] == "DMS Pro (monthly)"
+    assert data["buyer_name"] == "Acme Infra"
+    assert data["buyer_gstin"] == "29ABCDE1234F1Z5"
+    assert data["status"] == "paid"
+
+
+def test_receipt_to_html_renders_amount_and_payment() -> None:
+    html = receipt_to_html(build_receipt(
+        {"amount_minor": 50000, "currency": "INR", "gateway_payment_id": "pay_x",
+         "organization_id": "org_1", "record_status": "paid"},
+        plan={"name": "DMS Pro"},
+    ))
+    assert "<html" in html and "INR 500.00" in html
+    assert "pay_x" in html  # receipt no + payment reference
+    assert "Tax Invoice" in html
 
 
 @pytest.mark.asyncio
