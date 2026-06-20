@@ -368,6 +368,9 @@ async def ensure_indexes(db):
     await db.bg_notifications.create_index(
         [("bg_id", 1), ("notification_type", 1)], background=True
     )
+    await db.contract_master.create_index(
+        [("organization_id", 1), ("project_id", 1), ("contract_id", 1)], background=True, unique=True
+    )
 
     # Claims (Phase 4)
     await db.claims.create_index(
