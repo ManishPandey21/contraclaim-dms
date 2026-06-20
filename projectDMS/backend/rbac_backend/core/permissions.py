@@ -60,6 +60,8 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.bankguarantee.extend",
     "dms.bankguarantee.release",
     "dms.bankguarantee.export",
+    "dms.contract.master.view",
+    "dms.contract.master.manage",
     "dms.admin",
 ]
 
@@ -160,6 +162,8 @@ class Permissions:
     BG_EXTEND = "dms.bankguarantee.extend"
     BG_RELEASE = "dms.bankguarantee.release"
     BG_EXPORT = "dms.bankguarantee.export"
+    CONTRACT_MASTER_VIEW = "dms.contract.master.view"
+    CONTRACT_MASTER_MANAGE = "dms.contract.master.manage"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -272,6 +276,8 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.bankguarantee.extend": ["documents:update"],
     "dms.bankguarantee.release": ["documents:update", "projects:update"],
     "dms.bankguarantee.export": ["documents:read"],
+    "dms.contract.master.view": ["projects:read"],
+    "dms.contract.master.manage": ["projects:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],
