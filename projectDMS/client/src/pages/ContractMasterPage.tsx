@@ -61,6 +61,10 @@ const ContractMasterPage: React.FC = () => {
   const [projectId, setProjectId] = useState("");
   const [master, setMaster] = useState<ContractMasterDTO | null>(null);
   const [form, setForm] = useState<CForm>({ ...EMPTY });
+  // Multi-currency rows (strings for inputs). Empty = single-currency contract.
+  const [currencyRows, setCurrencyRows] = useState<
+    { currency: string; rate: string; value: string }[]
+  >([]);
   const [bgDates, setBgDates] = useState<BGRequiredDate[]>([]);
   const [reviseDate, setReviseDate] = useState("");
   const [loading, setLoading] = useState(false);
@@ -78,7 +82,14 @@ const ContractMasterPage: React.FC = () => {
   }, []);
 
   const fillForm = (m: ContractMasterDTO | null) => {
-    if (!m) { setForm({ ...EMPTY }); return; }
+    if (!m) { setForm({ ...EMPTY }); setCurrencyRows([]); return; }
+    setCurrencyRows(
+      (m.contract_currencies || []).map((c) => ({
+        currency: c.currency || "",
+        rate: c.conversion_rate != null ? String(c.conversion_rate) : "",
+        value: c.contract_value != null ? String(c.contract_value) : "",
+      })),
+    );
     setForm({
       contract_name: m.contract_name || "", contract_code: m.contract_code || "",
       client_name: m.client_name || "", contractor_name: m.contractor_name || "",
@@ -130,6 +141,16 @@ const ContractMasterPage: React.FC = () => {
         reporting_period: form.reporting_period || undefined,
         week_basis: form.week_basis || undefined,
       };
+      // Only send valid currency rows (code + positive rate). An empty list
+      // clears the breakdown back to single-currency.
+      const rows = currencyRows
+        .filter((r) => r.currency.trim() && Number(r.rate) > 0)
+        .map((r) => ({
+          currency: r.currency.trim().toUpperCase(),
+          conversion_rate: Number(r.rate),
+          contract_value: r.value ? Number(r.value) : undefined,
+        }));
+      payload.contract_currencies = rows;
       if (master) await updateContractMaster(master.id, payload);
       else await createContractMaster(payload);
       toast.success("Contract master saved");
@@ -193,9 +214,14 @@ const ContractMasterPage: React.FC = () => {
                 <div className="flex items-center justify-between">
                   <CardTitle>{master ? "Edit contract master" : "Create contract master"}</CardTitle>
                   {master && (
-                    <div className="flex gap-2 text-sm">
+                    <div className="flex flex-wrap gap-2 text-sm">
                       <Badge variant="outline">Original: {fmtAmount(master.original_contract_value)}</Badge>
                       <Badge className="bg-blue-600">Current: {fmtAmount(master.current_contract_value)}</Badge>
+                      {master.contract_currencies && master.contract_currencies.length > 0 && (
+                        <Badge className="bg-emerald-600">
+                          Total ({master.currency}): {fmtAmount(master.total_contract_value_base)}
+                        </Badge>
+                      )}
                     </div>
                   )}
                 </div>
@@ -225,6 +251,92 @@ const ContractMasterPage: React.FC = () => {
                     </select>
                   </div>
                 </div>
+
+                <div className="rounded-md border p-3">
+                  <div className="mb-2 flex items-center justify-between">
+                    <div>
+                      <Label className="text-sm font-medium">Contract currencies</Label>
+                      <p className="text-xs text-muted-foreground">
+                        For a multi-currency contract, add each currency with its
+                        award-fixed conversion rate to the base ({form.currency || "base"}).
+                        Leave empty for a single-currency contract.
+                      </p>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        setCurrencyRows((r) => [...r, { currency: "", rate: "", value: "" }])
+                      }
+                    >
+                      <PlusCircle className="mr-2 h-4 w-4" /> Add currency
+                    </Button>
+                  </div>
+
+                  {currencyRows.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 text-xs text-muted-foreground">
+                        <span>Currency</span>
+                        <span>Rate → {form.currency || "base"}</span>
+                        <span>Value (in currency)</span>
+                        <span />
+                      </div>
+                      {currencyRows.map((row, i) => (
+                        <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+                          <Input
+                            placeholder="USD"
+                            value={row.currency}
+                            onChange={(e) =>
+                              setCurrencyRows((r) =>
+                                r.map((x, j) => (j === i ? { ...x, currency: e.target.value } : x)),
+                              )
+                            }
+                          />
+                          <Input
+                            type="number"
+                            placeholder="83.0"
+                            value={row.rate}
+                            onChange={(e) =>
+                              setCurrencyRows((r) =>
+                                r.map((x, j) => (j === i ? { ...x, rate: e.target.value } : x)),
+                              )
+                            }
+                          />
+                          <Input
+                            type="number"
+                            placeholder="10000"
+                            value={row.value}
+                            onChange={(e) =>
+                              setCurrencyRows((r) =>
+                                r.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)),
+                              )
+                            }
+                          />
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-10 w-10 text-destructive"
+                            onClick={() => setCurrencyRows((r) => r.filter((_, j) => j !== i))}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      ))}
+                      <div className="pt-1 text-sm font-medium">
+                        Total contract value ({form.currency || "base"}):{" "}
+                        {fmtAmount(
+                          currencyRows.reduce(
+                            (s, r) => s + (Number(r.value) || 0) * (Number(r.rate) || 0),
+                            0,
+                          ),
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 <Button onClick={save} disabled={saving}>
                   {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                   {master ? "Save changes" : "Create"}

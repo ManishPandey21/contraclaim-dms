@@ -2,6 +2,13 @@ import { api } from "./api";
 
 // Contract Master API. Mirrors backend/rbac_backend/routers/contract_master.py.
 
+export interface ContractCurrency {
+  currency: string;
+  // 1 unit of `currency` = conversion_rate units of the base currency (fixed at award).
+  conversion_rate: number;
+  contract_value?: number | null;
+}
+
 export interface ContractMasterDTO {
   id: string;
   contract_id: string;
@@ -10,9 +17,11 @@ export interface ContractMasterDTO {
   client_name?: string | null;
   contractor_name?: string | null;
   engineer_name?: string | null;
-  currency: string;
+  currency: string; // base (reporting) currency
   original_contract_value?: number | null;
   current_contract_value?: number | null;
+  contract_currencies?: ContractCurrency[];
+  total_contract_value_base?: number | null;
   contract_start_date?: string | null;
   original_completion_date?: string | null;
   revised_completion_date?: string | null;
@@ -43,6 +52,7 @@ export interface ContractMasterPayload {
   reporting_period?: string;
   week_basis?: string;
   bg_validity_rules?: Record<string, { basis: string; offset_days: number }>;
+  contract_currencies?: ContractCurrency[];
 }
 
 export interface BGRequiredDate {
