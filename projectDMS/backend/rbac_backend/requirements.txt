@@ -99,3 +99,10 @@ llama-index-core==0.14.22
 llama-index-embeddings-openai==0.6.0
 llama-index-vector-stores-mongodb==0.10.1
 Pygments==2.19.2
+# Imported at module load in the boot chain but previously unpinned -> clean
+# install / container boot failed with ImportError. python-magic needs the
+# libmagic1 system lib (added to backend/Dockerfile).
+pandas==2.2.3
+requests==2.32.3
+ratelimit==2.2.1
+python-magic==0.4.27

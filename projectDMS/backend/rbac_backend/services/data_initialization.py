@@ -124,8 +124,17 @@ class DataInitializer:
                 try:
                     existing = await self.database.roles.find_one({"_id": role_data["_id"]})
                     if not existing:
-                        role = Role(**role_data)
-                        await self.database.roles.insert_one(role.model_dump(by_alias=True))
+                        # Seed docs key the role by "_id" (e.g. "superadmin"), but the
+                        # Role model has no _id alias — Role(**role_data) would raise
+                        # "id field required". Map _id -> id for validation, then store
+                        # back under the semantic _id so re-seeding stays idempotent and
+                        # matches the read path in role_service (which does the reverse).
+                        role_doc = dict(role_data)
+                        role_doc["id"] = str(role_doc.pop("_id"))
+                        role = Role(**role_doc)
+                        stored = role.model_dump()
+                        stored["_id"] = stored.pop("id")
+                        await self.database.roles.insert_one(stored)
                         created_count += 1
                         logger.debug(f"Created role: {role_data['_id']}")
                     else:

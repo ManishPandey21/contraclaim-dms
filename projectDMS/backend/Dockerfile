@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev curl \
+    && apt-get install -y --no-install-recommends build-essential libpq-dev curl libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY rbac_backend/requirements.txt ./rbac_backend/requirements.txt
