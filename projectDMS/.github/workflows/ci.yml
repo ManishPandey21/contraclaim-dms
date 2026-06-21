@@ -105,6 +105,12 @@ jobs:
         run: npm run lint
 
       - name: Run frontend tests
+        # vitest runs files serially (fileParallelism: false in vitest.config.ts
+        # to avoid a parallel-run deadlock). That reuses one fork worker for the
+        # whole suite, whose V8 heap accumulates across files, so give it headroom
+        # to avoid an end-of-run OOM. Fork workers inherit NODE_OPTIONS.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
         run: npm test -- --run
 
       - name: Build frontend
