@@ -121,6 +121,28 @@ async def create_project(
     return Project(**created_project)
 
 
+@router.get("/projects1", response_model=List[Project])
+async def read_projects_simple(
+    db = Depends(get_db),
+    current_user = Depends(get_current_user),
+    _: None = Depends(require_permission("projects:read")),
+):
+    # Retained intentionally: this is the minimal direct-db endpoint that the
+    # HTTP-level tenant-isolation regression suite (tests/test_http_isolation.py,
+    # the H10/C1 work) exercises to prove build_scope_query enforces org scope at
+    # the HTTP boundary. It is not a true duplicate of /projects (which paginates
+    # via ProjectService and is harder to mock), so it stays as the test vehicle.
+    scope_filter = build_scope_query(
+        current_user,
+        organization_id=None,
+        project_id=None,
+        org_field="organization_id",
+        project_field=None,
+    )
+    projects = await db.projects.find(scope_filter or {}).to_list(100)
+    return [Project(**proj) for proj in projects]
+
+
 @router.get("/projects", response_model=List[Project])
 async def read_projects(
     organization_id: str | None = None,
@@ -184,27 +206,6 @@ async def read_projects(
         logger = logging.getLogger(__name__)
         logger.error(f"Error in read_projects: {exc}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {exc}")
-
-
-@router.get("/projects1", response_model=List[Project])
-async def read_projects_simple(
-    db = Depends(get_db),
-    current_user = Depends(get_current_user),
-    _: None = Depends(require_permission("projects:read")),
-):
-    # SECURITY (C1): this endpoint previously returned db.projects.find() with
-    # no tenant scope, leaking projects across organizations to any user holding
-    # "projects:read". Apply the same deny-by-default scope used by /projects so
-    # non-superadmins only ever see projects within their org/project scope.
-    scope_filter = build_scope_query(
-        current_user,
-        organization_id=None,
-        project_id=None,
-        org_field="organization_id",
-        project_field=None,
-    )
-    projects = await db.projects.find(scope_filter or {}).to_list(100)
-    return [Project(**proj) for proj in projects]
 
 
 @router.get("/projects/{project_id}", response_model=Project)
@@ -352,19 +353,9 @@ async def delete_project(
     return {"message": "Project deleted successfully"}
 
 
-@router.get("/projects/{project_id}/representatives", response_model=List[Representative])
-async def get_project_representatives(
-    project_id: str,
-    db = Depends(get_db),
-    current_user = Depends(get_current_user),
-    _: None = Depends(require_permission("projects:read")),
-):
-    await _ensure_project_access(current_user, project_id, "projects:read", db)
-    proj = await _find_by_id(db.projects, project_id)
-    if not proj:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
-    reps = await db.representatives.find({"project_id": project_id}).to_list(100)
-    return [Representative(**r) for r in reps]
+# NOTE: GET /projects/{project_id}/representatives lives in representatives.py
+# (registered first, so this copy was dead/shadowed) — removed to clear the
+# duplicate operation ID.
 
 @router.post("/projects/{project_id}/deactivate", response_model=dict)
 async def deactivate_project(

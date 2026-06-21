@@ -1018,20 +1018,8 @@ async def delete_user(
     return await controller.delete_user(user_id, current_user)
 
 
-@router.post("/logout", deprecated=True)
-@handle_exceptions
-async def logout_user(
-    request: Request,
-    response: Response,
-    controller: UserController = Depends(get_user_controller),
-    current_user: CurrentUser = Depends(get_current_user),
-):
-    """Logout current user and invalidate session."""
-    _mark_legacy_auth_response(response, "/api/logout")
-    session_token = request.headers.get("authorization", "").replace("Bearer ", "")
-    if not session_token:
-        session_token = request.cookies.get(settings.AUTH_COOKIE_NAME, "")
-    return await controller.logout_user(current_user, session_token)
+# NOTE: POST /logout lives in auth.py (registered first, so this deprecated copy
+# was dead/shadowed) — removed to clear the duplicate route.
 
 
 # Additional security endpoints

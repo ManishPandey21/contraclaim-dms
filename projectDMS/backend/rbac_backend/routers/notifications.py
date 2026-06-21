@@ -97,21 +97,6 @@ async def mark_all_notifications_read(
     return {"updated": updated}
 
 
-@router.patch("/mark-all-read", status_code=status.HTTP_200_OK)
-async def patch_mark_all_notifications_read(
-    filters: MarkAllReadRequest | None = None,
-    notification_service: NotificationService = Depends(get_notification_service),
-    current_user: CurrentUser = Depends(get_current_user),
-) -> dict:
-    updated = await notification_service.mark_all_as_read(
-        current_user.id,
-        category=filters.category if filters else None,
-        event_type=filters.event_type if filters else None,
-        project_id=filters.project_id if filters else None,
-    )
-    return {"updated": updated}
-
-
 @router.get("/unread-count")
 async def unread_count(
     notification_service: NotificationService = Depends(get_notification_service),

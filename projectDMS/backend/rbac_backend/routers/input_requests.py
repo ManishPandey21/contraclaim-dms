@@ -607,17 +607,3 @@ async def get_suggested_key_points_for_letter(
 ):
     """Get AI-suggested key points for letter."""
     return await controller.get_suggested_key_points(letter_id, current_user)
-
-
-# Legacy endpoints for backward compatibility (deprecated)
-@router.get("/input_requests", response_model=List[dict], deprecated=True)
-@handle_exceptions
-async def list_items_legacy(
-    controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
-):
-    """Legacy endpoint - use /input-requests/letter/{letter_id} instead."""
-    # This is a deprecated endpoint maintained for compatibility
-    # Returns empty list and logs usage for migration tracking
-    logger.warning(f"User {current_user.id} used deprecated endpoint /input_requests")
-    return []
