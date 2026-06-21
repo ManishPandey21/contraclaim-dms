@@ -46,6 +46,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import useRBAC from "@/hooks/useRBAC";
+import { useStepUp } from "@/hooks/useStepUp";
 
 interface User {
   // id may be returned as "id" or "_id" depending on endpoint/model
@@ -102,6 +103,7 @@ const UsersPage = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const { can, loading: rbacLoading } = useRBAC();
+  const { requestToken, StepUpDialog } = useStepUp();
   const [accessDenied, setAccessDenied] = useState<boolean>(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetTargetUser, setResetTargetUser] = useState<User | null>(null);
@@ -445,6 +447,39 @@ const UsersPage = () => {
       toast({
         title: "Error",
         description: error.message || "Failed to delete user.",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Lock/unlock are step-up gated server-side (users:lock / users:unlock).
+  // requestToken pops the password dialog; a cancel rejects with "cancelled".
+  const handleLockToggle = async (userId: string, lock: boolean) => {
+    setLoading(true);
+    try {
+      const action = lock ? "users.lock" : "users.unlock";
+      const token = await requestToken(
+        action,
+        lock ? "Lock account" : "Unlock account",
+        "Enter your password to confirm this account action.",
+      );
+      if (lock) {
+        await api.lockUser(userId, { stepUpToken: token });
+      } else {
+        await api.unlockUser(userId, { stepUpToken: token });
+      }
+      toast({
+        title: lock ? "Account Locked" : "Account Unlocked",
+        description: `User account ${lock ? "locked" : "unlocked"} successfully.`,
+      });
+    } catch (error: any) {
+      if (String(error?.message || "").toLowerCase().includes("cancelled")) return;
+      toast({
+        title: "Error",
+        description:
+          error?.message || `Failed to ${lock ? "lock" : "unlock"} account.`,
         variant: "destructive",
       });
     } finally {
@@ -945,6 +980,24 @@ const UsersPage = () => {
                                   Reset Password
                                 </DropdownMenuItem>
                               )}
+                              {can("users:lock") && (
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    handleLockToggle(getUserId(user), true)
+                                  }
+                                >
+                                  Lock Account
+                                </DropdownMenuItem>
+                              )}
+                              {can("users:unlock") && (
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    handleLockToggle(getUserId(user), false)
+                                  }
+                                >
+                                  Unlock Account
+                                </DropdownMenuItem>
+                              )}
                               {can("users:delete") && (
                                 <DropdownMenuItem
                                   className="text-destructive"
@@ -1013,6 +1066,7 @@ const UsersPage = () => {
           </DialogContent>
         </Dialog>
       )}
+      {StepUpDialog}
     </div>
   );
 };

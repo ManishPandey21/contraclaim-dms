@@ -615,6 +615,31 @@ class EnhancedApiService {
     });
   }
 
+  // Account lock/unlock are step-up gated (users:lock / users:unlock).
+  async lockUser(
+    id: string,
+    options?: { stepUpToken?: string },
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(`/users/${id}/lock`, {
+      method: "POST",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
+    });
+  }
+
+  async unlockUser(
+    id: string,
+    options?: { stepUpToken?: string },
+  ): Promise<{ message: string }> {
+    return this.request<{ message: string }>(`/users/${id}/unlock`, {
+      method: "POST",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
+    });
+  }
+
   async checkUserPermission(
     permissionName: string,
   ): Promise<{ granted: boolean }> {
