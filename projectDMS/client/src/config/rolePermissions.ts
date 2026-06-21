@@ -98,6 +98,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Contract Controls registers (backend perms aliased to documents:read).
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
+  "/concerns": ["concerns:read"],
   // Contract Master (backend dms.contract.master.view aliased to projects:read).
   // Explicit so it wins over the /contracts prefix mapping.
   "/contracts/master": ["dms.contract.master.view", "dms.document.view"],

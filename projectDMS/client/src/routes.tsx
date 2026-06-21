@@ -57,6 +57,7 @@ const KeyDateRegisterPage = lazy(() => import("./pages/KeyDateRegisterPage"));
 const KeyDateDetailPage = lazy(() => import("./pages/KeyDateDetailPage"));
 const VariationRegisterPage = lazy(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazy(() => import("./pages/BankGuaranteeRegisterPage"));
+const ConcernsPage = lazy(() => import("./pages/ConcernsPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
   () => import("./pages/LetterTemplateEditorPage"),
@@ -217,6 +218,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/bank-guarantees" fallback="/overview">
               <BankGuaranteeRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="concerns"
+          element={
+            <RoleGuard path="/concerns" fallback="/overview">
+              <ConcernsPage />
             </RoleGuard>
           }
         />

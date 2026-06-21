@@ -212,6 +212,7 @@ const Sidebar = () => {
     { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
     { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
+    { path: "/concerns", icon: <MessageSquare size={20} />, label: "Concerns" },
     {
       path: "/tasks",
       icon: <ClipboardList size={20} />,
