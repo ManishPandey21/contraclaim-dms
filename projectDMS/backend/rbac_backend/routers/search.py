@@ -267,14 +267,32 @@ async def get_search_suggestions(
     try:
         # Search in document names and common terms
         suggestions = []
-        
+
+        # Tenant scope: suggestions are drawn from document names, so they must
+        # be restricted to the caller's org/project the same way /search/documents
+        # is — otherwise a user sees document names from other tenants (leak).
+        match_condition: Dict[str, Any] = {
+            "name": {"$regex": re.escape(q), "$options": "i"}
+        }
+        roles = set(current_user.roles or [])
+        if "superadmin" not in roles:
+            scope = ScopeService()
+            allowed_orgs = await scope.client_organization_ids(current_user)
+            allowed_projects = await scope.client_project_ids(current_user)
+            if "orgadmin" in roles or "orguser" in roles:
+                if not allowed_orgs:
+                    return {"suggestions": []}
+                match_condition["organization_id"] = {"$in": sorted(allowed_orgs)}
+            elif "projectadmin" in roles or "projectuser" in roles:
+                if not allowed_projects:
+                    return {"suggestions": []}
+                match_condition["project_id"] = {"$in": sorted(allowed_projects)}
+            else:
+                return {"suggestions": []}
+
         # Get suggestions from document names
         name_pipeline = [
-            {
-                "$match": {
-                    "name": {"$regex": re.escape(q), "$options": "i"}
-                }
-            },
+            {"$match": match_condition},
             {
                 "$project": {
                     "name": 1,
@@ -368,6 +386,16 @@ async def get_search_analytics(
     Get search analytics (admin only)
     """
     try:
+        # Search-analytics records aggregate queries across all users/tenants and
+        # are not tagged by organization, so there is no safe per-tenant scope —
+        # restrict to platform admins. Previously the "admin only" contract was
+        # documented but unenforced: any authenticated user could read global
+        # search analytics.
+        if "superadmin" not in {str(r).lower() for r in (current_user.roles or [])}:
+            raise HTTPException(
+                status_code=403, detail="Platform administrator role required"
+            )
+
         # Build date filter
         date_filter = {}
         if date_from:
@@ -425,6 +453,10 @@ async def get_search_analytics(
             "volume_over_time": volume_data
         }
         
+    except HTTPException:
+        # Let the 403 admin gate (and any other client error) propagate instead
+        # of being masked as a 500 by the broad handler below.
+        raise
     except Exception as e:
         logger.error(f"Analytics error: {str(e)}")
         raise HTTPException(status_code=500, detail="Failed to get analytics")
