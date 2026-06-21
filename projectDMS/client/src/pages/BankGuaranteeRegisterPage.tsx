@@ -50,6 +50,7 @@ import {
   updateBG,
 } from "@/services/bank-guarantees-api";
 import { enhancedApi } from "@/services/enhanced-api";
+import { getContractMasterForProject } from "@/services/contract-master-api";
 import { bgStatusColor, bgStatusLabel, bgTypeLabel, bgAlertText, fmtAmount } from "@/lib/contract-controls-helpers";
 
 const BG_TYPES = ["performance", "mobilisation_advance", "plant_advance", "retention", "additional_performance", "security_deposit", "other"];
@@ -59,12 +60,12 @@ const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
 
 interface BForm {
   project_id: string; bg_type: string; bg_number: string; issuing_bank: string; branch: string;
-  bg_amount: string; currency: string; submission_date: string; contractual_required_up_to: string;
+  bg_amount: string; currency: string; conversion_rate: string; submission_date: string; contractual_required_up_to: string;
   bg_expiry_date: string; claim_expiry_date: string; bg_status: string; remarks: string;
 }
 const EMPTY: BForm = {
   project_id: "", bg_type: "performance", bg_number: "", issuing_bank: "", branch: "",
-  bg_amount: "", currency: "INR", submission_date: "", contractual_required_up_to: "",
+  bg_amount: "", currency: "INR", conversion_rate: "1", submission_date: "", contractual_required_up_to: "",
   bg_expiry_date: "", claim_expiry_date: "", bg_status: "valid", remarks: "",
 };
 
@@ -92,6 +93,9 @@ const BankGuaranteeRegisterPage: React.FC = () => {
 
   const [extendBg, setExtendBg] = useState<BGDTO | null>(null);
   const [extForm, setExtForm] = useState({ revised_expiry_date: "", revised_claim_expiry_date: "", revised_required_up_to: "", extension_letter_reference: "", remarks: "" });
+  // Contract currencies for the form's project (award-fixed rates, read-only here).
+  const [formBaseCurrency, setFormBaseCurrency] = useState("INR");
+  const [formCurrencies, setFormCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -119,6 +123,27 @@ const BankGuaranteeRegisterPage: React.FC = () => {
     })();
     return () => { active = false; };
   }, []);
+  // When the dialog is open, pull the contract's currencies so the BG currency
+  // can be picked from them and the rate auto-filled (fixed at award).
+  useEffect(() => {
+    if (!dialogOpen || !form.project_id) { setFormCurrencies([]); setFormBaseCurrency("INR"); return; }
+    let active = true;
+    (async () => {
+      try {
+        const cm = await getContractMasterForProject(form.project_id);
+        if (!active) return;
+        setFormBaseCurrency(cm?.currency || "INR");
+        setFormCurrencies((cm?.contract_currencies || []).map((c) => ({ currency: c.currency, conversion_rate: c.conversion_rate })));
+      } catch { if (active) { setFormCurrencies([]); setFormBaseCurrency("INR"); } }
+    })();
+    return () => { active = false; };
+  }, [dialogOpen, form.project_id]);
+
+  const onBgCurrencyChange = (cur: string) => {
+    const match = formCurrencies.find((c) => c.currency === cur);
+    const rate = cur === formBaseCurrency ? 1 : match?.conversion_rate ?? Number(form.conversion_rate) || 1;
+    setForm((f) => ({ ...f, currency: cur, conversion_rate: String(rate) }));
+  };
 
   const openCreate = () => {
     setEditingId(null);
@@ -131,6 +156,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
       project_id: b.project_id || "", bg_type: b.bg_type, bg_number: b.bg_number || "",
       issuing_bank: b.issuing_bank || "", branch: b.branch || "",
       bg_amount: b.bg_amount != null ? String(b.bg_amount) : "", currency: b.currency || "INR",
+      conversion_rate: b.conversion_rate != null ? String(b.conversion_rate) : "1",
       submission_date: b.submission_date ? b.submission_date.slice(0, 10) : "",
       contractual_required_up_to: b.contractual_required_up_to ? b.contractual_required_up_to.slice(0, 10) : "",
       bg_expiry_date: b.bg_expiry_date ? b.bg_expiry_date.slice(0, 10) : "",
@@ -151,6 +177,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         project_id: form.project_id, bg_type: form.bg_type as any, bg_number: form.bg_number.trim(),
         issuing_bank: form.issuing_bank || undefined, branch: form.branch || undefined,
         bg_amount: form.bg_amount ? Number(form.bg_amount) : undefined, currency: form.currency || "INR",
+        conversion_rate: form.conversion_rate ? Number(form.conversion_rate) : undefined,
         submission_date: toISO(form.submission_date), contractual_required_up_to: toISO(form.contractual_required_up_to),
         bg_expiry_date: toISO(form.bg_expiry_date), claim_expiry_date: toISO(form.claim_expiry_date),
         bg_status: form.bg_status as any, remarks: form.remarks || undefined,
@@ -320,7 +347,12 @@ const BankGuaranteeRegisterPage: React.FC = () => {
                     <TableCell className="text-xs">{bgTypeLabel(b.bg_type)}</TableCell>
                     <TableCell className="font-mono text-xs">{b.bg_number || "—"}</TableCell>
                     <TableCell className="text-xs">{b.issuing_bank || "—"}</TableCell>
-                    <TableCell>{fmtAmount(b.bg_amount, b.currency)}</TableCell>
+                    <TableCell>
+                      {fmtAmount(b.bg_amount, b.currency)}
+                      {b.conversion_rate != null && b.conversion_rate !== 1 && b.bg_amount_base != null && (
+                        <div className="text-xs text-muted-foreground">≈ {fmtAmount(b.bg_amount_base)} base</div>
+                      )}
+                    </TableCell>
                     <TableCell>{fmtDate(b.contractual_required_up_to)}</TableCell>
                     <TableCell>{fmtDate(b.bg_expiry_date)}</TableCell>
                     <TableCell><Badge className={bgStatusColor(b.bg_status)}>{bgStatusLabel(b.bg_status)}</Badge></TableCell>
@@ -386,8 +418,34 @@ const BankGuaranteeRegisterPage: React.FC = () => {
               <div><Label>Issuing bank</Label><Input value={form.issuing_bank} onChange={(e) => setForm({ ...form, issuing_bank: e.target.value })} /></div>
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <div><Label>Amount</Label><Input type="number" value={form.bg_amount} onChange={(e) => setForm({ ...form, bg_amount: e.target.value })} /></div>
-              <div><Label>Currency</Label><Input value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })} /></div>
+              <div>
+                <Label>Amount</Label>
+                <Input type="number" value={form.bg_amount} onChange={(e) => setForm({ ...form, bg_amount: e.target.value })} />
+                {form.currency !== formBaseCurrency && form.bg_amount && (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    = {fmtAmount(Number(form.bg_amount) * (Number(form.conversion_rate) || 1), formBaseCurrency)} ({formBaseCurrency})
+                  </p>
+                )}
+              </div>
+              <div>
+                <Label>Currency</Label>
+                <select
+                  className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={form.currency}
+                  onChange={(e) => onBgCurrencyChange(e.target.value)}
+                >
+                  {Array.from(
+                    new Set([formBaseCurrency, ...formCurrencies.map((c) => c.currency), form.currency].filter(Boolean)),
+                  ).map((c) => {
+                    const r = c === formBaseCurrency ? 1 : formCurrencies.find((x) => x.currency === c)?.conversion_rate;
+                    return (
+                      <option key={c} value={c}>
+                        {c}{c !== formBaseCurrency && r ? ` (×${r})` : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
               <div>
                 <Label>Status</Label>
                 <Select value={form.bg_status} onValueChange={(v) => setForm({ ...form, bg_status: v })}>

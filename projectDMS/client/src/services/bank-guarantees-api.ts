@@ -18,6 +18,8 @@ export interface BGDTO {
   branch?: string | null;
   bg_amount?: number | null;
   currency: string;
+  conversion_rate?: number | null;
+  bg_amount_base?: number | null;
   submission_date?: string | null;
   contractual_required_up_to?: string | null;
   bg_expiry_date?: string | null;
@@ -43,6 +45,7 @@ export interface BGPayload {
   branch?: string;
   bg_amount?: number;
   currency?: string;
+  conversion_rate?: number;
   submission_date?: string;
   contractual_required_up_to?: string;
   bg_expiry_date?: string;
