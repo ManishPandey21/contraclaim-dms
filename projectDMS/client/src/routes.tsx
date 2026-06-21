@@ -60,6 +60,7 @@ const BankGuaranteeRegisterPage = lazy(() => import("./pages/BankGuaranteeRegist
 const ConcernsPage = lazy(() => import("./pages/ConcernsPage"));
 const BillingCatalogPage = lazy(() => import("./pages/BillingCatalogPage"));
 const RetrievalConsolePage = lazy(() => import("./pages/RetrievalConsolePage"));
+const IPCBillRegisterPage = lazy(() => import("./pages/IPCBillRegisterPage"));
 const ObservabilityPage = lazy(() => import("./pages/ObservabilityPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
@@ -221,6 +222,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/bank-guarantees" fallback="/overview">
               <BankGuaranteeRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="ipc-bills"
+          element={
+            <RoleGuard path="/ipc-bills" fallback="/overview">
+              <IPCBillRegisterPage />
             </RoleGuard>
           }
         />

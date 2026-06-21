@@ -98,6 +98,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Contract Controls registers (backend perms aliased to documents:read).
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
+  "/ipc-bills": ["dms.ipc.view", "dms.document.view"],
   "/concerns": ["concerns:read"],
   "/admin/billing-catalog": ["billing.plan.manage", "system:admin"],
   "/retrieval-console": ["dms.document.view"],
