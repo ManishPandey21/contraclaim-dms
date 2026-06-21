@@ -48,6 +48,44 @@ def test_bg_required_up_to_by_basis():
     assert bg_required_up_to(cm, "weird_type") == COMP
 
 
+# --- multi-currency contract value ----------------------------------------
+
+
+def test_total_contract_value_base_sums_converted_currencies():
+    from rbac_backend.services.contract_master_service import total_contract_value_base
+
+    cm = {
+        "currency": "INR",
+        "contract_currencies": [
+            {"currency": "INR", "conversion_rate": 1.0, "contract_value": 1_000_000},
+            {"currency": "USD", "conversion_rate": 83.0, "contract_value": 10_000},
+            {"currency": "EUR", "conversion_rate": 90.0, "contract_value": 5_000},
+        ],
+    }
+    # 1,000,000 + 10,000*83 + 5,000*90 = 1,000,000 + 830,000 + 450,000
+    assert total_contract_value_base(cm) == 2_280_000.0
+
+
+def test_total_contract_value_base_falls_back_to_single_currency():
+    from rbac_backend.services.contract_master_service import total_contract_value_base
+
+    assert total_contract_value_base({"current_contract_value": 750_000}) == 750_000.0
+    assert total_contract_value_base({"original_contract_value": 600_000}) == 600_000.0
+    assert total_contract_value_base({}) is None
+
+
+def test_contract_currency_validation():
+    import pytest as _pytest
+    from rbac_backend.models.contract_master import ContractCurrency
+
+    ok = ContractCurrency(currency="usd", conversion_rate=83.0, contract_value=10_000)
+    assert ok.currency == "USD"  # normalised
+    with _pytest.raises(Exception):
+        ContractCurrency(currency="USD", conversion_rate=0)  # non-positive rate
+    with _pytest.raises(Exception):
+        ContractCurrency(currency="  ", conversion_rate=1.0)  # empty code
+
+
 def test_bg_required_up_to_custom_rule_and_revised():
     cm = {
         "original_completion_date": COMP,

@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Per-BG-type validity rule: the required-up-to date = base(basis) + offset_days.
 # basis: "completion" (effective completion date) or "dlp_end" (completion + DLP).
@@ -29,6 +29,32 @@ DEFAULT_BG_VALIDITY_RULES: Dict[str, Dict[str, Any]] = {
 }
 
 
+class ContractCurrency(BaseModel):
+    """One contract currency with its award-fixed conversion rate to the base
+    currency, and the contract value denominated in that currency."""
+
+    currency: str
+    # 1 unit of `currency` = conversion_rate units of the base currency. The base
+    # currency itself has rate 1.0. Fixed at the time of award.
+    conversion_rate: float = 1.0
+    contract_value: Optional[float] = None  # value in this currency
+
+    @field_validator("currency")
+    @classmethod
+    def _currency_non_empty(cls, value: str) -> str:
+        cleaned = (value or "").strip().upper()
+        if not cleaned:
+            raise ValueError("currency code is required")
+        return cleaned
+
+    @field_validator("conversion_rate")
+    @classmethod
+    def _rate_positive(cls, value: float) -> float:
+        if value is None or float(value) <= 0:
+            raise ValueError("conversion_rate must be greater than 0")
+        return float(value)
+
+
 class ContractMasterBase(BaseModel):
     contract_id: str = "primary"  # package key; default single contract per project
     contract_name: Optional[str] = None
@@ -36,9 +62,13 @@ class ContractMasterBase(BaseModel):
     client_name: Optional[str] = None
     contractor_name: Optional[str] = None
     engineer_name: Optional[str] = None
-    currency: str = "INR"
+    currency: str = "INR"  # base (reporting) currency
     original_contract_value: Optional[float] = None
     current_contract_value: Optional[float] = None
+    # Multi-currency breakdown. When non-empty, the contract value is the sum of
+    # each currency's value converted to the base currency at its fixed rate.
+    # Empty => single-currency behaviour (value in `currency`).
+    contract_currencies: List[ContractCurrency] = Field(default_factory=list)
     contract_start_date: Optional[datetime] = None  # = Letter of Acceptance (LOA) date
     original_completion_date: Optional[datetime] = None
     revised_completion_date: Optional[datetime] = None
@@ -70,6 +100,7 @@ class ContractMasterUpdate(BaseModel):
     reporting_period: Optional[str] = None
     week_basis: Optional[str] = None
     bg_validity_rules: Optional[Dict[str, Dict[str, Any]]] = None
+    contract_currencies: Optional[List[ContractCurrency]] = None
 
 
 class ReviseCompletionRequest(BaseModel):
@@ -82,6 +113,10 @@ class ContractMaster(ContractMasterBase):
     # Derived for responses.
     effective_completion_date: Optional[datetime] = None
     dlp_end_date: Optional[datetime] = None
+    # Total contract value converted into the base `currency` (sum of each
+    # contract currency's value x its fixed rate); falls back to the
+    # single-currency value when no multi-currency breakdown is set.
+    total_contract_value_base: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None

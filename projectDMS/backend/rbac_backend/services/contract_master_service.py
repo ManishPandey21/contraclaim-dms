@@ -62,10 +62,35 @@ def bg_required_up_to(cm: Dict[str, Any], bg_type: str) -> Optional[datetime]:
     return base + timedelta(days=int(rule.get("offset_days") or 0))
 
 
+def total_contract_value_base(cm: Dict[str, Any]) -> Optional[float]:
+    """Total contract value in the base currency.
+
+    Sum each contract currency's value converted at its award-fixed rate. With no
+    multi-currency breakdown, fall back to the single-currency current/original
+    value so existing contracts are unaffected.
+    """
+    currencies = cm.get("contract_currencies") or []
+    if currencies:
+        total = 0.0
+        for entry in currencies:
+            value = entry.get("contract_value")
+            if value is None:
+                continue
+            rate = entry.get("conversion_rate")
+            rate = 1.0 if rate is None else float(rate)
+            total += float(value) * rate
+        return round(total, 2)
+    single = cm.get("current_contract_value")
+    if single is None:
+        single = cm.get("original_contract_value")
+    return round(float(single), 2) if single is not None else None
+
+
 def decorate(cm: Dict[str, Any]) -> Dict[str, Any]:
     c = dict(cm)
     c["effective_completion_date"] = effective_completion_date(c)
     c["dlp_end_date"] = dlp_end_date(c)
+    c["total_contract_value_base"] = total_contract_value_base(c)
     return c
 
 
