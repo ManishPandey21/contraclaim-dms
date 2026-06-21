@@ -216,6 +216,12 @@ const Sidebar = () => {
     { path: "/concerns", icon: <MessageSquare size={20} />, label: "Concerns" },
     { path: "/retrieval-console", icon: <Search size={20} />, label: "Retrieval Console" },
     {
+      path: "/observability",
+      icon: <Activity size={20} />,
+      label: "Observability",
+      permission: "reports:view",
+    },
+    {
       path: "/tasks",
       icon: <ClipboardList size={20} />,
       label: "Tasks",
