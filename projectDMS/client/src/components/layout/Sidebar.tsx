@@ -32,6 +32,7 @@ import {
   GitCompareArrows,
   Landmark,
   FileSignature,
+  PackageOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -245,6 +246,12 @@ const Sidebar = () => {
       icon: <Settings size={20} />,
       label: "Plan Settings",
       permission: "subscription.entitlement.manage",
+    },
+    {
+      path: "/admin/billing-catalog",
+      icon: <PackageOpen size={20} />,
+      label: "Billing Catalog",
+      permission: "billing.plan.manage",
     },
     {
       path: "/subscription-management",

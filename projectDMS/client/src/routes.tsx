@@ -58,6 +58,7 @@ const KeyDateDetailPage = lazy(() => import("./pages/KeyDateDetailPage"));
 const VariationRegisterPage = lazy(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazy(() => import("./pages/BankGuaranteeRegisterPage"));
 const ConcernsPage = lazy(() => import("./pages/ConcernsPage"));
+const BillingCatalogPage = lazy(() => import("./pages/BillingCatalogPage"));
 const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
 const LetterTemplateEditorPage = lazy(
   () => import("./pages/LetterTemplateEditorPage"),
@@ -226,6 +227,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/concerns" fallback="/overview">
               <ConcernsPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="admin/billing-catalog"
+          element={
+            <RoleGuard path="/admin/billing-catalog" fallback="/overview">
+              <BillingCatalogPage />
             </RoleGuard>
           }
         />
