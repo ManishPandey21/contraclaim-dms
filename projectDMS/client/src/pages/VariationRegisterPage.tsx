@@ -97,6 +97,12 @@ const VariationRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<VForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
+  // Per-currency split (variation-level). Empty = single-currency (flat amounts).
+  const [currencyRows, setCurrencyRows] = useState<
+    { currency: string; rate: string; submitted: string; approved: string }[]
+  >([]);
+  const [vBaseCurrency, setVBaseCurrency] = useState("INR");
+  const [vContractCurrencies, setVContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -123,13 +129,41 @@ const VariationRegisterPage: React.FC = () => {
     return () => { active = false; };
   }, []);
 
+  // Load the contract's currencies for the form's project so a split can be
+  // entered in the contract currencies with award-fixed rates.
+  useEffect(() => {
+    if (!dialogOpen || !form.project_id) { setVContractCurrencies([]); setVBaseCurrency("INR"); return; }
+    let active = true;
+    (async () => {
+      try {
+        const cm = await getContractMasterForProject(form.project_id);
+        if (!active) return;
+        setVBaseCurrency(cm?.currency || "INR");
+        setVContractCurrencies((cm?.contract_currencies || []).map((c) => ({ currency: c.currency, conversion_rate: c.conversion_rate })));
+      } catch { if (active) { setVContractCurrencies([]); setVBaseCurrency("INR"); } }
+    })();
+    return () => { active = false; };
+  }, [dialogOpen, form.project_id]);
+
+  const rateFor = (cur: string) =>
+    cur === vBaseCurrency ? 1 : vContractCurrencies.find((c) => c.currency === cur)?.conversion_rate ?? 1;
+
   const openCreate = () => {
     setEditingId(null);
     setForm({ ...EMPTY, project_id: projectFilter !== "all" ? projectFilter : "" });
+    setCurrencyRows([]);
     setDialogOpen(true);
   };
   const openEdit = (v: VariationDTO) => {
     setEditingId(v.id);
+    setCurrencyRows(
+      (v.currency_amounts || []).map((c) => ({
+        currency: c.currency || "",
+        rate: c.conversion_rate != null ? String(c.conversion_rate) : "",
+        submitted: c.submitted_amount != null ? String(c.submitted_amount) : "",
+        approved: c.approved_amount != null ? String(c.approved_amount) : "",
+      })),
+    );
     setForm({
       project_id: v.project_id || "", variation_number: v.variation_number || "",
       variation_type: v.variation_type, description: v.description || "",
@@ -155,12 +189,24 @@ const VariationRegisterPage: React.FC = () => {
         variation_type: form.variation_type as any,
         description: form.description || undefined,
         letter_reference: form.letter_reference || undefined,
-        submitted_amount: form.submitted_amount ? Number(form.submitted_amount) : undefined,
-        approved_amount: form.approved_amount ? Number(form.approved_amount) : undefined,
         original_contract_value: form.original_contract_value ? Number(form.original_contract_value) : undefined,
         status: form.status as any,
         remarks: form.remarks || undefined,
       };
+      const splitRows = currencyRows.filter((r) => r.currency.trim() && (r.submitted || r.approved));
+      if (splitRows.length > 0) {
+        // Multi-currency: send the per-currency split; base amounts derive server-side.
+        payload.currency_amounts = splitRows.map((r) => ({
+          currency: r.currency.trim().toUpperCase(),
+          conversion_rate: Number(r.rate) || rateFor(r.currency.trim().toUpperCase()),
+          submitted_amount: r.submitted ? Number(r.submitted) : undefined,
+          approved_amount: r.approved ? Number(r.approved) : undefined,
+        }));
+      } else {
+        payload.currency_amounts = [];
+        payload.submitted_amount = form.submitted_amount ? Number(form.submitted_amount) : undefined;
+        payload.approved_amount = form.approved_amount ? Number(form.approved_amount) : undefined;
+      }
       if (editingId) await updateVariation(editingId, payload);
       else await createVariation(payload);
       await load();
@@ -274,8 +320,16 @@ const VariationRegisterPage: React.FC = () => {
                     <TableCell className="font-mono text-xs">{v.variation_number || "—"}</TableCell>
                     <TableCell className="text-xs capitalize">{v.variation_type}</TableCell>
                     <TableCell className="max-w-[220px] truncate" title={v.description || ""}>{v.description || "—"}</TableCell>
-                    <TableCell>{fmtAmount(v.submitted_amount)}</TableCell>
-                    <TableCell>{fmtAmount(v.approved_amount)}</TableCell>
+                    <TableCell>
+                      {v.currency_amounts && v.currency_amounts.length > 0
+                        ? <span title="multi-currency (base)">{fmtAmount(v.submitted_amount_base)}<span className="ml-1 text-xs text-muted-foreground">≈base</span></span>
+                        : fmtAmount(v.submitted_amount)}
+                    </TableCell>
+                    <TableCell>
+                      {v.currency_amounts && v.currency_amounts.length > 0
+                        ? <span title="multi-currency (base)">{fmtAmount(v.approved_amount_base)}<span className="ml-1 text-xs text-muted-foreground">≈base</span></span>
+                        : fmtAmount(v.approved_amount)}
+                    </TableCell>
                     <TableCell><Badge className={variationStatusColor(v.status)}>{variationStatusLabel(v.status)}</Badge></TableCell>
                     <TableCell>{fmtDate(v.approval_date)}</TableCell>
                     <TableCell className="text-right">
@@ -355,9 +409,72 @@ const VariationRegisterPage: React.FC = () => {
               </div>
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <div><Label>Submitted</Label><Input type="number" value={form.submitted_amount} onChange={(e) => setForm({ ...form, submitted_amount: e.target.value })} /></div>
-              <div><Label>Approved</Label><Input type="number" value={form.approved_amount} onChange={(e) => setForm({ ...form, approved_amount: e.target.value })} /></div>
+              <div>
+                <Label>Submitted{currencyRows.length > 0 ? ` (${vBaseCurrency})` : ""}</Label>
+                <Input type="number" value={form.submitted_amount} disabled={currencyRows.length > 0}
+                  onChange={(e) => setForm({ ...form, submitted_amount: e.target.value })} />
+              </div>
+              <div>
+                <Label>Approved{currencyRows.length > 0 ? ` (${vBaseCurrency})` : ""}</Label>
+                <Input type="number" value={form.approved_amount} disabled={currencyRows.length > 0}
+                  onChange={(e) => setForm({ ...form, approved_amount: e.target.value })} />
+              </div>
               <div><Label>Original value</Label><Input type="number" value={form.original_contract_value} onChange={(e) => setForm({ ...form, original_contract_value: e.target.value })} /></div>
+            </div>
+
+            <div className="rounded-md border p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <div>
+                  <Label className="text-sm font-medium">Multi-currency split (optional)</Label>
+                  <p className="text-xs text-muted-foreground">
+                    A variation/BOQ item paid in 2+ currencies. Amounts convert to the
+                    base ({vBaseCurrency}) at award-fixed rates. When used, the flat
+                    amounts above are ignored.
+                  </p>
+                </div>
+                <Button type="button" variant="outline" size="sm"
+                  onClick={() => setCurrencyRows((r) => [...r, { currency: "", rate: "", submitted: "", approved: "" }])}>
+                  <PlusCircle className="mr-2 h-4 w-4" /> Add currency
+                </Button>
+              </div>
+              {currencyRows.length > 0 && (
+                <div className="space-y-2">
+                  <div className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2 text-xs text-muted-foreground">
+                    <span>Currency</span><span>Submitted</span><span>Approved</span><span />
+                  </div>
+                  {currencyRows.map((row, i) => (
+                    <div key={i} className="grid grid-cols-[1fr_1fr_1fr_auto] gap-2">
+                      <select
+                        className="flex h-10 rounded-md border border-input bg-background px-2 text-sm"
+                        value={row.currency}
+                        onChange={(e) => {
+                          const cur = e.target.value;
+                          setCurrencyRows((r) => r.map((x, j) => (j === i ? { ...x, currency: cur, rate: String(rateFor(cur)) } : x)));
+                        }}
+                      >
+                        <option value="">—</option>
+                        {Array.from(new Set([vBaseCurrency, ...vContractCurrencies.map((c) => c.currency), row.currency].filter(Boolean))).map((c) => (
+                          <option key={c} value={c}>{c}{c !== vBaseCurrency ? ` (×${rateFor(c)})` : ""}</option>
+                        ))}
+                      </select>
+                      <Input type="number" placeholder="0" value={row.submitted}
+                        onChange={(e) => setCurrencyRows((r) => r.map((x, j) => (j === i ? { ...x, submitted: e.target.value } : x)))} />
+                      <Input type="number" placeholder="0" value={row.approved}
+                        onChange={(e) => setCurrencyRows((r) => r.map((x, j) => (j === i ? { ...x, approved: e.target.value } : x)))} />
+                      <Button type="button" variant="ghost" size="icon" className="h-10 w-10 text-destructive"
+                        onClick={() => setCurrencyRows((r) => r.filter((_, j) => j !== i))}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                  <div className="pt-1 text-sm font-medium">
+                    Base ({vBaseCurrency}) — submitted{" "}
+                    {fmtAmount(currencyRows.reduce((s, r) => s + (Number(r.submitted) || 0) * (Number(r.rate) || rateFor(r.currency)), 0))}
+                    {" · "}approved{" "}
+                    {fmtAmount(currencyRows.reduce((s, r) => s + (Number(r.approved) || 0) * (Number(r.rate) || rateFor(r.currency)), 0))}
+                  </div>
+                </div>
+              )}
             </div>
             <div><Label>Letter reference</Label><Input value={form.letter_reference} onChange={(e) => setForm({ ...form, letter_reference: e.target.value })} /></div>
             <div><Label>Description</Label><Textarea value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} rows={2} /></div>

@@ -7,6 +7,13 @@ export type VariationStatus =
   | "draft" | "submitted" | "under_review" | "recommended"
   | "approved" | "rejected" | "superseded";
 
+export interface VariationCurrencyAmount {
+  currency: string;
+  conversion_rate: number; // to base, fixed at award
+  submitted_amount?: number | null;
+  approved_amount?: number | null;
+}
+
 export interface VariationDTO {
   id: string;
   variation_number?: string | null;
@@ -15,6 +22,9 @@ export interface VariationDTO {
   letter_reference?: string | null;
   submitted_amount?: number | null;
   approved_amount?: number | null;
+  currency_amounts?: VariationCurrencyAmount[];
+  submitted_amount_base?: number | null;
+  approved_amount_base?: number | null;
   difference_amount?: number | null;
   original_contract_value?: number | null;
   status: VariationStatus;
@@ -34,6 +44,7 @@ export interface VariationPayload {
   letter_reference?: string;
   submitted_amount?: number;
   approved_amount?: number;
+  currency_amounts?: VariationCurrencyAmount[];
   original_contract_value?: number;
   status?: VariationStatus;
   approval_date?: string;
