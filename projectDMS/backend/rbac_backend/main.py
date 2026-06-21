@@ -283,6 +283,13 @@ async def startup_event() -> None:
         CronTrigger(hour=8, minute=30),
         id="bg_expiry_scan",
     )
+    from .services.reference_sync_service import run_reference_sync_reaper
+
+    scheduler.add_job(
+        run_reference_sync_reaper,
+        CronTrigger(hour=8, minute=45),
+        id="reference_sync_reaper",
+    )
     scheduler.start()
 
 

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from bson.errors import InvalidId
@@ -195,6 +195,105 @@ class ReferenceSyncService:
             document_id,
         )
         return len(items)
+
+    async def drain_reference_queue(
+        self,
+        *,
+        batch: int = 200,
+        ttl_days: int = 30,
+    ) -> Dict[str, Any]:
+        """Resolve deferred references whose targets have since been ingested.
+
+        Without this reaper the ``reference_sync_queue`` only grows: a letter that
+        references a not-yet-uploaded letter is queued at ingest and never retried.
+
+        For each source document with pending entries we replay its *full* parser
+        reference set (already-resolved + still-pending) so newly-available targets
+        get linked without disturbing existing links (enqueue_missing=False avoids
+        re-queueing), then re-resolve each queued entry to set its status:
+          - target now found  -> ``resolved``
+          - source deleted     -> ``orphaned``
+          - older than ttl_days and still unresolved -> ``expired``
+          - otherwise          -> left ``pending`` (original age preserved)
+        """
+        db = await self._get_db()
+        now = datetime.utcnow()
+        cutoff = now - timedelta(days=ttl_days)
+
+        expired = await db.reference_sync_queue.update_many(
+            {"status": "pending", "createdAt": {"$lt": cutoff}},
+            {"$set": {"status": "expired", "updatedAt": now}},
+        )
+
+        pending = (
+            await db.reference_sync_queue.find({"status": "pending"})
+            .sort("createdAt", 1)
+            .limit(batch)
+            .to_list(length=batch)
+        )
+
+        by_doc: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in pending:
+            by_doc.setdefault(str(entry.get("document_id")), []).append(entry)
+
+        resolved_total = 0
+        orphaned_total = 0
+        processed_docs = 0
+
+        for document_id, entries in by_doc.items():
+            source_oid = self._to_object_id(document_id)
+            source_doc = (
+                await db.documents.find_one({"_id": source_oid}) if source_oid else None
+            )
+            entry_ids = [e["_id"] for e in entries]
+
+            if not source_doc:
+                await db.reference_sync_queue.update_many(
+                    {"_id": {"$in": entry_ids}},
+                    {"$set": {"status": "orphaned", "updatedAt": now}},
+                )
+                orphaned_total += len(entry_ids)
+                continue
+
+            processed_docs += 1
+            current = [
+                ref.model_dump()
+                for ref in self._coerce_reference_list(source_doc.get("references"))
+                if (ref.source or "").lower() == "parser"
+            ]
+            queued = [e.get("reference") for e in entries if e.get("reference")]
+
+            try:
+                await self.sync_bidirectional(
+                    document_id,
+                    current + queued,
+                    source="parser",
+                    enqueue_missing=False,
+                )
+            except ReferenceSyncError:
+                logger.warning("reaper: sync failed for document_id=%s", document_id)
+                continue
+
+            for e in entries:
+                target = await self._resolve_target_document(
+                    db=db, reference=e.get("reference") or {}, skip_ids={document_id}
+                )
+                if target:
+                    await db.reference_sync_queue.update_one(
+                        {"_id": e["_id"]},
+                        {"$set": {"status": "resolved", "updatedAt": now}},
+                    )
+                    resolved_total += 1
+
+        summary = {
+            "pending_scanned": len(pending),
+            "processed_docs": processed_docs,
+            "resolved": resolved_total,
+            "expired": expired.modified_count,
+            "orphaned": orphaned_total,
+        }
+        logger.info("reference_sync reaper: %s", summary)
+        return summary
 
     # ------------------------------------------------------------------ #
     # Internal helpers                                                   #
@@ -494,4 +593,17 @@ class ReferenceSyncService:
             return None
 
 
-__all__ = ["ReferenceSyncService", "ReferenceSyncError"]
+async def run_reference_sync_reaper() -> Dict[str, Any]:
+    """Scheduler entry point: drain the deferred reference-sync queue."""
+    try:
+        return await ReferenceSyncService().drain_reference_queue()
+    except Exception:  # pragma: no cover - defensive: scheduler must not crash
+        logger.exception("reference_sync reaper failed")
+        return {"error": "reaper_failed"}
+
+
+__all__ = [
+    "ReferenceSyncService",
+    "ReferenceSyncError",
+    "run_reference_sync_reaper",
+]
