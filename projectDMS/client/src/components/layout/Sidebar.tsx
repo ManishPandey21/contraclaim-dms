@@ -214,6 +214,7 @@ const Sidebar = () => {
     { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
     { path: "/concerns", icon: <MessageSquare size={20} />, label: "Concerns" },
+    { path: "/retrieval-console", icon: <Search size={20} />, label: "Retrieval Console" },
     {
       path: "/tasks",
       icon: <ClipboardList size={20} />,
