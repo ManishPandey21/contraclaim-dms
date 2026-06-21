@@ -21,6 +21,13 @@ export default defineConfig({
     pool: "forks",
     fileParallelism: false,
     testTimeout: 20000,
+    // Drop captured app console output. The serial worker accumulates heap across
+    // the whole run; a big avoidable consumer is buffered console noise (React
+    // act() warnings, router future-flag warnings, app error logs). Suppressing
+    // it cuts worker memory so stability doesn't hinge on a large heap. Test
+    // failures still print their own assertion diffs; this only drops console.*
+    // emitted by application code.
+    onConsoleLog: () => false,
     coverage: {
       reporter: ["text", "json", "html"],
       exclude: ["node_modules/", "src/tests/setup.ts"],
