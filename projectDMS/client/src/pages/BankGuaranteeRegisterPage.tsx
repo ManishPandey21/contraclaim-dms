@@ -34,7 +34,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { CalendarPlus, Download, Edit, Landmark, Loader2, PlusCircle, Unlock } from "lucide-react";
+import { AlertTriangle, CalendarPlus, Download, Edit, Landmark, Loader2, PlusCircle, Unlock } from "lucide-react";
 import { toast } from "sonner";
 import {
   BGDTO,
@@ -44,6 +44,7 @@ import {
   exportBGs,
   extendBG,
   getBGs,
+  getBGAlerts,
   getBGSummary,
   releaseBG,
   updateBG,
@@ -78,6 +79,7 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
 
 const BankGuaranteeRegisterPage: React.FC = () => {
   const [items, setItems] = useState<BGDTO[]>([]);
+  const [alerts, setAlerts] = useState<BGDTO[]>([]);
   const [summary, setSummary] = useState<BGSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [projectFilter, setProjectFilter] = useState("all");
@@ -97,8 +99,10 @@ const BankGuaranteeRegisterPage: React.FC = () => {
       if (projectFilter !== "all") params.project_id = projectFilter;
       if (statusFilter !== "all") params.status = statusFilter;
       if (typeFilter !== "all") params.type = typeFilter;
+      const scoped = projectFilter !== "all" ? { project_id: projectFilter } : undefined;
       setItems(await getBGs(params));
-      setSummary(await getBGSummary(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
+      setSummary(await getBGSummary(scoped));
+      setAlerts(await getBGAlerts(scoped));
     } catch {
       toast.error("Failed to load bank guarantees");
     }
@@ -238,6 +242,31 @@ const BankGuaranteeRegisterPage: React.FC = () => {
           <Stat label="Exp ≤30d" value={String(summary.expiring_30)} cls="text-red-600" />
           <Stat label="Expired" value={String(summary.expired)} cls="text-red-700" />
         </div>
+      )}
+
+      {alerts.length > 0 && (
+        <Card className="border-amber-300 bg-amber-50">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base text-amber-800">
+              <AlertTriangle className="h-5 w-5" />
+              {alerts.length} bank guarantee{alerts.length > 1 ? "s" : ""} need attention
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2 pt-0">
+            {alerts.map((b) => (
+              <button
+                key={b.id}
+                type="button"
+                onClick={() => openEdit(b)}
+                className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-left text-sm hover:bg-amber-100"
+                title={`Expiry ${fmtDate(b.bg_expiry_date)}`}
+              >
+                <span className="font-medium">{b.bg_number || bgTypeLabel(b.bg_type)}</span>
+                <span className="ml-2 text-amber-700">{bgAlertText(b)}</span>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
       )}
 
       <Card>

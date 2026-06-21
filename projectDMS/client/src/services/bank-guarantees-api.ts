@@ -94,6 +94,14 @@ export async function getBGSummary(params?: { project_id?: string }): Promise<BG
   return data as BGSummaryDTO;
 }
 
+// BGs needing attention (approaching expiry / claim deadline), scoped server-side.
+export async function getBGAlerts(params?: {
+  project_id?: string; organization_id?: string;
+}): Promise<BGDTO[]> {
+  const { data } = await api.get("/bank-guarantees/alerts", { params });
+  return Array.isArray(data) ? data.map(norm) : [];
+}
+
 export async function createBG(payload: BGPayload): Promise<BGDTO> {
   const { data } = await api.post("/bank-guarantees", payload);
   return norm(data);
