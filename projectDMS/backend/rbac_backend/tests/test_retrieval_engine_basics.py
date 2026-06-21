@@ -293,6 +293,74 @@ async def test_search_backend_fallback_to_mongo_when_qdrant_unhealthy():
     assert response.results, "Mongo fallback should return results"
 
 
+class RaisingVector(StubVector):
+    """Passes the up-front health check but fails mid-query (e.g. timeout)."""
+
+    def is_healthy(self) -> bool:
+        return True
+
+    async def search(self, *args, **kwargs):
+        raise RuntimeError("qdrant timeout")
+
+
+def _seed_one_chunk(fake_db: "FakeDB") -> None:
+    fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})
+    fake_db.chunks.docs.append(
+        {
+            "chunk_id": "chunk-1",
+            "document_id": "doc-1",
+            "org_id": "org-1",
+            "project_id": "proj-1",
+            "text_original": "timeline item",
+        }
+    )
+
+
+async def test_search_falls_back_to_mongo_when_qdrant_raises_midquery():
+    # Qdrant is healthy at backend-resolution time but throws during the query.
+    # The request must degrade to the Mongo failsafe, not surface a 500.
+    fake_db = FakeDB()
+    _seed_one_chunk(fake_db)
+    observability = ObservabilityService(fake_db)  # type: ignore[arg-type]
+    retrieval = RetrievalService(
+        db=fake_db,  # type: ignore[arg-type]
+        embedding_client=StubEmbedding(),
+        vector_client=RaisingVector(),
+        llm_generator=StubLLM(),  # type: ignore[arg-type]
+        observability=observability,
+    )
+    filters = SearchFilters(org_id="org-1", project_id="proj-1")
+    request = SearchRequest(
+        query="timeline",
+        strategy=SearchStrategy.VANILLA,
+        limit=1,
+        filters=filters,
+        backend=SearchBackend.AUTO,
+    )
+    response = await retrieval.search(request, current_user=None)  # must not raise
+    assert response.backend_used == SearchBackend.MONGO
+    assert response.results, "Mongo failsafe should still return results"
+
+
+async def test_rag_survives_qdrant_midquery_failure():
+    # rag() retrieves via the same path, so a Qdrant in-flight failure must still
+    # produce an answer through the Mongo failsafe instead of erroring.
+    fake_db = FakeDB()
+    _seed_one_chunk(fake_db)
+    observability = ObservabilityService(fake_db)  # type: ignore[arg-type]
+    retrieval = RetrievalService(
+        db=fake_db,  # type: ignore[arg-type]
+        embedding_client=StubEmbedding(),
+        vector_client=RaisingVector(),
+        llm_generator=StubLLM(),  # type: ignore[arg-type]
+        observability=observability,
+    )
+    filters = SearchFilters(org_id="org-1", project_id="proj-1")
+    request = RagRequest(query="timeline", strategy=SearchStrategy.VANILLA, limit=1, filters=filters)
+    resp = await retrieval.rag(request, current_user=None)  # must not raise
+    assert resp.answer, "RAG should produce an answer via the Mongo failsafe"
+
+
 async def test_rag_citations_include_doc_meta():
     fake_db = FakeDB()
     fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})

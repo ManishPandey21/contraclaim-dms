@@ -86,19 +86,33 @@ class RetrievalService:
             else:
                 retrievals = [(queries[0], await self._search_mongo(request))]
         else:
-            for q_vector, q in zip(query_vectors, queries):
-                results = await self.vector_client.search(
-                    q_vector,
-                    filters={
-                        "org_id": request.filters.org_id,
-                        "project_id": request.filters.project_id,
-                        "document_id": request.filters.document_id,
-                        "tags": request.filters.tags,
-                        **(request.filters.metadata or {}),
-                    },
-                    limit=request.limit,
+            try:
+                for q_vector, q in zip(query_vectors, queries):
+                    results = await self.vector_client.search(
+                        q_vector,
+                        filters={
+                            "org_id": request.filters.org_id,
+                            "project_id": request.filters.project_id,
+                            "document_id": request.filters.document_id,
+                            "tags": request.filters.tags,
+                            **(request.filters.metadata or {}),
+                        },
+                        limit=request.limit,
+                    )
+                    retrievals.append((q, results))
+            except Exception as exc:
+                # Qdrant passed the upfront health check but failed mid-query
+                # (timeout, dropped connection, transient error). Degrade to the
+                # Mongo failsafe instead of surfacing a 500. _resolve_backend only
+                # covers the up-front-unhealthy case; this covers fail-in-flight.
+                logger.warning(
+                    "Qdrant search failed (%s); falling back to Mongo failsafe", exc
                 )
-                retrievals.append((q, results))
+                backend_used = SearchBackend.MONGO
+                if self._is_contract_request(request):
+                    retrievals = [(queries[0], await self._search_contract_mongo(request))]
+                else:
+                    retrievals = [(queries[0], await self._search_mongo(request))]
         timings["vector_search_ms"] = (time.perf_counter() - search_start) * 1000
 
         fused = self._fuse_results(retrievals, request.limit, request.strategy)
