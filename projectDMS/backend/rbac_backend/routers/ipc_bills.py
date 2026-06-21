@@ -1,0 +1,180 @@
+"""IPC / Contractor Bill Register API. PolicyService-gated, tenant-scoped, audited."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+
+from ..core.database import get_db
+from ..core.permissions import Permissions
+from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..models.ipc_bill import (
+    IPCBill,
+    IPCBillCreate,
+    IPCBillSummary,
+    IPCBillUpdate,
+)
+from ..services.ipc_bill_service import IPCBillService
+from ..services.policy_service import PolicyService
+
+router = APIRouter()
+
+
+async def get_policy(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db=db)
+
+
+def _parse_date(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {value}")
+
+
+async def _load(ipc_id: str, permission: str, db, current_user, policy) -> dict:
+    i = await IPCBillService(db).get(ipc_id)
+    if not i:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IPC bill not found")
+    await policy.authorize_document(current_user, permission, i, resource_type="ipc_bill")
+    return i
+
+
+@router.get("/ipc-bills", response_model=List[IPCBill])
+async def list_ipc_bills(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    contract_id: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    payment_status: Optional[str] = Query(None),
+    currency: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=2000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user, Permissions.IPC_VIEW, resource_type="ipc_bills",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id, audit=False,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    items = await IPCBillService(db).list(
+        scope, project_id=project_id, contract_id=contract_id, status=status_filter,
+        payment_status=payment_status, currency=currency,
+        date_from=_parse_date(date_from), date_to=_parse_date(date_to), skip=skip, limit=limit,
+    )
+    return [IPCBill(**i) for i in items]
+
+
+@router.get("/ipc-bills/summary", response_model=IPCBillSummary)
+async def ipc_summary(
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    contract_id: Optional[str] = Query(None),
+    original_contract_value: Optional[float] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user, Permissions.IPC_VIEW, resource_type="ipc_bills",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id, audit=False,
+    )
+    scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+    return IPCBillSummary(**await IPCBillService(db).summary(
+        scope, project_id=project_id, contract_id=contract_id, original_contract_value=original_contract_value,
+    ))
+
+
+@router.get("/ipc-bills/export")
+async def export_ipc_bills(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    contract_id: Optional[str] = Query(None),
+    ipc_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user, Permissions.IPC_EXPORT, resource_type="ipc_bills",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id, audit=False,
+    )
+    from ..services import contract_controls_export as cx
+
+    svc = IPCBillService(db)
+    if ipc_id:
+        # Single-IPC export.
+        one = await _load(ipc_id, Permissions.IPC_EXPORT, db, current_user, policy)
+        rows = [one]
+        name = f"ipc-{one.get('ipc_number') or ipc_id}"
+    else:
+        scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
+        rows = await svc.list(scope, project_id=project_id, contract_id=contract_id, limit=5000)
+        name = "ipc-register"
+    return cx.export_response(name, cx.IPC_COLUMNS, rows, format)
+
+
+@router.post("/ipc-bills", response_model=IPCBill, status_code=status.HTTP_201_CREATED)
+async def create_ipc_bill(
+    payload: IPCBillCreate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = payload.organization_id or getattr(current_user, "organization_id", None)
+    await policy.authorize(
+        current_user, Permissions.IPC_CREATE, resource_type="ipc_bill",
+        organization_id=org, project_id=payload.project_id,
+    )
+    created = await IPCBillService(db).create(payload, current_user)
+    return IPCBill(**created)
+
+
+@router.get("/ipc-bills/{ipc_id}", response_model=IPCBill)
+async def get_ipc_bill(
+    ipc_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    return IPCBill(**await _load(ipc_id, Permissions.IPC_VIEW, db, current_user, policy))
+
+
+@router.put("/ipc-bills/{ipc_id}", response_model=IPCBill)
+async def update_ipc_bill(
+    ipc_id: str,
+    payload: IPCBillUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    # Moving to approved/paid/rejected requires the approve permission.
+    perm = Permissions.IPC_EDIT
+    if payload.status in {"approved", "paid", "partially_paid", "rejected"}:
+        perm = Permissions.IPC_APPROVE
+    i = await _load(ipc_id, perm, db, current_user, policy)
+    updated = await IPCBillService(db).update(i, payload.model_dump(exclude_unset=True), current_user)
+    return IPCBill(**(updated or i))
+
+
+@router.delete("/ipc-bills/{ipc_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_ipc_bill(
+    ipc_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    i = await _load(ipc_id, Permissions.IPC_DELETE, db, current_user, policy)
+    await IPCBillService(db).delete(i, current_user)
+    return None

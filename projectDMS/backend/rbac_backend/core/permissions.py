@@ -62,6 +62,12 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.bankguarantee.export",
     "dms.contract.master.view",
     "dms.contract.master.manage",
+    "dms.ipc.view",
+    "dms.ipc.create",
+    "dms.ipc.edit",
+    "dms.ipc.delete",
+    "dms.ipc.approve",
+    "dms.ipc.export",
     "dms.admin",
 ]
 
@@ -164,6 +170,12 @@ class Permissions:
     BG_EXPORT = "dms.bankguarantee.export"
     CONTRACT_MASTER_VIEW = "dms.contract.master.view"
     CONTRACT_MASTER_MANAGE = "dms.contract.master.manage"
+    IPC_VIEW = "dms.ipc.view"
+    IPC_CREATE = "dms.ipc.create"
+    IPC_EDIT = "dms.ipc.edit"
+    IPC_DELETE = "dms.ipc.delete"
+    IPC_APPROVE = "dms.ipc.approve"
+    IPC_EXPORT = "dms.ipc.export"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -278,6 +290,12 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.bankguarantee.export": ["documents:read"],
     "dms.contract.master.view": ["projects:read"],
     "dms.contract.master.manage": ["projects:update"],
+    "dms.ipc.view": ["documents:read"],
+    "dms.ipc.create": ["documents:create"],
+    "dms.ipc.edit": ["documents:update"],
+    "dms.ipc.delete": ["documents:delete"],
+    "dms.ipc.approve": ["documents:update", "projects:update"],
+    "dms.ipc.export": ["documents:read"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],

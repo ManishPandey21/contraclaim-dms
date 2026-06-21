@@ -41,6 +41,30 @@ BG_COLUMNS: List[Tuple[str, str]] = [
 ]
 
 
+IPC_COLUMNS: List[Tuple[str, str]] = [
+    ("ipc_number", "IPC No"),
+    ("ipc_period", "Period"),
+    ("contractor_name", "Contractor"),
+    ("status", "Status"),
+    ("payment_structure", "Payment Structure"),
+    ("payment_percentage", "Payment %"),
+    ("base_currency", "Base Ccy"),
+    ("claimed_total_base", "Claimed (base)"),
+    ("verified_total_base", "Verified (base)"),
+    ("approved_total_base", "Approved (base)"),
+    ("net_payable_base", "Net Payable (base)"),
+    ("paid_base", "Paid (base)"),
+    ("balance_payable_base", "Balance (base)"),
+    ("percent_billed", "% Billed"),
+    ("percent_approved", "% Approved"),
+    ("submission_date", "Submitted"),
+    ("verification_date", "Verified On"),
+    ("approval_date", "Approved On"),
+    ("payment_date", "Paid On"),
+    ("remarks", "Remarks"),
+]
+
+
 def _cell(value: Any) -> str:
     if value is None:
         return ""
