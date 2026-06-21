@@ -36,3 +36,7 @@ config/secrets/
 *.p12
 *.pfx
 *.token
+
+# Generated API types pipeline (see docs/SHARED_TYPES.md) — derived artifacts
+openapi.json
+src/types/api.generated.ts
