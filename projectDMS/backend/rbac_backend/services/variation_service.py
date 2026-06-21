@@ -26,12 +26,31 @@ def _sv(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
 
 
+def variation_base_amounts(variation: Dict[str, Any]) -> "tuple[float, float]":
+    """(submitted, approved) for one variation, in the contract base currency.
+
+    When a per-currency split is present, each currency's portion is converted at
+    its award-fixed rate; otherwise the flat amounts are taken to be in the base
+    currency already.
+    """
+    cas = variation.get("currency_amounts") or []
+    if cas:
+        sub = sum(
+            float(ca.get("submitted_amount") or 0.0) * float(ca.get("conversion_rate") or 1.0)
+            for ca in cas
+        )
+        app = sum(
+            float(ca.get("approved_amount") or 0.0) * float(ca.get("conversion_rate") or 1.0)
+            for ca in cas
+        )
+        return round(sub, 2), round(app, 2)
+    return float(variation.get("submitted_amount") or 0.0), float(variation.get("approved_amount") or 0.0)
+
+
 def signed_approved(variation: Dict[str, Any]) -> float:
-    """Approved amount with sign from the variation type (negative reduces value)."""
-    amount = variation.get("approved_amount")
-    if amount is None:
-        return 0.0
-    amount = abs(float(amount))
+    """Base-currency approved amount, signed by variation type (negative reduces value)."""
+    _, approved = variation_base_amounts(variation)
+    amount = abs(approved)
     return -amount if _sv(variation.get("variation_type")) == VariationType.NEGATIVE.value else amount
 
 
@@ -45,8 +64,9 @@ def variation_summary(variations: List[Dict[str, Any]], original_contract_value:
                 break
     ocv = float(ocv or 0.0)
 
-    total_submitted = sum(float(v.get("submitted_amount") or 0.0) for v in variations)
-    total_approved = sum(float(v.get("approved_amount") or 0.0) for v in variations
+    # All roll-ups are in the base currency so a mixed-currency register adds up.
+    total_submitted = sum(variation_base_amounts(v)[0] for v in variations)
+    total_approved = sum(variation_base_amounts(v)[1] for v in variations
                          if _sv(v.get("status")) == VariationStatus.APPROVED.value)
     cumulative = sum(signed_approved(v) for v in variations
                      if _sv(v.get("status")) == VariationStatus.APPROVED.value)
@@ -67,9 +87,19 @@ def variation_summary(variations: List[Dict[str, Any]], original_contract_value:
 
 def decorate(variation: Dict[str, Any]) -> Dict[str, Any]:
     v = dict(variation)
+    sub_base, app_base = variation_base_amounts(v)
+    v["submitted_amount_base"] = round(sub_base, 2)
+    v["approved_amount_base"] = round(app_base, 2)
     sub = v.get("submitted_amount")
     app = v.get("approved_amount")
-    v["difference_amount"] = (float(sub) - float(app)) if sub is not None and app is not None else None
+    if sub is not None and app is not None:
+        # Single-currency: keep the original submitted-vs-approved gap.
+        v["difference_amount"] = float(sub) - float(app)
+    elif v.get("currency_amounts"):
+        # Multi-currency: report the gap in the base currency.
+        v["difference_amount"] = round(sub_base - app_base, 2)
+    else:
+        v["difference_amount"] = None
     return v
 
 

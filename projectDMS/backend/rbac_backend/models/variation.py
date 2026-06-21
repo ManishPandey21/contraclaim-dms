@@ -32,6 +32,18 @@ class VariationStatus(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class VariationCurrencyAmount(BaseModel):
+    """One currency's portion of a variation. A single variation (BOQ item) may
+    be assessed/paid in two or more contract currencies."""
+
+    currency: str
+    # Award-fixed rate of `currency` to the contract base currency (from Contract
+    # Master). None/absent => 1.0.
+    conversion_rate: float = 1.0
+    submitted_amount: Optional[float] = None
+    approved_amount: Optional[float] = None
+
+
 class VariationBase(BaseModel):
     variation_number: Optional[str] = None
     variation_type: VariationType = VariationType.POSITIVE
@@ -39,6 +51,10 @@ class VariationBase(BaseModel):
     letter_reference: Optional[str] = None
     submitted_amount: Optional[float] = None
     approved_amount: Optional[float] = None
+    # Per-currency split. When present, the base-currency amounts are the sum of
+    # each currency's portion x its fixed rate; otherwise the flat amounts above
+    # are taken to be in the base currency.
+    currency_amounts: List[VariationCurrencyAmount] = Field(default_factory=list)
     original_contract_value: Optional[float] = None
     status: VariationStatus = VariationStatus.DRAFT
     approval_date: Optional[datetime] = None
@@ -60,6 +76,7 @@ class VariationUpdate(BaseModel):
     letter_reference: Optional[str] = None
     submitted_amount: Optional[float] = None
     approved_amount: Optional[float] = None
+    currency_amounts: Optional[List[VariationCurrencyAmount]] = None
     original_contract_value: Optional[float] = None
     status: Optional[VariationStatus] = None
     approval_date: Optional[datetime] = None
@@ -72,6 +89,9 @@ class Variation(VariationBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     # Derived for responses.
     difference_amount: Optional[float] = None
+    # Submitted/approved amounts converted into the contract base currency.
+    submitted_amount_base: Optional[float] = None
+    approved_amount_base: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None

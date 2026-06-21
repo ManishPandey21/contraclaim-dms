@@ -91,11 +91,19 @@ def due_alert_types(bg: Dict[str, Any], now: Optional[datetime] = None) -> List[
     return []
 
 
+def _base_amount(bg: Dict[str, Any]) -> float:
+    """BG amount in the contract base currency (amount x award-fixed rate)."""
+    amount = float(bg.get("bg_amount") or 0.0)
+    rate = bg.get("conversion_rate")
+    return amount * (1.0 if rate is None else float(rate))
+
+
 def decorate(bg: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     b = dict(bg)
     b["extension_required"] = extension_required(b, now)
     b["days_to_expiry"] = days_to_expiry(b, now)
     b["next_alert_date"] = next_alert_date(b)
+    b["bg_amount_base"] = round(_base_amount(b), 2) if b.get("bg_amount") is not None else None
     return b
 
 
@@ -105,7 +113,8 @@ def bg_summary(bgs: List[Dict[str, Any]], now: Optional[datetime] = None) -> Dic
     total_amount = 0.0
     for b in bgs:
         out["total"] += 1
-        total_amount += float(b.get("bg_amount") or 0.0)
+        # Convert to the base currency so a mixed-currency register sums correctly.
+        total_amount += _base_amount(b)
         status = _sv(b.get("bg_status"))
         if status == BGStatus.RELEASED.value:
             out["released"] += 1

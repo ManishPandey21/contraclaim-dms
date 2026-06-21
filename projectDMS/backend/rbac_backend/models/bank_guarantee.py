@@ -44,6 +44,9 @@ class BankGuaranteeBase(BaseModel):
     branch: Optional[str] = None
     bg_amount: Optional[float] = None
     currency: str = "INR"
+    # Award-fixed rate of `currency` to the contract base currency (from Contract
+    # Master). None/absent => 1.0 (BG already in the base currency).
+    conversion_rate: Optional[float] = None
     submission_date: Optional[datetime] = None
     contractual_required_up_to: Optional[datetime] = None
     bg_expiry_date: Optional[datetime] = None
@@ -68,6 +71,7 @@ class BankGuaranteeUpdate(BaseModel):
     branch: Optional[str] = None
     bg_amount: Optional[float] = None
     currency: Optional[str] = None
+    conversion_rate: Optional[float] = None
     submission_date: Optional[datetime] = None
     contractual_required_up_to: Optional[datetime] = None
     bg_expiry_date: Optional[datetime] = None
@@ -101,6 +105,8 @@ class BankGuarantee(BankGuaranteeBase):
     extension_required: Optional[bool] = None
     days_to_expiry: Optional[int] = None
     next_alert_date: Optional[datetime] = None
+    # bg_amount converted to the contract base currency (bg_amount x rate).
+    bg_amount_base: Optional[float] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None
