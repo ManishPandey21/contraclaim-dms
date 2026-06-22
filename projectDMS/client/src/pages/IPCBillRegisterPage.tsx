@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, Edit, FileText, Loader2, PlusCircle, Tags, Trash2 } from "lucide-react";
+import { Download, Edit, FileText, Loader2, PlusCircle, Search, Tags, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,17 +21,18 @@ import useRBAC from "@/hooks/useRBAC";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
-  COMPONENT_FIELDS, ComponentFieldConfig, CurrencyAmount, DEDUCTION_KEYS, DEDUCTION_LABELS,
-  DeductionsByPerspective, IPCBillDTO, IPCBillSummaryDTO, IPCLineItem, IPCPaymentRecord, IPCRevision,
-  IPCStatus, PERSPECTIVE_COLUMN, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS, PaymentStructure,
-  PerspectiveDeductions, PerspectiveKey, componentBase, createIPCBill, deleteIPCBill, emptyDeductions,
-  emptyPerspectiveDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal,
+  COMPONENT_FIELDS, ComponentFieldConfig, CurrencyAmount, DEDUCTION_LABELS, DEDUCTION_TAB_KEYS,
+  DeductionsByPerspective, GST_TAB_KEYS, IPCBillDTO, IPCBillSummaryDTO, IPCLineItem, IPCPaymentRecord,
+  IPCRevision, IPCStatus, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS, PaymentStructure,
+  PerspectiveDeductions, PerspectiveKey, RECOVERY_TAB_KEYS, componentBase, createIPCBill, deleteIPCBill,
+  emptyDeductions, emptyPerspectiveDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal,
   perspectiveDeductionsBase, updateIPCBill,
 } from "@/services/ipc-bills-api";
 import {
   IPCCategory, IPCCategoryKind, createIPCCategory, deleteIPCCategory, getIPCCategories,
   getIPCCategoriesManage, updateIPCCategory,
 } from "@/services/ipc-categories-api";
+import { DocumentItem, listDocuments } from "@/services/documents-api";
 
 const STATUSES: IPCStatus[] = ["draft", "submitted", "under_verification", "verified", "approved", "partially_paid", "paid", "rejected"];
 const PAY_STRUCT: PaymentStructure[] = ["full", "80_20", "20", "partial", "custom"];
@@ -51,13 +52,13 @@ interface HForm {
   project_id: string; ipc_number: string; ipc_date: string; period_from: string; period_to: string;
   contractor_name: string; approver: string; payment_structure: PaymentStructure; payment_percentage: string;
   status: IPCStatus; base_currency: string; original_contract_value: string; remarks: string;
-  letter_references: string; linked_document_ids: string;
+  letter_references: string;
 }
 const EMPTY_H: HForm = {
   project_id: "", ipc_number: "", ipc_date: "", period_from: "", period_to: "",
   contractor_name: "", approver: "", payment_structure: "full", payment_percentage: "",
   status: "draft", base_currency: "INR", original_contract_value: "", remarks: "",
-  letter_references: "", linked_document_ids: "",
+  letter_references: "",
 };
 
 const IPCBillRegisterPage: React.FC = () => {
@@ -79,6 +80,7 @@ const IPCBillRegisterPage: React.FC = () => {
   const [lineItems, setLineItems] = useState<IPCLineItem[]>([]);
   const [deductions, setDeductions] = useState<DeductionsByPerspective>(emptyDeductions());
   const [payments, setPayments] = useState<IPCPaymentRecord[]>([]);
+  const [linkedDocIds, setLinkedDocIds] = useState<string[]>([]);
   const [revisions, setRevisions] = useState<IPCRevision[]>([]);
   const [dedPersp, setDedPersp] = useState<PerspectiveKey>("employer_approved");
   const [saving, setSaving] = useState(false);
@@ -184,6 +186,7 @@ const IPCBillRegisterPage: React.FC = () => {
     setLineItems([]);
     setDeductions(emptyDeductions());
     setPayments([]);
+    setLinkedDocIds([]);
     setRevisions([]);
     setDedPersp("employer_approved");
     setDialogOpen(true);
@@ -198,7 +201,6 @@ const IPCBillRegisterPage: React.FC = () => {
       status: i.status, base_currency: i.base_currency || "INR",
       original_contract_value: i.original_contract_value != null ? String(i.original_contract_value) : "",
       remarks: i.remarks || "", letter_references: (i.letter_references || []).join(", "),
-      linked_document_ids: (i.linked_document_ids || []).join(", "),
     });
     setLineItems((i.line_items || []).map((li) => ({ ...li })));
     setDeductions({
@@ -207,6 +209,7 @@ const IPCBillRegisterPage: React.FC = () => {
       employer_approved: { ...emptyPerspectiveDeductions(), ...i.deductions?.employer_approved },
     });
     setPayments((i.payments || []).map((p) => ({ ...p })));
+    setLinkedDocIds(i.linked_document_ids || []);
     setRevisions(i.revisions || []);
     setDedPersp("employer_approved");
     setDialogOpen(true);
@@ -214,6 +217,39 @@ const IPCBillRegisterPage: React.FC = () => {
 
   const setDedComp = (pk: PerspectiveKey, ck: keyof PerspectiveDeductions, rows: CurrencyAmount[]) =>
     setDeductions((d) => ({ ...d, [pk]: { ...d[pk], [ck]: rows } }));
+
+  // One deduction-group tab: a shared perspective selector, the component
+  // editors for that group's keys, and the group's subtotal for the perspective.
+  const dedPanel = (keys: (keyof PerspectiveDeductions)[], title: string) => {
+    const subtotal = keys.reduce((s, k) => s + componentBase(deductions[dedPersp][k]), 0);
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <Label className="text-xs text-muted-foreground">Perspective</Label>
+          <Select value={dedPersp} onValueChange={(v) => setDedPersp(v as PerspectiveKey)}>
+            <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+            <SelectContent>{PERSPECTIVE_KEYS.map((pk) => <SelectItem key={pk} value={pk}>{PERSPECTIVE_LABELS[pk]}</SelectItem>)}</SelectContent>
+          </Select>
+        </div>
+        {keys.map((ck) => (
+          <ComponentEditor
+            key={ck}
+            title={DEDUCTION_LABELS[ck]}
+            rows={deductions[dedPersp][ck]}
+            baseCurrency={header.base_currency}
+            currencyOptions={currencyOptions}
+            rateFor={rateFor}
+            fieldConfig={COMPONENT_FIELDS[ck]}
+            categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
+            onChange={(rows) => setDedComp(dedPersp, ck, rows)}
+          />
+        ))}
+        <div className="rounded-md bg-muted/40 px-3 py-2 text-sm font-medium">
+          {title} — {PERSPECTIVE_LABELS[dedPersp]} ({header.base_currency}): {fmt(subtotal)}
+        </div>
+      </div>
+    );
+  };
 
   const save = async () => {
     if (!header.project_id || !header.ipc_number.trim()) {
@@ -237,7 +273,7 @@ const IPCBillRegisterPage: React.FC = () => {
         original_contract_value: header.original_contract_value ? Number(header.original_contract_value) : undefined,
         remarks: header.remarks || undefined,
         letter_references: header.letter_references.split(",").map((s) => s.trim()).filter(Boolean),
-        linked_document_ids: header.linked_document_ids.split(",").map((s) => s.trim()).filter(Boolean),
+        linked_document_ids: linkedDocIds,
         line_items: lineItems,
         deductions,
         payments,
@@ -411,7 +447,9 @@ const IPCBillRegisterPage: React.FC = () => {
             <TabsList className="flex h-auto flex-wrap justify-start">
               <TabsTrigger value="header">Header</TabsTrigger>
               <TabsTrigger value="line">Line items</TabsTrigger>
+              <TabsTrigger value="rec">Recoveries &amp; withholding</TabsTrigger>
               <TabsTrigger value="ded">Deductions</TabsTrigger>
+              <TabsTrigger value="gst">GST</TabsTrigger>
               <TabsTrigger value="pay">Payments</TabsTrigger>
               <TabsTrigger value="docs">Docs &amp; history</TabsTrigger>
             </TabsList>
@@ -472,32 +510,9 @@ const IPCBillRegisterPage: React.FC = () => {
               </Card>
             </TabsContent>
 
-            <TabsContent value="ded" className="space-y-3">
-              <div className="flex items-center gap-2">
-                <Label className="text-xs text-muted-foreground">Perspective</Label>
-                <Select value={dedPersp} onValueChange={(v) => setDedPersp(v as PerspectiveKey)}>
-                  <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
-                  <SelectContent>{PERSPECTIVE_KEYS.map((pk) => <SelectItem key={pk} value={pk}>{PERSPECTIVE_LABELS[pk]}</SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-              {DEDUCTION_KEYS.map((ck) => (
-                <ComponentEditor
-                  key={ck}
-                  title={DEDUCTION_LABELS[ck]}
-                  rows={deductions[dedPersp][ck]}
-                  baseCurrency={header.base_currency}
-                  currencyOptions={currencyOptions}
-                  rateFor={rateFor}
-                  fieldConfig={COMPONENT_FIELDS[ck]}
-                  categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
-                  onChange={(rows) => setDedComp(dedPersp, ck, rows)}
-                />
-              ))}
-              <div className="rounded-md bg-muted/40 px-3 py-2 text-sm font-medium">
-                {PERSPECTIVE_LABELS[dedPersp]} net ({header.base_currency}):{" "}
-                {fmt(lineTotal(lineItems, PERSPECTIVE_COLUMN[dedPersp]) - perspectiveDeductionsBase(deductions[dedPersp]))}
-              </div>
-            </TabsContent>
+            <TabsContent value="rec" className="space-y-3">{dedPanel(RECOVERY_TAB_KEYS, "Recoveries & withholding")}</TabsContent>
+            <TabsContent value="ded" className="space-y-3">{dedPanel(DEDUCTION_TAB_KEYS, "Deductions")}</TabsContent>
+            <TabsContent value="gst" className="space-y-3">{dedPanel(GST_TAB_KEYS, "GST")}</TabsContent>
 
             <TabsContent value="pay" className="space-y-3">
               <Card>
@@ -514,11 +529,7 @@ const IPCBillRegisterPage: React.FC = () => {
             </TabsContent>
 
             <TabsContent value="docs" className="space-y-3">
-              <Field label="Linked document IDs">
-                <Textarea rows={2} value={header.linked_document_ids}
-                  onChange={(e) => setHeader((h) => ({ ...h, linked_document_ids: e.target.value }))}
-                  placeholder="doc-id-1, doc-id-2" />
-              </Field>
+              <LettersLinker projectId={header.project_id} linkedIds={linkedDocIds} onChange={setLinkedDocIds} />
               <Card>
                 <CardHeader className="pb-2"><CardTitle className="text-sm">Revision history</CardTitle></CardHeader>
                 <CardContent>
@@ -705,6 +716,93 @@ const ComponentEditor: React.FC<{
         </div>
       ))}
     </div>
+  );
+};
+
+// Search uploaded letters/documents (scoped to the IPC's project) and link them
+// to the certificate. Linked ids are shown as removable chips.
+const docName = (d: DocumentItem) => d.name || d.filename || d._id;
+
+const LettersLinker: React.FC<{ projectId: string; linkedIds: string[]; onChange: (ids: string[]) => void }> =
+({ projectId, linkedIds, onChange }) => {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<DocumentItem[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [names, setNames] = useState<Record<string, string>>({});
+
+  // Build a name map for already-linked ids (from the project's documents).
+  useEffect(() => {
+    if (!projectId) return;
+    let active = true;
+    (async () => {
+      try {
+        const { documents } = await listDocuments({ project_id: projectId, limit: 200 });
+        if (!active) return;
+        const map: Record<string, string> = {};
+        (documents || []).forEach((d) => { map[d._id] = docName(d); });
+        setNames((prev) => ({ ...map, ...prev }));
+      } catch { /* optional */ }
+    })();
+    return () => { active = false; };
+  }, [projectId]);
+
+  const search = async () => {
+    setSearching(true);
+    try {
+      const { documents } = await listDocuments({ project_id: projectId || undefined, q: q.trim() || undefined, limit: 25 });
+      const term = q.trim().toLowerCase();
+      const list = (documents || []).filter((d) => !term || docName(d).toLowerCase().includes(term));
+      setResults(list);
+      setNames((prev) => { const m = { ...prev }; list.forEach((d) => { m[d._id] = docName(d); }); return m; });
+    } catch { toast.error("Search failed"); } finally { setSearching(false); }
+  };
+
+  const add = (d: DocumentItem) => { if (!linkedIds.includes(d._id)) onChange([...linkedIds, d._id]); };
+  const remove = (id: string) => onChange(linkedIds.filter((x) => x !== id));
+
+  return (
+    <Card>
+      <CardHeader className="pb-2"><CardTitle className="text-sm">Linked letters &amp; documents</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        <div className="flex flex-wrap gap-2">
+          {linkedIds.length === 0 ? (
+            <span className="text-sm text-muted-foreground">No documents linked.</span>
+          ) : linkedIds.map((id) => (
+            <Badge key={id} variant="secondary" className="gap-1">
+              <FileText className="h-3 w-3" />{names[id] || id}
+              <button type="button" className="ml-1" onClick={() => remove(id)} aria-label="Unlink"><X className="h-3 w-3" /></button>
+            </Badge>
+          ))}
+        </div>
+        <div className="flex gap-2">
+          <Input placeholder="Search uploaded letters…" value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void search(); } }} />
+          <Button type="button" variant="outline" onClick={() => void search()} disabled={searching || !projectId}>
+            {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+          </Button>
+        </div>
+        {!projectId && <p className="text-xs text-muted-foreground">Select a project on the Header tab to search its letters.</p>}
+        {results.length > 0 && (
+          <div className="max-h-48 overflow-y-auto rounded-md border">
+            {results.map((d) => {
+              const linked = linkedIds.includes(d._id);
+              return (
+                <div key={d._id} className="flex items-center justify-between gap-2 border-b px-3 py-2 last:border-0">
+                  <div className="flex min-w-0 items-center gap-2 text-sm">
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{docName(d)}</span>
+                  </div>
+                  <Button type="button" size="sm" variant={linked ? "ghost" : "outline"} disabled={linked} onClick={() => add(d)}>
+                    {linked ? "Linked" : "Link"}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 };
 

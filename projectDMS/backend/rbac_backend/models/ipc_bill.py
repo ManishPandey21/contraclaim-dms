@@ -103,19 +103,22 @@ class IPCLineItem(BaseModel):
 
 
 class IPCPerspectiveDeductions(BaseModel):
-    """The deduction breakdown for one perspective. `net = gross - sum(these)`."""
+    """The deduction breakdown for one perspective. `net = gross - sum(these)`.
+
+    Surfaced in the editor across three tabs: recoveries/withholding/penalties,
+    statutory deductions (Income Tax, Labour Cess via the deduction master) and
+    GST."""
 
     recovery_of_advances: List[CurrencyAmount] = Field(default_factory=list)
-    deductions: List[CurrencyAmount] = Field(default_factory=list)
-    it_tax: List[CurrencyAmount] = Field(default_factory=list)        # income tax
-    gst: List[CurrencyAmount] = Field(default_factory=list)
     withheld: List[CurrencyAmount] = Field(default_factory=list)
     penalties_ld: List[CurrencyAmount] = Field(default_factory=list)  # penalties / LD
+    deductions: List[CurrencyAmount] = Field(default_factory=list)    # IT, Labour Cess, ...
+    gst: List[CurrencyAmount] = Field(default_factory=list)
 
 
 # The deduction components that reduce gross to net, in roll-up order.
 DEDUCTION_COMPONENTS = (
-    "recovery_of_advances", "deductions", "it_tax", "gst", "withheld", "penalties_ld",
+    "recovery_of_advances", "withheld", "penalties_ld", "deductions", "gst",
 )
 
 

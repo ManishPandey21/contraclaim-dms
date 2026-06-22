@@ -36,14 +36,15 @@ def test_line_total_converts_each_column_to_base():
 def test_perspective_deductions_sums_all_components():
     persp = {
         "recovery_of_advances": [_ca("INR", 1.0, 2000)],
-        "deductions": [_ca("INR", 1.0, 3000)],
-        "it_tax": [_ca("INR", 1.0, 1000)],
-        "gst": [_ca("INR", 1.0, 1500)],
         "withheld": [_ca("INR", 1.0, 500)],
         "penalties_ld": [_ca("INR", 1.0, 0)],
+        "deductions": [_ca("INR", 1.0, 3000)],   # Income Tax + Labour Cess via master
+        "gst": [_ca("INR", 1.0, 1500)],
     }
-    assert perspective_deductions_base(persp) == 8_000.0
+    assert perspective_deductions_base(persp) == 7_000.0
     assert perspective_deductions_base(None) == 0.0
+    # A field outside the deduction set (legacy it_tax) is ignored.
+    assert perspective_deductions_base({"it_tax": [_ca("INR", 1.0, 999)]}) == 0.0
 
 
 def test_payments_base_sums_records():

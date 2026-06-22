@@ -32,24 +32,27 @@ export interface CurrencyAmount {
 // Deduction components for one perspective.
 export interface PerspectiveDeductions {
   recovery_of_advances: CurrencyAmount[];
-  deductions: CurrencyAmount[];
-  it_tax: CurrencyAmount[];
-  gst: CurrencyAmount[];
   withheld: CurrencyAmount[];
   penalties_ld: CurrencyAmount[];
+  deductions: CurrencyAmount[];  // statutory: Income Tax, Labour Cess (via master)
+  gst: CurrencyAmount[];
 }
 
 export const DEDUCTION_KEYS: (keyof PerspectiveDeductions)[] = [
-  "recovery_of_advances", "deductions", "it_tax", "gst", "withheld", "penalties_ld",
+  "recovery_of_advances", "withheld", "penalties_ld", "deductions", "gst",
 ];
 export const DEDUCTION_LABELS: Record<keyof PerspectiveDeductions, string> = {
   recovery_of_advances: "Recovery of advances",
-  deductions: "Deductions",
-  it_tax: "Income tax (IT)",
-  gst: "GST",
   withheld: "Withheld",
   penalties_ld: "Penalties / LD",
+  deductions: "Deductions",
+  gst: "GST",
 };
+
+// The deduction components grouped into editor tabs.
+export const RECOVERY_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["recovery_of_advances", "withheld", "penalties_ld"];
+export const DEDUCTION_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["deductions"];
+export const GST_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["gst"];
 
 // Which deduction rows carry a typed category (from which master) and/or a
 // free-text description. Drives the editor UI.
@@ -59,11 +62,10 @@ export interface ComponentFieldConfig {
 }
 export const COMPONENT_FIELDS: Record<keyof PerspectiveDeductions, ComponentFieldConfig> = {
   recovery_of_advances: { categoryKind: "advance", description: true },
-  deductions: { categoryKind: "deduction", description: true },
-  it_tax: {},
-  gst: {},
   withheld: { description: true },
   penalties_ld: { description: true },
+  deductions: { categoryKind: "deduction", description: true },
+  gst: { description: true },
 };
 
 export const PERSPECTIVE_KEYS = [
