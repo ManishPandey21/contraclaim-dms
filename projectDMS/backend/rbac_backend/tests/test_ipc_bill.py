@@ -1,17 +1,17 @@
 """IPC / Contractor Bill Register roll-ups.
 
-New function-first model: gross comes from line items (claimed/verified/approved
-columns), deductions are captured per perspective, payments are discrete records.
+Function-first model: gross comes from line items (claimed/verified/approved
+columns); each deduction component is likewise a list of lines carrying the
+three perspective columns; payments are discrete records.
 """
 
-from rbac_backend.models.ipc_bill import CurrencyAmount, IPCLineItem, IPCBill
+from rbac_backend.models.ipc_bill import IPCDeductionLine, IPCLineItem, IPCBill
 from rbac_backend.services.ipc_bill_service import (
-    component_base,
     decorate,
+    deductions_col_base,
     ipc_summary,
     line_total,
     payments_base,
-    perspective_deductions_base,
 )
 
 
@@ -20,31 +20,32 @@ def _li(currency, rate, claimed, verified, approved):
             "claimed": claimed, "verified": verified, "approved": approved}
 
 
+# Deduction lines share the same column shape as line items.
+_dl = _li
+
+
 def _ca(currency, rate, amount):
     return {"currency": currency, "conversion_rate": rate, "amount": amount}
 
 
 def test_line_total_converts_each_column_to_base():
     items = [_li("USD", 83.0, 100, 90, 90), _li("EUR", 90.0, 50, 50, 40)]
-    # claimed: 100*83 + 50*90 = 8300 + 4500 = 12,800
-    assert line_total(items, "claimed") == 12_800.0
-    # approved: 90*83 + 40*90 = 7470 + 3600 = 11,070
-    assert line_total(items, "approved") == 11_070.0
+    assert line_total(items, "claimed") == 12_800.0           # 100*83 + 50*90
+    assert line_total(items, "approved") == 11_070.0          # 90*83 + 40*90
     assert line_total([], "claimed") == 0.0
 
 
-def test_perspective_deductions_sums_all_components():
-    persp = {
-        "recovery_of_advances": [_ca("INR", 1.0, 2000)],
-        "withheld": [_ca("INR", 1.0, 500)],
-        "penalties_ld": [_ca("INR", 1.0, 0)],
-        "deductions": [_ca("INR", 1.0, 3000)],   # Income Tax + Labour Cess via master
-        "gst": [_ca("INR", 1.0, 1500)],
+def test_deductions_col_base_sums_components_per_column():
+    ded = {
+        "recovery_of_advances": [_dl("INR", 1.0, 2200, 2100, 2000)],
+        "withheld": [_dl("INR", 1.0, 600, 550, 500)],
+        "penalties_ld": [_dl("INR", 1.0, 0, 0, 0)],
+        "deductions": [_dl("INR", 1.0, 3300, 3100, 3000)],   # IT, Labour Cess
+        "gst": [_dl("INR", 1.0, 1600, 1550, 1500)],
     }
-    assert perspective_deductions_base(persp) == 7_000.0
-    assert perspective_deductions_base(None) == 0.0
-    # A field outside the deduction set (legacy it_tax) is ignored.
-    assert perspective_deductions_base({"it_tax": [_ca("INR", 1.0, 999)]}) == 0.0
+    assert deductions_col_base(ded, "approved") == 7_000.0    # 2000+500+0+3000+1500
+    assert deductions_col_base(ded, "claimed") == 7_700.0     # 2200+600+0+3300+1600
+    assert deductions_col_base(None, "approved") == 0.0
 
 
 def test_payments_base_sums_records():
@@ -57,20 +58,18 @@ def test_decorate_derives_totals_balance_and_percentages():
         "original_contract_value": 1_000_000,
         "line_items": [_li("INR", 1.0, 99600, 90000, 83000)],
         "deductions": {
-            "employer_approved": {
-                "recovery_of_advances": [_ca("INR", 1.0, 5000)],
-                "deductions": [_ca("INR", 1.0, 3000)],
-            }
+            "recovery_of_advances": [_dl("INR", 1.0, 6000, 5500, 5000)],
+            "deductions": [_dl("INR", 1.0, 3500, 3200, 3000)],
         },
         "payments": [_ca("INR", 1.0, 60000)],
     }
     d = decorate(ipc)
     assert d["claimed_total_base"] == 99_600.0
     assert d["approved_total_base"] == 83_000.0
-    assert d["total_deductions_base"] == 8_000.0
-    assert d["net_payable_base"] == 75_000.0     # 83,000 - 8,000
+    assert d["total_deductions_base"] == 8_000.0     # approved col: 5000 + 3000
+    assert d["net_payable_base"] == 75_000.0         # 83,000 - 8,000
     assert d["paid_base"] == 60_000.0
-    assert d["balance_payable_base"] == 15_000.0  # 75,000 - 60,000
+    assert d["balance_payable_base"] == 15_000.0     # 75,000 - 60,000
     assert d["percent_billed"] == round(99_600 / 1_000_000 * 100, 4)
     assert d["percent_approved"] == round(83_000 / 1_000_000 * 100, 4)
 
@@ -79,7 +78,7 @@ def test_summary_aggregates_and_counts():
     ipcs = [
         {"status": "approved", "original_contract_value": 1_000_000,
          "line_items": [_li("INR", 1.0, 100000, 95000, 90000)],
-         "deductions": {"employer_approved": {"deductions": [_ca("INR", 1.0, 0)]}},
+         "deductions": {"deductions": [_dl("INR", 1.0, 0, 0, 0)]},
          "payments": [_ca("INR", 1.0, 50000)]},
         {"status": "paid",
          "line_items": [_li("INR", 1.0, 40000, 40000, 40000)],
@@ -100,12 +99,15 @@ def test_summary_aggregates_and_counts():
 
 def test_model_validation_and_defaults():
     import pytest
-    ok = CurrencyAmount(currency="usd", conversion_rate=83.0, amount=100)
+    ok = IPCDeductionLine(currency="usd", conversion_rate=83.0, claimed=100, approved=90)
     assert ok.currency == "USD"
     with pytest.raises(Exception):
         IPCLineItem(currency="USD", conversion_rate=0, claimed=1)
-    # A fresh bill has empty line items and a default deductions structure.
+    with pytest.raises(Exception):
+        IPCDeductionLine(currency="USD", conversion_rate=0, approved=1)
+    # A fresh bill has empty line items, empty deduction components and no payments.
     bill = IPCBill(project_id="p1")
     assert bill.line_items == []
-    assert bill.deductions.employer_approved.deductions == []
+    assert bill.deductions.recovery_of_advances == []
+    assert bill.deductions.gst == []
     assert bill.payments == []

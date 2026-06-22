@@ -21,12 +21,10 @@ import useRBAC from "@/hooks/useRBAC";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
-  COMPONENT_FIELDS, ComponentFieldConfig, CurrencyAmount, DEDUCTION_LABELS, DEDUCTION_TAB_KEYS,
-  DeductionsByPerspective, GST_TAB_KEYS, IPCBillDTO, IPCBillSummaryDTO, IPCLineItem, IPCPaymentRecord,
-  IPCRevision, IPCStatus, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS, PaymentStructure,
-  PerspectiveDeductions, PerspectiveKey, RECOVERY_TAB_KEYS, componentBase, createIPCBill, deleteIPCBill,
-  emptyDeductions, emptyPerspectiveDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal,
-  perspectiveDeductionsBase, updateIPCBill,
+  COMPONENT_FIELDS, ComponentFieldConfig, DEDUCTION_KEYS, DEDUCTION_LABELS, IPCBillDTO,
+  IPCBillSummaryDTO, IPCDeductionLine, IPCDeductions, IPCLineItem, IPCPaymentRecord, IPCRevision,
+  IPCStatus, PaymentStructure, componentBase, createIPCBill, deductionsColTotal, deleteIPCBill,
+  emptyDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal, updateIPCBill,
 } from "@/services/ipc-bills-api";
 import {
   IPCCategory, IPCCategoryKind, createIPCCategory, deleteIPCCategory, getIPCCategories,
@@ -78,11 +76,10 @@ const IPCBillRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [header, setHeader] = useState<HForm>({ ...EMPTY_H });
   const [lineItems, setLineItems] = useState<IPCLineItem[]>([]);
-  const [deductions, setDeductions] = useState<DeductionsByPerspective>(emptyDeductions());
+  const [deductions, setDeductions] = useState<IPCDeductions>(emptyDeductions());
   const [payments, setPayments] = useState<IPCPaymentRecord[]>([]);
   const [linkedDocIds, setLinkedDocIds] = useState<string[]>([]);
   const [revisions, setRevisions] = useState<IPCRevision[]>([]);
-  const [dedPersp, setDedPersp] = useState<PerspectiveKey>("employer_approved");
   const [saving, setSaving] = useState(false);
   const [contractCurrencies, setContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
   const [advanceCats, setAdvanceCats] = useState<IPCCategory[]>([]);
@@ -174,7 +171,7 @@ const IPCBillRegisterPage: React.FC = () => {
     const claimed = lineTotal(lineItems, "claimed");
     const verified = lineTotal(lineItems, "verified");
     const approved = lineTotal(lineItems, "approved");
-    const approvedDed = perspectiveDeductionsBase(deductions.employer_approved);
+    const approvedDed = deductionsColTotal(deductions, "approved");
     const net = approved - approvedDed;
     const paid = componentBase(payments);
     return { claimed, verified, approved, approvedDed, net, paid, balance: net - paid };
@@ -188,7 +185,6 @@ const IPCBillRegisterPage: React.FC = () => {
     setPayments([]);
     setLinkedDocIds([]);
     setRevisions([]);
-    setDedPersp("employer_approved");
     setDialogOpen(true);
   };
   const openEdit = (i: IPCBillDTO) => {
@@ -203,53 +199,15 @@ const IPCBillRegisterPage: React.FC = () => {
       remarks: i.remarks || "", letter_references: (i.letter_references || []).join(", "),
     });
     setLineItems((i.line_items || []).map((li) => ({ ...li })));
-    setDeductions({
-      contractor_claimed: { ...emptyPerspectiveDeductions(), ...i.deductions?.contractor_claimed },
-      engineer_verified: { ...emptyPerspectiveDeductions(), ...i.deductions?.engineer_verified },
-      employer_approved: { ...emptyPerspectiveDeductions(), ...i.deductions?.employer_approved },
-    });
+    setDeductions({ ...emptyDeductions(), ...i.deductions });
     setPayments((i.payments || []).map((p) => ({ ...p })));
     setLinkedDocIds(i.linked_document_ids || []);
     setRevisions(i.revisions || []);
-    setDedPersp("employer_approved");
     setDialogOpen(true);
   };
 
-  const setDedComp = (pk: PerspectiveKey, ck: keyof PerspectiveDeductions, rows: CurrencyAmount[]) =>
-    setDeductions((d) => ({ ...d, [pk]: { ...d[pk], [ck]: rows } }));
-
-  // One deduction-group tab: a shared perspective selector, the component
-  // editors for that group's keys, and the group's subtotal for the perspective.
-  const dedPanel = (keys: (keyof PerspectiveDeductions)[], title: string) => {
-    const subtotal = keys.reduce((s, k) => s + componentBase(deductions[dedPersp][k]), 0);
-    return (
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <Label className="text-xs text-muted-foreground">Perspective</Label>
-          <Select value={dedPersp} onValueChange={(v) => setDedPersp(v as PerspectiveKey)}>
-            <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
-            <SelectContent>{PERSPECTIVE_KEYS.map((pk) => <SelectItem key={pk} value={pk}>{PERSPECTIVE_LABELS[pk]}</SelectItem>)}</SelectContent>
-          </Select>
-        </div>
-        {keys.map((ck) => (
-          <ComponentEditor
-            key={ck}
-            title={DEDUCTION_LABELS[ck]}
-            rows={deductions[dedPersp][ck]}
-            baseCurrency={header.base_currency}
-            currencyOptions={currencyOptions}
-            rateFor={rateFor}
-            fieldConfig={COMPONENT_FIELDS[ck]}
-            categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
-            onChange={(rows) => setDedComp(dedPersp, ck, rows)}
-          />
-        ))}
-        <div className="rounded-md bg-muted/40 px-3 py-2 text-sm font-medium">
-          {title} — {PERSPECTIVE_LABELS[dedPersp]} ({header.base_currency}): {fmt(subtotal)}
-        </div>
-      </div>
-    );
-  };
+  const setDedComp = (ck: keyof IPCDeductions, rows: IPCDeductionLine[]) =>
+    setDeductions((d) => ({ ...d, [ck]: rows }));
 
   const save = async () => {
     if (!header.project_id || !header.ipc_number.trim()) {
@@ -447,9 +405,7 @@ const IPCBillRegisterPage: React.FC = () => {
             <TabsList className="flex h-auto flex-wrap justify-start">
               <TabsTrigger value="header">Header</TabsTrigger>
               <TabsTrigger value="line">Line items</TabsTrigger>
-              <TabsTrigger value="rec">Recoveries &amp; withholding</TabsTrigger>
-              <TabsTrigger value="ded">Deductions</TabsTrigger>
-              <TabsTrigger value="gst">GST</TabsTrigger>
+              {DEDUCTION_KEYS.map((ck) => <TabsTrigger key={ck} value={ck}>{DEDUCTION_LABELS[ck]}</TabsTrigger>)}
               <TabsTrigger value="pay">Payments</TabsTrigger>
               <TabsTrigger value="docs">Docs &amp; history</TabsTrigger>
             </TabsList>
@@ -510,9 +466,20 @@ const IPCBillRegisterPage: React.FC = () => {
               </Card>
             </TabsContent>
 
-            <TabsContent value="rec" className="space-y-3">{dedPanel(RECOVERY_TAB_KEYS, "Recoveries & withholding")}</TabsContent>
-            <TabsContent value="ded" className="space-y-3">{dedPanel(DEDUCTION_TAB_KEYS, "Deductions")}</TabsContent>
-            <TabsContent value="gst" className="space-y-3">{dedPanel(GST_TAB_KEYS, "GST")}</TabsContent>
+            {DEDUCTION_KEYS.map((ck) => (
+              <TabsContent key={ck} value={ck} className="space-y-3">
+                <DeductionLinesEditor
+                  title={DEDUCTION_LABELS[ck]}
+                  rows={deductions[ck]}
+                  baseCurrency={header.base_currency}
+                  currencyOptions={currencyOptions}
+                  rateFor={rateFor}
+                  fieldConfig={COMPONENT_FIELDS[ck]}
+                  categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
+                  onChange={(rows) => setDedComp(ck, rows)}
+                />
+              </TabsContent>
+            ))}
 
             <TabsContent value="pay" className="space-y-3">
               <Card>
@@ -654,67 +621,74 @@ const PaymentsEditor: React.FC<{
   );
 };
 
-// One deduction component as a list of rows. Each row is {currency, amount} plus,
-// where the config asks, a typed category (advance/deduction master) and/or a
-// free-text description.
-const ComponentEditor: React.FC<{
-  title: string; rows: CurrencyAmount[]; baseCurrency: string;
+// One deduction component, edited as a grid like Line items so the contractor
+// claimed / GC verified / employer approved amounts sit side by side per line.
+// Carries an optional master category and description per the component config.
+const DeductionLinesEditor: React.FC<{
+  title: string; rows: IPCDeductionLine[]; baseCurrency: string;
   currencyOptions: string[]; rateFor: (c: string) => number;
   fieldConfig: ComponentFieldConfig; categories: IPCCategory[];
-  onChange: (rows: CurrencyAmount[]) => void;
+  onChange: (rows: IPCDeductionLine[]) => void;
 }> = ({ title, rows, baseCurrency, currencyOptions, rateFor, fieldConfig, categories, onChange }) => {
-  const add = () => onChange([...(rows || []), { currency: baseCurrency, conversion_rate: 1, amount: 0 }]);
-  const set = (i: number, patch: Partial<CurrencyAmount>) =>
-    onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const base = componentBase(rows);
+  const add = () => onChange([...(rows || []), { category: null, description: "", currency: baseCurrency, conversion_rate: 1, claimed: 0, verified: 0, approved: 0 }]);
+  const set = (i: number, patch: Partial<IPCDeductionLine>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const hasCategory = !!fieldConfig.categoryKind;
-  const cols = hasCategory ? "grid-cols-[1.2fr_1fr_1fr_auto]" : "grid-cols-[1fr_1fr_auto]";
+  const cols = `${hasCategory ? "110px " : ""}${fieldConfig.description ? "minmax(0,1fr) " : ""}68px 74px 74px 74px 28px`;
+  const tClaimed = lineTotal(rows, "claimed");
+  const tVerified = lineTotal(rows, "verified");
+  const tApproved = lineTotal(rows, "approved");
   return (
     <div className="rounded-md border p-2">
-      <div className="flex items-center justify-between">
+      <div className="mb-1 flex items-center justify-between">
         <span className="text-sm font-medium">{title}</span>
-        <div className="flex items-center gap-2">
-          {rows.length > 0 && <span className="text-xs text-muted-foreground">= {fmt(base)} {baseCurrency}</span>}
-          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />line</Button>
-        </div>
+        <Button type="button" variant="ghost" size="sm" className="h-7" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />Add line</Button>
+      </div>
+      <div className="grid gap-2 border-b pb-1 text-xs text-muted-foreground" style={{ gridTemplateColumns: cols }}>
+        {hasCategory && <span>Type</span>}
+        {fieldConfig.description && <span>Description</span>}
+        <span>Ccy</span>
+        <span className="text-right">Claimed</span>
+        <span className="text-right">Verified</span>
+        <span className="text-right">Approved</span>
+        <span />
       </div>
       {rows.map((r, i) => (
-        <div key={i} className="mt-1 space-y-1">
-          <div className={`grid ${cols} gap-2`}>
-            {hasCategory && (
-              <select
-                className="flex h-9 rounded-md border border-input bg-background px-2 text-sm"
-                value={r.category || ""}
-                onChange={(e) => set(i, { category: e.target.value || null })}
-              >
-                <option value="">— type —</option>
-                {categories.map((c) => <option key={c.id} value={c.code}>{c.name}</option>)}
-                {r.category && !categories.some((c) => c.code === r.category) && (
-                  <option value={r.category}>{r.category}</option>
-                )}
-              </select>
-            )}
-            <select
-              className="flex h-9 rounded-md border border-input bg-background px-2 text-sm"
-              value={r.currency}
-              onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}
-            >
-              {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => (
-                <option key={c} value={c}>{c}{c !== baseCurrency ? ` (×${rateFor(c)})` : ""}</option>
-              ))}
+        <div key={i} className="mt-1 grid items-center gap-2" style={{ gridTemplateColumns: cols }}>
+          {hasCategory && (
+            <select className="flex h-9 rounded-md border border-input bg-background px-2 text-sm" value={r.category || ""}
+              onChange={(e) => set(i, { category: e.target.value || null })}>
+              <option value="">— type —</option>
+              {categories.map((c) => <option key={c.id} value={c.code}>{c.name}</option>)}
+              {r.category && !categories.some((c) => c.code === r.category) && <option value={r.category}>{r.category}</option>}
             </select>
-            <Input type="number" className="h-9" placeholder="0" value={r.amount}
-              onChange={(e) => set(i, { amount: Number(e.target.value) })} />
-            <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
-              <Trash2 className="h-4 w-4" />
-            </Button>
-          </div>
-          {fieldConfig.description && (
-            <Input className="h-8 text-sm" placeholder="Description / reason"
-              value={r.description || ""} onChange={(e) => set(i, { description: e.target.value || null })} />
           )}
+          {fieldConfig.description && (
+            <Input className="h-9" placeholder="Description / reason" value={r.description || ""}
+              onChange={(e) => set(i, { description: e.target.value || null })} />
+          )}
+          <select className="flex h-9 rounded-md border border-input bg-background px-1 text-sm" value={r.currency}
+            onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}>
+            {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+          <Input type="number" className="h-9 text-right" value={r.claimed} onChange={(e) => set(i, { claimed: Number(e.target.value) })} />
+          <Input type="number" className="h-9 text-right" value={r.verified} onChange={(e) => set(i, { verified: Number(e.target.value) })} />
+          <Input type="number" className="h-9 text-right" value={r.approved} onChange={(e) => set(i, { approved: Number(e.target.value) })} />
+          <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+            <Trash2 className="h-4 w-4" />
+          </Button>
         </div>
       ))}
+      {rows.length > 0 && (
+        <div className="mt-2 grid gap-2 border-t pt-2 text-xs font-medium" style={{ gridTemplateColumns: cols }}>
+          {hasCategory && <span />}
+          <span className="text-muted-foreground">Subtotal ({baseCurrency})</span>
+          <span />
+          <span className="text-right">{fmt(tClaimed)}</span>
+          <span className="text-right">{fmt(tVerified)}</span>
+          <span className="text-right">{fmt(tApproved)}</span>
+          <span />
+        </div>
+      )}
     </div>
   );
 };

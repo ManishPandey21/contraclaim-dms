@@ -29,30 +29,38 @@ export interface CurrencyAmount {
   description?: string | null; // free-text reason / detail
 }
 
-// Deduction components for one perspective.
-export interface PerspectiveDeductions {
-  recovery_of_advances: CurrencyAmount[];
-  withheld: CurrencyAmount[];
-  penalties_ld: CurrencyAmount[];
-  deductions: CurrencyAmount[];  // statutory: Income Tax, Labour Cess (via master)
-  gst: CurrencyAmount[];
+// One deduction line: same column shape as a line item (claimed/verified/
+// approved side by side), plus an optional master category and description.
+export interface IPCDeductionLine {
+  category?: string | null;
+  description?: string | null;
+  currency: string;
+  conversion_rate: number;
+  claimed: number;
+  verified: number;
+  approved: number;
 }
 
-export const DEDUCTION_KEYS: (keyof PerspectiveDeductions)[] = [
+// All deduction components, each a list of lines. One editor tab per component.
+export interface IPCDeductions {
+  recovery_of_advances: IPCDeductionLine[];
+  withheld: IPCDeductionLine[];
+  penalties_ld: IPCDeductionLine[];
+  deductions: IPCDeductionLine[];  // statutory: Income Tax, Labour Cess (via master)
+  gst: IPCDeductionLine[];
+}
+
+export const DEDUCTION_KEYS: (keyof IPCDeductions)[] = [
   "recovery_of_advances", "withheld", "penalties_ld", "deductions", "gst",
 ];
-export const DEDUCTION_LABELS: Record<keyof PerspectiveDeductions, string> = {
-  recovery_of_advances: "Recovery of advances",
-  withheld: "Withheld",
-  penalties_ld: "Penalties / LD",
+// Tab + editor title per deduction component.
+export const DEDUCTION_LABELS: Record<keyof IPCDeductions, string> = {
+  recovery_of_advances: "Recoveries",
+  withheld: "Withhold",
+  penalties_ld: "Penalties",
   deductions: "Deductions",
   gst: "GST",
 };
-
-// The deduction components grouped into editor tabs.
-export const RECOVERY_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["recovery_of_advances", "withheld", "penalties_ld"];
-export const DEDUCTION_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["deductions"];
-export const GST_TAB_KEYS: (keyof PerspectiveDeductions)[] = ["gst"];
 
 // Which deduction rows carry a typed category (from which master) and/or a
 // free-text description. Drives the editor UI.
@@ -60,31 +68,13 @@ export interface ComponentFieldConfig {
   categoryKind?: "advance" | "deduction";
   description?: boolean;
 }
-export const COMPONENT_FIELDS: Record<keyof PerspectiveDeductions, ComponentFieldConfig> = {
+export const COMPONENT_FIELDS: Record<keyof IPCDeductions, ComponentFieldConfig> = {
   recovery_of_advances: { categoryKind: "advance", description: true },
   withheld: { description: true },
   penalties_ld: { description: true },
   deductions: { categoryKind: "deduction", description: true },
   gst: { description: true },
 };
-
-export const PERSPECTIVE_KEYS = [
-  "contractor_claimed", "engineer_verified", "employer_approved",
-] as const;
-export type PerspectiveKey = (typeof PERSPECTIVE_KEYS)[number];
-export const PERSPECTIVE_LABELS: Record<PerspectiveKey, string> = {
-  contractor_claimed: "Contractor claimed",
-  engineer_verified: "Engineer/GC verified",
-  employer_approved: "Employer approved",
-};
-// The line-item column matching each perspective.
-export const PERSPECTIVE_COLUMN: Record<PerspectiveKey, "claimed" | "verified" | "approved"> = {
-  contractor_claimed: "claimed",
-  engineer_verified: "verified",
-  employer_approved: "approved",
-};
-
-export type DeductionsByPerspective = Record<PerspectiveKey, PerspectiveDeductions>;
 
 export interface IPCPaymentRecord {
   payment_date?: string | null;
@@ -95,13 +85,8 @@ export interface IPCPaymentRecord {
   amount: number;
 }
 
-export const emptyPerspectiveDeductions = (): PerspectiveDeductions => ({
-  recovery_of_advances: [], deductions: [], it_tax: [], gst: [], withheld: [], penalties_ld: [],
-});
-export const emptyDeductions = (): DeductionsByPerspective => ({
-  contractor_claimed: emptyPerspectiveDeductions(),
-  engineer_verified: emptyPerspectiveDeductions(),
-  employer_approved: emptyPerspectiveDeductions(),
+export const emptyDeductions = (): IPCDeductions => ({
+  recovery_of_advances: [], withheld: [], penalties_ld: [], deductions: [], gst: [],
 });
 
 export interface IPCBillDTO {
@@ -118,7 +103,7 @@ export interface IPCBillDTO {
   payment_structure: PaymentStructure;
   payment_percentage?: number | null;
   line_items: IPCLineItem[];
-  deductions: DeductionsByPerspective;
+  deductions: IPCDeductions;
   payments: IPCPaymentRecord[];
   status: IPCStatus;
   remarks?: string | null;
@@ -163,7 +148,7 @@ export interface IPCBillPayload {
   payment_structure?: PaymentStructure;
   payment_percentage?: number;
   line_items?: IPCLineItem[];
-  deductions?: DeductionsByPerspective;
+  deductions?: IPCDeductions;
   payments?: IPCPaymentRecord[];
   status?: IPCStatus;
   remarks?: string;
@@ -195,11 +180,7 @@ const norm = (raw: any): IPCBillDTO => ({
   payments: raw?.payments ?? [],
   letter_references: raw?.letter_references ?? [],
   linked_document_ids: raw?.linked_document_ids ?? [],
-  deductions: {
-    contractor_claimed: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.contractor_claimed || {}) },
-    engineer_verified: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.engineer_verified || {}) },
-    employer_approved: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.employer_approved || {}) },
-  },
+  deductions: { ...emptyDeductions(), ...(raw?.deductions || {}) },
 });
 
 export async function getIPCBills(params?: {
@@ -241,10 +222,19 @@ export async function exportIPCBills(
 export const componentBase = (items: CurrencyAmount[] | IPCPaymentRecord[]): number =>
   (items || []).reduce((s, x: any) => s + (Number(x.amount) || 0) * (Number(x.conversion_rate) || 1), 0);
 
-// Base-currency total of one line-item column.
-export const lineTotal = (items: IPCLineItem[], col: "claimed" | "verified" | "approved"): number =>
+// Base-currency total of one column (claimed/verified/approved) of line items
+// or deduction lines — both share the column shape.
+export type ColumnKey = "claimed" | "verified" | "approved";
+interface ColumnLine {
+  claimed?: number;
+  verified?: number;
+  approved?: number;
+  conversion_rate?: number;
+}
+export const lineTotal = (items: ColumnLine[], col: ColumnKey): number =>
   (items || []).reduce((s, x) => s + (Number(x[col]) || 0) * (Number(x.conversion_rate) || 1), 0);
 
-// Sum of all deduction components for one perspective.
-export const perspectiveDeductionsBase = (d?: PerspectiveDeductions): number =>
-  d ? DEDUCTION_KEYS.reduce((s, k) => s + componentBase(d[k]), 0) : 0;
+// Base-currency total of one perspective column summed across every deduction
+// component.
+export const deductionsColTotal = (d: IPCDeductions | undefined, col: ColumnKey): number =>
+  d ? DEDUCTION_KEYS.reduce((s, k) => s + lineTotal(d[k], col), 0) : 0;

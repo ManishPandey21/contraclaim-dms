@@ -45,10 +45,11 @@ def line_total(items: Any, col: str) -> float:
     return total
 
 
-def perspective_deductions_base(persp: Any) -> float:
-    """Sum all deduction components of one perspective, in base currency."""
-    persp = persp or {}
-    return sum(component_base(persp.get(key)) for key in DEDUCTION_COMPONENTS)
+def deductions_col_base(deductions: Any, col: str) -> float:
+    """Sum one perspective column (claimed/verified/approved) across all
+    deduction components, in base currency."""
+    d = deductions or {}
+    return sum(line_total(d.get(comp), col) for comp in DEDUCTION_COMPONENTS)
 
 
 def payments_base(payments: Any) -> float:
@@ -61,7 +62,7 @@ def _ipc_metrics(ipc: Dict[str, Any]) -> Dict[str, float]:
     claimed = line_total(line_items, "claimed")
     verified = line_total(line_items, "verified")
     approved = line_total(line_items, "approved")
-    approved_ded = perspective_deductions_base(ded.get("employer_approved"))
+    approved_ded = deductions_col_base(ded, "approved")
     net_payable = approved - approved_ded
     paid = payments_base(ipc.get("payments"))
     return {

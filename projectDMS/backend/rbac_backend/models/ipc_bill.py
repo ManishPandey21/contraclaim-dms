@@ -102,30 +102,46 @@ class IPCLineItem(BaseModel):
         return _clean_rate(value)
 
 
-class IPCPerspectiveDeductions(BaseModel):
-    """The deduction breakdown for one perspective. `net = gross - sum(these)`.
+class IPCDeductionLine(BaseModel):
+    """One deduction line, mirroring a line item: an optional type/description in
+    one currency with the contractor-claimed, GC-verified and employer-approved
+    amounts side by side, so the three views compare in a single row."""
 
-    Surfaced in the editor across three tabs: recoveries/withholding/penalties,
-    statutory deductions (Income Tax, Labour Cess via the deduction master) and
-    GST."""
+    category: Optional[str] = None     # master code (advance / deduction type)
+    description: Optional[str] = None
+    currency: str = "INR"
+    conversion_rate: float = 1.0
+    claimed: float = 0.0
+    verified: float = 0.0
+    approved: float = 0.0
 
-    recovery_of_advances: List[CurrencyAmount] = Field(default_factory=list)
-    withheld: List[CurrencyAmount] = Field(default_factory=list)
-    penalties_ld: List[CurrencyAmount] = Field(default_factory=list)  # penalties / LD
-    deductions: List[CurrencyAmount] = Field(default_factory=list)    # IT, Labour Cess, ...
-    gst: List[CurrencyAmount] = Field(default_factory=list)
+    @field_validator("currency")
+    @classmethod
+    def _currency(cls, value: str) -> str:
+        return _clean_currency(value)
+
+    @field_validator("conversion_rate")
+    @classmethod
+    def _rate(cls, value: float) -> float:
+        return _clean_rate(value)
+
+
+class IPCDeductions(BaseModel):
+    """All deduction components, each a list of lines carrying the three
+    perspective columns. Surfaced as one tab per component (Recoveries,
+    Withhold, Penalties, Deductions, GST)."""
+
+    recovery_of_advances: List[IPCDeductionLine] = Field(default_factory=list)
+    withheld: List[IPCDeductionLine] = Field(default_factory=list)
+    penalties_ld: List[IPCDeductionLine] = Field(default_factory=list)  # penalties / LD
+    deductions: List[IPCDeductionLine] = Field(default_factory=list)    # IT, Labour Cess, ...
+    gst: List[IPCDeductionLine] = Field(default_factory=list)
 
 
 # The deduction components that reduce gross to net, in roll-up order.
 DEDUCTION_COMPONENTS = (
     "recovery_of_advances", "withheld", "penalties_ld", "deductions", "gst",
 )
-
-
-class DeductionsByPerspective(BaseModel):
-    contractor_claimed: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
-    engineer_verified: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
-    employer_approved: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
 
 
 class IPCPaymentRecord(BaseModel):
@@ -172,7 +188,7 @@ class IPCBillBase(BaseModel):
 
     # Function-first body.
     line_items: List[IPCLineItem] = Field(default_factory=list)
-    deductions: DeductionsByPerspective = Field(default_factory=DeductionsByPerspective)
+    deductions: IPCDeductions = Field(default_factory=IPCDeductions)
     payments: List[IPCPaymentRecord] = Field(default_factory=list)
 
     # Status workflow dates (set as the certificate progresses; not on the Header tab).
@@ -208,7 +224,7 @@ class IPCBillUpdate(BaseModel):
     payment_structure: Optional[PaymentStructure] = None
     payment_percentage: Optional[float] = None
     line_items: Optional[List[IPCLineItem]] = None
-    deductions: Optional[DeductionsByPerspective] = None
+    deductions: Optional[IPCDeductions] = None
     payments: Optional[List[IPCPaymentRecord]] = None
     submission_date: Optional[datetime] = None
     verification_date: Optional[datetime] = None
