@@ -25,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CalendarClock, FileSignature, Loader2, Save } from "lucide-react";
+import { CalendarClock, FileSignature, Loader2, PlusCircle, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   BGRequiredDate,
