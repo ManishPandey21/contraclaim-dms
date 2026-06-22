@@ -147,6 +147,10 @@ export function useRBAC(): UseRBACResult {
   const [error, setError] = useState<string | null>(null);
   const [perms, setPerms] = useState<Set<string>>(new Set());
   const [roles, setRoles] = useState<string[]>([]);
+  // Whether the first role fetch has completed. Until it has, an empty `roles`
+  // means "still loading", not "no access" — otherwise a freshly-mounted
+  // RoleGuard would deny and bounce deep-links to /overview before roles arrive.
+  const [rolesResolved, setRolesResolved] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -164,6 +168,8 @@ export function useRBAC(): UseRBACResult {
         if (mounted) setRoles(fetched);
       } catch {
         if (mounted) setRoles([]);
+      } finally {
+        if (mounted) setRolesResolved(true);
       }
     };
 
@@ -187,9 +193,10 @@ export function useRBAC(): UseRBACResult {
         setError(null);
 
         // If roles are not yet resolved but we have a JWT, wait for the /me sync effect
-        // to populate roles. This prevents premature "access denied" UI.
+        // to populate roles. This prevents premature "access denied" UI: stay in the
+        // loading state until the first role fetch has actually completed.
         if (roles.length === 0) {
-          if (mounted) setLoading(false);
+          if (mounted) setLoading(!rolesResolved);
           return;
         }
 
@@ -253,7 +260,7 @@ export function useRBAC(): UseRBACResult {
     return () => {
       mounted = false;
     };
-  }, [roleKey, roles]);
+  }, [roleKey, roles, rolesResolved]);
 
   const can = (permId: string) => {
     if (!permId) return false;
