@@ -1,6 +1,8 @@
 import { api } from "./api";
 
 // IPC / Contractor Bill Register API. Mirrors routers/ipc_bills.py.
+// Function-first model: line items (gross, 3 perspective columns), deductions
+// per perspective, and discrete payment records.
 
 export type IPCStatus =
   | "draft" | "submitted" | "under_verification" | "verified"
@@ -8,6 +10,17 @@ export type IPCStatus =
 
 export type PaymentStructure = "full" | "80_20" | "20" | "partial" | "custom";
 
+// One BOQ/scope line with the three estimate perspectives side by side.
+export interface IPCLineItem {
+  description?: string | null;
+  currency: string;
+  conversion_rate: number;
+  claimed: number;
+  verified: number;
+  approved: number;
+}
+
+// One deduction / recovery line.
 export interface CurrencyAmount {
   currency: string;
   conversion_rate: number; // to base, fixed at award
@@ -16,40 +29,37 @@ export interface CurrencyAmount {
   description?: string | null; // free-text reason / detail
 }
 
-// Each component is a list of currency amounts (per-component multi-currency).
-export interface IPCComponents {
-  gross: CurrencyAmount[];
-  deductions: CurrencyAmount[];
+// Deduction components for one perspective.
+export interface PerspectiveDeductions {
   recovery_of_advances: CurrencyAmount[];
+  deductions: CurrencyAmount[];
   it_tax: CurrencyAmount[];
   gst: CurrencyAmount[];
   withheld: CurrencyAmount[];
   penalties_ld: CurrencyAmount[];
 }
 
-export const COMPONENT_KEYS: (keyof IPCComponents)[] = [
-  "gross", "deductions", "recovery_of_advances", "it_tax", "gst", "withheld", "penalties_ld",
+export const DEDUCTION_KEYS: (keyof PerspectiveDeductions)[] = [
+  "recovery_of_advances", "deductions", "it_tax", "gst", "withheld", "penalties_ld",
 ];
-export const COMPONENT_LABELS: Record<keyof IPCComponents, string> = {
-  gross: "Gross value",
-  deductions: "Deductions",
+export const DEDUCTION_LABELS: Record<keyof PerspectiveDeductions, string> = {
   recovery_of_advances: "Recovery of advances",
+  deductions: "Deductions",
   it_tax: "Income tax (IT)",
   gst: "GST",
   withheld: "Withheld",
   penalties_ld: "Penalties / LD",
 };
 
-// Per-component field config: which rows carry a typed category (and from which
-// master) and/or a free-text description. Drives the editor UI.
+// Which deduction rows carry a typed category (from which master) and/or a
+// free-text description. Drives the editor UI.
 export interface ComponentFieldConfig {
   categoryKind?: "advance" | "deduction";
   description?: boolean;
 }
-export const COMPONENT_FIELDS: Record<keyof IPCComponents, ComponentFieldConfig> = {
-  gross: {},
-  deductions: { categoryKind: "deduction", description: true },
+export const COMPONENT_FIELDS: Record<keyof PerspectiveDeductions, ComponentFieldConfig> = {
   recovery_of_advances: { categoryKind: "advance", description: true },
+  deductions: { categoryKind: "deduction", description: true },
   it_tax: {},
   gst: {},
   withheld: { description: true },
@@ -57,47 +67,70 @@ export const COMPONENT_FIELDS: Record<keyof IPCComponents, ComponentFieldConfig>
 };
 
 export const PERSPECTIVE_KEYS = [
-  "contractor_claimed", "engineer_verified", "employer_approved", "actually_paid",
+  "contractor_claimed", "engineer_verified", "employer_approved",
 ] as const;
 export type PerspectiveKey = (typeof PERSPECTIVE_KEYS)[number];
 export const PERSPECTIVE_LABELS: Record<PerspectiveKey, string> = {
   contractor_claimed: "Contractor claimed",
   engineer_verified: "Engineer/GC verified",
   employer_approved: "Employer approved",
-  actually_paid: "Actually paid",
+};
+// The line-item column matching each perspective.
+export const PERSPECTIVE_COLUMN: Record<PerspectiveKey, "claimed" | "verified" | "approved"> = {
+  contractor_claimed: "claimed",
+  engineer_verified: "verified",
+  employer_approved: "approved",
 };
 
-export const emptyComponents = (): IPCComponents => ({
-  gross: [], deductions: [], recovery_of_advances: [], it_tax: [], gst: [], withheld: [], penalties_ld: [],
+export type DeductionsByPerspective = Record<PerspectiveKey, PerspectiveDeductions>;
+
+export interface IPCPaymentRecord {
+  payment_date?: string | null;
+  reference?: string | null;
+  method?: string | null;
+  currency: string;
+  conversion_rate: number;
+  amount: number;
+}
+
+export const emptyPerspectiveDeductions = (): PerspectiveDeductions => ({
+  recovery_of_advances: [], deductions: [], it_tax: [], gst: [], withheld: [], penalties_ld: [],
+});
+export const emptyDeductions = (): DeductionsByPerspective => ({
+  contractor_claimed: emptyPerspectiveDeductions(),
+  engineer_verified: emptyPerspectiveDeductions(),
+  employer_approved: emptyPerspectiveDeductions(),
 });
 
 export interface IPCBillDTO {
   id: string;
   ipc_number?: string | null;
+  ipc_date?: string | null;
   ipc_period?: string | null;
+  period_from?: string | null;
+  period_to?: string | null;
   contract_id?: string | null;
   contractor_name?: string | null;
+  approver?: string | null;
   base_currency: string;
   payment_structure: PaymentStructure;
   payment_percentage?: number | null;
-  contractor_claimed: IPCComponents;
-  engineer_verified: IPCComponents;
-  employer_approved: IPCComponents;
-  actually_paid: IPCComponents;
-  submission_date?: string | null;
-  verification_date?: string | null;
-  approval_date?: string | null;
-  payment_date?: string | null;
+  line_items: IPCLineItem[];
+  deductions: DeductionsByPerspective;
+  payments: IPCPaymentRecord[];
   status: IPCStatus;
   remarks?: string | null;
   letter_references: string[];
   linked_document_ids: string[];
   original_contract_value?: number | null;
   project_id?: string | null;
+  current_revision?: number | null;
+  revisions?: IPCRevision[];
   // Derived (base currency)
   claimed_total_base?: number | null;
   verified_total_base?: number | null;
   approved_total_base?: number | null;
+  total_deductions_base?: number | null;
   net_payable_base?: number | null;
   paid_base?: number | null;
   balance_payable_base?: number | null;
@@ -106,26 +139,34 @@ export interface IPCBillDTO {
   created_at?: string | null;
 }
 
+export interface IPCRevision {
+  revision_number: number;
+  status?: string | null;
+  remarks?: string | null;
+  changed_by?: string | null;
+  changed_at?: string | null;
+}
+
 export interface IPCBillPayload {
   project_id: string;
   ipc_number?: string;
+  ipc_date?: string;
   ipc_period?: string;
+  period_from?: string;
+  period_to?: string;
   contract_id?: string;
   contractor_name?: string;
+  approver?: string;
   base_currency?: string;
   payment_structure?: PaymentStructure;
   payment_percentage?: number;
-  contractor_claimed?: IPCComponents;
-  engineer_verified?: IPCComponents;
-  employer_approved?: IPCComponents;
-  actually_paid?: IPCComponents;
-  submission_date?: string;
-  verification_date?: string;
-  approval_date?: string;
-  payment_date?: string;
+  line_items?: IPCLineItem[];
+  deductions?: DeductionsByPerspective;
+  payments?: IPCPaymentRecord[];
   status?: IPCStatus;
   remarks?: string;
   letter_references?: string[];
+  linked_document_ids?: string[];
   original_contract_value?: number;
 }
 
@@ -148,12 +189,15 @@ export interface IPCBillSummaryDTO {
 const norm = (raw: any): IPCBillDTO => ({
   ...raw,
   id: raw?._id ?? raw?.id,
+  line_items: raw?.line_items ?? [],
+  payments: raw?.payments ?? [],
   letter_references: raw?.letter_references ?? [],
   linked_document_ids: raw?.linked_document_ids ?? [],
-  contractor_claimed: { ...emptyComponents(), ...(raw?.contractor_claimed || {}) },
-  engineer_verified: { ...emptyComponents(), ...(raw?.engineer_verified || {}) },
-  employer_approved: { ...emptyComponents(), ...(raw?.employer_approved || {}) },
-  actually_paid: { ...emptyComponents(), ...(raw?.actually_paid || {}) },
+  deductions: {
+    contractor_claimed: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.contractor_claimed || {}) },
+    engineer_verified: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.engineer_verified || {}) },
+    employer_approved: { ...emptyPerspectiveDeductions(), ...(raw?.deductions?.employer_approved || {}) },
+  },
 });
 
 export async function getIPCBills(params?: {
@@ -191,6 +235,14 @@ export async function exportIPCBills(
   return data instanceof Blob ? data : new Blob([data]);
 }
 
-// Base-currency total of a component (sum of amount x rate).
-export const componentBase = (items: CurrencyAmount[]): number =>
-  (items || []).reduce((s, x) => s + (Number(x.amount) || 0) * (Number(x.conversion_rate) || 1), 0);
+// Base-currency total of a deduction/payment list (sum of amount x rate).
+export const componentBase = (items: CurrencyAmount[] | IPCPaymentRecord[]): number =>
+  (items || []).reduce((s, x: any) => s + (Number(x.amount) || 0) * (Number(x.conversion_rate) || 1), 0);
+
+// Base-currency total of one line-item column.
+export const lineTotal = (items: IPCLineItem[], col: "claimed" | "verified" | "approved"): number =>
+  (items || []).reduce((s, x) => s + (Number(x[col]) || 0) * (Number(x.conversion_rate) || 1), 0);
+
+// Sum of all deduction components for one perspective.
+export const perspectiveDeductionsBase = (d?: PerspectiveDeductions): number =>
+  d ? DEDUCTION_KEYS.reduce((s, k) => s + componentBase(d[k]), 0) : 0;

@@ -15,14 +15,17 @@ from ..core.database import get_database
 from ..models.ipc_bill import IPCBillCreate
 from .audit_event_service import AuditEventService
 
-# Components that reduce the gross to arrive at the net payable.
-_DEDUCTIONS = ("deductions", "recovery_of_advances", "it_tax", "gst", "withheld", "penalties_ld")
+from ..models.ipc_bill import DEDUCTION_COMPONENTS
+
 _APPROVED_LIKE = {"approved", "partially_paid", "paid"}
 _PENDING_LIKE = {"draft", "submitted", "under_verification", "verified"}
 
 
 def component_base(items: Any) -> float:
-    """Sum a component's currency amounts converted to the base currency."""
+    """Sum a list of {amount, conversion_rate} lines, converted to base.
+
+    Used for deduction/recovery lines and for payment records (both carry
+    `amount` + `conversion_rate`)."""
     total = 0.0
     for it in items or []:
         amount = float(it.get("amount") or 0.0)
@@ -31,29 +34,41 @@ def component_base(items: Any) -> float:
     return total
 
 
-def perspective_gross_base(comp: Any) -> float:
-    return component_base((comp or {}).get("gross"))
+def line_total(items: Any, col: str) -> float:
+    """Sum one perspective column (claimed/verified/approved) of the line items,
+    converted to base."""
+    total = 0.0
+    for it in items or []:
+        amount = float(it.get(col) or 0.0)
+        rate = it.get("conversion_rate")
+        total += amount * (1.0 if rate is None else float(rate))
+    return total
 
 
-def perspective_net_base(comp: Any) -> float:
-    """Gross minus all deduction-type components, in the base currency."""
-    comp = comp or {}
-    net = component_base(comp.get("gross"))
-    for key in _DEDUCTIONS:
-        net -= component_base(comp.get(key))
-    return net
+def perspective_deductions_base(persp: Any) -> float:
+    """Sum all deduction components of one perspective, in base currency."""
+    persp = persp or {}
+    return sum(component_base(persp.get(key)) for key in DEDUCTION_COMPONENTS)
+
+
+def payments_base(payments: Any) -> float:
+    return component_base(payments)
 
 
 def _ipc_metrics(ipc: Dict[str, Any]) -> Dict[str, float]:
-    claimed = perspective_gross_base(ipc.get("contractor_claimed"))
-    verified = perspective_gross_base(ipc.get("engineer_verified"))
-    approved = perspective_gross_base(ipc.get("employer_approved"))
-    net_payable = perspective_net_base(ipc.get("employer_approved"))
-    paid = perspective_net_base(ipc.get("actually_paid"))
+    line_items = ipc.get("line_items")
+    ded = ipc.get("deductions") or {}
+    claimed = line_total(line_items, "claimed")
+    verified = line_total(line_items, "verified")
+    approved = line_total(line_items, "approved")
+    approved_ded = perspective_deductions_base(ded.get("employer_approved"))
+    net_payable = approved - approved_ded
+    paid = payments_base(ipc.get("payments"))
     return {
         "claimed_total_base": round(claimed, 2),
         "verified_total_base": round(verified, 2),
         "approved_total_base": round(approved, 2),
+        "total_deductions_base": round(approved_ded, 2),
         "net_payable_base": round(net_payable, 2),
         "paid_base": round(paid, 2),
         "balance_payable_base": round(net_payable - paid, 2),
@@ -183,7 +198,7 @@ class IPCBillService:
                 rng["$gte"] = date_from
             if date_to:
                 rng["$lte"] = date_to
-            query["submission_date"] = rng
+            query["ipc_date"] = rng
         cursor = db.ipc_bills.find(query).sort("created_at", -1).skip(skip).limit(limit)
         rows = [decorate(i) async for i in cursor]
         # payment_status is a derived filter (balance based), applied in-memory.

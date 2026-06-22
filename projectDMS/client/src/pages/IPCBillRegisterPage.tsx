@@ -21,10 +21,12 @@ import useRBAC from "@/hooks/useRBAC";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
-  COMPONENT_FIELDS, COMPONENT_KEYS, COMPONENT_LABELS, ComponentFieldConfig, CurrencyAmount,
-  IPCBillDTO, IPCBillSummaryDTO, IPCComponents, IPCStatus, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS,
-  PaymentStructure, PerspectiveKey, componentBase, createIPCBill, deleteIPCBill, emptyComponents,
-  exportIPCBills, getIPCBills, getIPCSummary, updateIPCBill,
+  COMPONENT_FIELDS, ComponentFieldConfig, CurrencyAmount, DEDUCTION_KEYS, DEDUCTION_LABELS,
+  DeductionsByPerspective, IPCBillDTO, IPCBillSummaryDTO, IPCLineItem, IPCPaymentRecord, IPCRevision,
+  IPCStatus, PERSPECTIVE_COLUMN, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS, PaymentStructure,
+  PerspectiveDeductions, PerspectiveKey, componentBase, createIPCBill, deleteIPCBill, emptyDeductions,
+  emptyPerspectiveDeductions, exportIPCBills, getIPCBills, getIPCSummary, lineTotal,
+  perspectiveDeductionsBase, updateIPCBill,
 } from "@/services/ipc-bills-api";
 import {
   IPCCategory, IPCCategoryKind, createIPCCategory, deleteIPCCategory, getIPCCategories,
@@ -46,25 +48,17 @@ const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
 const dstr = (d?: string | null) => (d ? d.slice(0, 10) : "");
 
 interface HForm {
-  project_id: string; ipc_number: string; ipc_period: string; contractor_name: string;
-  payment_structure: PaymentStructure; payment_percentage: string; status: IPCStatus;
-  base_currency: string; original_contract_value: string; remarks: string; letter_references: string;
-  submission_date: string; verification_date: string; approval_date: string; payment_date: string;
+  project_id: string; ipc_number: string; ipc_date: string; period_from: string; period_to: string;
+  contractor_name: string; approver: string; payment_structure: PaymentStructure; payment_percentage: string;
+  status: IPCStatus; base_currency: string; original_contract_value: string; remarks: string;
+  letter_references: string; linked_document_ids: string;
 }
 const EMPTY_H: HForm = {
-  project_id: "", ipc_number: "", ipc_period: "", contractor_name: "",
-  payment_structure: "full", payment_percentage: "", status: "draft",
-  base_currency: "INR", original_contract_value: "", remarks: "", letter_references: "",
-  submission_date: "", verification_date: "", approval_date: "", payment_date: "",
+  project_id: "", ipc_number: "", ipc_date: "", period_from: "", period_to: "",
+  contractor_name: "", approver: "", payment_structure: "full", payment_percentage: "",
+  status: "draft", base_currency: "INR", original_contract_value: "", remarks: "",
+  letter_references: "", linked_document_ids: "",
 };
-const EMPTY_PERS = (): Record<PerspectiveKey, IPCComponents> => ({
-  contractor_claimed: emptyComponents(), engineer_verified: emptyComponents(),
-  employer_approved: emptyComponents(), actually_paid: emptyComponents(),
-});
-
-const netOf = (c: IPCComponents): number =>
-  componentBase(c.gross) - componentBase(c.deductions) - componentBase(c.recovery_of_advances)
-  - componentBase(c.it_tax) - componentBase(c.gst) - componentBase(c.withheld) - componentBase(c.penalties_ld);
 
 const IPCBillRegisterPage: React.FC = () => {
   const { can } = useRBAC();
@@ -82,7 +76,11 @@ const IPCBillRegisterPage: React.FC = () => {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [header, setHeader] = useState<HForm>({ ...EMPTY_H });
-  const [pers, setPers] = useState<Record<PerspectiveKey, IPCComponents>>(EMPTY_PERS());
+  const [lineItems, setLineItems] = useState<IPCLineItem[]>([]);
+  const [deductions, setDeductions] = useState<DeductionsByPerspective>(emptyDeductions());
+  const [payments, setPayments] = useState<IPCPaymentRecord[]>([]);
+  const [revisions, setRevisions] = useState<IPCRevision[]>([]);
+  const [dedPersp, setDedPersp] = useState<PerspectiveKey>("employer_approved");
   const [saving, setSaving] = useState(false);
   const [contractCurrencies, setContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
   const [advanceCats, setAdvanceCats] = useState<IPCCategory[]>([]);
@@ -131,7 +129,6 @@ const IPCBillRegisterPage: React.FC = () => {
         setHeader((h) => ({
           ...h,
           base_currency: h.base_currency && h.base_currency !== "INR" ? h.base_currency : (cm.currency || "INR"),
-          // Only auto-fill the contract value when the user hasn't entered one.
           original_contract_value:
             h.original_contract_value || cmValue == null ? h.original_contract_value : String(cmValue),
         }));
@@ -140,8 +137,7 @@ const IPCBillRegisterPage: React.FC = () => {
     return () => { active = false; };
   }, [dialogOpen, header.project_id]);
 
-  // Load the advance + deduction catalogs (org-wide + project overrides merged)
-  // for the editor dropdowns whenever the dialog opens or the project changes.
+  // Load the advance + deduction catalogs (org-wide + project overrides) for the editor.
   const loadCategories = useCallback(async (projectId?: string) => {
     try {
       const params = projectId ? { project_id: projectId } : undefined;
@@ -153,7 +149,6 @@ const IPCBillRegisterPage: React.FC = () => {
       setDeductionCats(ded);
     } catch { /* optional */ }
   }, []);
-
   useEffect(() => {
     if (!dialogOpen) return;
     void loadCategories(header.project_id || undefined);
@@ -172,36 +167,53 @@ const IPCBillRegisterPage: React.FC = () => {
     () => Array.from(new Set([header.base_currency, ...contractCurrencies.map((c) => c.currency)].filter(Boolean))),
     [header.base_currency, contractCurrencies]);
 
+  // Derived editor totals (base currency).
+  const totals = useMemo(() => {
+    const claimed = lineTotal(lineItems, "claimed");
+    const verified = lineTotal(lineItems, "verified");
+    const approved = lineTotal(lineItems, "approved");
+    const approvedDed = perspectiveDeductionsBase(deductions.employer_approved);
+    const net = approved - approvedDed;
+    const paid = componentBase(payments);
+    return { claimed, verified, approved, approvedDed, net, paid, balance: net - paid };
+  }, [lineItems, deductions, payments]);
+
   const openCreate = () => {
     setEditingId(null);
     setHeader({ ...EMPTY_H, project_id: projectFilter !== "all" ? projectFilter : "" });
-    setPers(EMPTY_PERS());
+    setLineItems([]);
+    setDeductions(emptyDeductions());
+    setPayments([]);
+    setRevisions([]);
+    setDedPersp("employer_approved");
     setDialogOpen(true);
   };
   const openEdit = (i: IPCBillDTO) => {
     setEditingId(i.id);
     setHeader({
-      project_id: i.project_id || "", ipc_number: i.ipc_number || "", ipc_period: i.ipc_period || "",
-      contractor_name: i.contractor_name || "", payment_structure: i.payment_structure || "full",
+      project_id: i.project_id || "", ipc_number: i.ipc_number || "", ipc_date: dstr(i.ipc_date),
+      period_from: dstr(i.period_from), period_to: dstr(i.period_to), contractor_name: i.contractor_name || "",
+      approver: i.approver || "", payment_structure: i.payment_structure || "full",
       payment_percentage: i.payment_percentage != null ? String(i.payment_percentage) : "",
       status: i.status, base_currency: i.base_currency || "INR",
       original_contract_value: i.original_contract_value != null ? String(i.original_contract_value) : "",
       remarks: i.remarks || "", letter_references: (i.letter_references || []).join(", "),
-      submission_date: dstr(i.submission_date), verification_date: dstr(i.verification_date),
-      approval_date: dstr(i.approval_date), payment_date: dstr(i.payment_date),
+      linked_document_ids: (i.linked_document_ids || []).join(", "),
     });
-    setPers({
-      contractor_claimed: { ...emptyComponents(), ...i.contractor_claimed },
-      engineer_verified: { ...emptyComponents(), ...i.engineer_verified },
-      employer_approved: { ...emptyComponents(), ...i.employer_approved },
-      actually_paid: { ...emptyComponents(), ...i.actually_paid },
+    setLineItems((i.line_items || []).map((li) => ({ ...li })));
+    setDeductions({
+      contractor_claimed: { ...emptyPerspectiveDeductions(), ...i.deductions?.contractor_claimed },
+      engineer_verified: { ...emptyPerspectiveDeductions(), ...i.deductions?.engineer_verified },
+      employer_approved: { ...emptyPerspectiveDeductions(), ...i.deductions?.employer_approved },
     });
+    setPayments((i.payments || []).map((p) => ({ ...p })));
+    setRevisions(i.revisions || []);
+    setDedPersp("employer_approved");
     setDialogOpen(true);
   };
 
-  // Immutable setter for one component's currency-amount list.
-  const setComp = (pk: PerspectiveKey, ck: keyof IPCComponents, rows: CurrencyAmount[]) =>
-    setPers((p) => ({ ...p, [pk]: { ...p[pk], [ck]: rows } }));
+  const setDedComp = (pk: PerspectiveKey, ck: keyof PerspectiveDeductions, rows: CurrencyAmount[]) =>
+    setDeductions((d) => ({ ...d, [pk]: { ...d[pk], [ck]: rows } }));
 
   const save = async () => {
     if (!header.project_id || !header.ipc_number.trim()) {
@@ -213,8 +225,11 @@ const IPCBillRegisterPage: React.FC = () => {
       const payload = {
         project_id: header.project_id,
         ipc_number: header.ipc_number.trim(),
-        ipc_period: header.ipc_period || undefined,
+        ipc_date: toISO(header.ipc_date),
+        period_from: toISO(header.period_from),
+        period_to: toISO(header.period_to),
         contractor_name: header.contractor_name || undefined,
+        approver: header.approver || undefined,
         payment_structure: header.payment_structure,
         payment_percentage: header.payment_percentage ? Number(header.payment_percentage) : undefined,
         status: header.status,
@@ -222,14 +237,10 @@ const IPCBillRegisterPage: React.FC = () => {
         original_contract_value: header.original_contract_value ? Number(header.original_contract_value) : undefined,
         remarks: header.remarks || undefined,
         letter_references: header.letter_references.split(",").map((s) => s.trim()).filter(Boolean),
-        submission_date: toISO(header.submission_date),
-        verification_date: toISO(header.verification_date),
-        approval_date: toISO(header.approval_date),
-        payment_date: toISO(header.payment_date),
-        contractor_claimed: pers.contractor_claimed,
-        engineer_verified: pers.engineer_verified,
-        employer_approved: pers.employer_approved,
-        actually_paid: pers.actually_paid,
+        linked_document_ids: header.linked_document_ids.split(",").map((s) => s.trim()).filter(Boolean),
+        line_items: lineItems,
+        deductions,
+        payments,
       };
       if (editingId) await updateIPCBill(editingId, payload);
       else await createIPCBill(payload);
@@ -349,7 +360,7 @@ const IPCBillRegisterPage: React.FC = () => {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>IPC No</TableHead><TableHead>Period</TableHead><TableHead>Contractor</TableHead>
+                    <TableHead>IPC No</TableHead><TableHead>Date</TableHead><TableHead>Contractor</TableHead>
                     <TableHead>Status</TableHead><TableHead className="text-right">Claimed</TableHead>
                     <TableHead className="text-right">Approved</TableHead><TableHead className="text-right">Net Payable</TableHead>
                     <TableHead className="text-right">Paid</TableHead><TableHead className="text-right">Balance</TableHead>
@@ -360,7 +371,7 @@ const IPCBillRegisterPage: React.FC = () => {
                   {items.map((i) => (
                     <TableRow key={i.id}>
                       <TableCell className="font-medium">{i.ipc_number || "—"}</TableCell>
-                      <TableCell>{i.ipc_period || "—"}</TableCell>
+                      <TableCell>{fmtDate(i.ipc_date) }</TableCell>
                       <TableCell>{i.contractor_name || "—"}</TableCell>
                       <TableCell><Badge variant="secondary" className={statusColor[i.status]}>{label(i.status)}</Badge></TableCell>
                       <TableCell className="text-right">{fmt(i.claimed_total_base)}</TableCell>
@@ -390,69 +401,145 @@ const IPCBillRegisterPage: React.FC = () => {
       </Card>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[820px]">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[880px]">
           <DialogHeader>
-            <DialogTitle>{editingId ? "Edit IPC" : "Add IPC"}</DialogTitle>
-            <DialogDescription>Amounts can be split across the contract currencies; rates are fixed from Contract Master.</DialogDescription>
+            <DialogTitle>{editingId ? "Edit IPC" : "Add IPC"}{header.ipc_number ? ` — ${header.ipc_number}` : ""}</DialogTitle>
+            <DialogDescription>Interim Payment Certificate — claimed, verified, approved &amp; paid amounts.</DialogDescription>
           </DialogHeader>
 
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-            <Field label="Project">
-              <Select value={header.project_id} onValueChange={(v) => setHeader((h) => ({ ...h, project_id: v }))}>
-                <SelectTrigger><SelectValue placeholder="Project" /></SelectTrigger>
-                <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
-              </Select>
-            </Field>
-            <Field label="IPC number"><Input value={header.ipc_number} onChange={(e) => setHeader((h) => ({ ...h, ipc_number: e.target.value }))} placeholder="IPC-001" /></Field>
-            <Field label="Period"><Input value={header.ipc_period} onChange={(e) => setHeader((h) => ({ ...h, ipc_period: e.target.value }))} placeholder="Jan 2026" /></Field>
-            <Field label="Contractor"><Input value={header.contractor_name} onChange={(e) => setHeader((h) => ({ ...h, contractor_name: e.target.value }))} /></Field>
-            <Field label="Base currency"><Input value={header.base_currency} onChange={(e) => setHeader((h) => ({ ...h, base_currency: e.target.value.toUpperCase() }))} /></Field>
-            <Field label="Contract value (base)"><Input type="number" value={header.original_contract_value} onChange={(e) => setHeader((h) => ({ ...h, original_contract_value: e.target.value }))} /></Field>
-            <Field label="Payment structure">
-              <Select value={header.payment_structure} onValueChange={(v) => setHeader((h) => ({ ...h, payment_structure: v as PaymentStructure }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{PAY_STRUCT.map((s) => <SelectItem key={s} value={s}>{label(s)}</SelectItem>)}</SelectContent>
-              </Select>
-            </Field>
-            <Field label="Payment %"><Input type="number" value={header.payment_percentage} onChange={(e) => setHeader((h) => ({ ...h, payment_percentage: e.target.value }))} placeholder="80" /></Field>
-            <Field label="Status">
-              <Select value={header.status} onValueChange={(v) => setHeader((h) => ({ ...h, status: v as IPCStatus }))}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{STATUSES.map((s) => <SelectItem key={s} value={s}>{label(s)}</SelectItem>)}</SelectContent>
-              </Select>
-            </Field>
-            <Field label="Submission date"><Input type="date" value={header.submission_date} onChange={(e) => setHeader((h) => ({ ...h, submission_date: e.target.value }))} /></Field>
-            <Field label="Verification date"><Input type="date" value={header.verification_date} onChange={(e) => setHeader((h) => ({ ...h, verification_date: e.target.value }))} /></Field>
-            <Field label="Approval date"><Input type="date" value={header.approval_date} onChange={(e) => setHeader((h) => ({ ...h, approval_date: e.target.value }))} /></Field>
-            <Field label="Payment date"><Input type="date" value={header.payment_date} onChange={(e) => setHeader((h) => ({ ...h, payment_date: e.target.value }))} /></Field>
-            <Field label="Letter references"><Input value={header.letter_references} onChange={(e) => setHeader((h) => ({ ...h, letter_references: e.target.value }))} placeholder="L-1, L-2" /></Field>
-          </div>
-          <Field label="Remarks"><Textarea rows={2} value={header.remarks} onChange={(e) => setHeader((h) => ({ ...h, remarks: e.target.value }))} /></Field>
-
-          <Tabs defaultValue={PERSPECTIVE_KEYS[0]} className="pt-1">
+          <Tabs defaultValue="header" className="pt-1">
             <TabsList className="flex h-auto flex-wrap justify-start">
-              {PERSPECTIVE_KEYS.map((pk) => <TabsTrigger key={pk} value={pk}>{PERSPECTIVE_LABELS[pk]}</TabsTrigger>)}
+              <TabsTrigger value="header">Header</TabsTrigger>
+              <TabsTrigger value="line">Line items</TabsTrigger>
+              <TabsTrigger value="ded">Deductions</TabsTrigger>
+              <TabsTrigger value="pay">Payments</TabsTrigger>
+              <TabsTrigger value="docs">Docs &amp; history</TabsTrigger>
             </TabsList>
-            {PERSPECTIVE_KEYS.map((pk) => (
-              <TabsContent key={pk} value={pk} className="space-y-3">
-                {COMPONENT_KEYS.map((ck) => (
-                  <ComponentEditor
-                    key={ck}
-                    title={COMPONENT_LABELS[ck]}
-                    rows={pers[pk][ck]}
-                    baseCurrency={header.base_currency}
-                    currencyOptions={currencyOptions}
-                    rateFor={rateFor}
-                    fieldConfig={COMPONENT_FIELDS[ck]}
-                    categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
-                    onChange={(rows) => setComp(pk, ck, rows)}
-                  />
-                ))}
-                <div className="rounded-md bg-muted/40 px-3 py-2 text-sm font-medium">
-                  Net payable ({header.base_currency}): {fmt(netOf(pers[pk]))}
-                </div>
-              </TabsContent>
-            ))}
+
+            <TabsContent value="header" className="space-y-3">
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+                <Field label="IPC number"><Input value={header.ipc_number} onChange={(e) => setHeader((h) => ({ ...h, ipc_number: e.target.value }))} placeholder="IPC-001" /></Field>
+                <Field label="IPC date"><Input type="date" value={header.ipc_date} onChange={(e) => setHeader((h) => ({ ...h, ipc_date: e.target.value }))} /></Field>
+                <Field label="Status">
+                  <Select value={header.status} onValueChange={(v) => setHeader((h) => ({ ...h, status: v as IPCStatus }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>{STATUSES.map((s) => <SelectItem key={s} value={s}>{label(s)}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Project">
+                  <Select value={header.project_id} onValueChange={(v) => setHeader((h) => ({ ...h, project_id: v }))}>
+                    <SelectTrigger><SelectValue placeholder="Project" /></SelectTrigger>
+                    <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Contractor"><Input value={header.contractor_name} onChange={(e) => setHeader((h) => ({ ...h, contractor_name: e.target.value }))} /></Field>
+                <Field label="Primary currency"><Input value={header.base_currency} onChange={(e) => setHeader((h) => ({ ...h, base_currency: e.target.value.toUpperCase() }))} /></Field>
+                <Field label="Period from"><Input type="date" value={header.period_from} onChange={(e) => setHeader((h) => ({ ...h, period_from: e.target.value }))} /></Field>
+                <Field label="Period to"><Input type="date" value={header.period_to} onChange={(e) => setHeader((h) => ({ ...h, period_to: e.target.value }))} /></Field>
+                <Field label="Letter references"><Input value={header.letter_references} onChange={(e) => setHeader((h) => ({ ...h, letter_references: e.target.value }))} placeholder="L-1, L-2" /></Field>
+                <Field label="Approver"><Input value={header.approver} onChange={(e) => setHeader((h) => ({ ...h, approver: e.target.value }))} placeholder="Employer's Representative" /></Field>
+                <Field label="Payment structure">
+                  <Select value={header.payment_structure} onValueChange={(v) => setHeader((h) => ({ ...h, payment_structure: v as PaymentStructure }))}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>{PAY_STRUCT.map((s) => <SelectItem key={s} value={s}>{label(s)}</SelectItem>)}</SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Payment %"><Input type="number" value={header.payment_percentage} onChange={(e) => setHeader((h) => ({ ...h, payment_percentage: e.target.value }))} placeholder="80" /></Field>
+                <Field label="Contract value (base)"><Input type="number" value={header.original_contract_value} onChange={(e) => setHeader((h) => ({ ...h, original_contract_value: e.target.value }))} /></Field>
+              </div>
+              <Field label="Remarks"><Textarea rows={2} value={header.remarks} onChange={(e) => setHeader((h) => ({ ...h, remarks: e.target.value }))} /></Field>
+            </TabsContent>
+
+            <TabsContent value="line" className="space-y-3">
+              <LineItemsEditor
+                rows={lineItems} baseCurrency={header.base_currency} currencyOptions={currencyOptions}
+                rateFor={rateFor} onChange={setLineItems}
+              />
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between pb-2">
+                  <CardTitle className="text-sm">Auto-calculated totals</CardTitle>
+                  <Badge variant="secondary">Primary: {header.base_currency}</Badge>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <Mini label="Claimed" value={fmt(totals.claimed)} />
+                  <Mini label="Verified" value={fmt(totals.verified)} />
+                  <Mini label="Approved" value={fmt(totals.approved)} />
+                  <Mini label="Total deductions" value={fmt(totals.approvedDed)} />
+                  <Mini label="Net payable" value={fmt(totals.net)} />
+                  <Mini label="Paid" value={fmt(totals.paid)} />
+                  <Mini label="Balance" value={fmt(totals.balance)} />
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="ded" className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Label className="text-xs text-muted-foreground">Perspective</Label>
+                <Select value={dedPersp} onValueChange={(v) => setDedPersp(v as PerspectiveKey)}>
+                  <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                  <SelectContent>{PERSPECTIVE_KEYS.map((pk) => <SelectItem key={pk} value={pk}>{PERSPECTIVE_LABELS[pk]}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              {DEDUCTION_KEYS.map((ck) => (
+                <ComponentEditor
+                  key={ck}
+                  title={DEDUCTION_LABELS[ck]}
+                  rows={deductions[dedPersp][ck]}
+                  baseCurrency={header.base_currency}
+                  currencyOptions={currencyOptions}
+                  rateFor={rateFor}
+                  fieldConfig={COMPONENT_FIELDS[ck]}
+                  categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
+                  onChange={(rows) => setDedComp(dedPersp, ck, rows)}
+                />
+              ))}
+              <div className="rounded-md bg-muted/40 px-3 py-2 text-sm font-medium">
+                {PERSPECTIVE_LABELS[dedPersp]} net ({header.base_currency}):{" "}
+                {fmt(lineTotal(lineItems, PERSPECTIVE_COLUMN[dedPersp]) - perspectiveDeductionsBase(deductions[dedPersp]))}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="pay" className="space-y-3">
+              <Card>
+                <CardContent className="grid grid-cols-3 gap-3 pt-4">
+                  <Mini label="Net payable" value={fmt(totals.net)} />
+                  <Mini label={`Paid (${header.base_currency})`} value={fmt(totals.paid)} />
+                  <Mini label="Balance payable" value={fmt(totals.balance)} />
+                </CardContent>
+              </Card>
+              <PaymentsEditor
+                rows={payments} baseCurrency={header.base_currency} currencyOptions={currencyOptions}
+                rateFor={rateFor} onChange={setPayments}
+              />
+            </TabsContent>
+
+            <TabsContent value="docs" className="space-y-3">
+              <Field label="Linked document IDs">
+                <Textarea rows={2} value={header.linked_document_ids}
+                  onChange={(e) => setHeader((h) => ({ ...h, linked_document_ids: e.target.value }))}
+                  placeholder="doc-id-1, doc-id-2" />
+              </Field>
+              <Card>
+                <CardHeader className="pb-2"><CardTitle className="text-sm">Revision history</CardTitle></CardHeader>
+                <CardContent>
+                  {revisions.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No revisions yet.</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {[...revisions].reverse().map((r, idx) => (
+                        <div key={idx} className="flex items-start gap-3 border-b pb-2 last:border-0">
+                          <Badge variant="secondary">Rev {r.revision_number}</Badge>
+                          <div className="text-sm">
+                            <div>{label(r.status) || "—"}{r.changed_by ? ` · ${r.changed_by}` : ""}</div>
+                            <div className="text-xs text-muted-foreground">{fmtDate(r.changed_at)}{r.remarks ? ` · ${r.remarks}` : ""}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </TabsContent>
           </Tabs>
 
           <DialogFooter>
@@ -478,13 +565,87 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
   <Card><CardHeader className="pb-2"><CardDescription className="text-xs">{label}</CardDescription><CardTitle className={`text-xl ${cls || ""}`}>{value}</CardTitle></CardHeader></Card>
 );
 
+const Mini: React.FC<{ label: string; value: string }> = ({ label, value }) => (
+  <div className="rounded-md bg-muted/40 px-3 py-2">
+    <div className="text-xs text-muted-foreground">{label}</div>
+    <div className="text-lg font-medium">{value}</div>
+  </div>
+);
+
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
   <div className="grid gap-1.5"><Label className="text-xs text-muted-foreground">{label}</Label>{children}</div>
 );
 
-// One component as a list of rows. Each row is {currency, amount} plus, where
-// the component config asks for it, a typed category (advance/deduction master)
-// and/or a free-text description. Rate auto-filled from the contract currencies.
+// Line items: one row per BOQ/scope item with claimed/verified/approved columns.
+const LineItemsEditor: React.FC<{
+  rows: IPCLineItem[]; baseCurrency: string; currencyOptions: string[];
+  rateFor: (c: string) => number; onChange: (rows: IPCLineItem[]) => void;
+}> = ({ rows, baseCurrency, currencyOptions, rateFor, onChange }) => {
+  const add = () => onChange([...(rows || []), { description: "", currency: baseCurrency, conversion_rate: 1, claimed: 0, verified: 0, approved: 0 }]);
+  const set = (i: number, patch: Partial<IPCLineItem>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <div className="rounded-md border p-2">
+      <div className="grid grid-cols-[1fr_80px_repeat(3,90px)_32px] gap-2 border-b pb-1 text-xs text-muted-foreground">
+        <span>Description</span><span>Currency</span>
+        <span className="text-right">Contractor claimed</span><span className="text-right">GC verified</span><span className="text-right">Employer approved</span><span />
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} className="mt-1 grid grid-cols-[1fr_80px_repeat(3,90px)_32px] items-center gap-2">
+          <Input className="h-9" placeholder="Scope / BOQ item" value={r.description || ""} onChange={(e) => set(i, { description: e.target.value })} />
+          <select className="flex h-9 rounded-md border border-input bg-background px-2 text-sm" value={r.currency}
+            onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}>
+            {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <Input type="number" className="h-9 text-right" value={r.claimed} onChange={(e) => set(i, { claimed: Number(e.target.value) })} />
+          <Input type="number" className="h-9 text-right" value={r.verified} onChange={(e) => set(i, { verified: Number(e.target.value) })} />
+          <Input type="number" className="h-9 text-right" value={r.approved} onChange={(e) => set(i, { approved: Number(e.target.value) })} />
+          <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      <Button type="button" variant="ghost" size="sm" className="mt-2 h-8" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />Add line item</Button>
+    </div>
+  );
+};
+
+// Payment records: discrete actual payments made.
+const PaymentsEditor: React.FC<{
+  rows: IPCPaymentRecord[]; baseCurrency: string; currencyOptions: string[];
+  rateFor: (c: string) => number; onChange: (rows: IPCPaymentRecord[]) => void;
+}> = ({ rows, baseCurrency, currencyOptions, rateFor, onChange }) => {
+  const add = () => onChange([...(rows || []), { payment_date: null, reference: "", method: "", currency: baseCurrency, conversion_rate: 1, amount: 0 }]);
+  const set = (i: number, patch: Partial<IPCPaymentRecord>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  return (
+    <div className="rounded-md border p-2">
+      <div className="grid grid-cols-[130px_1fr_110px_80px_100px_32px] gap-2 border-b pb-1 text-xs text-muted-foreground">
+        <span>Date</span><span>Reference</span><span>Method</span><span>Currency</span><span className="text-right">Amount</span><span />
+      </div>
+      {rows.map((r, i) => (
+        <div key={i} className="mt-1 grid grid-cols-[130px_1fr_110px_80px_100px_32px] items-center gap-2">
+          <Input type="date" className="h-9" value={dstr(r.payment_date)} onChange={(e) => set(i, { payment_date: e.target.value ? new Date(e.target.value).toISOString() : null })} />
+          <Input className="h-9" placeholder="Cheque / NEFT ref" value={r.reference || ""} onChange={(e) => set(i, { reference: e.target.value })} />
+          <Input className="h-9" placeholder="NEFT / RTGS" value={r.method || ""} onChange={(e) => set(i, { method: e.target.value })} />
+          <select className="flex h-9 rounded-md border border-input bg-background px-2 text-sm" value={r.currency}
+            onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}>
+            {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => (<option key={c} value={c}>{c}</option>))}
+          </select>
+          <Input type="number" className="h-9 text-right" value={r.amount} onChange={(e) => set(i, { amount: Number(e.target.value) })} />
+          <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      <Button type="button" variant="ghost" size="sm" className="mt-2 h-8" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />Record payment</Button>
+    </div>
+  );
+};
+
+// One deduction component as a list of rows. Each row is {currency, amount} plus,
+// where the config asks, a typed category (advance/deduction master) and/or a
+// free-text description.
 const ComponentEditor: React.FC<{
   title: string; rows: CurrencyAmount[]; baseCurrency: string;
   currencyOptions: string[]; rateFor: (c: string) => number;

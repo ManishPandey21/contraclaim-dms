@@ -1,11 +1,20 @@
 """IPC / Contractor Bill Register models (Contract Controls).
 
-Records each Interim Payment Certificate (IPC) with the contractor-claimed,
-engineer-verified, employer-approved and actually-paid views of the bill. Each
-component (gross, deductions, recovery of advances, IT, GST, withholding,
-penalties/LD) may itself be denominated in one or more contract currencies; the
-service converts everything to the contract base currency for roll-ups.
-Tenant-scoped by organization/project, consistent with the other registers.
+Records each Interim Payment Certificate (IPC) as a real certificate would be
+filled, organised function-first rather than perspective-first:
+
+  * line_items  — one row per BOQ/scope item with the contractor-claimed,
+                  engineer/GC-verified and employer-approved gross amounts
+                  side by side (each line in one currency).
+  * deductions  — recoveries of advances, statutory deductions, withholding
+                  and penalties/LD, captured per perspective
+                  (claimed / verified / approved). Each line carries an
+                  optional master ``category`` and free-text ``description``.
+  * payments    — discrete actual payments made (date, reference, amount).
+
+Every monetary line carries its award-fixed conversion rate; the service
+converts everything to the contract base currency for roll-ups. Tenant-scoped
+by organization/project, consistent with the other registers.
 """
 
 from __future__ import annotations
@@ -37,14 +46,23 @@ class PaymentStructure(str, Enum):
     CUSTOM = "custom"
 
 
-class CurrencyAmount(BaseModel):
-    """One currency's portion of a component, with its award-fixed rate to base.
+def _clean_currency(value: str) -> str:
+    cleaned = (value or "").strip().upper()
+    if not cleaned:
+        raise ValueError("currency code is required")
+    return cleaned
 
-    `category` carries the master code for typed lines (advance type on recovery
-    rows, deduction type on deduction rows); `description` is a free-text reason
-    (why a recovery / withholding / penalty was applied). Both are optional so
-    existing rows and the base-currency roll-ups stay unchanged.
-    """
+
+def _clean_rate(value: float) -> float:
+    if value is None or float(value) <= 0:
+        raise ValueError("conversion_rate must be greater than 0")
+    return float(value)
+
+
+class CurrencyAmount(BaseModel):
+    """One deduction/recovery line: an amount in a currency, with the rate to
+    base. `category` carries the master code (advance / deduction type) and
+    `description` a free-text reason. Both optional."""
 
     currency: str
     conversion_rate: float = 1.0  # 1 unit of `currency` = rate base units (fixed at award)
@@ -55,31 +73,77 @@ class CurrencyAmount(BaseModel):
     @field_validator("currency")
     @classmethod
     def _currency(cls, value: str) -> str:
-        cleaned = (value or "").strip().upper()
-        if not cleaned:
-            raise ValueError("currency code is required")
-        return cleaned
+        return _clean_currency(value)
 
     @field_validator("conversion_rate")
     @classmethod
     def _rate(cls, value: float) -> float:
-        if value is None or float(value) <= 0:
-            raise ValueError("conversion_rate must be greater than 0")
-        return float(value)
+        return _clean_rate(value)
 
 
-class IPCComponents(BaseModel):
-    """One perspective's bill breakdown. Each component is a list of currency
-    amounts (per-component multi-currency). `net_payable` is derived by the
-    service (gross minus all deductions), not entered here."""
+class IPCLineItem(BaseModel):
+    """One BOQ/scope line with the three estimate perspectives side by side."""
 
-    gross: List[CurrencyAmount] = Field(default_factory=list)
-    deductions: List[CurrencyAmount] = Field(default_factory=list)
+    description: Optional[str] = None
+    currency: str = "INR"
+    conversion_rate: float = 1.0
+    claimed: float = 0.0
+    verified: float = 0.0
+    approved: float = 0.0
+
+    @field_validator("currency")
+    @classmethod
+    def _currency(cls, value: str) -> str:
+        return _clean_currency(value)
+
+    @field_validator("conversion_rate")
+    @classmethod
+    def _rate(cls, value: float) -> float:
+        return _clean_rate(value)
+
+
+class IPCPerspectiveDeductions(BaseModel):
+    """The deduction breakdown for one perspective. `net = gross - sum(these)`."""
+
     recovery_of_advances: List[CurrencyAmount] = Field(default_factory=list)
+    deductions: List[CurrencyAmount] = Field(default_factory=list)
     it_tax: List[CurrencyAmount] = Field(default_factory=list)        # income tax
     gst: List[CurrencyAmount] = Field(default_factory=list)
     withheld: List[CurrencyAmount] = Field(default_factory=list)
     penalties_ld: List[CurrencyAmount] = Field(default_factory=list)  # penalties / LD
+
+
+# The deduction components that reduce gross to net, in roll-up order.
+DEDUCTION_COMPONENTS = (
+    "recovery_of_advances", "deductions", "it_tax", "gst", "withheld", "penalties_ld",
+)
+
+
+class DeductionsByPerspective(BaseModel):
+    contractor_claimed: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
+    engineer_verified: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
+    employer_approved: IPCPerspectiveDeductions = Field(default_factory=IPCPerspectiveDeductions)
+
+
+class IPCPaymentRecord(BaseModel):
+    """One actual payment made against the certificate."""
+
+    payment_date: Optional[datetime] = None
+    reference: Optional[str] = None     # cheque / NEFT / instrument reference
+    method: Optional[str] = None        # NEFT / RTGS / cheque ...
+    currency: str = "INR"
+    conversion_rate: float = 1.0
+    amount: float = 0.0
+
+    @field_validator("currency")
+    @classmethod
+    def _currency(cls, value: str) -> str:
+        return _clean_currency(value)
+
+    @field_validator("conversion_rate")
+    @classmethod
+    def _rate(cls, value: float) -> float:
+        return _clean_rate(value)
 
 
 class IPCRevision(BaseModel):
@@ -92,19 +156,23 @@ class IPCRevision(BaseModel):
 
 class IPCBillBase(BaseModel):
     ipc_number: Optional[str] = None
-    ipc_period: Optional[str] = None        # e.g. "Jan 2026" / "2026-01"
+    ipc_date: Optional[datetime] = None         # certificate date
+    ipc_period: Optional[str] = None            # optional label, e.g. "Jan 2026"
+    period_from: Optional[datetime] = None
+    period_to: Optional[datetime] = None
     contract_id: Optional[str] = None
     contractor_name: Optional[str] = None
-    base_currency: str = "INR"              # reporting currency (from Contract Master)
+    approver: Optional[str] = None              # e.g. "Employer's Representative"
+    base_currency: str = "INR"                  # reporting currency (from Contract Master)
     payment_structure: PaymentStructure = PaymentStructure.FULL
     payment_percentage: Optional[float] = None  # e.g. 80, 20, 100
 
-    # The four perspectives.
-    contractor_claimed: IPCComponents = Field(default_factory=IPCComponents)
-    engineer_verified: IPCComponents = Field(default_factory=IPCComponents)
-    employer_approved: IPCComponents = Field(default_factory=IPCComponents)
-    actually_paid: IPCComponents = Field(default_factory=IPCComponents)
+    # Function-first body.
+    line_items: List[IPCLineItem] = Field(default_factory=list)
+    deductions: DeductionsByPerspective = Field(default_factory=DeductionsByPerspective)
+    payments: List[IPCPaymentRecord] = Field(default_factory=list)
 
+    # Status workflow dates (set as the certificate progresses; not on the Header tab).
     submission_date: Optional[datetime] = None
     verification_date: Optional[datetime] = None
     approval_date: Optional[datetime] = None
@@ -126,16 +194,19 @@ class IPCBillCreate(IPCBillBase):
 
 class IPCBillUpdate(BaseModel):
     ipc_number: Optional[str] = None
+    ipc_date: Optional[datetime] = None
     ipc_period: Optional[str] = None
+    period_from: Optional[datetime] = None
+    period_to: Optional[datetime] = None
     contract_id: Optional[str] = None
     contractor_name: Optional[str] = None
+    approver: Optional[str] = None
     base_currency: Optional[str] = None
     payment_structure: Optional[PaymentStructure] = None
     payment_percentage: Optional[float] = None
-    contractor_claimed: Optional[IPCComponents] = None
-    engineer_verified: Optional[IPCComponents] = None
-    employer_approved: Optional[IPCComponents] = None
-    actually_paid: Optional[IPCComponents] = None
+    line_items: Optional[List[IPCLineItem]] = None
+    deductions: Optional[DeductionsByPerspective] = None
+    payments: Optional[List[IPCPaymentRecord]] = None
     submission_date: Optional[datetime] = None
     verification_date: Optional[datetime] = None
     approval_date: Optional[datetime] = None
@@ -156,8 +227,9 @@ class IPCBill(IPCBillBase):
     claimed_total_base: Optional[float] = None       # contractor gross claimed
     verified_total_base: Optional[float] = None       # engineer gross verified
     approved_total_base: Optional[float] = None       # employer gross approved
-    net_payable_base: Optional[float] = None          # employer-approved net
-    paid_base: Optional[float] = None                 # actually-paid net
+    total_deductions_base: Optional[float] = None     # employer-approved deductions
+    net_payable_base: Optional[float] = None          # approved gross - approved deductions
+    paid_base: Optional[float] = None                 # sum of payment records
     balance_payable_base: Optional[float] = None      # net payable - paid
     percent_billed: Optional[float] = None            # claimed / contract value
     percent_approved: Optional[float] = None          # approved / contract value
