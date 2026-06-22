@@ -27,6 +27,7 @@ import {
   Clock,
   Sparkles,
   Bell,
+  Activity,
   CreditCard,
   CalendarClock,
   GitCompareArrows,
