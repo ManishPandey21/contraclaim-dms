@@ -141,7 +141,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
 
   const onBgCurrencyChange = (cur: string) => {
     const match = formCurrencies.find((c) => c.currency === cur);
-    const rate = cur === formBaseCurrency ? 1 : match?.conversion_rate ?? Number(form.conversion_rate) || 1;
+    const rate = cur === formBaseCurrency ? 1 : (match?.conversion_rate ?? (Number(form.conversion_rate) || 1));
     setForm((f) => ({ ...f, currency: cur, conversion_rate: String(rate) }));
   };
 

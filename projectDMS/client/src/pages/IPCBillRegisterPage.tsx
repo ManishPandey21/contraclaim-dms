@@ -120,11 +120,13 @@ const IPCBillRegisterPage: React.FC = () => {
         const cm = await getContractMasterForProject(header.project_id);
         if (!active || !cm) return;
         setContractCurrencies((cm.contract_currencies || []).map((c) => ({ currency: c.currency, conversion_rate: c.conversion_rate })));
+        const cmValue = cm.total_contract_value_base ?? cm.original_contract_value;
         setHeader((h) => ({
           ...h,
-          base_currency: h.base_currency && h.base_currency !== "INR" ? h.base_currency : cm.currency || "INR",
-          original_contract_value: h.original_contract_value || (cm.total_contract_value_base ?? cm.original_contract_value) != null
-            ? String(cm.total_contract_value_base ?? cm.original_contract_value ?? "") : h.original_contract_value,
+          base_currency: h.base_currency && h.base_currency !== "INR" ? h.base_currency : (cm.currency || "INR"),
+          // Only auto-fill the contract value when the user hasn't entered one.
+          original_contract_value:
+            h.original_contract_value || cmValue == null ? h.original_contract_value : String(cmValue),
         }));
       } catch { /* optional */ }
     })();
