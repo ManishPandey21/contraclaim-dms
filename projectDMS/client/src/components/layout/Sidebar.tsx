@@ -208,6 +208,7 @@ const Sidebar = () => {
       label: "Contract Appraisal",
     },
 
+    // ── Registers (claims / contract controls) ──
     { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
     { path: "/sla", icon: <Clock size={20} />, label: "SLA Tracker" },
     { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
@@ -215,39 +216,23 @@ const Sidebar = () => {
     { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
     { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },
+
+    // ── User tools ──
+    { path: "/tasks", icon: <ClipboardList size={20} />, label: "Tasks" },
     { path: "/concerns", icon: <MessageSquare size={20} />, label: "Concerns" },
     { path: "/retrieval-console", icon: <Search size={20} />, label: "Retrieval Console" },
+    { path: "/folders", icon: <FolderClosed size={20} />, label: "Folder Structure" },
+    { path: "/reports", icon: <BarChart size={20} />, label: "Reports & Analytics" },
+    { path: "/notifications", icon: <Bell size={20} />, label: "Notifications" },
+
+    // ── Admin tools ──
     {
       path: "/observability",
       icon: <Activity size={20} />,
       label: "Observability",
       permission: "reports:view",
     },
-    {
-      path: "/tasks",
-      icon: <ClipboardList size={20} />,
-      label: "Tasks",
-    },
-    {
-      path: "/folders",
-      icon: <FolderClosed size={20} />,
-      label: "Folder Structure",
-    },
-    {
-      path: "/reports",
-      icon: <BarChart size={20} />,
-      label: "Reports & Analytics",
-    },
-    {
-      path: "/notifications",
-      icon: <Bell size={20} />,
-      label: "Notifications",
-    },
-    {
-      path: "/health",
-      icon: <HeartPulse size={20} />,
-      label: "System Health",
-    },
+    { path: "/health", icon: <HeartPulse size={20} />, label: "System Health" },
     { path: "/users", icon: <Users size={20} />, label: "Users" },
     { path: "/permissions", icon: <UserCog size={20} />, label: "Permissions" },
     {
@@ -323,12 +308,13 @@ const Sidebar = () => {
               "Email Groups", // After Add Stakeholder
               "Search Letters", // After Search letter
               "Create Template", // After Letter Templates
-              "Contract Appraisal", // After the Contracts group
-              "Tasks", // After the Claims / SLA / Tasks group
+              "Contract Appraisal", // After the Contracts group → Registers
+              "IPC / Bill Register", // End of Registers → User tools
+              "Notifications", // End of User tools → Admin tools
             ]);
 
             return (
-              <React.Fragment>
+              <React.Fragment key={link.path}>
                 <li>
                   <NavLink
                     to={link.path}
