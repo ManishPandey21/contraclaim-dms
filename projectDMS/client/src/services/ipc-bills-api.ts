@@ -12,6 +12,8 @@ export interface CurrencyAmount {
   currency: string;
   conversion_rate: number; // to base, fixed at award
   amount: number;
+  category?: string | null;    // master code (advance / deduction type)
+  description?: string | null; // free-text reason / detail
 }
 
 // Each component is a list of currency amounts (per-component multi-currency).
@@ -36,6 +38,22 @@ export const COMPONENT_LABELS: Record<keyof IPCComponents, string> = {
   gst: "GST",
   withheld: "Withheld",
   penalties_ld: "Penalties / LD",
+};
+
+// Per-component field config: which rows carry a typed category (and from which
+// master) and/or a free-text description. Drives the editor UI.
+export interface ComponentFieldConfig {
+  categoryKind?: "advance" | "deduction";
+  description?: boolean;
+}
+export const COMPONENT_FIELDS: Record<keyof IPCComponents, ComponentFieldConfig> = {
+  gross: {},
+  deductions: { categoryKind: "deduction", description: true },
+  recovery_of_advances: { categoryKind: "advance", description: true },
+  it_tax: {},
+  gst: {},
+  withheld: { description: true },
+  penalties_ld: { description: true },
 };
 
 export const PERSPECTIVE_KEYS = [

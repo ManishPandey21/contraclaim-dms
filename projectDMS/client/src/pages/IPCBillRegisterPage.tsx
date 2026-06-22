@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Download, Edit, FileText, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { Download, Edit, FileText, Loader2, PlusCircle, Tags, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,11 +21,15 @@ import useRBAC from "@/hooks/useRBAC";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
-  COMPONENT_KEYS, COMPONENT_LABELS, CurrencyAmount, IPCBillDTO, IPCBillSummaryDTO,
-  IPCComponents, IPCStatus, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS, PaymentStructure,
-  PerspectiveKey, componentBase, createIPCBill, deleteIPCBill, emptyComponents,
+  COMPONENT_FIELDS, COMPONENT_KEYS, COMPONENT_LABELS, ComponentFieldConfig, CurrencyAmount,
+  IPCBillDTO, IPCBillSummaryDTO, IPCComponents, IPCStatus, PERSPECTIVE_KEYS, PERSPECTIVE_LABELS,
+  PaymentStructure, PerspectiveKey, componentBase, createIPCBill, deleteIPCBill, emptyComponents,
   exportIPCBills, getIPCBills, getIPCSummary, updateIPCBill,
 } from "@/services/ipc-bills-api";
+import {
+  IPCCategory, IPCCategoryKind, createIPCCategory, deleteIPCCategory, getIPCCategories,
+  getIPCCategoriesManage, updateIPCCategory,
+} from "@/services/ipc-categories-api";
 
 const STATUSES: IPCStatus[] = ["draft", "submitted", "under_verification", "verified", "approved", "partially_paid", "paid", "rejected"];
 const PAY_STRUCT: PaymentStructure[] = ["full", "80_20", "20", "partial", "custom"];
@@ -81,6 +85,9 @@ const IPCBillRegisterPage: React.FC = () => {
   const [pers, setPers] = useState<Record<PerspectiveKey, IPCComponents>>(EMPTY_PERS());
   const [saving, setSaving] = useState(false);
   const [contractCurrencies, setContractCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
+  const [advanceCats, setAdvanceCats] = useState<IPCCategory[]>([]);
+  const [deductionCats, setDeductionCats] = useState<IPCCategory[]>([]);
+  const [manageOpen, setManageOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -132,6 +139,30 @@ const IPCBillRegisterPage: React.FC = () => {
     })();
     return () => { active = false; };
   }, [dialogOpen, header.project_id]);
+
+  // Load the advance + deduction catalogs (org-wide + project overrides merged)
+  // for the editor dropdowns whenever the dialog opens or the project changes.
+  const loadCategories = useCallback(async (projectId?: string) => {
+    try {
+      const params = projectId ? { project_id: projectId } : undefined;
+      const [adv, ded] = await Promise.all([
+        getIPCCategories({ ...(params || {}), kind: "advance" }),
+        getIPCCategories({ ...(params || {}), kind: "deduction" }),
+      ]);
+      setAdvanceCats(adv);
+      setDeductionCats(ded);
+    } catch { /* optional */ }
+  }, []);
+
+  useEffect(() => {
+    if (!dialogOpen) return;
+    void loadCategories(header.project_id || undefined);
+  }, [dialogOpen, header.project_id, loadCategories]);
+
+  const catsFor = useCallback(
+    (kind?: "advance" | "deduction"): IPCCategory[] =>
+      kind === "advance" ? advanceCats : kind === "deduction" ? deductionCats : [],
+    [advanceCats, deductionCats]);
 
   const rateFor = useCallback((cur: string) =>
     cur === header.base_currency ? 1 : contractCurrencies.find((c) => c.currency === cur)?.conversion_rate ?? 1,
@@ -256,6 +287,9 @@ const IPCBillRegisterPage: React.FC = () => {
               <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>
               <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>
             </>
+          )}
+          {can("dms.ipc.edit") && (
+            <Button variant="outline" size="sm" onClick={() => setManageOpen(true)}><Tags className="mr-2 h-4 w-4" />Manage types</Button>
           )}
           {can("dms.ipc.create") && <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add IPC</Button>}
         </div>
@@ -409,6 +443,8 @@ const IPCBillRegisterPage: React.FC = () => {
                     baseCurrency={header.base_currency}
                     currencyOptions={currencyOptions}
                     rateFor={rateFor}
+                    fieldConfig={COMPONENT_FIELDS[ck]}
+                    categories={catsFor(COMPONENT_FIELDS[ck].categoryKind)}
                     onChange={(rows) => setComp(pk, ck, rows)}
                   />
                 ))}
@@ -425,6 +461,15 @@ const IPCBillRegisterPage: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ManageCategoriesDialog
+        open={manageOpen}
+        onOpenChange={setManageOpen}
+        projects={projects}
+        defaultProjectId={projectFilter !== "all" ? projectFilter : ""}
+        canEdit={can("dms.ipc.edit")}
+        onChanged={() => { if (dialogOpen) void loadCategories(header.project_id || undefined); }}
+      />
     </div>
   );
 };
@@ -437,44 +482,241 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
   <div className="grid gap-1.5"><Label className="text-xs text-muted-foreground">{label}</Label>{children}</div>
 );
 
-// One component as a list of {currency, amount} rows. Rate auto-filled from the
-// contract currencies; defaults to a single base-currency row when first used.
+// One component as a list of rows. Each row is {currency, amount} plus, where
+// the component config asks for it, a typed category (advance/deduction master)
+// and/or a free-text description. Rate auto-filled from the contract currencies.
 const ComponentEditor: React.FC<{
   title: string; rows: CurrencyAmount[]; baseCurrency: string;
-  currencyOptions: string[]; rateFor: (c: string) => number; onChange: (rows: CurrencyAmount[]) => void;
-}> = ({ title, rows, baseCurrency, currencyOptions, rateFor, onChange }) => {
+  currencyOptions: string[]; rateFor: (c: string) => number;
+  fieldConfig: ComponentFieldConfig; categories: IPCCategory[];
+  onChange: (rows: CurrencyAmount[]) => void;
+}> = ({ title, rows, baseCurrency, currencyOptions, rateFor, fieldConfig, categories, onChange }) => {
   const add = () => onChange([...(rows || []), { currency: baseCurrency, conversion_rate: 1, amount: 0 }]);
   const set = (i: number, patch: Partial<CurrencyAmount>) =>
     onChange(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const base = componentBase(rows);
+  const hasCategory = !!fieldConfig.categoryKind;
+  const cols = hasCategory ? "grid-cols-[1.2fr_1fr_1fr_auto]" : "grid-cols-[1fr_1fr_auto]";
   return (
     <div className="rounded-md border p-2">
       <div className="flex items-center justify-between">
         <span className="text-sm font-medium">{title}</span>
         <div className="flex items-center gap-2">
           {rows.length > 0 && <span className="text-xs text-muted-foreground">= {fmt(base)} {baseCurrency}</span>}
-          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />currency</Button>
+          <Button type="button" variant="ghost" size="sm" className="h-7" onClick={add}><PlusCircle className="mr-1 h-3.5 w-3.5" />line</Button>
         </div>
       </div>
       {rows.map((r, i) => (
-        <div key={i} className="mt-1 grid grid-cols-[1fr_1fr_auto] gap-2">
-          <select
-            className="flex h-9 rounded-md border border-input bg-background px-2 text-sm"
-            value={r.currency}
-            onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}
-          >
-            {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => (
-              <option key={c} value={c}>{c}{c !== baseCurrency ? ` (×${rateFor(c)})` : ""}</option>
-            ))}
-          </select>
-          <Input type="number" className="h-9" placeholder="0" value={r.amount}
-            onChange={(e) => set(i, { amount: Number(e.target.value) })} />
-          <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
-            <Trash2 className="h-4 w-4" />
-          </Button>
+        <div key={i} className="mt-1 space-y-1">
+          <div className={`grid ${cols} gap-2`}>
+            {hasCategory && (
+              <select
+                className="flex h-9 rounded-md border border-input bg-background px-2 text-sm"
+                value={r.category || ""}
+                onChange={(e) => set(i, { category: e.target.value || null })}
+              >
+                <option value="">— type —</option>
+                {categories.map((c) => <option key={c.id} value={c.code}>{c.name}</option>)}
+                {r.category && !categories.some((c) => c.code === r.category) && (
+                  <option value={r.category}>{r.category}</option>
+                )}
+              </select>
+            )}
+            <select
+              className="flex h-9 rounded-md border border-input bg-background px-2 text-sm"
+              value={r.currency}
+              onChange={(e) => { const cur = e.target.value; set(i, { currency: cur, conversion_rate: rateFor(cur) }); }}
+            >
+              {Array.from(new Set([...currencyOptions, r.currency].filter(Boolean))).map((c) => (
+                <option key={c} value={c}>{c}{c !== baseCurrency ? ` (×${rateFor(c)})` : ""}</option>
+              ))}
+            </select>
+            <Input type="number" className="h-9" placeholder="0" value={r.amount}
+              onChange={(e) => set(i, { amount: Number(e.target.value) })} />
+            <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+          {fieldConfig.description && (
+            <Input className="h-8 text-sm" placeholder="Description / reason"
+              value={r.description || ""} onChange={(e) => set(i, { description: e.target.value || null })} />
+          )}
         </div>
       ))}
     </div>
+  );
+};
+
+// Master management: create / rename / activate / delete advance + deduction
+// types. Scope is org-wide (project = "") or a project override/addition.
+interface CatForm { id: string; kind: IPCCategoryKind; name: string; description: string; scope: string; }
+const EMPTY_CAT: CatForm = { id: "", kind: "deduction", name: "", description: "", scope: "" };
+
+const ManageCategoriesDialog: React.FC<{
+  open: boolean; onOpenChange: (v: boolean) => void;
+  projects: { id: string; name: string }[]; defaultProjectId: string;
+  canEdit: boolean; onChanged: () => void;
+}> = ({ open, onOpenChange, projects, defaultProjectId, canEdit, onChanged }) => {
+  const [scope, setScope] = useState<string>(defaultProjectId);
+  const [items, setItems] = useState<IPCCategory[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [form, setForm] = useState<CatForm>({ ...EMPTY_CAT });
+  const [busy, setBusy] = useState(false);
+  const projectName = (id?: string | null) => projects.find((p) => p.id === id)?.name || "Project";
+
+  const reload = useCallback(async (proj: string) => {
+    setLoading(true);
+    try {
+      setItems(await getIPCCategoriesManage(proj ? { project_id: proj } : undefined));
+    } catch { toast.error("Failed to load types"); } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    setScope(defaultProjectId);
+    setForm({ ...EMPTY_CAT, scope: defaultProjectId });
+  }, [open, defaultProjectId]);
+  useEffect(() => { if (open) void reload(scope); }, [open, scope, reload]);
+
+  const submit = async () => {
+    if (!form.name.trim()) { toast.error("Name is required"); return; }
+    setBusy(true);
+    try {
+      if (form.id) {
+        await updateIPCCategory(form.id, { name: form.name.trim(), description: form.description || undefined });
+        toast.success("Type updated");
+      } else {
+        await createIPCCategory({
+          kind: form.kind,
+          code: form.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, ""),
+          name: form.name.trim(),
+          description: form.description || undefined,
+          project_id: form.scope || null,
+        });
+        toast.success("Type added");
+      }
+      setForm({ ...EMPTY_CAT, kind: form.kind, scope: form.scope });
+      await reload(scope);
+      onChanged();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to save type");
+    } finally { setBusy(false); }
+  };
+
+  const toggleActive = async (c: IPCCategory) => {
+    try { await updateIPCCategory(c.id, { active: !c.active }); await reload(scope); onChanged(); }
+    catch { toast.error("Failed to update"); }
+  };
+  const remove = async (c: IPCCategory) => {
+    if (!window.confirm(`Delete "${c.name}"?`)) return;
+    try { await deleteIPCCategory(c.id); await reload(scope); onChanged(); }
+    catch (e: any) { toast.error(e?.response?.data?.detail || "Failed to delete"); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[760px]">
+        <DialogHeader>
+          <DialogTitle>Manage advance &amp; deduction types</DialogTitle>
+          <DialogDescription>
+            Org-wide types apply to every project; a project can add or override types. Recoveries pick an
+            advance type; deductions pick a deduction type.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-center gap-2">
+          <Label className="text-xs text-muted-foreground">Scope</Label>
+          <Select value={scope || "org"} onValueChange={(v) => setScope(v === "org" ? "" : v)}>
+            <SelectTrigger className="w-60"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="org">Org-wide</SelectItem>
+              {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name} (project)</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+
+        {canEdit && (
+          <div className="grid grid-cols-2 gap-2 rounded-md border p-3 md:grid-cols-[140px_1fr_1fr_140px_auto]">
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">Kind</Label>
+              <Select value={form.kind} onValueChange={(v) => setForm((f) => ({ ...f, kind: v as IPCCategoryKind }))} disabled={!!form.id}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="advance">Advance</SelectItem>
+                  <SelectItem value="deduction">Deduction</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">Name</Label>
+              <Input value={form.name} onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Retention" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">Description</Label>
+              <Input value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} placeholder="optional" />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs text-muted-foreground">Add to</Label>
+              <Select value={form.scope || "org"} onValueChange={(v) => setForm((f) => ({ ...f, scope: v === "org" ? "" : v }))} disabled={!!form.id}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="org">Org-wide</SelectItem>
+                  {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-end gap-1">
+              <Button size="sm" onClick={submit} disabled={busy}>{form.id ? "Save" : "Add"}</Button>
+              {form.id && <Button size="sm" variant="ghost" onClick={() => setForm({ ...EMPTY_CAT, kind: form.kind, scope: form.scope })}>Cancel</Button>}
+            </div>
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center justify-center py-8 text-muted-foreground"><Loader2 className="mr-2 h-5 w-5 animate-spin" />Loading…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Type</TableHead><TableHead>Kind</TableHead><TableHead>Scope</TableHead>
+                  <TableHead>Status</TableHead><TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {items.length === 0 ? (
+                  <TableRow><TableCell colSpan={5} className="py-6 text-center text-muted-foreground">No types defined.</TableCell></TableRow>
+                ) : items.map((c) => (
+                  <TableRow key={c.id}>
+                    <TableCell>
+                      <div className="font-medium">{c.name}</div>
+                      <div className="text-xs text-muted-foreground">{c.code}{c.description ? ` · ${c.description}` : ""}</div>
+                    </TableCell>
+                    <TableCell><Badge variant="secondary">{label(c.kind)}</Badge></TableCell>
+                    <TableCell>{c.project_id ? projectName(c.project_id) : "Org-wide"}{c.is_default && <span className="ml-1 text-xs text-muted-foreground">(default)</span>}</TableCell>
+                    <TableCell><Badge variant="secondary" className={c.active ? "bg-green-100 text-green-800" : "bg-gray-100 text-gray-600"}>{c.active ? "Active" : "Inactive"}</Badge></TableCell>
+                    <TableCell className="text-right whitespace-nowrap">
+                      {canEdit && (
+                        <>
+                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit"
+                            onClick={() => setForm({ id: c.id, kind: c.kind, name: c.name, description: c.description || "", scope: c.project_id || "" })}><Edit className="h-4 w-4" /></Button>
+                          <Button variant="ghost" size="sm" className="h-8" title="Toggle active" onClick={() => toggleActive(c)}>{c.active ? "Disable" : "Enable"}</Button>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" title="Delete" onClick={() => remove(c)}><Trash2 className="h-4 w-4" /></Button>
+                        </>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 };
 

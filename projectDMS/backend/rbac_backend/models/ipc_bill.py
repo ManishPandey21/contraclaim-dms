@@ -38,11 +38,19 @@ class PaymentStructure(str, Enum):
 
 
 class CurrencyAmount(BaseModel):
-    """One currency's portion of a component, with its award-fixed rate to base."""
+    """One currency's portion of a component, with its award-fixed rate to base.
+
+    `category` carries the master code for typed lines (advance type on recovery
+    rows, deduction type on deduction rows); `description` is a free-text reason
+    (why a recovery / withholding / penalty was applied). Both are optional so
+    existing rows and the base-currency roll-ups stay unchanged.
+    """
 
     currency: str
     conversion_rate: float = 1.0  # 1 unit of `currency` = rate base units (fixed at award)
     amount: float = 0.0
+    category: Optional[str] = None     # master code (advance / deduction type)
+    description: Optional[str] = None  # free-text reason / detail
 
     @field_validator("currency")
     @classmethod
