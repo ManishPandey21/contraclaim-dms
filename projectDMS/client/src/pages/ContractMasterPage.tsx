@@ -156,7 +156,16 @@ const ContractMasterPage: React.FC = () => {
       toast.success("Contract master saved");
       await loadMaster(projectId);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to save");
+      const detail = e?.response?.data?.detail;
+      // Distinguish an app error (has a response/detail) from a transport
+      // failure (no response = network / CORS / proxy / timeout), so the toast
+      // tells you which layer failed instead of a generic "Failed to save".
+      const message = detail
+        ? (typeof detail === "string" ? detail : JSON.stringify(detail))
+        : e?.response
+          ? `Save failed (HTTP ${e.response.status}${e.response.statusText ? " " + e.response.statusText : ""})`
+          : `Could not reach the server — ${e?.message || "network/CORS error"}`;
+      toast.error(message);
     } finally {
       setSaving(false);
     }
