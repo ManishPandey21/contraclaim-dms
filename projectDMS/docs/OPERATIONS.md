@@ -198,6 +198,24 @@ Verify: `https://<host>` scores A on SSL Labs; `curl -sI https://<host>` shows
 
 ---
 
+## 6a. Scheduled (cron) jobs
+
+The app runs six cron jobs via APScheduler: daily/weekly email digests, the SLA
+deadline scan, the key-date notification scan, the BG-expiry scan and the
+reference-sync reaper.
+
+- **Single owner:** only the process with `RUN_SCHEDULER=true` runs them. In the
+  prod compose this is the `contract-worker` (keep it at **1 replica**); the web
+  `backend` tier sets `RUN_SCHEDULER=false` because it may be scaled to >1 replica.
+- **Safety net:** every job is wrapped in a Mongo leader lock (`scheduler_locks`
+  collection). Even if more than one process enables the scheduler, each job fires
+  **exactly once** per schedule; a `locked_until` TTL auto-releases a crashed
+  holder. `SCHEDULER_LOCK_TTL_SECONDS` (default 3600) bounds that window.
+- **Verify:** check the owner's startup log for `Scheduler started: 6 leader-locked
+  cron jobs`; `db.scheduler_locks` gains one short-lived doc per job while it runs.
+
+---
+
 ## 7. Demo / pilot seed
 
 ```bash

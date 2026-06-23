@@ -292,6 +292,12 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_WORKERS: int = Field(default=1, validation_alias="CONTRACT_QUEUE_WORKERS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
+    # H2: whether this process runs the APScheduler cron jobs. Default True keeps
+    # single-process deploys working; jobs are leader-locked so it stays correct
+    # even if several processes enable it. In a scaled deploy run it only on the
+    # worker (RUN_SCHEDULER=true there, false on the web tier).
+    RUN_SCHEDULER: bool = Field(default=True, validation_alias="RUN_SCHEDULER")
+    SCHEDULER_LOCK_TTL_SECONDS: int = Field(default=3600, validation_alias="SCHEDULER_LOCK_TTL_SECONDS")
 
     # Redaction / observability
     OBSERVABILITY_STORE_RAW_QUERIES: bool = Field(default=False, validation_alias="OBSERVABILITY_STORE_RAW_QUERIES")

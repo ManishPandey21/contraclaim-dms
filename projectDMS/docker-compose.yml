@@ -26,6 +26,8 @@ services:
       GRAPHITI_ENABLED: "false"
       LANGGRAPH_ENABLED: "false"
       START_CONTRACT_QUEUE_WORKERS: "false"
+      # H2: cron jobs run in the worker, not the web tier (leader-locked either way).
+      RUN_SCHEDULER: "false"
     depends_on:
       qdrant:
         condition: service_healthy
@@ -87,6 +89,8 @@ services:
       LANGGRAPH_ENABLED: "false"
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      # H2: single owner of the leader-locked cron jobs.
+      RUN_SCHEDULER: "true"
     depends_on:
       qdrant:
         condition: service_healthy

@@ -6,12 +6,6 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-try:
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-except ImportError:  # pragma: no cover - optional dependency
-    AsyncIOScheduler = None
-    CronTrigger = None
 
 from .core.config import settings
 from .core.csrf import validate_unsafe_cookie_request
@@ -65,7 +59,6 @@ from .routers import (
     retrieval_engine,
 )
 from .routers.ws import router as ws_router
-from .dependencies import get_email_service
 from .services.background_jobs import start_background_services, stop_background_services
 from .services.contract_ingest_queue import (
     start_contract_ingest_queue,
@@ -73,6 +66,7 @@ from .services.contract_ingest_queue import (
 )
 from .services.runtime_state import get_runtime_state
 from .core.database import connect as connect_database, disconnect as disconnect_database
+from .services.scheduler import start_scheduler, stop_scheduler
 from .services.observability import observability_registry
 from .observability.tracing import setup_tracing, current_trace_id
 
@@ -225,8 +219,6 @@ app.include_router(performance.router, prefix="/api", tags=["performance"])
 app.include_router(ws_router)
 app.include_router(health.router)
 
-scheduler = AsyncIOScheduler() if AsyncIOScheduler else None
-
 
 @app.on_event("startup")
 async def startup_event() -> None:
@@ -272,48 +264,9 @@ async def startup_event() -> None:
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await start_contract_ingest_queue()
 
-    if scheduler is None or CronTrigger is None:
-        return
-    email_service = await get_email_service()
-    scheduler.add_job(
-        email_service.send_daily_digests,
-        CronTrigger(hour=9, minute=0),
-        id="daily_digests",
-    )
-    scheduler.add_job(
-        email_service.send_weekly_digests,
-        CronTrigger(day_of_week="sun", hour=9, minute=0),
-        id="weekly_digests",
-    )
-    from .services.sla_service import run_sla_scan
-
-    scheduler.add_job(
-        run_sla_scan,
-        CronTrigger(hour=8, minute=0),
-        id="sla_deadline_scan",
-    )
-    from .services.key_date_service import run_key_date_notification_scan
-
-    scheduler.add_job(
-        run_key_date_notification_scan,
-        CronTrigger(hour=8, minute=15),
-        id="key_date_notification_scan",
-    )
-    from .services.bank_guarantee_service import run_bg_expiry_scan
-
-    scheduler.add_job(
-        run_bg_expiry_scan,
-        CronTrigger(hour=8, minute=30),
-        id="bg_expiry_scan",
-    )
-    from .services.reference_sync_service import run_reference_sync_reaper
-
-    scheduler.add_job(
-        run_reference_sync_reaper,
-        CronTrigger(hour=8, minute=45),
-        id="reference_sync_reaper",
-    )
-    scheduler.start()
+    # H2: cron jobs run via a gated, leader-locked scheduler so they fire once
+    # across replicas (see services.scheduler). Disabled when RUN_SCHEDULER=false.
+    app.state.scheduler = await start_scheduler()
 
 
 @app.on_event("shutdown")
@@ -323,8 +276,7 @@ async def shutdown_event() -> None:
     if settings.START_BACKGROUND_SERVICES:
         await stop_background_services()
     await get_runtime_state().close()
-    if scheduler and scheduler.running:
-        scheduler.shutdown()
+    await stop_scheduler(getattr(app.state, "scheduler", None))
     # H1: close the MongoDB client + cancel any in-flight index creation.
     await disconnect_database()
 
