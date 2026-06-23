@@ -20,6 +20,23 @@ class FalkorGraphError(Exception):
 
 _NORMALIZE_PATTERN = re.compile(r"[^0-9a-zA-Z]+")
 
+# A Cypher query is treated as a write unless it is provably read-only. Reads are
+# routed to GRAPH.RO_QUERY (FalkorDB best practice: skips the write path and works
+# on read-only replicas). The detector is deliberately conservative — only pure
+# reads use RO_QUERY; anything with a write clause (incl. `CREATE INDEX` and the
+# index procedures) stays on GRAPH.QUERY, because misclassifying a write as a read
+# would make FalkorDB reject it.
+_WRITE_CLAUSE_RE = re.compile(
+    r"\b(CREATE|MERGE|SET|DELETE|REMOVE|DROP|FOREACH)\b"
+    r"|createNodeIndex|createIndex|dropNodeIndex|dropIndex",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_cypher(cypher: str) -> bool:
+    """True when the Cypher contains no write clause (safe for GRAPH.RO_QUERY)."""
+    return not _WRITE_CLAUSE_RE.search(cypher or "")
+
 
 def normalize_letter_code(code: str) -> str:
     """Normalize a letter code so it can be used as the Falkor `normCode`."""
@@ -402,6 +419,7 @@ class FalkorGraphService:
         params: Optional[Dict[str, Any]] = None,
         *,
         suppress_error_log: bool = False,
+        read_only: Optional[bool] = None,
     ) -> Any:
         """
         Execute a Cypher query against FalkorDB.
@@ -442,8 +460,13 @@ class FalkorGraphService:
             else:
                 logger.debug("Executing FalkorDB query: %s", cypher_stripped[:200])
 
+            # Reads use GRAPH.RO_QUERY (works on read-only replicas, skips the
+            # write path); writes use GRAPH.QUERY. Detection is based on the
+            # original Cypher (the params header never adds write clauses).
+            use_read_only = read_only if read_only is not None else _is_read_only_cypher(cypher_stripped)
+            command = "GRAPH.RO_QUERY" if use_read_only else "GRAPH.QUERY"
             response = client.execute_command(
-                "GRAPH.QUERY",
+                command,
                 self.config.graph_name,
                 query_to_execute,
                 "--compact",
