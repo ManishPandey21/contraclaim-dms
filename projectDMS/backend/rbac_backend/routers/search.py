@@ -100,7 +100,7 @@ async def search_documents(
         # File type filter
         if file_types:
             # Extract file extensions from filename
-            file_type_regex = "|".join([f"\.{ft}$" for ft in file_types])
+            file_type_regex = "|".join([rf"\.{re.escape(ft)}$" for ft in file_types])
             match_conditions["filename"] = {"$regex": file_type_regex, "$options": "i"}
         
         # Organization filter
