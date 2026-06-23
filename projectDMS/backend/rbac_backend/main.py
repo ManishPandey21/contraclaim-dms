@@ -72,6 +72,7 @@ from .services.contract_ingest_queue import (
     stop_contract_ingest_queue,
 )
 from .services.runtime_state import get_runtime_state
+from .core.database import connect as connect_database, disconnect as disconnect_database
 from .services.observability import observability_registry
 from .observability.tracing import setup_tracing, current_trace_id
 
@@ -231,6 +232,24 @@ scheduler = AsyncIOScheduler() if AsyncIOScheduler else None
 async def startup_event() -> None:
     global _loop_handler_installed
     settings.validate_runtime_configuration()
+
+    # H1: establish the MongoDB connection and build all indexes (perf indexes,
+    # unique constraints for webhook/share-token idempotency, TTL cleanups) and,
+    # in production, validate the replica set. Index creation is kicked off as a
+    # background task so it never blocks startup. A bad/standalone DB fails fast
+    # in production; in dev/test we keep the previous lazy behaviour so the app
+    # can start before Mongo is reachable.
+    try:
+        await connect_database()
+    except Exception:
+        environment = str(getattr(settings, "ENVIRONMENT", "development") or "development").lower()
+        if environment == "production":
+            raise
+        logger.warning(
+            "Database connect() failed at startup; continuing with lazy connection",
+            exc_info=True,
+        )
+
     loop = asyncio.get_running_loop()
     if not _loop_handler_installed:
         previous_handler = loop.get_exception_handler()
@@ -306,6 +325,8 @@ async def shutdown_event() -> None:
     await get_runtime_state().close()
     if scheduler and scheduler.running:
         scheduler.shutdown()
+    # H1: close the MongoDB client + cancel any in-flight index creation.
+    await disconnect_database()
 
 
 if __name__ == "__main__":
