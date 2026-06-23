@@ -31,7 +31,18 @@ class ContractIngestQueue:
 
     @property
     def redis_url(self) -> str:
-        return settings.CONTRACT_QUEUE_REDIS_URL or settings.FALKORDB_URL
+        # The queue broker is the app's Redis — never the graph database. Falling
+        # back to FALKORDB_URL silently routed jobs into FalkorDB (which then
+        # rejected writes when that instance was a read-only replica). Require a
+        # real Redis URL and fail loudly otherwise.
+        url = (settings.CONTRACT_QUEUE_REDIS_URL or settings.APP_REDIS_URL or "").strip()
+        if not url:
+            raise RuntimeError(
+                "Contract ingest queue needs a Redis broker: set CONTRACT_QUEUE_REDIS_URL "
+                "(or APP_REDIS_URL). It no longer falls back to FALKORDB_URL — FalkorDB is "
+                "the graph database, not a job broker."
+            )
+        return url
 
     async def connect(self) -> Optional[Redis]:
         if not self.enabled:
