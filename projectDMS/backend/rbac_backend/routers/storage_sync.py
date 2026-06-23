@@ -40,6 +40,34 @@ STALE_THRESHOLD_MINUTES = 15
 QDRANT_HEALTH_MAX_ATTEMPTS = 3
 QDRANT_HEALTH_BACKOFF_SECONDS = 0.5
 QDRANT_SLOW_THRESHOLD_MS = 2000.0
+# A persistent degraded state is re-logged at WARNING at most this often; in
+# between, unchanged issues drop to DEBUG so the monitor doesn't spam an
+# identical warning every CHECK_INTERVAL_SECONDS (alarm fatigue).
+WARN_REPEAT_SECONDS = 3600
+
+
+def _should_emit_warning(
+    signature: Tuple[str, ...],
+    prev_signature: Optional[Tuple[str, ...]],
+    now: float,
+    last_warn_at: float,
+) -> bool:
+    """WARN when the issue set first appears / changes, or on the heartbeat;
+    otherwise an unchanged, still-degraded state stays at DEBUG."""
+    return signature != prev_signature or (now - last_warn_at) >= WARN_REPEAT_SECONDS
+
+
+def _qdrant_hint(config: DocumentProcessingConfig, reason: Optional[str]) -> Optional[str]:
+    """Actionable hint for the common Qdrant misconfigurations."""
+    url = (config.qdrant_url or "")
+    if reason == "client_init_failed" and config.qdrant_api_key and url.startswith("http://"):
+        return (
+            "QDRANT_URL is http:// but QDRANT_API_KEY is set — use an https:// URL "
+            "or unset QDRANT_API_KEY"
+        )
+    if reason == "qdrant_client_missing":
+        return "install the 'qdrant-client' package"
+    return None
 
 _monitor_task: Optional[asyncio.Task] = None
 
@@ -501,7 +529,15 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     if missing_backlinks:
         issues.append(f"{missing_backlinks} reference backlinks missing")
     if config.qdrant_enabled and not qdrant_available:
-        issues.append(qdrant_reason or "qdrant_unavailable")
+        reason = qdrant_reason or "qdrant_unavailable"
+        message = f"qdrant {reason}"
+        detail = (qdrant_error or "").strip()
+        if detail:
+            message += f": {detail[:200]}"
+        hint = _qdrant_hint(config, reason)
+        if hint:
+            message += f" — {hint}"
+        issues.append(message)
     if qdrant_latency_ms is not None and qdrant_latency_ms > QDRANT_SLOW_THRESHOLD_MS:
         issues.append(f"qdrant_slow ({int(qdrant_latency_ms)}ms)")
     if qdrant_retries:
@@ -565,18 +601,32 @@ async def storage_sync_status(
 
 
 async def _run_storage_monitor() -> None:
+    # Log on transition, not on every poll: WARN when the issue set first appears
+    # or changes, INFO on recovery, DEBUG while an unchanged problem persists, and
+    # a low-frequency WARN heartbeat so a long-standing issue isn't fully silent.
+    prev_signature: Optional[Tuple[str, ...]] = None
+    last_warn_at = 0.0
     while True:
         try:
             status = await _gather_storage_status()
             issues = status.get("issues", [])
+            signature = tuple(issues)
+            now = time.monotonic()
             if issues:
-                logger.warning("Storage sync monitor detected issues: %s", "; ".join(issues))
+                if _should_emit_warning(signature, prev_signature, now, last_warn_at):
+                    logger.warning("Storage sync monitor detected issues: %s", "; ".join(issues))
+                    last_warn_at = now
+                else:
+                    logger.debug("Storage sync still degraded: %s", "; ".join(issues))
+            elif prev_signature:
+                logger.info("Storage sync recovered; all checks healthy")
             else:
                 logger.debug(
                     "Storage sync healthy (mongo=%s qdrant=%s)",
                     status["vector_store"]["mongo_chunk_count"],
                     status["vector_store"]["qdrant_chunk_count"],
                 )
+            prev_signature = signature
         except asyncio.CancelledError:
             break
         except Exception:  # pragma: no cover - defensive logging
