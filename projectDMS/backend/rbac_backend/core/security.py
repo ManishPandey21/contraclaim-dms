@@ -255,11 +255,17 @@ def get_password_hash(password: str) -> str:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
+    now = datetime.utcnow()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = now + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
+    # Stamp issued-at. The token-invalidation check in get_current_user compares
+    # the token's iat against a per-user `user_jwt_min_iat` marker. Without iat the
+    # verifier falls back to iat=0, which is < any marker, so it rejects EVERY token
+    # for that user — freshly minted ones included — and the user can never log in.
+    to_encode.setdefault("iat", now)
     # Mark the audience of this token so non-access tokens (e.g. step-up tokens,
     # which share the signing key) cannot be replayed as a session credential.
     to_encode.setdefault("type", "access")

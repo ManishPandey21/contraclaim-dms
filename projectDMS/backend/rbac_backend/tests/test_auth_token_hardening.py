@@ -11,6 +11,7 @@ Redis session store is present.
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 
@@ -90,6 +91,58 @@ def test_access_token_is_stamped_with_type_access():
     token = create_access_token({"sub": "a@example.com", "user_id": "user-1"})
     payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
     assert payload["type"] == "access"
+
+
+# --- Regression: min_iat invalidation must not nuke freshly-minted tokens -----
+
+
+class _MinIatRedis:
+    """Redis fake exposing a ``user_jwt_min_iat`` floor and an active session."""
+
+    def __init__(self, min_iat: int):
+        self._min_iat = str(int(min_iat)).encode()
+
+    async def get(self, key):
+        return self._min_iat if "user_jwt_min_iat" in str(key) else None
+
+    async def exists(self, _key):
+        return 1  # session is active; isolate the min_iat behaviour
+
+
+def test_access_token_is_stamped_with_iat():
+    # Without an iat claim, get_current_user reads iat=0 and any min_iat marker
+    # rejects every token. The token must carry an issued-at timestamp.
+    token = create_access_token({"sub": "a@example.com", "user_id": "user-1"})
+    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    assert "iat" in payload
+    assert abs(int(payload["iat"]) - int(time.time())) < 60
+
+
+@pytest.mark.asyncio
+async def test_fresh_token_survives_past_min_iat_floor(monkeypatch):
+    # A min_iat marker set an hour ago must NOT reject a token minted now.
+    past_floor = int(time.time()) - 3600
+    _patch_runtime(monkeypatch, _MinIatRedis(past_floor))
+    token = create_access_token(
+        {"sub": "a@example.com", "user_id": "user-1", "roles": ["orguser"], "session_id": "sess-1"}
+    )
+    request = _FakeRequest(headers={"authorization": f"Bearer {token}"})
+    result = await get_current_user(request, _FakeDB(_USER_DOC))
+    assert isinstance(result, CurrentUser)
+
+
+@pytest.mark.asyncio
+async def test_token_predating_min_iat_floor_is_rejected(monkeypatch):
+    # Invalidation still works: a token issued before the floor is rejected.
+    future_floor = int(time.time()) + 3600
+    _patch_runtime(monkeypatch, _MinIatRedis(future_floor))
+    token = create_access_token(
+        {"sub": "a@example.com", "user_id": "user-1", "roles": ["orguser"], "session_id": "sess-1"}
+    )
+    request = _FakeRequest(headers={"authorization": f"Bearer {token}"})
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user(request, _FakeDB(_USER_DOC))
+    assert exc.value.status_code == 401
 
 
 @pytest.mark.asyncio
