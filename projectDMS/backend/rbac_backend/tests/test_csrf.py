@@ -27,6 +27,18 @@ def test_csrf_token_roundtrip_validates():
     assert csrf.validate_csrf_token(token)
 
 
+def test_logout_is_csrf_exempt():
+    # A logout POST without a CSRF token must not be rejected — it only clears
+    # cookies, and gating it would leave users unable to log out.
+    request = SimpleNamespace(
+        method="POST",
+        url=SimpleNamespace(path="/api/logout", scheme="http"),
+        headers={"host": "localhost:8000", "origin": "http://localhost:8000"},
+        cookies={settings.AUTH_COOKIE_NAME: "session"},
+    )
+    assert csrf.validate_unsafe_cookie_request(request) is None
+
+
 def test_csrf_rejects_missing_header_for_cookie_auth():
     request = _Request({settings.AUTH_COOKIE_NAME: "session"})
 

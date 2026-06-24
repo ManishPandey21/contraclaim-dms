@@ -50,6 +50,10 @@ def _clear_auth_cookie(response: Response) -> None:
         domain=settings.AUTH_COOKIE_DOMAIN,
         path="/",
     )
+    # Also clear a host-only cookie set before AUTH_COOKIE_DOMAIN was configured,
+    # otherwise the stale cookie keeps the user logged in after logout.
+    if settings.AUTH_COOKIE_DOMAIN:
+        response.delete_cookie(key=settings.AUTH_COOKIE_NAME, path="/")
     clear_csrf_cookie(response)
 
 

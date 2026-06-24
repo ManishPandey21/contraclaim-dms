@@ -18,6 +18,10 @@ SAFE_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
 EXEMPT_PATHS = {
     "/api/login",
     "/api/contact",
+    # Logout must not depend on a valid CSRF token: CSRF on logout is low risk
+    # (worst case it just signs the user out), and gating it means a stale/missing
+    # CSRF cookie leaves the user unable to log out. It only ever clears cookies.
+    "/api/logout",
 }
 
 
@@ -61,6 +65,9 @@ def clear_csrf_cookie(response: Response) -> None:
         domain=settings.AUTH_COOKIE_DOMAIN,
         path="/",
     )
+    # Also clear a host-only cookie set before AUTH_COOKIE_DOMAIN was configured.
+    if settings.AUTH_COOKIE_DOMAIN:
+        response.delete_cookie(key=CSRF_COOKIE_NAME, path="/")
 
 
 def _normalized_origins(origins: Iterable[str]) -> set[str]:
