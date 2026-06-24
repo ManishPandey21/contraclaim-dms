@@ -77,6 +77,15 @@ const PermissionsPage = () => {
   const getRoleId = (role: any) =>
     (role && (role as any)._id) ?? (role && (role as any).id);
 
+  // Super Admin bypasses all permission checks, so it always has complete
+  // rights. Render its column as fully granted + read-only rather than relying
+  // on stored role permissions (which may be empty / not seeded).
+  const isSuperAdminRole = (role: any) => {
+    const id = String(getRoleId(role) || "").toLowerCase().replace(/[-_\s]/g, "");
+    const name = String(role?.name || "").toLowerCase().replace(/[-_\s]/g, "");
+    return id === "superadmin" || name === "superadmin";
+  };
+
   const deriveRoleLevel = (role: any) => {
     // If backend provides level, prefer it
     const raw = (role?.level || "").toString().toLowerCase();
@@ -689,17 +698,22 @@ const PermissionsPage = () => {
                                   : roles.filter(
                                       (r) => getRoleId(r) === selectedRole
                                     )
-                                ).map((role) => (
+                                ).map((role) => {
+                                  const isSuper = isSuperAdminRole(role);
+                                  return (
                                   <TableCell
                                     key={getRoleId(role)}
                                     className="text-center"
                                   >
                                     <Checkbox
                                       checked={
-                                        permissionsMatrix[
-                                          getRoleId(role)
-                                        ]?.includes(permission.id) ?? false
+                                        isSuper
+                                          ? true
+                                          : permissionsMatrix[
+                                              getRoleId(role)
+                                            ]?.includes(permission.id) ?? false
                                       }
+                                      disabled={isSuper}
                                       onCheckedChange={(checked) =>
                                         handleCheckboxChange(
                                           getRoleId(role),
@@ -710,7 +724,8 @@ const PermissionsPage = () => {
                                       className="mx-auto"
                                     />
                                   </TableCell>
-                                ))}
+                                  );
+                                })}
                               </TableRow>
                             ))}
                           </TableBody>
