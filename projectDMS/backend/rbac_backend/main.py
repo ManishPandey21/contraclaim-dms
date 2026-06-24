@@ -242,6 +242,15 @@ async def startup_event() -> None:
             exc_info=True,
         )
 
+    # Seed the permission catalog + grant the superadmin role complete rights so
+    # the Permissions page always reflects the full set (incl. the registers)
+    # without a manual migration. Best-effort: never block startup.
+    try:
+        from .services.data_initialization import ensure_permission_catalog_and_superadmin
+        await ensure_permission_catalog_and_superadmin()
+    except Exception:
+        logger.warning("Permission catalog seed at startup failed", exc_info=True)
+
     loop = asyncio.get_running_loop()
     if not _loop_handler_installed:
         previous_handler = loop.get_exception_handler()

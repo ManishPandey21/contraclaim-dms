@@ -373,6 +373,34 @@ async def initialize_all_data(database=None) -> Dict[str, int]:
     """Initialize all data types"""
     if database is None:
         from ..core.database import database
-    
+
     initializer = create_data_initializer(database)
     return await initializer.initialize_all_data()
+
+
+async def ensure_permission_catalog_and_superadmin(database=None) -> None:
+    """Seed the permission catalog into ``db.permissions`` and grant the
+    superadmin role complete rights. Idempotent and safe to run on every
+    startup: it only adds missing permissions and unions them onto the
+    superadmin role (never removing manual grants). This keeps the Permissions
+    page reflecting the full catalog (incl. the contract-controls registers)
+    without a manual migration step.
+    """
+    if database is None:
+        from ..core.database import get_database
+        database = await get_database()
+
+    from ..models.permission import DEFAULT_PERMISSIONS
+
+    # 1) Ensure every catalog permission exists (adds any new ones).
+    svc = PermissionService()
+    svc.db = database
+    await svc.create_default_permissions()
+
+    # 2) Superadmin = complete rights (union; never removes existing grants).
+    all_names = [p["name"] for p in DEFAULT_PERMISSIONS if p.get("name")]
+    if all_names:
+        await database.roles.update_one(
+            {"_id": "superadmin"},
+            {"$addToSet": {"permissions": {"$each": all_names}}},
+        )
