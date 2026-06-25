@@ -87,11 +87,13 @@ const EMPTY: MForm = {
 };
 
 const Stat: React.FC<{ label: string; value: number; cls?: string }> = ({ label, value, cls }) => (
-  <Card>
-    <CardHeader className="pb-2">
-      <CardDescription>{label}</CardDescription>
-      <CardTitle className={`text-3xl ${cls || ""}`}>{value}</CardTitle>
+  <Card className="flex flex-col">
+    <CardHeader>
+      <CardDescription className="break-words leading-tight">{label}</CardDescription>
     </CardHeader>
+    <CardContent className="mt-auto">
+      <CardTitle className={`text-3xl break-words leading-tight ${cls || ""}`}>{value}</CardTitle>
+    </CardContent>
   </Card>
 );
 

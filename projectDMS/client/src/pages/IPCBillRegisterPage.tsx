@@ -540,7 +540,14 @@ const IPCBillRegisterPage: React.FC = () => {
 };
 
 const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label, value, cls }) => (
-  <Card><CardHeader className="pb-2"><CardDescription className="text-xs">{label}</CardDescription><CardTitle className={`text-xl ${cls || ""}`}>{value}</CardTitle></CardHeader></Card>
+  <Card className="flex flex-col">
+    <CardHeader>
+      <CardDescription className="text-xs break-words leading-tight">{label}</CardDescription>
+    </CardHeader>
+    <CardContent className="mt-auto">
+      <CardTitle className={`text-xl break-words leading-tight ${cls || ""}`}>{value}</CardTitle>
+    </CardContent>
+  </Card>
 );
 
 const Mini: React.FC<{ label: string; value: string }> = ({ label, value }) => (
