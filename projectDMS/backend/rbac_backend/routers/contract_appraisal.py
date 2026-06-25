@@ -202,6 +202,11 @@ async def delete_appraisal(
     generated again. Gated by the generate permission — whoever may regenerate
     may delete-to-regenerate."""
     report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_GENERATE, db, current_user, policy)
+    if report.get("is_locked"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Approved report is locked; use Regenerate to create a new version instead of deleting.",
+        )
     await AppraisalService(db).delete_report(report, current_user)
     return None
 

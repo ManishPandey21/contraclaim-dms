@@ -42,6 +42,28 @@ def test_completeness_requires_review_when_unknown():
     assert status.value == "requires_review" and missing == []
 
 
+def test_completeness_classifies_employers_requirements_from_filename():
+    # H1: a single Employer's Requirements upload (filename "...ER.pdf") must be
+    # detected so it is NOT reported as missing — only the other four classes are.
+    status, missing = assess_completeness({"contract", "KNPCC-05 Vol-3 (Part-I) ER.pdf"})
+    assert status.value == "incomplete"
+    assert not any("Employer" in m for m in missing)
+    assert any("Letter of Acceptance" in m for m in missing)
+
+
+def test_completeness_requires_review_when_only_generic_type():
+    # H1: generic "contract" type + unclassifiable filename → honest "needs review",
+    # never a false "all five missing" banner.
+    status, missing = assess_completeness({"contract", "scan001.pdf"})
+    assert status.value == "requires_review" and missing == []
+
+
+def test_completeness_abbr_matches_whole_word_only():
+    # H1: "er" must not match inside words like "tender"/"register".
+    status, _ = assess_completeness({"tender register.pdf"})
+    assert status.value == "requires_review"
+
+
 # --- generator ------------------------------------------------------------
 
 
@@ -233,7 +255,35 @@ async def test_run_job_persists_draft_v1_and_completes():
 
 
 @pytest.mark.asyncio
-async def test_regenerate_creates_new_version_never_overwrites():
+async def test_cancel_before_run_produces_no_report():
+    # H2: a job cancelled before generation starts must not run or create a report.
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    job = await svc.create_job(organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=user)
+    cancelled = await svc.cancel_job(job["_id"])
+    assert cancelled["status"] == "cancelled"
+
+    result = await svc.run_job(job["_id"], user, retrieval_service=_RetrievalSupported())
+    assert result == {}
+    assert (await svc.get_job(job["_id"]))["status"] == "cancelled"
+    assert len(db.contract_appraisal_reports.docs) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancel_completed_job_is_noop():
+    # H2: cancellation must not clobber an already-finished job back to cancelled.
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    job = await svc.create_job(organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=user)
+    await svc.run_job(job["_id"], user, retrieval_service=_RetrievalSupported())
+    after = await svc.cancel_job(job["_id"])
+    assert after["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_creates_new_version_and_supersedes_prior():
     db = _DB()
     svc = AppraisalService(db)
     user = SimpleNamespace(id="u1", organization_id="org-A")
@@ -241,13 +291,17 @@ async def test_regenerate_creates_new_version_never_overwrites():
     report1 = await svc.run_job(job1["_id"], user, retrieval_service=_RetrievalSupported())
     await svc.approve(report1, user)
 
-    # regenerate → new job → v2; v1 stays locked + unchanged
+    # regenerate → new job → v2; v1 is archived (superseded + locked), not overwritten
     job2 = await svc.regenerate(report1, user)
     report2 = await svc.run_job(job2["_id"], user, retrieval_service=_RetrievalSupported())
     assert report2["report_version"] == 2
     assert report2["_id"] != report1["_id"]
     v1 = await svc.get_report(report1["_id"])
-    assert v1["is_locked"] is True and v1["status"] == "approved"
+    assert v1["report_version"] == 1
+    assert v1["is_locked"] is True and v1["status"] == "superseded"
+    # only the newest version is live for this selection
+    live = await svc.find_existing_report("org-A", "proj-A", ["d1"])
+    assert live["_id"] == report2["_id"]
 
 
 # --- scope / RBAC at the endpoint -----------------------------------------
@@ -439,6 +493,21 @@ async def test_generate_denied_when_report_exists():
         await generate_appraisal(payload, db=db, current_user=_user(org="org-A"), policy=_policy())
     assert exc.value.status_code == 409
     assert exc.value.detail["report_id"] == "r1"
+
+
+@pytest.mark.asyncio
+async def test_delete_locked_report_returns_409():
+    # H4: an approved/locked report cannot be deleted (immutability is preserved);
+    # regeneration is the path to a new version.
+    db = _DB()
+    db.contract_appraisal_reports.docs["r1"] = {
+        "_id": "r1", "organization_id": "org-A", "project_id": "proj-A",
+        "is_locked": True, "status": "approved", "document_ids": ["d1"],
+    }
+    with pytest.raises(HTTPException) as exc:
+        await delete_appraisal("r1", db=db, current_user=_user(org="org-A"), policy=_policy())
+    assert exc.value.status_code == 409
+    assert "r1" in db.contract_appraisal_reports.docs  # not deleted
 
 
 @pytest.mark.asyncio

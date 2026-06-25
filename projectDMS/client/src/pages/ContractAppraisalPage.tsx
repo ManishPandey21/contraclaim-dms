@@ -59,6 +59,7 @@ import {
   getAppraisalJob,
   getExistingAppraisal,
   listAppraisals,
+  regenerateAppraisal,
   rejectAppraisal,
 } from "@/services/contracts-api";
 import AppraisalRegisters from "@/components/contract-appraisal/AppraisalRegisters";
@@ -314,6 +315,22 @@ const ContractAppraisalPage: React.FC = () => {
       await loadReports();
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to delete");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onRegenerate = async () => {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const j = await regenerateAppraisal(selected._id);
+      setJob(j);
+      setSelected(null);
+      pollJob(j._id);
+      toast.info("Regenerating — a new version will be created and this one archived.");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to regenerate");
     } finally {
       setBusy(false);
     }
@@ -581,27 +598,34 @@ const ContractAppraisalPage: React.FC = () => {
                 <Download className="mr-2 h-4 w-4" />
                 Export PDF
               </Button>
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button variant="outline" className="text-destructive" disabled={busy}>
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Delete this appraisal?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      This permanently removes the report and its registers. You can then
-                      generate a fresh appraisal for this selection.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Cancel</AlertDialogCancel>
-                    <AlertDialogAction onClick={onDelete}>Delete</AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
+              {selected.is_locked ? (
+                <Button variant="outline" onClick={onRegenerate} disabled={busy || !!jobActive}>
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  Regenerate (new version)
+                </Button>
+              ) : (
+                <AlertDialog>
+                  <AlertDialogTrigger asChild>
+                    <Button variant="outline" className="text-destructive" disabled={busy}>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Delete this appraisal?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This permanently removes the report and its registers. You can then
+                        generate a fresh appraisal for this selection.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction onClick={onDelete}>Delete</AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              )}
             </div>
 
             {editing ? (

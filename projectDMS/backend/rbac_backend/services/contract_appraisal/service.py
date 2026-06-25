@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -33,28 +34,67 @@ from .repository import AppraisalRepository
 
 logger = logging.getLogger(__name__)
 
-# Mandatory contract document types for a complete appraisal (normalised tokens).
-MANDATORY_DOC_TYPES: Dict[str, Tuple[str, ...]] = {
-    "Letter of Acceptance": ("letter of acceptance", "loa"),
-    "General Conditions (GCC)": ("gcc", "general conditions"),
-    "Special/Particular Conditions (SCC/PCC)": ("scc", "pcc", "special conditions", "particular conditions"),
-    "Employer's Requirements / Specifications": ("employer", "requirement", "specification", "technical spec"),
-    "Bill of Quantities / Price Schedule": ("boq", "bill of quantities", "price schedule"),
+# Mandatory contract document classes. ``phrases`` match as substrings; ``abbr``
+# match as whole words, so "ER" in a filename classifies as Employer's
+# Requirements while "er" inside "letter"/"tender" does not. Documents are
+# classified by their stored type *and* their filename, because contract uploads
+# are stored with a generic ``document_type="contract"`` and the granular class
+# (LoA/GCC/SCC/ER/BoQ) is only discernible from the file name.
+MANDATORY_DOC_TYPES: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "Letter of Acceptance": {"phrases": ("letter of acceptance",), "abbr": ("loa",)},
+    "General Conditions (GCC)": {"phrases": ("general conditions",), "abbr": ("gcc",)},
+    "Special/Particular Conditions (SCC/PCC)": {
+        "phrases": ("special conditions", "particular conditions"),
+        "abbr": ("scc", "pcc"),
+    },
+    "Employer's Requirements / Specifications": {
+        "phrases": ("employer", "requirement", "specification", "technical spec"),
+        "abbr": ("er",),
+    },
+    "Bill of Quantities / Price Schedule": {
+        "phrases": ("bill of quantities", "price schedule", "schedule of prices"),
+        "abbr": ("boq",),
+    },
 }
 
 
-def assess_completeness(present_types: Set[str]) -> Tuple[CompletenessStatus, List[str]]:
-    """Pure completeness check: which mandatory document classes are absent."""
-    normalised = {str(t).lower() for t in present_types if t}
-    if not normalised:
-        return CompletenessStatus.REQUIRES_REVIEW, []
-    missing: List[str] = []
+def _classify_descriptor(text: str) -> Set[str]:
+    """Return the mandatory-document labels a single descriptor string matches."""
+    t = str(text or "").lower()
+    if not t:
+        return set()
+    labels: Set[str] = set()
     for label, tokens in MANDATORY_DOC_TYPES.items():
-        if not any(any(tok in nt for tok in tokens) for nt in normalised):
-            missing.append(label)
+        if any(p in t for p in tokens["phrases"]) or any(
+            re.search(rf"\b{re.escape(a)}\b", t) for a in tokens["abbr"]
+        ):
+            labels.add(label)
+    return labels
+
+
+def assess_completeness(present_descriptors: Set[str]) -> Tuple[CompletenessStatus, List[str]]:
+    """Classify the selected documents and report which mandatory classes are absent.
+
+    ``present_descriptors`` are the descriptor strings (document type + filename)
+    of the selected documents. When *nothing* can be classified we return
+    REQUIRES_REVIEW rather than asserting all classes are missing — the documents
+    simply aren't tagged granularly enough to judge, and a false "everything is
+    missing" banner (including the very document the user uploaded) is worse than
+    an honest "needs review".
+    """
+    matched: Set[str] = set()
+    for descriptor in present_descriptors or []:
+        matched |= _classify_descriptor(descriptor)
+    if not matched:
+        return CompletenessStatus.REQUIRES_REVIEW, []
+    missing = [label for label in MANDATORY_DOC_TYPES if label not in matched]
     if not missing:
         return CompletenessStatus.COMPLETE, []
     return CompletenessStatus.INCOMPLETE, missing
+
+
+class _JobCancelled(Exception):
+    """Internal signal that a job was cancelled mid-run; aborts without a report."""
 
 
 class AppraisalService:
@@ -77,20 +117,36 @@ class AppraisalService:
 
     # --- completeness -----------------------------------------------------
 
-    async def _gather_doc_types(self, document_ids: List[str]) -> Set[str]:
+    _DESCRIPTOR_FIELDS = (
+        "document_type",
+        "contract_document_type",
+        "doc_type",
+        "original_filename",
+        "file_name",
+        "filename",
+        "document_name",
+        "title",
+    )
+
+    async def _gather_doc_descriptors(self, document_ids: List[str]) -> Set[str]:
+        """Descriptor strings (type + filename) for the selected documents, used to
+        classify them against the mandatory contract document set. Matches by both
+        ``_id`` and a ``document_id`` field so it is robust to id typing."""
         if not document_ids:
             return set()
         db = await self._get_db()
-        types: Set[str] = set()
+        ids = list(document_ids)
+        descriptors: Set[str] = set()
         try:
-            cursor = db.documents.find({"_id": {"$in": list(document_ids)}})
+            cursor = db.documents.find({"$or": [{"_id": {"$in": ids}}, {"document_id": {"$in": ids}}]})
             async for doc in cursor:
-                t = doc.get("document_type") or doc.get("contract_document_type") or doc.get("doc_type")
-                if t:
-                    types.add(str(t))
+                for field in self._DESCRIPTOR_FIELDS:
+                    val = doc.get(field)
+                    if val:
+                        descriptors.add(str(val))
         except Exception:  # pragma: no cover - completeness is best-effort
-            logger.exception("Completeness doc-type lookup failed")
-        return types
+            logger.exception("Completeness descriptor lookup failed")
+        return descriptors
 
     # --- job lifecycle ----------------------------------------------------
 
@@ -121,25 +177,38 @@ class AppraisalService:
         except RuntimeError:  # pragma: no cover - no running loop (sync context)
             logger.warning("No event loop to schedule appraisal job %s", job_id)
 
+    async def _raise_if_cancelled(self, job_id: str) -> None:
+        """Abort generation if the job has been cancelled out from under us."""
+        job = await self._repo().get_job(job_id)
+        if job and job.get("status") == AppraisalJobStatus.CANCELLED.value:
+            raise _JobCancelled()
+
     async def run_job(self, job_id: str, current_user: Any, retrieval_service: Any = None) -> Dict[str, Any]:
         repo = self._repo()
         job = await repo.get_job(job_id)
         if not job:
+            return {}
+        # Cancelled before it started — don't resurrect it back to RUNNING.
+        if job.get("status") == AppraisalJobStatus.CANCELLED.value:
             return {}
         try:
             await repo.update_job(
                 job_id,
                 {"status": AppraisalJobStatus.RUNNING.value, "started_at": datetime.utcnow(), "current_step": "Checking documents", "progress": 5},
             )
-            doc_types = await self._gather_doc_types(job.get("document_ids", []))
-            completeness, missing = assess_completeness(doc_types)
+            descriptors = await self._gather_doc_descriptors(job.get("document_ids", []))
+            completeness, missing = assess_completeness(descriptors)
 
             if retrieval_service is None:
                 retrieval_service = await self._build_retrieval_service()
 
+            await self._raise_if_cancelled(job_id)
             await repo.update_job(job_id, {"status": AppraisalJobStatus.GENERATING.value, "current_step": "Generating report", "progress": 10})
 
             async def _progress(pct: int, step: str) -> None:
+                # Cancellation is checked between sections so a long generation
+                # stops promptly instead of finishing and clobbering the status.
+                await self._raise_if_cancelled(job_id)
                 await repo.update_job(job_id, {"progress": max(10, min(99, pct)), "current_step": step})
 
             generator = AppraisalGenerator(retrieval_service)
@@ -151,6 +220,7 @@ class AppraisalService:
                 progress_cb=_progress,
             )
 
+            await self._raise_if_cancelled(job_id)
             version = await repo.next_version(job.get("organization_id"), job.get("project_id"), job.get("document_ids", []))
             report = AppraisalReport(
                 organization_id=job.get("organization_id"),
@@ -172,6 +242,9 @@ class AppraisalService:
                 created_by=getattr(current_user, "id", None),
             ).model_dump(by_alias=True)
             await repo.create_report(report)
+            # Regeneration always creates a new version; supersede any prior live
+            # report for the same selection so only the newest is active.
+            await self._supersede_prior(report)
             await repo.update_job(
                 job_id,
                 {"status": AppraisalJobStatus.COMPLETED.value, "report_id": report["_id"], "progress": 100, "current_step": "Completed", "completed_at": datetime.utcnow()},
@@ -186,6 +259,13 @@ class AppraisalService:
                 after={"version": version, "completeness": completeness.value, "confidence": report["confidence_score"]},
             )
             return report
+        except _JobCancelled:
+            logger.info("Appraisal job %s cancelled before completion; no report created", job_id)
+            await repo.update_job(
+                job_id,
+                {"status": AppraisalJobStatus.CANCELLED.value, "current_step": "Cancelled", "completed_at": datetime.utcnow()},
+            )
+            return {}
         except Exception as exc:  # pragma: no cover - failure path
             logger.exception("Appraisal job %s failed", job_id)
             await repo.update_job(job_id, {"status": AppraisalJobStatus.FAILED.value, "error_message": str(exc), "completed_at": datetime.utcnow()})
@@ -199,7 +279,20 @@ class AppraisalService:
         return await get_retrieval_service(db=db, observability=observability)
 
     async def cancel_job(self, job_id: str) -> Optional[Dict[str, Any]]:
-        return await self._repo().update_job(job_id, {"status": AppraisalJobStatus.CANCELLED.value})
+        repo = self._repo()
+        job = await repo.get_job(job_id)
+        if not job:
+            return None
+        terminal = {
+            AppraisalJobStatus.COMPLETED.value,
+            AppraisalJobStatus.FAILED.value,
+            AppraisalJobStatus.CANCELLED.value,
+        }
+        if job.get("status") in terminal:
+            return job  # already finished — nothing to cancel
+        return await repo.update_job(
+            job_id, {"status": AppraisalJobStatus.CANCELLED.value, "current_step": "Cancelled"}
+        )
 
     async def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         return await self._repo().get_job(job_id)
@@ -256,16 +349,35 @@ class AppraisalService:
         return updated
 
     async def regenerate(self, report: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
-        """Start a fresh job for the same scope — never overwrites the existing report."""
-        job = await self.create_job(
+        """Start a fresh job for the same scope — never overwrites the existing report.
+
+        The prior report is left untouched until the new version is persisted, at
+        which point ``run_job`` supersedes it via ``_supersede_prior`` (so a failed
+        regeneration never strands the user without a live report).
+        """
+        return await self.create_job(
             organization_id=report.get("organization_id"),
             project_id=report.get("project_id"),
             document_ids=report.get("document_ids", []),
             current_user=current_user,
         )
-        # Mark the prior approved report as superseded once a new one exists is
-        # handled at approval time; here we only kick off the new version.
-        return job
+
+    async def _supersede_prior(self, new_report: Dict[str, Any]) -> None:
+        """Mark every other live report for the same (org, project, document-set)
+        selection as superseded + locked, so only the newest version is active."""
+        org = new_report.get("organization_id")
+        proj = new_report.get("project_id")
+        wanted = {str(d) for d in (new_report.get("document_ids") or [])}
+        new_id = str(new_report.get("_id"))
+        repo = self._repo()
+        terminal = {ReportStatus.SUPERSEDED.value, ReportStatus.REJECTED.value}
+        for r in await repo.list_reports({"organization_id": org, "project_id": proj}):
+            if str(r.get("_id")) == new_id or r.get("status") in terminal:
+                continue
+            if {str(d) for d in (r.get("document_ids") or [])} == wanted:
+                await repo.update_report(
+                    r["_id"], {"status": ReportStatus.SUPERSEDED.value, "is_locked": True}
+                )
 
     async def add_comment(self, report: Dict[str, Any], text: str, current_user: Any, *, section_reference: Optional[str] = None) -> Dict[str, Any]:
         comment = ReviewComment(
