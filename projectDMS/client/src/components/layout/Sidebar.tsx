@@ -400,10 +400,8 @@ const Sidebar = () => {
                       )}
                     </button>
                   </li>
-                  {/* Divider always shown after the Arbitration toggle */}
-                  <li aria-hidden="true"><div className="my-2 h-px bg-gray-200" /></li>
-                  {/* When accordion is closed the Draft Counterclaim divider never renders,
-                      so we emit it here instead so the User tools section stays separated */}
+                  {/* When accordion is closed, emit the section-end divider here since
+                      Draft Counterclaim never renders and its divider never fires */}
                   {!arbitrationOpen && (
                     <li aria-hidden="true"><div className="my-2 h-px bg-gray-200" /></li>
                   )}
