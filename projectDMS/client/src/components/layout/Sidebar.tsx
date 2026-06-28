@@ -213,6 +213,17 @@ const Sidebar = () => {
       icon: <Network size={20} />,
       label: "Contract Timeline",
     },
+
+    // ── Contract registers ──
+    { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
+    { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
+    { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
+    { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },
+    { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
+
+    // ── Claims & arbitration ──
+    { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
+    { path: "/sla", icon: <Clock size={20} />, label: "SLA Tracker" },
     {
       path: "/chronology",
       icon: <ClipboardList size={20} />,
@@ -227,31 +238,26 @@ const Sidebar = () => {
       path: "/arbitration/claim",
       icon: <FileText size={20} />,
       label: "Draft Statement of Claim",
+      sub: true,
     },
     {
       path: "/arbitration/defence",
       icon: <FileSignature size={20} />,
       label: "Draft Statement of Defence",
+      sub: true,
     },
     {
       path: "/arbitration/rejoinder",
       icon: <GitCompareArrows size={20} />,
       label: "Draft Rejoinder",
+      sub: true,
     },
     {
       path: "/arbitration/counterclaim",
       icon: <Scale size={20} />,
       label: "Draft Counterclaim",
+      sub: true,
     },
-
-    // ── Registers (claims / contract controls) ──
-    { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
-    { path: "/sla", icon: <Clock size={20} />, label: "SLA Tracker" },
-    { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
-    { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
-    { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
-    { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
-    { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },
 
     // ── User tools ──
     { path: "/tasks", icon: <ClipboardList size={20} />, label: "Tasks" },
@@ -344,8 +350,9 @@ const Sidebar = () => {
               "Email Groups", // After Add Stakeholder
               "Search Letters", // After Search letter
               "Create Template", // After Letter Templates
-              "Contract Timeline", // After the Contracts group → Registers
-              "IPC / Bill Register", // End of Registers → User tools
+              "Contract Timeline", // After Contracts group → Contract registers
+              "Variation Register", // End of Contract registers → Claims & arbitration
+              "Draft Counterclaim", // End of Claims & arbitration → User tools
               "Notifications", // End of User tools → Admin tools
             ]);
 
@@ -356,7 +363,9 @@ const Sidebar = () => {
                     to={link.path}
                     className={({ isActive }) =>
                       cn(
-                        "flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200",
+                        "flex items-center space-x-3 rounded-md text-sm font-medium transition-all duration-200",
+                        "sub" in link && link.sub ? "px-3 py-1.5 pl-8" : "px-3 py-2",
+                        "sub" in link && link.sub && "text-xs",
                         isActive
                           ? "bg-docsumo-blue/10 text-docsumo-blue"
                           : "text-gray-600 hover:bg-docsumo-blue/5 hover:text-docsumo-blue",
@@ -364,7 +373,7 @@ const Sidebar = () => {
                       )
                     }
                   >
-                    <span>{link.icon}</span>
+                    <span>{"sub" in link && link.sub ? <span className="text-gray-400">›</span> : link.icon}</span>
                     {!collapsed && <span>{link.label}</span>}
                   </NavLink>
                 </li>
