@@ -13,7 +13,7 @@ import asyncio
 import io
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ...models.contract_appraisal import (
@@ -97,6 +97,28 @@ class _JobCancelled(Exception):
     """Internal signal that a job was cancelled mid-run; aborts without a report."""
 
 
+# M1: hold strong references to in-flight generation tasks so the event loop's
+# GC can't drop a fire-and-forget task mid-run, and bound how many generations
+# run at once so a burst can't swamp the process.
+_BACKGROUND_TASKS: Set["asyncio.Task[Any]"] = set()
+# Semaphore is created lazily and keyed by the running loop — an asyncio.Semaphore
+# binds to one loop, and a single cached instance would break under test runners
+# that use a fresh loop per test.
+_GENERATION_SEMAPHORES: "Dict[Any, asyncio.Semaphore]" = {}
+
+
+def _generation_semaphore() -> asyncio.Semaphore:
+    from ...core.config import settings
+
+    loop = asyncio.get_running_loop()
+    sem = _GENERATION_SEMAPHORES.get(loop)
+    if sem is None:
+        limit = max(1, int(getattr(settings, "CONTRACT_APPRAISAL_MAX_CONCURRENCY", 2)))
+        sem = asyncio.Semaphore(limit)
+        _GENERATION_SEMAPHORES[loop] = sem
+    return sem
+
+
 class AppraisalService:
     def __init__(self, db: Any = None) -> None:
         self.db = db
@@ -171,11 +193,16 @@ class AppraisalService:
         return job
 
     def schedule(self, job_id: str, current_user: Any) -> None:
-        """Fire-and-forget generation — the repo's Redis-disabled inline fallback."""
+        """Fire-and-forget generation, but managed: the task is kept referenced so
+        it can't be garbage-collected mid-run (M1). Concurrency and timeout are
+        enforced inside run_job."""
         try:
-            asyncio.create_task(self.run_job(job_id, current_user))
+            task = asyncio.create_task(self.run_job(job_id, current_user))
         except RuntimeError:  # pragma: no cover - no running loop (sync context)
             logger.warning("No event loop to schedule appraisal job %s", job_id)
+            return
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     async def _raise_if_cancelled(self, job_id: str) -> None:
         """Abort generation if the job has been cancelled out from under us."""
@@ -184,6 +211,8 @@ class AppraisalService:
             raise _JobCancelled()
 
     async def run_job(self, job_id: str, current_user: Any, retrieval_service: Any = None) -> Dict[str, Any]:
+        """Managed generation (M1): bounded concurrency + a hard timeout around the
+        actual work, with cancellation/timeout/failure all recorded on the job."""
         repo = self._repo()
         job = await repo.get_job(job_id)
         if not job:
@@ -191,74 +220,15 @@ class AppraisalService:
         # Cancelled before it started — don't resurrect it back to RUNNING.
         if job.get("status") == AppraisalJobStatus.CANCELLED.value:
             return {}
+        from ...core.config import settings
+
+        timeout = max(60, int(getattr(settings, "CONTRACT_APPRAISAL_TIMEOUT_SECONDS", 1800)))
         try:
-            await repo.update_job(
-                job_id,
-                {"status": AppraisalJobStatus.RUNNING.value, "started_at": datetime.utcnow(), "current_step": "Checking documents", "progress": 5},
-            )
-            descriptors = await self._gather_doc_descriptors(job.get("document_ids", []))
-            completeness, missing = assess_completeness(descriptors)
-
-            if retrieval_service is None:
-                retrieval_service = await self._build_retrieval_service()
-
-            await self._raise_if_cancelled(job_id)
-            await repo.update_job(job_id, {"status": AppraisalJobStatus.GENERATING.value, "current_step": "Generating report", "progress": 10})
-
-            async def _progress(pct: int, step: str) -> None:
-                # Cancellation is checked between sections so a long generation
-                # stops promptly instead of finishing and clobbering the status.
-                await self._raise_if_cancelled(job_id)
-                await repo.update_job(job_id, {"progress": max(10, min(99, pct)), "current_step": step})
-
-            generator = AppraisalGenerator(retrieval_service)
-            result = await generator.generate(
-                organization_id=job.get("organization_id"),
-                project_id=job.get("project_id"),
-                document_ids=job.get("document_ids", []),
-                current_user=current_user,
-                progress_cb=_progress,
-            )
-
-            await self._raise_if_cancelled(job_id)
-            version = await repo.next_version(job.get("organization_id"), job.get("project_id"), job.get("document_ids", []))
-            report = AppraisalReport(
-                organization_id=job.get("organization_id"),
-                project_id=job.get("project_id"),
-                job_id=job_id,
-                document_ids=job.get("document_ids", []),
-                report_version=version,
-                status=ReportStatus.DRAFT,
-                ai_prompt_version=result.get("ai_prompt_version"),
-                document_completeness_status=completeness,
-                missing_documents=missing,
-                executive_summary=result.get("executive_summary", ""),
-                full_report_markdown=result.get("full_report_markdown", ""),
-                sections=result.get("sections", []),
-                structured_output=result.get("structured_output", {}),
-                citations=result.get("citations", []),
-                confidence_score=result.get("confidence_score", 0.0),
-                overall_risk_rating=result.get("overall_risk_rating"),
-                created_by=getattr(current_user, "id", None),
-            ).model_dump(by_alias=True)
-            await repo.create_report(report)
-            # Regeneration always creates a new version; supersede any prior live
-            # report for the same selection so only the newest is active.
-            await self._supersede_prior(report)
-            await repo.update_job(
-                job_id,
-                {"status": AppraisalJobStatus.COMPLETED.value, "report_id": report["_id"], "progress": 100, "current_step": "Completed", "completed_at": datetime.utcnow()},
-            )
-            await self.audit.emit(
-                action="contract_appraisal.generated",
-                actor_id=getattr(current_user, "id", None),
-                resource_type="contract_appraisal_report",
-                resource_id=report["_id"],
-                organization_id=job.get("organization_id"),
-                project_id=job.get("project_id"),
-                after={"version": version, "completeness": completeness.value, "confidence": report["confidence_score"]},
-            )
-            return report
+            async with _generation_semaphore():
+                return await asyncio.wait_for(
+                    self._run_job_inner(job_id, job, current_user, retrieval_service),
+                    timeout=timeout,
+                )
         except _JobCancelled:
             logger.info("Appraisal job %s cancelled before completion; no report created", job_id)
             await repo.update_job(
@@ -266,10 +236,112 @@ class AppraisalService:
                 {"status": AppraisalJobStatus.CANCELLED.value, "current_step": "Cancelled", "completed_at": datetime.utcnow()},
             )
             return {}
+        except asyncio.TimeoutError:
+            logger.error("Appraisal job %s timed out after %ss", job_id, timeout)
+            await repo.update_job(
+                job_id,
+                {"status": AppraisalJobStatus.FAILED.value, "error_message": f"Generation timed out after {timeout}s", "completed_at": datetime.utcnow()},
+            )
+            return {}
         except Exception as exc:  # pragma: no cover - failure path
             logger.exception("Appraisal job %s failed", job_id)
             await repo.update_job(job_id, {"status": AppraisalJobStatus.FAILED.value, "error_message": str(exc), "completed_at": datetime.utcnow()})
             return {}
+
+    async def _run_job_inner(self, job_id: str, job: Dict[str, Any], current_user: Any, retrieval_service: Any = None) -> Dict[str, Any]:
+        """The actual generation. Raises _JobCancelled on cancellation; all other
+        outcomes (timeout, failure) are handled by the managed run_job wrapper."""
+        repo = self._repo()
+        await repo.update_job(
+            job_id,
+            {"status": AppraisalJobStatus.RUNNING.value, "started_at": datetime.utcnow(), "current_step": "Checking documents", "progress": 5},
+        )
+        descriptors = await self._gather_doc_descriptors(job.get("document_ids", []))
+        completeness, missing = assess_completeness(descriptors)
+
+        if retrieval_service is None:
+            retrieval_service = await self._build_retrieval_service()
+
+        await self._raise_if_cancelled(job_id)
+        await repo.update_job(job_id, {"status": AppraisalJobStatus.GENERATING.value, "current_step": "Generating report", "progress": 10})
+
+        async def _progress(pct: int, step: str) -> None:
+            # Cancellation is checked between sections so a long generation
+            # stops promptly instead of finishing and clobbering the status.
+            await self._raise_if_cancelled(job_id)
+            await repo.update_job(job_id, {"progress": max(10, min(99, pct)), "current_step": step})
+
+        generator = AppraisalGenerator(retrieval_service)
+        result = await generator.generate(
+            organization_id=job.get("organization_id"),
+            project_id=job.get("project_id"),
+            document_ids=job.get("document_ids", []),
+            current_user=current_user,
+            progress_cb=_progress,
+        )
+
+        await self._raise_if_cancelled(job_id)
+        version = await self._next_version(job.get("organization_id"), job.get("project_id"), job.get("document_ids", []))
+        report = AppraisalReport(
+            organization_id=job.get("organization_id"),
+            project_id=job.get("project_id"),
+            job_id=job_id,
+            document_ids=job.get("document_ids", []),
+            report_version=version,
+            status=ReportStatus.DRAFT,
+            ai_prompt_version=result.get("ai_prompt_version"),
+            document_completeness_status=completeness,
+            missing_documents=missing,
+            executive_summary=result.get("executive_summary", ""),
+            full_report_markdown=result.get("full_report_markdown", ""),
+            sections=result.get("sections", []),
+            structured_output=result.get("structured_output", {}),
+            citations=result.get("citations", []),
+            confidence_score=result.get("confidence_score", 0.0),
+            overall_risk_rating=result.get("overall_risk_rating"),
+            created_by=getattr(current_user, "id", None),
+        ).model_dump(by_alias=True)
+        await repo.create_report(report)
+        # Regeneration always creates a new version; supersede any prior live
+        # report for the same selection so only the newest is active.
+        await self._supersede_prior(report)
+        await repo.update_job(
+            job_id,
+            {"status": AppraisalJobStatus.COMPLETED.value, "report_id": report["_id"], "progress": 100, "current_step": "Completed", "completed_at": datetime.utcnow()},
+        )
+        await self.audit.emit(
+            action="contract_appraisal.generated",
+            actor_id=getattr(current_user, "id", None),
+            resource_type="contract_appraisal_report",
+            resource_id=report["_id"],
+            organization_id=job.get("organization_id"),
+            project_id=job.get("project_id"),
+            after={"version": version, "completeness": completeness.value, "confidence": report["confidence_score"]},
+        )
+        return report
+
+    async def reap_stuck_jobs(self, max_age_seconds: Optional[int] = None) -> int:
+        """M1: fail jobs left RUNNING/GENERATING by a crashed or restarted process,
+        so the UI stops polling forever. Safe to run periodically (scheduler)."""
+        from ...core.config import settings
+
+        if self.db is None:
+            self.db = await self._get_db()
+            self.repo = None
+        timeout = max(60, int(max_age_seconds or getattr(settings, "CONTRACT_APPRAISAL_TIMEOUT_SECONDS", 1800)))
+        cutoff = datetime.utcnow() - timedelta(seconds=timeout)
+        return await self._repo().fail_stuck_jobs(cutoff)
+
+    async def _next_version(self, organization_id: Optional[str], project_id: Optional[str], document_ids: List[str]) -> int:
+        """M2: next version number *for this exact document selection* (per-selection,
+        not per-project) so per-document and whole-project appraisals version
+        independently instead of sharing one counter."""
+        wanted = {str(d) for d in (document_ids or [])}
+        highest = 0
+        for r in await self._repo().list_reports({"organization_id": organization_id, "project_id": project_id}):
+            if {str(d) for d in (r.get("document_ids") or [])} == wanted:
+                highest = max(highest, int(r.get("report_version") or 0))
+        return highest + 1
 
     async def _build_retrieval_service(self) -> Any:
         db = await self._get_db()

@@ -299,6 +299,16 @@ class Settings(BaseSettings):
     RUN_SCHEDULER: bool = Field(default=True, validation_alias="RUN_SCHEDULER")
     SCHEDULER_LOCK_TTL_SECONDS: int = Field(default=3600, validation_alias="SCHEDULER_LOCK_TTL_SECONDS")
 
+    # Contract appraisal generation (M1–M3). Generation runs in-process as a
+    # managed background task: bounded concurrency, a hard timeout, and a reaper
+    # that fails jobs left RUNNING by a crash/restart. Retrieval breadth is
+    # tunable per deployment (clamped to the engine's own bounds: limit<=50,
+    # iterations<=5) so large contracts can trade latency for coverage.
+    CONTRACT_APPRAISAL_TIMEOUT_SECONDS: int = Field(default=1800, validation_alias="CONTRACT_APPRAISAL_TIMEOUT_SECONDS")
+    CONTRACT_APPRAISAL_MAX_CONCURRENCY: int = Field(default=2, ge=1, validation_alias="CONTRACT_APPRAISAL_MAX_CONCURRENCY")
+    CONTRACT_APPRAISAL_RETRIEVAL_LIMIT: int = Field(default=50, ge=1, le=50, validation_alias="CONTRACT_APPRAISAL_RETRIEVAL_LIMIT")
+    CONTRACT_APPRAISAL_QA_MAX_ITERATIONS: int = Field(default=3, ge=1, le=5, validation_alias="CONTRACT_APPRAISAL_QA_MAX_ITERATIONS")
+
     # Redaction / observability
     OBSERVABILITY_STORE_RAW_QUERIES: bool = Field(default=False, validation_alias="OBSERVABILITY_STORE_RAW_QUERIES")
     METRICS_ENABLED: bool = Field(default=True, validation_alias="METRICS_ENABLED")

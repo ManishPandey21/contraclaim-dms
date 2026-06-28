@@ -46,6 +46,7 @@ class AppraisalGenerator:
         self.retrieval_service = retrieval_service
 
     def _build_request(self, query: str, organization_id: str, project_id: str, document_ids: List[str]):
+        from ...core.config import settings
         from ...retrieval.models import ContractQARequest, SearchFilters
 
         filters = SearchFilters(
@@ -57,15 +58,17 @@ class AppraisalGenerator:
         # (SearchFilters only carries a single document_id).
         if len(document_ids) == 1:
             filters.document_id = str(document_ids[0])
+        # Retrieval breadth is configurable (M3) so large contracts can trade
+        # latency for coverage. Clamp to the engine's own bounds (limit<=50,
+        # iterations<=5) so an over-eager setting can't raise a validation error.
+        limit = max(1, min(50, int(getattr(settings, "CONTRACT_APPRAISAL_RETRIEVAL_LIMIT", 50))))
+        max_iterations = max(1, min(5, int(getattr(settings, "CONTRACT_APPRAISAL_QA_MAX_ITERATIONS", 3))))
         return ContractQARequest(
             query=query,
             filters=filters,
             require_citations=True,
-            max_iterations=3,
-            # Pull the widest evidence window the engine allows so each section
-            # reasons over (as much as possible of) the complete selected
-            # document rather than a thin top-k slice.
-            limit=50,
+            max_iterations=max_iterations,
+            limit=limit,
         )
 
     async def generate(

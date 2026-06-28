@@ -9,6 +9,7 @@ regeneration always creates a new version. Endpoints live on the existing
 
 from __future__ import annotations
 
+import asyncio
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -280,8 +281,11 @@ async def export_appraisal_pdf(
     policy: PolicyService = Depends(get_policy),
 ):
     report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_EXPORT, db, current_user, policy)
-    content = AppraisalService(db).build_pdf(report)
-    await AppraisalService(db)._emit(report, "exported", current_user)
+    svc = AppraisalService(db)
+    # reportlab is synchronous and can be slow for large reports — run it off the
+    # event loop so it doesn't block other requests (M4).
+    content = await asyncio.to_thread(svc.build_pdf, report)
+    await svc._emit(report, "exported", current_user)
     filename = f"contract-appraisal-v{report.get('report_version', 1)}.pdf"
     return Response(
         content=content,
@@ -426,8 +430,10 @@ async def export_appraisal_docx(
     policy: PolicyService = Depends(get_policy),
 ):
     report = await _load_report(report_id, Permissions.CONTRACT_APPRAISAL_EXPORT, db, current_user, policy)
-    content = AppraisalService(db).build_docx(report)
-    await AppraisalService(db)._emit(report, "exported", current_user)
+    svc = AppraisalService(db)
+    # python-docx is synchronous — render off the event loop (M4).
+    content = await asyncio.to_thread(svc.build_docx, report)
+    await svc._emit(report, "exported", current_user)
     filename = f"contract-appraisal-v{report.get('report_version', 1)}.docx"
     return Response(
         content=content,

@@ -38,12 +38,17 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
 
     from ..dependencies import get_email_service
     from .bank_guarantee_service import run_bg_expiry_scan
+    from .contract_appraisal.service import AppraisalService
     from .key_date_service import run_key_date_notification_scan
     from .reference_sync_service import run_reference_sync_reaper
     from .sla_service import run_sla_scan
 
     ttl = int(settings.SCHEDULER_LOCK_TTL_SECONDS)
     email_service = await get_email_service()
+
+    async def reap_appraisal_jobs() -> int:
+        # Fresh service per run; resolves its own DB handle (M1 stuck-job reaper).
+        return await AppraisalService().reap_stuck_jobs()
 
     # (job_id, callable, trigger) — every callable is leader-locked.
     specs = [
@@ -53,6 +58,7 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
         ("key_date_notification_scan", run_key_date_notification_scan, CronTrigger(hour=8, minute=15)),
         ("bg_expiry_scan", run_bg_expiry_scan, CronTrigger(hour=8, minute=30)),
         ("reference_sync_reaper", run_reference_sync_reaper, CronTrigger(hour=8, minute=45)),
+        ("appraisal_stuck_job_reaper", reap_appraisal_jobs, CronTrigger(minute="*/15")),
     ]
 
     scheduler = AsyncIOScheduler()

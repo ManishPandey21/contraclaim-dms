@@ -3,6 +3,7 @@ lifecycle, versioning, scope isolation."""
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -187,6 +188,28 @@ class _Coll:
             self.docs[d["_id"]] = dict(d)
         return SimpleNamespace(inserted_ids=[d["_id"] for d in docs])
 
+    async def update_many(self, query, update):
+        def _match(d):
+            for k, v in query.items():
+                dv = d.get(k)
+                if isinstance(v, dict):
+                    if "$in" in v and dv not in v["$in"]:
+                        return False
+                    if "$lt" in v and not (dv is not None and dv < v["$lt"]):
+                        return False
+                    if "$nin" in v and dv in v["$nin"]:
+                        return False
+                elif dv != v:
+                    return False
+            return True
+
+        n = 0
+        for d in self.docs.values():
+            if _match(d):
+                d.update(update.get("$set", {}))
+                n += 1
+        return SimpleNamespace(modified_count=n)
+
     def find(self, query):
         docs = [d for d in self.docs.values() if all(d.get(k) == v for k, v in query.items() if not isinstance(v, dict))]
 
@@ -252,6 +275,38 @@ async def test_run_job_persists_draft_v1_and_completes():
     assert refreshed_job["status"] == "completed"
     assert refreshed_job["report_id"] == report["_id"]
     assert refreshed_job["progress"] == 100
+
+
+@pytest.mark.asyncio
+async def test_version_is_per_document_selection():
+    # M2: a whole-project appraisal and a single-document appraisal version
+    # independently instead of sharing one per-project counter.
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    j1 = await svc.create_job(organization_id="org-A", project_id="proj-A", document_ids=[], current_user=user)
+    r1 = await svc.run_job(j1["_id"], user, retrieval_service=_RetrievalSupported())
+    j2 = await svc.create_job(organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=user)
+    r2 = await svc.run_job(j2["_id"], user, retrieval_service=_RetrievalSupported())
+    assert r1["report_version"] == 1
+    assert r2["report_version"] == 1  # distinct selection → its own counter, not 2
+
+
+@pytest.mark.asyncio
+async def test_reap_stuck_jobs_fails_only_old_running_jobs():
+    # M1: jobs left RUNNING/GENERATING by a crash are reaped; recent and terminal
+    # jobs are untouched.
+    db = _DB()
+    svc = AppraisalService(db)
+    old = datetime.utcnow() - timedelta(hours=2)
+    db.contract_appraisal_jobs.docs["j1"] = {"_id": "j1", "status": "running", "started_at": old}
+    db.contract_appraisal_jobs.docs["j2"] = {"_id": "j2", "status": "generating", "started_at": datetime.utcnow()}
+    db.contract_appraisal_jobs.docs["j3"] = {"_id": "j3", "status": "completed", "started_at": old}
+    reaped = await svc.reap_stuck_jobs(max_age_seconds=60)
+    assert reaped == 1
+    assert db.contract_appraisal_jobs.docs["j1"]["status"] == "failed"
+    assert db.contract_appraisal_jobs.docs["j2"]["status"] == "generating"
+    assert db.contract_appraisal_jobs.docs["j3"]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -439,7 +494,6 @@ async def test_update_register_item_verification():
 
 
 def test_build_pdf_returns_pdf_bytes():
-    pytest.importorskip("reportlab")  # shipped via requirements.txt; skip if not installed locally
     report = {"full_report_markdown": "# Title\n\n## 1. Executive Summary\nHello.", "report_version": 1}
     data = AppraisalService.build_pdf(report)
     assert data[:4] == b"%PDF"
@@ -455,6 +509,27 @@ def test_generator_request_uses_full_coverage_and_doc_scope():
     assert req.filters.document_id == "d1"
     req2 = gen._build_request("q", "org-A", "proj-A", [])
     assert req2.filters.document_id is None
+
+
+def test_generator_request_respects_configured_breadth(monkeypatch):
+    # M3: retrieval breadth is tunable per deployment.
+    from rbac_backend.core.config import settings
+
+    monkeypatch.setattr(settings, "CONTRACT_APPRAISAL_RETRIEVAL_LIMIT", 30, raising=False)
+    monkeypatch.setattr(settings, "CONTRACT_APPRAISAL_QA_MAX_ITERATIONS", 5, raising=False)
+    req = AppraisalGenerator(_RetrievalSupported())._build_request("q", "org-A", "proj-A", ["d1"])
+    assert req.limit == 30 and req.max_iterations == 5
+
+
+def test_generator_request_clamps_breadth_to_engine_bounds(monkeypatch):
+    # M3: over-eager settings are clamped to the engine's bounds (limit<=50, iter<=5)
+    # so they can't raise a validation error.
+    from rbac_backend.core.config import settings
+
+    monkeypatch.setattr(settings, "CONTRACT_APPRAISAL_RETRIEVAL_LIMIT", 999, raising=False)
+    monkeypatch.setattr(settings, "CONTRACT_APPRAISAL_QA_MAX_ITERATIONS", 99, raising=False)
+    req = AppraisalGenerator(_RetrievalSupported())._build_request("q", "org-A", "proj-A", ["d1"])
+    assert req.limit == 50 and req.max_iterations == 5
 
 
 @pytest.mark.asyncio

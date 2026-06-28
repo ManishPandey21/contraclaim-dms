@@ -48,6 +48,22 @@ class AppraisalRepository:
             {"_id": job_id}, {"$set": fields}, return_document=True
         )
 
+    async def fail_stuck_jobs(self, cutoff: datetime) -> int:
+        """Mark jobs still RUNNING/GENERATING since before ``cutoff`` as failed
+        (their process died mid-run). Returns the number reaped."""
+        result = await self.jobs.update_many(
+            {"status": {"$in": ["running", "generating"]}, "started_at": {"$lt": cutoff}},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error_message": "Generation did not complete (process restart or timeout)",
+                    "completed_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        return int(getattr(result, "modified_count", 0) or 0)
+
     # --- reports ----------------------------------------------------------
 
     async def create_report(self, report: Dict[str, Any]) -> Dict[str, Any]:
