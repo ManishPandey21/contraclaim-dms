@@ -213,6 +213,31 @@ const Sidebar = () => {
       icon: <Network size={20} />,
       label: "Contract Timeline",
     },
+    {
+      path: "/arbitration/drafts",
+      icon: <Landmark size={20} />,
+      label: "Arbitration Drafting",
+    },
+    {
+      path: "/arbitration/claim",
+      icon: <FileText size={20} />,
+      label: "Draft Statement of Claim",
+    },
+    {
+      path: "/arbitration/defence",
+      icon: <FileSignature size={20} />,
+      label: "Draft Statement of Defence",
+    },
+    {
+      path: "/arbitration/rejoinder",
+      icon: <GitCompareArrows size={20} />,
+      label: "Draft Rejoinder",
+    },
+    {
+      path: "/arbitration/counterclaim",
+      icon: <Scale size={20} />,
+      label: "Draft Counterclaim",
+    },
 
     // ── Registers (claims / contract controls) ──
     { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },

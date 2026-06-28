@@ -72,6 +72,14 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.evidence_graph.verify",
     "dms.evidence_graph.manage",
     "dms.contract.timeline.view",
+    "dms.arbitration.view",
+    "dms.arbitration.create",
+    "dms.arbitration.edit",
+    "dms.arbitration.generate",
+    "dms.arbitration.export",
+    "dms.arbitration.approve",
+    "dms.arbitration.audit",
+    "dms.arbitration.admin",
     "dms.admin",
 ]
 
@@ -184,6 +192,14 @@ class Permissions:
     EVIDENCE_GRAPH_VERIFY = "dms.evidence_graph.verify"
     EVIDENCE_GRAPH_MANAGE = "dms.evidence_graph.manage"
     CONTRACT_TIMELINE_VIEW = "dms.contract.timeline.view"
+    ARBITRATION_VIEW = "dms.arbitration.view"
+    ARBITRATION_CREATE = "dms.arbitration.create"
+    ARBITRATION_EDIT = "dms.arbitration.edit"
+    ARBITRATION_GENERATE = "dms.arbitration.generate"
+    ARBITRATION_EXPORT = "dms.arbitration.export"
+    ARBITRATION_APPROVE = "dms.arbitration.approve"
+    ARBITRATION_AUDIT = "dms.arbitration.audit"
+    ARBITRATION_ADMIN = "dms.arbitration.admin"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -308,6 +324,14 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.evidence_graph.verify": ["documents:update"],
     "dms.evidence_graph.manage": ["documents:update", "projects:update"],
     "dms.contract.timeline.view": ["documents:read"],
+    "dms.arbitration.view": ["documents:read"],
+    "dms.arbitration.create": ["documents:create"],
+    "dms.arbitration.edit": ["documents:update"],
+    "dms.arbitration.generate": ["documents:read"],
+    "dms.arbitration.export": ["documents:read"],
+    "dms.arbitration.approve": ["documents:update", "projects:update"],
+    "dms.arbitration.audit": ["documents:read"],
+    "dms.arbitration.admin": ["documents:update", "projects:update"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],

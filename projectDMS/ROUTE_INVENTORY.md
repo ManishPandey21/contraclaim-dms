@@ -74,6 +74,13 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 | `/contracts/timeline` | ContractTimelinePage | `dms.contract.timeline.view` or `dms.evidence_graph.view` or `dms.document.view` | Yes | RoleGuard; evidence graph timeline. |
 | `/contracts/appraisal` | ContractAppraisalPage | `dms.contract.appraisal.view` or `dms.document.view` | Yes | RoleGuard. |
 | `/contracts/master` | ContractMasterPage | `dms.contract.master.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/arbitration` | ArbitrationDraftingPage | `dms.arbitration.view` or `dms.document.view` | No | RoleGuard; arbitration drafting shell. |
+| `/arbitration/claim` | ArbitrationDraftingPage | `dms.arbitration.create` or `dms.arbitration.view` or `dms.document.view` | Yes | Draft Statement of Claim. |
+| `/arbitration/defence` | ArbitrationDraftingPage | `dms.arbitration.create` or `dms.arbitration.view` or `dms.document.view` | Yes | Draft Statement of Defence. |
+| `/arbitration/rejoinder` | ArbitrationDraftingPage | `dms.arbitration.create` or `dms.arbitration.view` or `dms.document.view` | Yes | Draft Rejoinder / Reply to Defence. |
+| `/arbitration/counterclaim` | ArbitrationDraftingPage | `dms.arbitration.create` or `dms.arbitration.view` or `dms.document.view` | Yes | Draft Counterclaim. |
+| `/arbitration/drafts` | ArbitrationDraftingPage | `dms.arbitration.view` or `dms.document.view` | Yes | Saved arbitration drafts. |
+| `/arbitration/drafts/:draftId` | ArbitrationDraftingPage | `dms.arbitration.view` or `dms.document.view` | No | Draft detail, generation, paragraph import, and export. |
 | `/reference/:id` | ReferencePage | `dms.document.view` | No | Prefix mapping through `/reference`. |
 | `/health` | HealthPage | `system:admin` | Yes | RoleGuard. |
 

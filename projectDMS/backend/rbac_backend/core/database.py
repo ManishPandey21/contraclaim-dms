@@ -319,6 +319,37 @@ async def ensure_indexes(db):
         background=True,
     )
 
+    # Arbitration pleadings drafting
+    await db.arbitration_drafts.create_index(
+        [("organization_id", 1), ("project_id", 1), ("contract_id", 1), ("draft_type", 1), ("status", 1)],
+        background=True,
+    )
+    await db.arbitration_drafts.create_index(
+        [("organization_id", 1), ("project_id", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.arbitration_draft_versions.create_index(
+        [("draft_id", 1), ("version", 1)],
+        unique=True,
+        background=True,
+    )
+    await db.arbitration_selected_references.create_index(
+        [("draft_id", 1), ("source_type", 1), ("source_id", 1)],
+        background=True,
+    )
+    await db.arbitration_claim_heads.create_index(
+        [("draft_id", 1), ("head_type", 1)],
+        background=True,
+    )
+    await db.arbitration_paragraph_responses.create_index(
+        [("draft_id", 1), ("source_paragraph_number", 1)],
+        background=True,
+    )
+    await db.arbitration_generation_runs.create_index(
+        [("draft_id", 1), ("created_at", -1)],
+        background=True,
+    )
+
     # Parties / Representatives
     await db.parties.create_index("organization_id", background=True)
     await db.parties.create_index("projects", background=True)

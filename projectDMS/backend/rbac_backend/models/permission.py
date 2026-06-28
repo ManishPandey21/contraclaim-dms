@@ -262,6 +262,16 @@ DEFAULT_PERMISSIONS = [
     {"name": "dms.evidence_graph.manage", "description": "Manage evidence graph events and links", "category": "document_management", "resource": "dms.evidence_graph", "action": "admin", "is_system": True},
     {"name": "dms.contract.timeline.view", "description": "View Contract Intelligence Timeline", "category": "document_management", "resource": "dms.contract.timeline", "action": "read", "is_system": True},
 
+    # --- Arbitration pleadings drafting ---
+    {"name": "dms.arbitration.view", "description": "View Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "read", "is_system": True},
+    {"name": "dms.arbitration.create", "description": "Create Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "create", "is_system": True},
+    {"name": "dms.arbitration.edit", "description": "Edit Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "update", "is_system": True},
+    {"name": "dms.arbitration.generate", "description": "Generate Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "admin", "is_system": True},
+    {"name": "dms.arbitration.export", "description": "Export Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "admin", "is_system": True},
+    {"name": "dms.arbitration.approve", "description": "Approve Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "admin", "is_system": True},
+    {"name": "dms.arbitration.audit", "description": "View Arbitration Draft Audit", "category": "document_management", "resource": "dms.arbitration", "action": "read", "is_system": True},
+    {"name": "dms.arbitration.admin", "description": "Administer Arbitration Drafting", "category": "document_management", "resource": "dms.arbitration", "action": "admin", "is_system": True},
+
     # --- Tasks ---
     {"name": "dms.task.view", "description": "View Tasks", "category": "project_management", "resource": "dms.task", "action": "read", "is_system": True},
     {"name": "dms.task.create", "description": "Create Tasks", "category": "project_management", "resource": "dms.task", "action": "create", "is_system": True},

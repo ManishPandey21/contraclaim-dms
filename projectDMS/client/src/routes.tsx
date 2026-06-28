@@ -74,6 +74,7 @@ const ContractQAPage = lazy(() => import("./pages/ContractQAPage"));
 const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
 const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
+const ArbitrationDraftingPage = lazy(() => import("./pages/ArbitrationDraftingPage"));
 const ReferencePage = lazy(() => import("./pages/ReferencePage"));
 const ShareDocumentPage = lazy(() => import("./pages/ShareDocumentPage"));
 const EmailGroupsPage = lazy(() => import("./pages/EmailGroupsPage"));
@@ -297,6 +298,62 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/contracts/master" fallback="/overview">
               <ContractMasterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration"
+          element={
+            <RoleGuard path="/arbitration" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/claim"
+          element={
+            <RoleGuard path="/arbitration/claim" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/defence"
+          element={
+            <RoleGuard path="/arbitration/defence" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/rejoinder"
+          element={
+            <RoleGuard path="/arbitration/rejoinder" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/counterclaim"
+          element={
+            <RoleGuard path="/arbitration/counterclaim" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/drafts"
+          element={
+            <RoleGuard path="/arbitration/drafts" fallback="/overview">
+              <ArbitrationDraftingPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="arbitration/drafts/:draftId"
+          element={
+            <RoleGuard path="/arbitration/drafts" fallback="/overview">
+              <ArbitrationDraftingPage />
             </RoleGuard>
           }
         />

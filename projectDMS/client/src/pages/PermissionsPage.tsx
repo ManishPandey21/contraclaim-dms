@@ -365,6 +365,21 @@ const PermissionsPage = () => {
       ],
     },
     {
+      id: "arbitration-drafting",
+      name: "Arbitration Drafting",
+      icon: FileSignature,
+      permissions: [
+        { id: "dms.arbitration.view", name: "View Arbitration Drafts" },
+        { id: "dms.arbitration.create", name: "Create Arbitration Drafts" },
+        { id: "dms.arbitration.edit", name: "Edit Arbitration Drafts" },
+        { id: "dms.arbitration.generate", name: "Generate Arbitration Drafts" },
+        { id: "dms.arbitration.export", name: "Export Arbitration Drafts" },
+        { id: "dms.arbitration.approve", name: "Approve Arbitration Drafts" },
+        { id: "dms.arbitration.audit", name: "View Arbitration Audit" },
+        { id: "dms.arbitration.admin", name: "Arbitration Admin" },
+      ],
+    },
+    {
       id: "tasks",
       name: "Tasks",
       icon: ClipboardList,
