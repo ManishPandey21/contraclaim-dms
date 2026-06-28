@@ -368,7 +368,7 @@ const Sidebar = () => {
             // Hide sub-items when the accordion is closed
             if (isSub && !arbitrationOpen) return null;
 
-            // "Arbitration Drafting" renders as a toggle button instead of a NavLink
+            // "Arbitration" renders as a toggle button instead of a NavLink
             if (link.label === "Arbitration") {
               const anySubActive = location.pathname.startsWith("/arbitration/");
               return (
@@ -400,6 +400,13 @@ const Sidebar = () => {
                       )}
                     </button>
                   </li>
+                  {/* Divider always shown after the Arbitration toggle */}
+                  <li aria-hidden="true"><div className="my-2 h-px bg-gray-200" /></li>
+                  {/* When accordion is closed the Draft Counterclaim divider never renders,
+                      so we emit it here instead so the User tools section stays separated */}
+                  {!arbitrationOpen && (
+                    <li aria-hidden="true"><div className="my-2 h-px bg-gray-200" /></li>
+                  )}
                 </React.Fragment>
               );
             }
