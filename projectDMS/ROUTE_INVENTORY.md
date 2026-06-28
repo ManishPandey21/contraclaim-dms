@@ -1,60 +1,86 @@
-# Route Inventory (frontend ↔ permission map)
+# Route Inventory (Frontend Permission Map)
 
-**Generated/maintained for Phase 0.** Source of truth for *which app route maps to which page and which permission*. The guard test `client/src/config/__tests__/routeInventory.test.ts` runs in CI (vitest) and **fails the build if any `<Route>` in `routes.tsx` lacks a `ROUTE_PERMISSIONS` mapping** (or an explicit public/open classification). Pair every new route with a `ROUTE_PERMISSIONS` entry **and** (if user-facing) a SideBar link — see `client/src/config/rolePermissions.ts` and `client/src/components/layout/Sidebar.tsx`.
+**Generated/maintained for Phase 0.** This document maps user-facing frontend routes to page components and frontend permission gates. Backend `PolicyService` remains authoritative; these guards only control frontend navigation and route visibility.
 
-> Frontend guards (`ProtectedRoute`, `RoleGuard`, SideBar filter) are **UX only**. Backend `PolicyService` remains authoritative.
+The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a `<Route>` in `client/src/routes.tsx` is not public, open, or covered by `ROUTE_PERMISSIONS`. The sidebar parity test `client/src/config/__tests__/rolePermissions.sidebar.test.ts` fails when a sidebar link does not resolve to a route permission mapping.
 
-## Classification legend
-- **Open** — any authenticated user (`/overview`, `/profile`, `/notifications`).
-- **Public** — unauthenticated (`/`, `/login`, `*`).
-- **Mapped** — gated by `ROUTE_PERMISSIONS[path]` (exact or prefix).
+## Classification
+
+- Public: unauthenticated route.
+- Open: any authenticated user.
+- Mapped: gated by `ROUTE_PERMISSIONS`, with exact match preferred over prefix match.
+- Prefix: covered by a base route permission such as `/letters`, `/claims`, `/key-dates`, `/contracts`, or `/letter-templates`.
 
 ## Inventory
 
-| Route | Page | Permission (frontend gate) | SideBar | Notes |
-|---|---|---|---|---|
-| `/` | LandingPage | Public | — | marketing |
-| `/login` | LoginPage | Public | — | |
-| `*` | NotFound | Public | — | |
-| `/overview` | Overview | Open | ✅ | |
-| `/dashboard` | Dashboard | `dms.dashboard.view` | ✅ | |
-| `/register` | RegisterPage | `users:create` | ✅ | RoleGuard |
-| `/organizations` | OrganizationsPage | `organizations:read` | ✅ | |
-| `/projects` | ProjectsPage | `projects:read` | ✅ | |
-| `/parties` | PartiesInvolvedPage | `parties:read` | ✅ | |
-| `/representatives` | RepresentativesPage | `representatives:read` | — | |
-| `/email-groups` | EmailGroupsPage | `email_groups:read` | ✅ | |
-| `/upload` | UploadPage | `dms.document.upload` | ✅ | |
-| `/documents` | DocumentsPage | `dms.document.view` | ✅ | |
-| `/documentsearch` | EnhancedDocumentsPage | `dms.document.view` | ✅ | |
-| `/documentviewer/:id` | DocumentViewerPage | `dms.document.view` (prefix) | — | |
-| `/documents/summary/:id` | LetterSummaryPage | `dms.document.view` (prefix) | — | |
-| `/reference/:id` | ReferencePage | `dms.document.view` (prefix) | — | |
-| `/share/:id` | ShareDocumentPage | `documents:share` (prefix) | — | |
-| `/tags` | TagsPage | `tags:read` | — | |
-| `/folders` | FolderStructurePage | `dms.document.view` | ✅ | |
-| `/letters` | LetterWorkflowPage | `drafting.request.view` | ✅ | RoleGuard |
-| `/letters/:id/*` | Letter* pages | `drafting.request.view` (prefix) | — | input/strategy/draft/review/approval/completed |
-| `/letter-quality` | LetterQualityDashboardPage | `drafting.request.view` | ✅ | |
-| `/letter-templates` | LetterTemplatePage | `letter_templates:read` | ✅ | |
-| `/letter-templates/:id/edit` | LetterTemplateEditorPage | (prefix) | ✅ | |
-| `/contracts` | ContractsPage | `dms.document.view` | — | hub |
-| `/contracts/upload` | ContractsUploadPage | (prefix) | ✅ | |
-| `/contracts/search` | ContractsSearchPage | (prefix) | ✅ | |
-| `/contracts/qa` | ContractQAPage | (prefix) | ✅ | |
-| `/contracts/appraisal` | ContractAppraisalPage | `dms.contract.appraisal.view` + `dms.document.view` | ✅ | RoleGuard · explicit (Phase 1) |
-| `/claims` | ClaimsRegisterPage | `dms.claim.view` + `dms.document.view` | ✅ | RoleGuard · added Phase 1 |
-| `/sla` | SLATrackerPage | `dms.claim.view` + `dms.document.view` | ✅ | RoleGuard · added Phase 1 |
-| `/tasks` | TasksPage | `tasks:read` + `dms.document.view` | ✅ | RoleGuard · `dms.task.*` planned |
-| `/reports` | ReportsAnalyticsPage | `reports:view` | ✅ | |
-| `/notifications` | NotificationCenterPage | Open | ✅ | |
-| `/health` | HealthPage | `system:admin` | ✅ | RoleGuard |
-| `/users` | UsersPage | `users:read` | ✅ | |
-| `/permissions` | PermissionsPage | `roles:read` | ✅ | |
-| `/plan-settings` | PlanSettingsPage | `subscription.entitlement.manage` | ✅ | |
-| `/subscription-management` | SubscriptionManagementPage | `subscription.entitlement.manage` + `subscription.upgrade` | ✅ | RoleGuard |
-| `/settings` | SettingsPage | `settings:view` | ✅ | |
-| `/profile` | ProfilePage | Open | footer | |
+| Route | Page | Permission Gate | Sidebar | Notes |
+| --- | --- | --- | --- | --- |
+| `/` | LandingPage | Public | No | Marketing entry. |
+| `/login` | LoginPage | Public | No | Authentication. |
+| `*` | NotFound | Public | No | Catch-all. |
+| `/overview` | Overview | Open | Yes | Authenticated landing page. |
+| `/dashboard` | Dashboard | `dms.dashboard.view` | Yes | |
+| `/organizations` | OrganizationsPage | `organizations:read` | Yes | |
+| `/projects` | ProjectsPage | `projects:read` | Yes | |
+| `/documents` | DocumentsPage | `dms.document.view` | Yes | Letters library. |
+| `/documentsearch` | EnhancedDocumentsPage | `dms.document.view` | Yes | |
+| `/tags` | TagsPage | `tags:read` | No | |
+| `/profile` | ProfilePage | Open | Footer | |
+| `/users` | UsersPage | `users:read` | Yes | |
+| `/permissions` | PermissionsPage | `roles:read` | Yes | |
+| `/settings` | SettingsPage | `settings:view` | Yes | |
+| `/plan-settings` | PlanSettingsPage | `subscription.entitlement.manage` | Yes | |
+| `/subscription-management` | SubscriptionManagementPage | `subscription.entitlement.manage` or `subscription.upgrade` | Yes | RoleGuard. |
+| `/billing/return` | BillingReturnPage | `subscription.entitlement.manage` or `subscription.upgrade` | No | Hosted checkout return. |
+| `/notifications` | NotificationCenterPage | Open | Yes | |
+| `/upload` | UploadPage | `dms.document.upload` | Yes | |
+| `/documentviewer/:id` | DocumentViewerPage | `dms.document.view` | No | Prefix mapping through `/documentviewer`. |
+| `/share/:id` | ShareDocumentPage | `documents:share` | No | Prefix mapping through `/share`. |
+| `/email-groups` | EmailGroupsPage | `email_groups:read` | Yes | |
+| `/register` | RegisterPage | `users:create` | Yes | RoleGuard. |
+| `/folders` | FolderStructurePage | `dms.document.view` | Yes | |
+| `/tasks` | TasksPage | `tasks:read` or `dms.document.view` | Yes | RoleGuard. |
+| `/parties` | PartiesInvolvedPage | `parties:read` | Yes | |
+| `/letters` | LetterWorkflowPage | `drafting.request.view` | Yes | RoleGuard. |
+| `/documents/summary/:id` | LetterSummaryPage | `dms.document.view` | No | Prefix mapping through `/documents`. |
+| `/letters/:id/input` | LetterInputPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/strategic-plan` | LetterStrategicPlanPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/strategy` | LetterStrategicPlanPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/draft` | LetterDraftPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/review` | LetterReviewPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/approval` | LetterApprovalPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letters/:id/completed` | LetterCompletedPage | `drafting.request.view` | No | Prefix mapping through `/letters`. |
+| `/letter-quality` | LetterQualityDashboardPage | `drafting.request.view` | Yes | |
+| `/reports` | ReportsAnalyticsPage | `reports:view` | Yes | |
+| `/claims` | ClaimsRegisterPage | `dms.claim.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/claims/:id` | ClaimDetailPage | `dms.claim.view` or `dms.document.view` | No | Prefix mapping through `/claims`; RoleGuard. |
+| `/sla` | SLATrackerPage | `dms.claim.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/key-dates` | KeyDateRegisterPage | `dms.keydate.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/key-dates/:id` | KeyDateDetailPage | `dms.keydate.view` or `dms.document.view` | No | Prefix mapping through `/key-dates`; RoleGuard. |
+| `/variations` | VariationRegisterPage | `dms.variation.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/bank-guarantees` | BankGuaranteeRegisterPage | `dms.bankguarantee.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/ipc-bills` | IPCBillRegisterPage | `dms.ipc.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/concerns` | ConcernsPage | `concerns:read` | Yes | RoleGuard. |
+| `/admin/billing-catalog` | BillingCatalogPage | `billing.plan.manage` or `system:admin` | Yes | RoleGuard. |
+| `/retrieval-console` | RetrievalConsolePage | `dms.document.view` | Yes | RoleGuard. |
+| `/observability` | ObservabilityPage | `reports:view` or `system:admin` | Yes | RoleGuard. |
+| `/letter-templates` | LetterTemplatePage | `letter_templates:read` | Yes | |
+| `/letter-templates/:id/edit` | LetterTemplateEditorPage | `letter_templates:read` | Yes | Prefix mapping through `/letter-templates`. |
+| `/representatives` | RepresentativesPage | `representatives:read` | No | |
+| `/contracts` | ContractsPage | `dms.document.view` | No | Contract hub. |
+| `/contracts/upload` | ContractsUploadPage | `dms.document.view` | Yes | Prefix mapping through `/contracts`. |
+| `/contracts/search` | ContractsSearchPage | `dms.document.view` | Yes | Prefix mapping through `/contracts`. |
+| `/contracts/qa` | ContractQAPage | `dms.document.view` | Yes | Prefix mapping through `/contracts`. |
+| `/contracts/timeline` | ContractTimelinePage | `dms.contract.timeline.view` or `dms.evidence_graph.view` or `dms.document.view` | Yes | RoleGuard; evidence graph timeline. |
+| `/contracts/appraisal` | ContractAppraisalPage | `dms.contract.appraisal.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/contracts/master` | ContractMasterPage | `dms.contract.master.view` or `dms.document.view` | Yes | RoleGuard. |
+| `/reference/:id` | ReferencePage | `dms.document.view` | No | Prefix mapping through `/reference`. |
+| `/health` | HealthPage | `system:admin` | Yes | RoleGuard. |
 
-## How the guard works
-`routeInventory.test.ts` regex-extracts every `<Route path="...">` from `routes.tsx`, absolutizes the path, and asserts it is `Public`, `Open`, or covered by a `ROUTE_PERMISSIONS` key (exact or `startsWith(base + "/")` prefix). A new unmapped route fails the test with the offending path listed.
+## Phase 0 Guardrails
+
+- Add every new route to `ROUTE_PERMISSIONS`, mark it public/open in the route inventory test, or intentionally cover it by an existing prefix.
+- Add every user-facing sidebar route to `rolePermissions.sidebar.test.ts`.
+- Add every new backend-enforced permission to `backend/rbac_backend/core/permissions.py`.
+- The permission catalogs in `backend/rbac_backend/models/permission.py` and `backend/rbac_backend/initial_data/default_permissions.py` append any missing canonical permissions at import time.
+- `backend/rbac_backend/initial_data/default_roles.py` explicitly grants all Client DMS permissions to the default `orgadmin` role during seeding, so Organization Admin permission save/retrieve does not depend on legacy aliases.

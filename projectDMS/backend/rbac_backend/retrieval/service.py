@@ -582,9 +582,170 @@ class RetrievalService:
 
         merged = list(all_results.values())
         merged = await self._expand_contract_clause_results(merged, limit=max(limit, 1))
+        merged = await self._augment_with_contract_graph_results(merged, request, limit=max(limit, 1))
         clause_hints = self._extract_clause_hints(request.query, request.metadata_filters)
         reranked = self._rerank_contract_results(merged, clause_hints, request.metadata_filters)
         return reranked[:limit]
+
+    async def _augment_with_contract_graph_results(
+        self,
+        results: List[SearchResult],
+        request: ContractQARequest,
+        limit: int,
+    ) -> List[SearchResult]:
+        if not results:
+            return results
+        seed_clause_numbers: List[str] = []
+        seed_document_ids: List[str] = []
+        existing_keys: set[Tuple[str, str]] = set()
+        for result in results:
+            payload = result.payload or {}
+            if str(payload.get("uploadType") or payload.get("document_type") or "").lower() != "contract":
+                continue
+            document_id = str(payload.get("document_id") or result.document_id or "")
+            clause_number = str(payload.get("clause_number") or payload.get("clause_no") or "")
+            if document_id:
+                seed_document_ids.append(document_id)
+            if clause_number:
+                seed_clause_numbers.append(clause_number)
+                existing_keys.add((document_id, clause_number.lower()))
+        seed_clause_numbers.extend(self._extract_clause_hints(request.query, request.metadata_filters))
+        seed_clause_numbers = self._normalize_graph_clause_seeds(seed_clause_numbers)
+        seed_clause_numbers = self._dedupe_queries(seed_clause_numbers)
+        seed_document_ids = self._dedupe_queries(seed_document_ids)
+        if not seed_clause_numbers:
+            return results
+
+        try:
+            from ..services.contract_graph_service import ContractGraphService
+
+            graph = ContractGraphService()
+            rows = graph.find_related_clauses(
+                organization_id=request.filters.org_id,
+                project_id=request.filters.project_id,
+                seed_clause_numbers=seed_clause_numbers,
+                seed_document_ids=seed_document_ids,
+                limit=max(limit * 3, 10),
+            )
+        except Exception as exc:
+            logger.debug("Contract graph augmentation skipped: %s", exc)
+            return results
+
+        candidates = [
+            row
+            for row in rows
+            if row.get("document_id")
+            and row.get("clause_number")
+            and (str(row.get("document_id")), str(row.get("clause_number")).lower()) not in existing_keys
+        ]
+        if not candidates:
+            return results
+
+        graph_results = await self._graph_rows_to_search_results(candidates, base_score=0.62)
+        if not graph_results:
+            return results
+        return results + graph_results
+
+    def _normalize_graph_clause_seeds(self, values: List[str]) -> List[str]:
+        out: List[str] = []
+        for value in values:
+            raw = str(value or "").strip()
+            if not raw:
+                continue
+            out.append(raw)
+            stripped = re.sub(r"^(?:GCC|SCC|Clause)\s+", "", raw, flags=re.I).strip()
+            if stripped and stripped != raw:
+                out.append(stripped)
+        return out
+
+    async def _graph_rows_to_search_results(
+        self,
+        rows: List[Dict[str, Any]],
+        *,
+        base_score: float,
+    ) -> List[SearchResult]:
+        filters = [
+            {"uploadType": "contract", "document_id": str(row.get("document_id")), "clause_number": str(row.get("clause_number"))}
+            for row in rows
+            if row.get("document_id") and row.get("clause_number")
+        ]
+        chunks_by_key: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+        if filters:
+            try:
+                cursor = self.db.document_vectors.find({"$or": filters}).sort([("chunk_index", 1)])
+                async for doc in cursor:
+                    key = (str(doc.get("document_id") or ""), str(doc.get("clause_number") or "").lower())
+                    chunks_by_key.setdefault(key, []).append(doc)
+            except Exception as exc:
+                logger.debug("Graph clause Mongo hydration skipped: %s", exc)
+
+        out: List[SearchResult] = []
+        for row in rows:
+            document_id = str(row.get("document_id") or "")
+            clause_number = str(row.get("clause_number") or "")
+            key = (document_id, clause_number.lower())
+            chunks = chunks_by_key.get(key) or []
+            chunks.sort(key=lambda item: item.get("chunk_index") or 0)
+            if chunks:
+                first = chunks[0]
+                text = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks if chunk.get("text")).strip()
+                page_numbers = sorted(
+                    {
+                        int(page)
+                        for chunk in chunks
+                        for page in (chunk.get("page_numbers") or ([chunk.get("page_number")] if chunk.get("page_number") else []))
+                        if isinstance(page, (int, float)) or str(page).isdigit()
+                    }
+                )
+                payload = {
+                    "document_id": document_id,
+                    "chunk_id": first.get("chunk_id") or f"graph:{document_id}:{clause_number}",
+                    "uploadType": "contract",
+                    "document_type": "contract",
+                    "text": text or row.get("text") or "",
+                    "full_clause_text": text or row.get("text") or "",
+                    "clause_id": first.get("clause_id") or row.get("clause_id"),
+                    "clause_number": clause_number,
+                    "clause_title": first.get("clause_title") or row.get("clause_title"),
+                    "section_heading": first.get("section_heading") or row.get("section_type"),
+                    "page_numbers": page_numbers,
+                    "page": page_numbers[0] if page_numbers else row.get("page_number"),
+                    "page_number": page_numbers[0] if page_numbers else row.get("page_number"),
+                    "file_name": first.get("file_name") or first.get("filename"),
+                    "source_filename": first.get("source_filename") or first.get("filename"),
+                    "graph_expanded": True,
+                    "graph_relation": row.get("graph_relation"),
+                }
+            else:
+                payload = {
+                    "document_id": document_id,
+                    "chunk_id": f"graph:{document_id}:{clause_number}:{row.get('clause_id') or ''}",
+                    "uploadType": "contract",
+                    "document_type": "contract",
+                    "text": row.get("text") or "",
+                    "full_clause_text": row.get("text") or "",
+                    "clause_id": row.get("clause_id"),
+                    "clause_number": clause_number,
+                    "clause_title": row.get("clause_title"),
+                    "section_heading": row.get("section_type"),
+                    "page": row.get("page_number"),
+                    "page_number": row.get("page_number"),
+                    "page_numbers": [row.get("page_number")] if row.get("page_number") else [],
+                    "graph_expanded": True,
+                    "graph_relation": row.get("graph_relation"),
+                }
+            snippet = str(payload.get("text") or "")[:6000]
+            out.append(
+                SearchResult(
+                    document_id=document_id,
+                    chunk_id=str(payload.get("chunk_id")),
+                    score=base_score,
+                    page=payload.get("page"),
+                    snippet=snippet[:400],
+                    payload=normalize_source_payload(payload),
+                )
+            )
+        return out
 
     async def _expand_contract_clause_results(
         self,
@@ -913,6 +1074,10 @@ class RetrievalService:
             base = float(res.score or 0.0)
             payload = res.payload or {}
             text = (payload.get("text_enriched") or payload.get("text") or res.snippet or "").lower()
+            if payload.get("graph_expanded"):
+                base += 0.08
+                if payload.get("graph_relation") == "same_clause_number":
+                    base += 0.08
             for hint in clause_hints_lower:
                 if hint and hint in text:
                     base += 0.25

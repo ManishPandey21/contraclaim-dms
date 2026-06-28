@@ -386,6 +386,65 @@ async def ensure_indexes(db):
         [("claim_id", 1), ("created_at", -1)], background=True
     )
 
+    # Evidence graph / Contract Intelligence Timeline
+    await db.project_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("event_date", -1)], background=True
+    )
+    await db.project_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("event_type", 1), ("status", 1)], background=True
+    )
+    await db.project_events.create_index(
+        [("source_entity_type", 1), ("source_entity_id", 1)], background=True
+    )
+    await db.event_links.create_index(
+        [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)], background=True
+    )
+    await db.event_links.create_index(
+        [("link_group_id", 1), ("revision", -1)], background=True
+    )
+    await db.event_links.create_index(
+        [("source_type", 1), ("source_id", 1), ("status", 1)], background=True
+    )
+    await db.event_links.create_index(
+        [("target_type", 1), ("target_id", 1), ("status", 1)], background=True
+    )
+    await db.ai_extractions.create_index(
+        [("source_document_id", 1), ("content_hash", 1), ("schema_version", 1)],
+        unique=True,
+        background=True,
+    )
+    await db.ai_extractions.create_index(
+        [("organization_id", 1), ("project_id", 1), ("created_at", -1)], background=True
+    )
+
+    await db.drawing_references.create_index(
+        [("organization_id", 1), ("project_id", 1), ("drawing_number", 1), ("revision", 1)], background=True
+    )
+    await db.drawing_references.create_index(
+        [("organization_id", 1), ("project_id", 1), ("status", 1)], background=True
+    )
+    await db.drawing_references.create_index(
+        [("organization_id", 1), ("project_id", 1), ("location", 1)], background=True
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("start_date", -1)], background=True
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("responsibility", 1), ("status", 1)], background=True
+    )
+    await db.delay_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("location", 1)], background=True
+    )
+    await db.programme_milestones.create_index(
+        [("organization_id", 1), ("project_id", 1), ("planned_date", -1)], background=True
+    )
+    await db.programme_milestones.create_index(
+        [("organization_id", 1), ("project_id", 1), ("milestone_type", 1), ("status", 1)], background=True
+    )
+    await db.programme_milestones.create_index(
+        [("organization_id", 1), ("project_id", 1), ("location", 1)], background=True
+    )
+
     # Contract appraisal (Contract Appraisal Report — v2)
     await db.contract_appraisal_jobs.create_index(
         [("organization_id", 1), ("project_id", 1), ("status", 1), ("created_at", -1)],

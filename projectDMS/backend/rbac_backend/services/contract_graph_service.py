@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .falkor_graph_service import FalkorGraphService, FalkorGraphError
 
@@ -185,3 +185,93 @@ class ContractGraphService:
         except Exception:
             logger.exception("Unexpected error during Falkor contract graph ingestion for %s", document.doc_id)
 
+    def find_related_clauses(
+        self,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+        seed_clause_numbers: List[str],
+        seed_document_ids: Optional[List[str]] = None,
+        limit: int = 25,
+    ) -> List[Dict[str, Any]]:
+        """Return graph-neighbor clauses for retrieval expansion.
+
+        The current contract graph only models Document -> Section -> Clause.
+        This query therefore returns two defensible related sets:
+        - sibling clauses from sections containing a seed clause
+        - clauses with the same number elsewhere in the scoped contract graph
+        """
+        if not self.enabled or not seed_clause_numbers:
+            return []
+        seed_clause_numbers = [str(item).strip() for item in seed_clause_numbers if str(item).strip()]
+        seed_document_ids = [str(item).strip() for item in (seed_document_ids or []) if str(item).strip()]
+        if not seed_clause_numbers:
+            return []
+        params = {
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "seed_clause_numbers": seed_clause_numbers[:20],
+            "seed_document_ids": seed_document_ids[:20],
+            "has_seed_document_ids": bool(seed_document_ids),
+            "limit": max(1, min(int(limit or 25), 100)),
+        }
+        cypher = """
+        MATCH (seed:Clause {organization_id: $organization_id, project_id: $project_id})
+        WHERE seed.clause_number IN $seed_clause_numbers
+          AND ($has_seed_document_ids = false OR seed.doc_id IN $seed_document_ids)
+        MATCH (section:Section)-[:HAS_CLAUSE]->(seed)
+        MATCH (section)-[:HAS_CLAUSE]->(related:Clause)
+        WHERE related.is_active = true
+        RETURN related.doc_id AS document_id,
+               related.clause_id AS clause_id,
+               related.clause_number AS clause_number,
+               related.title AS clause_title,
+               related.text_content AS text,
+               related.page_number AS page_number,
+               related.section_type AS section_type,
+               related.priority AS priority,
+               related.clause_node_id AS clause_node_id,
+               'section_sibling' AS graph_relation
+        LIMIT $limit
+        """
+        try:
+            rows = self.falkor._parse_rows(self.falkor._execute(cypher, params, read_only=True))
+        except Exception as exc:
+            logger.debug("Contract graph related-clause lookup failed: %s", exc)
+            return []
+
+        # Same-number matches are useful when SCC/GCC documents both carry the
+        # relevant clause number but live in different sections/documents.
+        same_number_cypher = """
+        MATCH (related:Clause {organization_id: $organization_id, project_id: $project_id})
+        WHERE related.is_active = true
+          AND related.clause_number IN $seed_clause_numbers
+          AND ($has_seed_document_ids = false OR NOT (related.doc_id IN $seed_document_ids))
+        RETURN related.doc_id AS document_id,
+               related.clause_id AS clause_id,
+               related.clause_number AS clause_number,
+               related.title AS clause_title,
+               related.text_content AS text,
+               related.page_number AS page_number,
+               related.section_type AS section_type,
+               related.priority AS priority,
+               related.clause_node_id AS clause_node_id,
+               'same_clause_number' AS graph_relation
+        LIMIT $limit
+        """
+        try:
+            rows.extend(self.falkor._parse_rows(self.falkor._execute(same_number_cypher, params, read_only=True)))
+        except Exception as exc:
+            logger.debug("Contract graph same-number lookup failed: %s", exc)
+
+        seen: set[tuple[str, str, str]] = set()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            key = (str(row.get("document_id") or ""), str(row.get("clause_number") or ""), str(row.get("clause_node_id") or ""))
+            if not key[0] or not key[1] or key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+            if len(out) >= params["limit"]:
+                break
+        return out

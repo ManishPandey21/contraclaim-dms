@@ -106,3 +106,12 @@ Desktop.ini
 *.swo
 .idea/
 .vscode/
+__MACOSX/
+**/__MACOSX/
+
+# Local agent tooling config (not product code)
+.claude/
+
+# "graphify" code-graph tool output — keep only the human-readable .md reports
+graphify-out/*
+!graphify-out/*.md

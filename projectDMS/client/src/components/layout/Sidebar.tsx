@@ -34,6 +34,7 @@ import {
   Landmark,
   FileSignature,
   PackageOpen,
+  Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -207,6 +208,11 @@ const Sidebar = () => {
       icon: <Sparkles size={20} />,
       label: "Contract Appraisal",
     },
+    {
+      path: "/contracts/timeline",
+      icon: <Network size={20} />,
+      label: "Contract Timeline",
+    },
 
     // ── Registers (claims / contract controls) ──
     { path: "/claims", icon: <Scale size={20} />, label: "Claims Register" },
@@ -308,7 +314,7 @@ const Sidebar = () => {
               "Email Groups", // After Add Stakeholder
               "Search Letters", // After Search letter
               "Create Template", // After Letter Templates
-              "Contract Appraisal", // After the Contracts group → Registers
+              "Contract Timeline", // After the Contracts group → Registers
               "IPC / Bill Register", // End of Registers → User tools
               "Notifications", // End of User tools → Admin tools
             ]);

@@ -1,5 +1,7 @@
 from datetime import datetime
 
+from ..core.permissions import CLIENT_DMS_PERMISSIONS
+
 DEFAULT_ROLES = [
     {
         "_id": "superadmin",
@@ -387,3 +389,22 @@ DEFAULT_ROLES = [
     }
 
 ]
+
+
+def _merge_role_permissions(role_ids: set[str], permissions: list[str]) -> None:
+    for role in DEFAULT_ROLES:
+        if role.get("_id") not in role_ids:
+            continue
+        existing = list(role.get("permissions") or [])
+        seen = set(existing)
+        for permission in permissions:
+            if permission not in seen:
+                existing.append(permission)
+                seen.add(permission)
+        role["permissions"] = existing
+
+
+_merge_role_permissions(
+    {"superadmin", "orgadmin", "projectadmin", "contractmgr_org"},
+    CLIENT_DMS_PERMISSIONS,
+)

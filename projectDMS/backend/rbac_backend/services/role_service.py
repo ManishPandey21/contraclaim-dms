@@ -39,6 +39,57 @@ class RoleService:
         self.db = None
         self.audit_logger = AuditLogger()
 
+    @staticmethod
+    def _infer_permission_action(permission_name: str) -> PermissionLevel:
+        token = (permission_name or "").replace(":", ".").split(".")[-1].lower()
+        if token in {"create", "upload", "add", "submit"}:
+            return PermissionLevel.CREATE
+        if token in {"update", "edit", "edit_metadata", "link_reference", "manage"}:
+            return PermissionLevel.UPDATE if token != "manage" else PermissionLevel.ADMIN
+        if token == "delete":
+            return PermissionLevel.DELETE
+        if token in {"admin", "approve", "export", "generate", "reject", "assess", "extend", "release", "eot_submit", "eot_approve", "achievement"}:
+            return PermissionLevel.ADMIN
+        return PermissionLevel.READ
+
+    @staticmethod
+    def _infer_permission_category(permission_name: str) -> PermissionCategory:
+        if permission_name.startswith("dms."):
+            return PermissionCategory.DOCUMENT_MANAGEMENT
+        if permission_name.startswith("drafting."):
+            return PermissionCategory.DRAFTING_MANAGEMENT
+        if permission_name.startswith("billing."):
+            return PermissionCategory.BILLING_MANAGEMENT
+        if permission_name.startswith("subscription."):
+            return PermissionCategory.SUBSCRIPTION_MANAGEMENT
+        if permission_name.startswith("roles:") or permission_name.startswith("permissions:"):
+            return PermissionCategory.ROLE_MANAGEMENT
+        if permission_name.startswith("users:"):
+            return PermissionCategory.USER_MANAGEMENT
+        return PermissionCategory.SYSTEM_ADMINISTRATION
+
+    def _synthetic_permission(self, permission_name: str) -> Permission:
+        resource = permission_name
+        if "." in permission_name:
+            parts = permission_name.split(".")
+            resource = ".".join(parts[:-1]) or permission_name
+        elif ":" in permission_name:
+            resource = permission_name.split(":", 1)[0]
+        now = datetime.utcnow()
+        return Permission(
+            id=permission_name,
+            name=permission_name,
+            description=permission_name.replace(".", " ").replace(":", " ").replace("_", " ").title(),
+            category=self._infer_permission_category(permission_name),
+            resource=resource,
+            action=self._infer_permission_action(permission_name),
+            is_system=False,
+            is_active=True,
+            created_at=now,
+            updated_at=now,
+            created_by="system",
+        )
+
     def _extract_role_names(self, current_user: Any) -> set[str]:
         role_names: set[str] = set()
         for role in getattr(current_user, "roles", []) or []:
@@ -660,41 +711,21 @@ class RoleService:
                     permission_docs = []
 
             permissions = []
+            found_keys: set[str] = set()
             for doc in permission_docs:
-                doc["id"] = str(doc["_id"])
+                original_id = str(doc.get("_id") or doc.get("id") or "")
+                doc["id"] = original_id
                 doc.pop("_id", None)
-                # normalize category/action if stored as string values
-                permissions.append(Permission(**doc))
+                permission = Permission(**doc)
+                permissions.append(permission)
+                found_keys.update({permission.name, permission.id, original_id})
 
-            # Fallback: synthesize stubs for permissions stored as names but missing in collection
-            if not permissions and names:
-                for name in names:
-                    if not isinstance(name, str):
-                        continue
-                    parts = name.split(":")
-                    resource = parts[0] if parts else "system"
-                    action = parts[1] if len(parts) > 1 else "read"
-                    try:
-                        action_enum = PermissionLevel(action)
-                    except Exception:
-                        action_enum = PermissionLevel.READ
-                    synthetic = {
-                        "name": name,
-                        "id": name,
-                        "description": name.replace(":", " ").title(),
-                        "category": PermissionCategory.SYSTEM_ADMINISTRATION,
-                        "resource": resource,
-                        "action": action_enum,
-                        "is_system": False,
-                        "is_active": True,
-                        "created_at": datetime.utcnow(),
-                        "updated_at": datetime.utcnow(),
-                        "created_by": "system",
-                    }
-                    try:
-                        permissions.append(Permission(**synthetic))
-                    except Exception:
-                        continue
+            # Catalog drift must not make saved role permissions disappear from
+            # the UI. Return synthetic stubs for saved name-based permissions
+            # that are not present in the permissions collection.
+            for name in names:
+                if isinstance(name, str) and name not in found_keys:
+                    permissions.append(self._synthetic_permission(name))
 
             return permissions
 

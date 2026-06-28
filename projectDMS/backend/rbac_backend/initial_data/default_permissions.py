@@ -73,6 +73,53 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.user.manage", "name": "Manage Client DMS Users"},
     {"_id": "dms.project.manage", "name": "Manage Client DMS Projects"},
     {"_id": "dms.audit.view", "name": "View DMS Audit Trail"},
+    {"_id": "dms.claim.view", "name": "View Claims"},
+    {"_id": "dms.claim.create", "name": "Create Claims"},
+    {"_id": "dms.claim.edit", "name": "Edit Claims"},
+    {"_id": "dms.claim.delete", "name": "Delete Claims"},
+    {"_id": "dms.claim.manage", "name": "Manage Claims"},
+    {"_id": "dms.claim.assess", "name": "Assess Claims"},
+    {"_id": "dms.contract.appraisal.view", "name": "View Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.generate", "name": "Generate Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.edit", "name": "Edit Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.approve", "name": "Approve Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.reject", "name": "Reject Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.export", "name": "Export Contract Appraisal"},
+    {"_id": "dms.contract.appraisal.create_registers", "name": "Create Contract Appraisal Registers"},
+    {"_id": "dms.keydate.view", "name": "View Key Dates"},
+    {"_id": "dms.keydate.create", "name": "Create Key Dates"},
+    {"_id": "dms.keydate.edit", "name": "Edit Key Dates"},
+    {"_id": "dms.keydate.delete", "name": "Delete Key Dates"},
+    {"_id": "dms.keydate.manage", "name": "Manage Key Dates"},
+    {"_id": "dms.keydate.export", "name": "Export Key Dates"},
+    {"_id": "dms.keydate.eot_submit", "name": "Submit Key Date EOT"},
+    {"_id": "dms.keydate.eot_approve", "name": "Approve Key Date EOT"},
+    {"_id": "dms.keydate.achievement", "name": "Record Key Date Achievement"},
+    {"_id": "dms.variation.view", "name": "View Variations"},
+    {"_id": "dms.variation.create", "name": "Create Variations"},
+    {"_id": "dms.variation.edit", "name": "Edit Variations"},
+    {"_id": "dms.variation.delete", "name": "Delete Variations"},
+    {"_id": "dms.variation.approve", "name": "Approve Variations"},
+    {"_id": "dms.variation.export", "name": "Export Variations"},
+    {"_id": "dms.bankguarantee.view", "name": "View Bank Guarantees"},
+    {"_id": "dms.bankguarantee.create", "name": "Create Bank Guarantees"},
+    {"_id": "dms.bankguarantee.edit", "name": "Edit Bank Guarantees"},
+    {"_id": "dms.bankguarantee.delete", "name": "Delete Bank Guarantees"},
+    {"_id": "dms.bankguarantee.extend", "name": "Extend Bank Guarantees"},
+    {"_id": "dms.bankguarantee.release", "name": "Release Bank Guarantees"},
+    {"_id": "dms.bankguarantee.export", "name": "Export Bank Guarantees"},
+    {"_id": "dms.contract.master.view", "name": "View Contract Master"},
+    {"_id": "dms.contract.master.manage", "name": "Manage Contract Master"},
+    {"_id": "dms.ipc.view", "name": "View IPC Bills"},
+    {"_id": "dms.ipc.create", "name": "Create IPC Bills"},
+    {"_id": "dms.ipc.edit", "name": "Edit IPC Bills"},
+    {"_id": "dms.ipc.delete", "name": "Delete IPC Bills"},
+    {"_id": "dms.ipc.approve", "name": "Approve IPC Bills"},
+    {"_id": "dms.ipc.export", "name": "Export IPC Bills"},
+    {"_id": "dms.evidence_graph.view", "name": "View Evidence Graph"},
+    {"_id": "dms.evidence_graph.verify", "name": "Verify Evidence Graph Links"},
+    {"_id": "dms.evidence_graph.manage", "name": "Manage Evidence Graph"},
+    {"_id": "dms.contract.timeline.view", "name": "View Contract Intelligence Timeline"},
     {"_id": "dms.admin", "name": "Administer Client DMS"},
     {"_id": "drafting.request.view", "name": "View Drafting Requests"},
     {"_id": "drafting.request.create", "name": "Create Drafting Requests"},
@@ -94,3 +141,20 @@ DEFAULT_PERMISSIONS = [
     {"_id": "subscription.archive_access", "name": "Access Archive Subscription"},
     {"_id": "subscription.offboarding_export", "name": "Run Offboarding Export"},
 ]
+
+
+def _display_name(permission_name: str) -> str:
+    return permission_name.replace(".", " ").replace(":", " ").replace("_", " ").title()
+
+
+def _append_missing_canonical_permissions() -> None:
+    from ..core.permissions import CANONICAL_PERMISSIONS
+
+    existing = {entry["_id"] for entry in DEFAULT_PERMISSIONS}
+    for permission_name in CANONICAL_PERMISSIONS:
+        if permission_name not in existing:
+            DEFAULT_PERMISSIONS.append({"_id": permission_name, "name": _display_name(permission_name)})
+            existing.add(permission_name)
+
+
+_append_missing_canonical_permissions()

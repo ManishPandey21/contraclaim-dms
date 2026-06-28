@@ -68,6 +68,10 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.ipc.delete",
     "dms.ipc.approve",
     "dms.ipc.export",
+    "dms.evidence_graph.view",
+    "dms.evidence_graph.verify",
+    "dms.evidence_graph.manage",
+    "dms.contract.timeline.view",
     "dms.admin",
 ]
 
@@ -176,6 +180,10 @@ class Permissions:
     IPC_DELETE = "dms.ipc.delete"
     IPC_APPROVE = "dms.ipc.approve"
     IPC_EXPORT = "dms.ipc.export"
+    EVIDENCE_GRAPH_VIEW = "dms.evidence_graph.view"
+    EVIDENCE_GRAPH_VERIFY = "dms.evidence_graph.verify"
+    EVIDENCE_GRAPH_MANAGE = "dms.evidence_graph.manage"
+    CONTRACT_TIMELINE_VIEW = "dms.contract.timeline.view"
     DMS_ADMIN = "dms.admin"
 
     DRAFTING_REQUEST_CREATE = "drafting.request.create"
@@ -296,6 +304,10 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.ipc.delete": ["documents:delete"],
     "dms.ipc.approve": ["documents:update", "projects:update"],
     "dms.ipc.export": ["documents:read"],
+    "dms.evidence_graph.view": ["documents:read"],
+    "dms.evidence_graph.verify": ["documents:update"],
+    "dms.evidence_graph.manage": ["documents:update", "projects:update"],
+    "dms.contract.timeline.view": ["documents:read"],
     "dms.admin": ["system:admin"],
     "billing.plan.view": ["organizations:read"],
     "billing.plan.manage": ["system:admin"],

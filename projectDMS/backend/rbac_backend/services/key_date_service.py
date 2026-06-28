@@ -189,8 +189,8 @@ class KeyDateService:
 
         The Contract Master is the source of truth: ``contract_start_date`` is the
         LOA date and ``week_basis`` selects the formula. Falls back to the project
-        record's start date when no Contract Master exists; an explicit override
-        (e.g. an LOA that states a different commencement date) always wins.
+        record's start date when no Contract Master exists, and only then to an
+        explicit user-provided override.
         """
         db = await self._get_db()
         try:
@@ -201,15 +201,18 @@ class KeyDateService:
         except Exception:
             cm = None
         basis = (cm or {}).get("week_basis") or WEEK_BASIS_LOA_PLUS
-        if override:
-            return override, basis
         start = _as_dt((cm or {}).get("contract_start_date"))
         if not start:
             try:
-                proj = await db.projects.find_one({"_id": project_id})
+                project_query: Dict[str, Any] = {"_id": project_id}
+                if organization_id:
+                    project_query["organization_id"] = organization_id
+                proj = await db.projects.find_one(project_query)
             except Exception:
                 proj = None
             start = _as_dt((proj or {}).get("project_start_date") or (proj or {}).get("start_date"))
+        if not start:
+            start = override
         if not start:
             raise KeyDateError("Contract start date (LOA) is required to calculate the key date")
         return start, basis

@@ -4,6 +4,9 @@ the frontend Permissions page. Prevents the gap where a new feature adds a
 permission the UI never surfaces.
 """
 
+from rbac_backend.core.permissions import CANONICAL_PERMISSIONS, CLIENT_DMS_PERMISSIONS
+from rbac_backend.initial_data.default_permissions import DEFAULT_PERMISSIONS as INITIAL_DATA_PERMISSIONS
+from rbac_backend.initial_data.default_roles import DEFAULT_ROLES
 from rbac_backend.models.permission import DEFAULT_PERMISSIONS, PermissionCreate
 
 
@@ -48,3 +51,21 @@ def test_all_default_permissions_validate():
     # name format) — a malformed entry would break seeding.
     for entry in DEFAULT_PERMISSIONS:
         PermissionCreate(**entry)
+
+
+def test_model_permission_catalog_contains_every_canonical_permission():
+    seeded = {p["name"] for p in DEFAULT_PERMISSIONS}
+    missing = sorted(set(CANONICAL_PERMISSIONS) - seeded)
+    assert not missing, f"canonical permissions missing from model DEFAULT_PERMISSIONS: {missing}"
+
+
+def test_initial_data_permission_catalog_contains_every_canonical_permission():
+    seeded = {p["_id"] for p in INITIAL_DATA_PERMISSIONS}
+    missing = sorted(set(CANONICAL_PERMISSIONS) - seeded)
+    assert not missing, f"canonical permissions missing from initial_data DEFAULT_PERMISSIONS: {missing}"
+
+
+def test_organization_admin_seed_has_explicit_client_dms_permissions():
+    roles = {role["_id"]: set(role.get("permissions") or []) for role in DEFAULT_ROLES}
+    missing = sorted(set(CLIENT_DMS_PERMISSIONS) - roles["orgadmin"])
+    assert not missing, f"orgadmin seed missing explicit Client DMS permissions: {missing}"

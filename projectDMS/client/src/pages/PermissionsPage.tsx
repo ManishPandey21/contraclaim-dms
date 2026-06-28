@@ -139,7 +139,11 @@ const PermissionsPage = () => {
     try {
       const data = await api.getRolePermissions(roleId);
       // Extract permission identifiers; prefer stable permission 'name'
-      const permissionIds = data.map((p: any) => p.name ?? p._id ?? p.id);
+      let permissionIds = data.map((p: any) => p.name ?? p._id ?? p.id);
+      if (permissionIds.length === 0) {
+        const role = roles.find((item) => getRoleId(item) === roleId);
+        permissionIds = ((role as any)?.permissions || []).map(String);
+      }
 
       // Update the permissions matrix for this role
       setPermissionsMatrix((prevMatrix) => ({

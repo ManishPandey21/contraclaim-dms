@@ -87,6 +87,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // also accept `dms.document.view` to match the population the backend authorizes.
   // Must be listed explicitly so it wins over the `/contracts` prefix match.
   "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
+  "/contracts/timeline": ["dms.contract.timeline.view", "dms.evidence_graph.view", "dms.document.view"],
   // Claims register + SLA tracker (Phase 4). Backend `dms.claim.view` is
   // legacy-aliased to `documents:read`; accept `dms.document.view` as the
   // frontend-visible equivalent so the links surface for document viewers.

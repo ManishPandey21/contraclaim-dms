@@ -22,6 +22,8 @@ from .routers import (
     variations,
     bank_guarantees,
     ipc_bills,
+    evidence_graph,
+    evidence_registers,
     ipc_categories,
     sla,
     dashboard,
@@ -181,6 +183,8 @@ app.include_router(key_dates.router, prefix="/api", tags=["key-dates"])
 app.include_router(variations.router, prefix="/api", tags=["variations"])
 app.include_router(bank_guarantees.router, prefix="/api", tags=["bank-guarantees"])
 app.include_router(ipc_bills.router, prefix="/api", tags=["ipc-bills"])
+app.include_router(evidence_graph.router, prefix="/api", tags=["evidence-graph"])
+app.include_router(evidence_registers.router, prefix="/api", tags=["evidence-registers"])
 app.include_router(ipc_categories.router, prefix="/api", tags=["ipc-categories"])
 app.include_router(sla.router, prefix="/api", tags=["sla"])
 app.include_router(letters.router, prefix="/api", tags=["letters"])

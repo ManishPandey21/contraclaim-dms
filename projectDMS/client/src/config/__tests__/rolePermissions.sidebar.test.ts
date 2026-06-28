@@ -31,16 +31,26 @@ const SIDEBAR_PATHS = [
   "/contracts/search",
   "/contracts/qa",
   "/contracts/appraisal",
+  "/contracts/timeline",
   "/claims",
   "/sla",
+  "/key-dates",
+  "/contracts/master",
+  "/variations",
+  "/bank-guarantees",
+  "/ipc-bills",
   "/tasks",
+  "/concerns",
+  "/retrieval-console",
   "/folders",
   "/reports",
   "/notifications",
+  "/observability",
   "/health",
   "/users",
   "/permissions",
   "/plan-settings",
+  "/admin/billing-catalog",
   "/subscription-management",
   "/settings",
 ];
@@ -87,6 +97,11 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     // under the old prefix-only behaviour they would have been denied.
     const can = canFor(["dms.contract.appraisal.view"]);
     expect(isRouteAllowedByPermission(can, "/contracts/appraisal")).toBe(true);
+  });
+
+  it("Contract Timeline honours its graph permission, not just the /contracts prefix", () => {
+    const can = canFor(["dms.evidence_graph.view"]);
+    expect(isRouteAllowedByPermission(can, "/contracts/timeline")).toBe(true);
   });
 
   it("Subscription management stays behind a billing permission", () => {

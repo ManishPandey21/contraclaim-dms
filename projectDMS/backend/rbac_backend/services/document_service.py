@@ -30,6 +30,7 @@ from ..models.notification import NotificationContext, NotificationType
 from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
 from .falkor_graph_service import normalize_letter_code
+from .evidence_graph_service import EvidenceGraphService
 
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
@@ -66,6 +67,7 @@ class DocumentService:
         self.db = db
         self.notification_service = notification_service
         self.graph_ingestion = GraphIngestionService()
+        self.evidence_graph = EvidenceGraphService(db)
         self.reference_sync_service = ReferenceSyncService(db)
 
     async def _get_db(self) -> Database:
@@ -1143,6 +1145,17 @@ class DocumentService:
                     )
                 except Exception:
                     logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
+
+                try:
+                    await self.evidence_graph.ingest_document_metadata(
+                        document_id=document_id,
+                        document_data=graph_document_payload,
+                        metadata=metadata,
+                        metadata_source=metadata_source,
+                        upload_type=upload,
+                    )
+                except Exception:
+                    logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
 
                 if getattr(result, "processed_path", None):
                     update_fields["processed_path"] = result.processed_path

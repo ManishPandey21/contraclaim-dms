@@ -35,6 +35,7 @@ from ..utils.validation import sanitize_filename
 from .document_audit_service import DocumentAuditService
 from .document_service import DocumentService, DocumentServiceError
 from .file_object_service import FileObjectService
+from .contract_graph_service import ContractGraphService
 from .ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
@@ -708,7 +709,8 @@ class ContractService:
         candidate_limit = max(page_size * 5, page_size + skip_count + 10)
         lexical_candidates = await self._lexical_candidates(collection, match_stage, regex, candidate_limit, request.category_terms)
         vector_candidates = await self._vector_candidates(request, effective_org, effective_project, project_filters, candidate_limit)
-        normalized, total_count, has_more = await self._assemble_results(collection, lexical_candidates, vector_candidates, page_size, skip_count)
+        graph_candidates = await self._graph_candidates(request, effective_org, effective_project, candidate_limit)
+        normalized, total_count, has_more = await self._assemble_results(collection, lexical_candidates, vector_candidates, graph_candidates, page_size, skip_count)
         normalized = self._rerank_contract_chunks(normalized, request)
         summary, summary_title = self._build_summary(normalized) if request.summarize else (None, None)
         return ContractSearchResponse(
@@ -783,6 +785,62 @@ class ContractService:
             logger.warning("Contract vector search failed: %s", exc)
             return []
 
+    async def _graph_candidates(
+        self,
+        request: ContractSearchRequest,
+        effective_org: Optional[str],
+        effective_project: Optional[str],
+        candidate_limit: int,
+    ) -> List[Dict[str, Any]]:
+        if not effective_org or not effective_project:
+            return []
+        clause_numbers = self._extract_clause_numbers_for_graph(request)
+        if not clause_numbers:
+            return []
+        try:
+            rows = ContractGraphService().find_related_clauses(
+                organization_id=effective_org,
+                project_id=effective_project,
+                seed_clause_numbers=clause_numbers,
+                seed_document_ids=[request.document_id] if request.document_id else None,
+                limit=candidate_limit,
+            )
+        except Exception as exc:
+            logger.debug("Contract graph candidate expansion failed: %s", exc)
+            return []
+        return [
+            {
+                "document_id": self._coerce_id(row.get("document_id")),
+                "clause_number": row.get("clause_number"),
+                "clause_start_position": row.get("clause_start_position"),
+                "score": 0.75 if row.get("graph_relation") == "same_clause_number" else 0.45,
+                "graph_relation": row.get("graph_relation"),
+            }
+            for row in rows
+            if row.get("document_id") and row.get("clause_number")
+        ]
+
+    def _extract_clause_numbers_for_graph(self, request: ContractSearchRequest) -> List[str]:
+        values: List[str] = []
+        if request.clause_number:
+            values.append(request.clause_number)
+        for match in re.finditer(r"\b(?:GCC|SCC|Clause)\s*([0-9A-Za-z._-]+)", request.query or "", flags=re.I):
+            values.append(match.group(1))
+        # For exact searches like "8.4 extension of time", use the leading
+        # clause-like token as a graph seed without treating every number as one.
+        leading = re.match(r"^\s*([0-9]+(?:\.[0-9A-Za-z]+)+)\b", request.query or "")
+        if leading:
+            values.append(leading.group(1))
+        seen: set[str] = set()
+        out: List[str] = []
+        for value in values:
+            cleaned = str(value or "").strip()
+            key = cleaned.lower()
+            if cleaned and key not in seen:
+                seen.add(key)
+                out.append(cleaned)
+        return out[:10]
+
     def _payload_matches_structured_filters(self, payload: Dict[str, Any], request: ContractSearchRequest) -> bool:
         def contains(field: str, value: Optional[str]) -> bool:
             needle = (value or "").strip().lower()
@@ -815,7 +873,15 @@ class ContractService:
                 return False
         return True
 
-    async def _assemble_results(self, collection, lexical_candidates: List[Dict[str, Any]], vector_candidates: List[Dict[str, Any]], page_size: int, skip_count: int) -> Tuple[List[Dict[str, Any]], int, bool]:
+    async def _assemble_results(
+        self,
+        collection,
+        lexical_candidates: List[Dict[str, Any]],
+        vector_candidates: List[Dict[str, Any]],
+        graph_candidates: Optional[List[Dict[str, Any]]],
+        page_size: int,
+        skip_count: int,
+    ) -> Tuple[List[Dict[str, Any]], int, bool]:
         def clause_key(document_id: Optional[str], clause_number: Optional[str], clause_start: Optional[Any]) -> str:
             return f"{document_id or ''}::{clause_number or ''}::{clause_start or 0}"
 
@@ -838,6 +904,26 @@ class ContractService:
             vector_ranked.append({"key": key, "score": item.get("score") or 0.0})
             key_meta.setdefault(key, {"document_id": document_id, "upload_id": self._coerce_id(payload.get("upload_id")), "clause_number": clause_number, "clause_start_position": clause_start})
 
+        graph_ranked: List[Dict[str, Any]] = []
+        for item in graph_candidates or []:
+            document_id = self._coerce_id(item.get("document_id"))
+            clause_number = item.get("clause_number")
+            clause_start = item.get("clause_start_position")
+            if not document_id or not clause_number:
+                continue
+            key = clause_key(document_id, clause_number, clause_start)
+            graph_ranked.append({"key": key, "score": item.get("score") or 0.0})
+            key_meta.setdefault(
+                key,
+                {
+                    "document_id": document_id,
+                    "upload_id": self._coerce_id(item.get("upload_id")),
+                    "clause_number": clause_number,
+                    "clause_start_position": clause_start,
+                    "graph_relation": item.get("graph_relation"),
+                },
+            )
+
         def rrf(items: Sequence[Dict[str, Any]]) -> Dict[str, float]:
             scores: Dict[str, float] = {}
             for rank, item in enumerate(sorted(items, key=lambda value: value.get("score", 0), reverse=True), start=1):
@@ -849,6 +935,8 @@ class ContractService:
             combined_scores[key] = combined_scores.get(key, 0.0) + score
         for key, score in rrf(vector_ranked).items():
             combined_scores[key] = combined_scores.get(key, 0.0) + score
+        for key, score in rrf(graph_ranked).items():
+            combined_scores[key] = combined_scores.get(key, 0.0) + (score * 0.8)
         ranked_keys = sorted(combined_scores.keys(), key=lambda key: (-combined_scores.get(key, 0.0), key_meta.get(key, {}).get("clause_start_position") or 0))
         total_count = len(ranked_keys)
         page_keys = ranked_keys[skip_count : skip_count + page_size]
@@ -869,7 +957,10 @@ class ContractService:
         docs = await collection.find({"$or": clause_filters}).sort([("chunk_index", 1)]).to_list(length=None)
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for doc in docs:
-            grouped.setdefault(clause_key(self._coerce_id(doc.get("document_id")), doc.get("clause_number"), doc.get("clause_start_position")), []).append(doc)
+            doc_id = self._coerce_id(doc.get("document_id"))
+            clause_number = doc.get("clause_number")
+            grouped.setdefault(clause_key(doc_id, clause_number, doc.get("clause_start_position")), []).append(doc)
+            grouped.setdefault(clause_key(doc_id, clause_number, None), []).append(doc)
 
         normalized: List[Dict[str, Any]] = []
         for key in page_keys:

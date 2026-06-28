@@ -44,7 +44,7 @@ class PermissionBase(BaseModel):
         colon_parts = stripped.split(":")
         dot_parts = stripped.split(".")
         valid_legacy = len(colon_parts) == 2 and all(part.strip() for part in colon_parts)
-        valid_canonical = len(dot_parts) >= 3 and all(part.strip() for part in dot_parts)
+        valid_canonical = len(dot_parts) >= 2 and all(part.strip() for part in dot_parts)
         if not valid_legacy and not valid_canonical:
             raise ValueError("Permission name must follow 'resource:action' or canonical dotted format")
         return stripped
@@ -256,6 +256,12 @@ DEFAULT_PERMISSIONS = [
     {"name": "dms.contract.appraisal.export", "description": "Export Contract Appraisal", "category": "document_management", "resource": "dms.contract.appraisal", "action": "admin", "is_system": True},
     {"name": "dms.contract.appraisal.create_registers", "description": "Create registers from appraisal", "category": "document_management", "resource": "dms.contract.appraisal", "action": "admin", "is_system": True},
 
+    # --- Evidence graph / Contract Intelligence Timeline ---
+    {"name": "dms.evidence_graph.view", "description": "View evidence graph links", "category": "document_management", "resource": "dms.evidence_graph", "action": "read", "is_system": True},
+    {"name": "dms.evidence_graph.verify", "description": "Verify or reject evidence graph links", "category": "document_management", "resource": "dms.evidence_graph", "action": "update", "is_system": True},
+    {"name": "dms.evidence_graph.manage", "description": "Manage evidence graph events and links", "category": "document_management", "resource": "dms.evidence_graph", "action": "admin", "is_system": True},
+    {"name": "dms.contract.timeline.view", "description": "View Contract Intelligence Timeline", "category": "document_management", "resource": "dms.contract.timeline", "action": "read", "is_system": True},
+
     # --- Tasks ---
     {"name": "dms.task.view", "description": "View Tasks", "category": "project_management", "resource": "dms.task", "action": "read", "is_system": True},
     {"name": "dms.task.create", "description": "Create Tasks", "category": "project_management", "resource": "dms.task", "action": "create", "is_system": True},
@@ -263,3 +269,80 @@ DEFAULT_PERMISSIONS = [
     {"name": "dms.task.delete", "description": "Delete Tasks", "category": "project_management", "resource": "dms.task", "action": "delete", "is_system": True},
     {"name": "dms.task.manage", "description": "Manage Tasks", "category": "project_management", "resource": "dms.task", "action": "admin", "is_system": True},
 ]
+
+
+def _permission_action_for_name(permission_name: str) -> str:
+    token = (permission_name or "").replace(":", ".").split(".")[-1].lower()
+    if token in {"create", "upload", "add", "submit"}:
+        return PermissionLevel.CREATE.value
+    if token in {"update", "edit", "edit_metadata", "link_reference", "verify"}:
+        return PermissionLevel.UPDATE.value
+    if token == "delete":
+        return PermissionLevel.DELETE.value
+    if token in {
+        "admin",
+        "approve",
+        "assess",
+        "cancel",
+        "download",
+        "download_all",
+        "downgrade",
+        "eot_approve",
+        "eot_submit",
+        "export",
+        "extend",
+        "generate",
+        "manage",
+        "release",
+        "reject",
+        "trial",
+        "upgrade",
+        "achievement",
+    }:
+        return PermissionLevel.ADMIN.value
+    return PermissionLevel.READ.value
+
+
+def _permission_category_for_name(permission_name: str) -> str:
+    if permission_name.startswith("dms."):
+        return PermissionCategory.DOCUMENT_MANAGEMENT.value
+    if permission_name.startswith("drafting."):
+        return PermissionCategory.DRAFTING_MANAGEMENT.value
+    if permission_name.startswith("billing."):
+        return PermissionCategory.BILLING_MANAGEMENT.value
+    if permission_name.startswith("subscription."):
+        return PermissionCategory.SUBSCRIPTION_MANAGEMENT.value
+    if permission_name.startswith("users:"):
+        return PermissionCategory.USER_MANAGEMENT.value
+    if permission_name.startswith(("roles:", "permissions:")):
+        return PermissionCategory.ROLE_MANAGEMENT.value
+    return PermissionCategory.SYSTEM_ADMINISTRATION.value
+
+
+def _canonical_permission_entry(permission_name: str) -> Dict[str, Any]:
+    resource = (
+        permission_name.split(":", 1)[0]
+        if ":" in permission_name
+        else ".".join(permission_name.split(".")[:-1])
+    )
+    return {
+        "name": permission_name,
+        "description": permission_name.replace(".", " ").replace(":", " ").replace("_", " ").title(),
+        "category": _permission_category_for_name(permission_name),
+        "resource": resource,
+        "action": _permission_action_for_name(permission_name),
+        "is_system": True,
+    }
+
+
+def _append_missing_canonical_permissions() -> None:
+    from ..core.permissions import CANONICAL_PERMISSIONS
+
+    existing = {entry["name"] for entry in DEFAULT_PERMISSIONS}
+    for permission_name in CANONICAL_PERMISSIONS:
+        if permission_name not in existing:
+            DEFAULT_PERMISSIONS.append(_canonical_permission_entry(permission_name))
+            existing.add(permission_name)
+
+
+_append_missing_canonical_permissions()

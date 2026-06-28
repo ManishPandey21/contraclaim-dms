@@ -563,13 +563,14 @@ class PermissionService:
             if not perms:
                 return []
 
+            names: List[str] = []
+
             # Wildcard: return all active permissions
             if "*" in perms:
                 cursor = db.permissions.find({"is_active": {"$ne": False}})
                 docs = await cursor.to_list(length=None)
             else:
                 object_ids = []
-                names = []
                 for p in perms:
                     if isinstance(p, str):
                         try:
@@ -587,8 +588,21 @@ class PermissionService:
                 docs = await cursor.to_list(length=None)
 
             permissions: List[Permission] = []
+            found_keys: set[str] = set()
             for doc in docs:
-                permissions.append(self._build_permission_from_doc(doc))
+                permission = self._build_permission_from_doc(doc)
+                permissions.append(permission)
+                found_keys.update(
+                    {
+                        permission.name,
+                        permission.id,
+                        str(doc.get("_id") or ""),
+                        str(doc.get("id") or ""),
+                    }
+                )
+            for name in names:
+                if isinstance(name, str) and name not in found_keys:
+                    permissions.append(self._build_permission_from_doc({"_id": name, "name": name}))
             return permissions
 
         except Exception as e:

@@ -73,6 +73,7 @@ const ContractsSearchPage = lazy(() => import("./pages/ContractsSearchPage"));
 const ContractQAPage = lazy(() => import("./pages/ContractQAPage"));
 const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
+const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
 const ReferencePage = lazy(() => import("./pages/ReferencePage"));
 const ShareDocumentPage = lazy(() => import("./pages/ShareDocumentPage"));
 const EmailGroupsPage = lazy(() => import("./pages/EmailGroupsPage"));
@@ -275,6 +276,14 @@ const AppRoutes = () => (
         <Route path="contracts/upload" element={<ContractsUploadPage />} />
         <Route path="contracts/search" element={<ContractsSearchPage />} />
         <Route path="contracts/qa" element={<ContractQAPage />} />
+        <Route
+          path="contracts/timeline"
+          element={
+            <RoleGuard path="/contracts/timeline" fallback="/overview">
+              <ContractTimelinePage />
+            </RoleGuard>
+          }
+        />
         <Route
           path="contracts/appraisal"
           element={
