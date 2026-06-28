@@ -44,6 +44,7 @@ import { isRouteAllowedByPermission } from "@/config/rolePermissions";
 
 const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
+  const [arbitrationOpen, setArbitrationOpen] = useState(false);
   const location = useLocation();
   const { roles, can } = useRBAC();
 
@@ -356,6 +357,47 @@ const Sidebar = () => {
               "Notifications", // End of User tools → Admin tools
             ]);
 
+            const isSub = "sub" in link && link.sub;
+
+            // Hide sub-items when the accordion is closed
+            if (isSub && !arbitrationOpen) return null;
+
+            // "Arbitration Drafting" renders as a toggle button instead of a NavLink
+            if (link.label === "Arbitration Drafting") {
+              const anySubActive = location.pathname.startsWith("/arbitration/");
+              return (
+                <React.Fragment key={link.path}>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => setArbitrationOpen((o) => !o)}
+                      className={cn(
+                        "w-full flex items-center space-x-3 px-3 py-2 rounded-md text-sm font-medium transition-all duration-200",
+                        anySubActive
+                          ? "bg-docsumo-blue/10 text-docsumo-blue"
+                          : "text-gray-600 hover:bg-docsumo-blue/5 hover:text-docsumo-blue",
+                        collapsed && "justify-center",
+                      )}
+                    >
+                      <span>{link.icon}</span>
+                      {!collapsed && (
+                        <>
+                          <span className="flex-1 text-left">{link.label}</span>
+                          <ChevronRight
+                            size={14}
+                            className={cn(
+                              "shrink-0 transition-transform duration-200",
+                              arbitrationOpen && "rotate-90",
+                            )}
+                          />
+                        </>
+                      )}
+                    </button>
+                  </li>
+                </React.Fragment>
+              );
+            }
+
             return (
               <React.Fragment key={link.path}>
                 <li>
@@ -364,8 +406,8 @@ const Sidebar = () => {
                     className={({ isActive }) =>
                       cn(
                         "flex items-center space-x-3 rounded-md text-sm font-medium transition-all duration-200",
-                        "sub" in link && link.sub ? "px-3 py-1.5 pl-8" : "px-3 py-2",
-                        "sub" in link && link.sub && "text-xs",
+                        isSub ? "px-3 py-1.5 pl-8" : "px-3 py-2",
+                        isSub && "text-xs",
                         isActive
                           ? "bg-docsumo-blue/10 text-docsumo-blue"
                           : "text-gray-600 hover:bg-docsumo-blue/5 hover:text-docsumo-blue",
@@ -373,7 +415,7 @@ const Sidebar = () => {
                       )
                     }
                   >
-                    <span>{"sub" in link && link.sub ? <span className="text-gray-400">›</span> : link.icon}</span>
+                    <span>{isSub ? <span className="text-gray-400">›</span> : link.icon}</span>
                     {!collapsed && <span>{link.label}</span>}
                   </NavLink>
                 </li>
