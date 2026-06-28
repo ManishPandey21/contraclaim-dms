@@ -515,6 +515,9 @@ const ArbitrationDraftingPage: React.FC = () => {
           <Button variant="outline" asChild>
             <Link to="/arbitration/rejoinder">New Rejoinder</Link>
           </Button>
+          <Button variant="outline" asChild>
+            <Link to="/arbitration/counterclaim">New Counterclaim</Link>
+          </Button>
         </div>
       </div>
 

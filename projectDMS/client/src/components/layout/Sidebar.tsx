@@ -233,7 +233,13 @@ const Sidebar = () => {
     {
       path: "/arbitration/drafts",
       icon: <Landmark size={20} />,
-      label: "Arbitration Drafting",
+      label: "Arbitration",
+    },
+    {
+      path: "/arbitration/drafts",
+      icon: <FileText size={20} />,
+      label: "Saved Drafts",
+      sub: true,
     },
     {
       path: "/arbitration/claim",
@@ -363,7 +369,7 @@ const Sidebar = () => {
             if (isSub && !arbitrationOpen) return null;
 
             // "Arbitration Drafting" renders as a toggle button instead of a NavLink
-            if (link.label === "Arbitration Drafting") {
+            if (link.label === "Arbitration") {
               const anySubActive = location.pathname.startsWith("/arbitration/");
               return (
                 <React.Fragment key={link.path}>
