@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -26,7 +27,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import {
   ChronologyEventDTO,
@@ -41,6 +41,9 @@ import {
   rejectChronologyEvent,
   verifyChronologyEvent,
 } from "@/services/chronology-api";
+import { DocumentItem, listDocuments } from "@/services/documents-api";
+import { Organization, listOrganizations } from "@/services/organizations-api";
+import { Project, listProjects } from "@/services/projects-api";
 
 const CHRONOLOGY_TYPES = [
   "general_dispute",
@@ -67,6 +70,10 @@ function fmtDate(value?: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleDateString();
+}
+
+function docLabel(doc: DocumentItem): string {
+  return doc.filename || doc.name || doc._id;
 }
 
 function statusClass(status: string): string {
@@ -149,7 +156,65 @@ const EventCard: React.FC<{
   </Card>
 );
 
+// Document picker: shows project documents with checkboxes
+const DocumentPicker: React.FC<{
+  documents: DocumentItem[];
+  selected: Set<string>;
+  loading: boolean;
+  onToggle: (id: string) => void;
+  onSelectAll: () => void;
+  onClearAll: () => void;
+}> = ({ documents, selected, loading, onToggle, onSelectAll, onClearAll }) => {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Loading project documents…
+      </div>
+    );
+  }
+  if (documents.length === 0) {
+    return <p className="text-sm text-muted-foreground py-1">No documents found for this project.</p>;
+  }
+  return (
+    <div className="space-y-1">
+      <div className="flex gap-3 text-xs mb-2">
+        <button type="button" className="text-sky-600 hover:underline" onClick={onSelectAll}>Select all</button>
+        <button type="button" className="text-slate-500 hover:underline" onClick={onClearAll}>Clear</button>
+        <span className="text-muted-foreground ml-auto">{selected.size} / {documents.length} selected</span>
+      </div>
+      <div className="max-h-48 overflow-y-auto rounded border divide-y">
+        {documents.map((doc) => (
+          <label
+            key={doc._id}
+            className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 cursor-pointer text-sm"
+          >
+            <Checkbox
+              checked={selected.has(doc._id)}
+              onCheckedChange={() => onToggle(doc._id)}
+            />
+            <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span className="truncate">{docLabel(doc)}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+};
+
 const ChronologyBuilderPage: React.FC = () => {
+  // Org/project selector state
+  const [organizations, setOrganizations] = useState<Organization[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [scopeOrgId, setScopeOrgId] = useState("");
+  const [scopeProjectId, setScopeProjectId] = useState("");
+  const [scopeLoading, setScopeLoading] = useState(false);
+
+  // Project documents for the picker
+  const [projectDocs, setProjectDocs] = useState<DocumentItem[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+
+  // Chronology list + selection
   const [chronologies, setChronologies] = useState<MatterChronologyDTO[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [events, setEvents] = useState<ChronologyEventDTO[]>([]);
@@ -157,18 +222,23 @@ const ChronologyBuilderPage: React.FC = () => {
   const [eventLoading, setEventLoading] = useState(false);
   const [busyEvent, setBusyEvent] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState("all");
-  const [sourceInput, setSourceInput] = useState("");
+
+  // Extract panel: doc selection
+  const [extractDocIds, setExtractDocIds] = useState<Set<string>>(new Set());
+
+  // Attach panel
   const [draftId, setDraftId] = useState("");
   const [contextCount, setContextCount] = useState(0);
+
+  // Creation form
   const [form, setForm] = useState({
-    organization_id: "",
-    project_id: "",
     contract_id: "",
     title: "",
     chronology_type: "general_dispute",
     party_perspective: "neutral",
-    selected_source_ids: "",
   });
+  // Selected doc IDs for creation
+  const [createDocIds, setCreateDocIds] = useState<Set<string>>(new Set());
 
   const selected = useMemo(
     () => chronologies.find((item) => item.id === selectedId) || null,
@@ -186,10 +256,49 @@ const ChronologyBuilderPage: React.FC = () => {
     return base;
   }, [events]);
 
+  // Load orgs on mount
+  useEffect(() => {
+    setScopeLoading(true);
+    listOrganizations()
+      .then(setOrganizations)
+      .catch(() => toast.error("Failed to load organizations"))
+      .finally(() => setScopeLoading(false));
+  }, []);
+
+  // Load projects when org changes
+  useEffect(() => {
+    setScopeProjectId("");
+    setProjects([]);
+    if (!scopeOrgId) return;
+    listProjects({ organization_id: scopeOrgId })
+      .then(setProjects)
+      .catch(() => toast.error("Failed to load projects"));
+  }, [scopeOrgId]);
+
+  // Load project documents when project changes
+  useEffect(() => {
+    setProjectDocs([]);
+    setCreateDocIds(new Set());
+    setExtractDocIds(new Set());
+    if (!scopeProjectId) return;
+    setDocsLoading(true);
+    listDocuments({ organization_id: scopeOrgId || undefined, project_id: scopeProjectId, limit: 200 })
+      .then((res) => setProjectDocs(res.documents ?? []))
+      .catch(() => toast.error("Failed to load project documents"))
+      .finally(() => setDocsLoading(false));
+  }, [scopeOrgId, scopeProjectId]);
+
   const loadChronologies = useCallback(async () => {
     try {
       setLoading(true);
-      const rows = await listChronologies();
+      const rows = await listChronologies(
+        scopeOrgId || scopeProjectId
+          ? {
+              organization_id: scopeOrgId || undefined,
+              project_id: scopeProjectId || undefined,
+            }
+          : undefined,
+      );
       setChronologies(rows);
       setSelectedId((current) => current || rows[0]?.id || "");
     } catch {
@@ -197,7 +306,7 @@ const ChronologyBuilderPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [scopeOrgId, scopeProjectId]);
 
   const loadEvents = useCallback(async () => {
     if (!selectedId) {
@@ -228,24 +337,25 @@ const ChronologyBuilderPage: React.FC = () => {
   }, [loadEvents]);
 
   const submit = async () => {
-    if (!form.project_id.trim() || !form.title.trim()) {
+    if (!scopeProjectId.trim() || !form.title.trim()) {
       toast.error("Project and title are required");
       return;
     }
     try {
       const created = await createChronology({
-        organization_id: form.organization_id || undefined,
-        project_id: form.project_id,
+        organization_id: scopeOrgId || undefined,
+        project_id: scopeProjectId,
         contract_id: form.contract_id || undefined,
         title: form.title,
         chronology_type: form.chronology_type,
         party_perspective: form.party_perspective,
-        selected_source_ids: form.selected_source_ids.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean),
+        selected_source_ids: Array.from(createDocIds),
         selected_source_types: ["document"],
       });
       toast.success("Chronology created");
       setChronologies((prev) => [created, ...prev]);
       setSelectedId(created.id);
+      setCreateDocIds(new Set());
     } catch {
       toast.error("Unable to create chronology");
     }
@@ -255,8 +365,7 @@ const ChronologyBuilderPage: React.FC = () => {
     if (!selectedId) return;
     try {
       setEventLoading(true);
-      const sourceIds = sourceInput.split(/[\s,]+/).map((item) => item.trim()).filter(Boolean);
-      const result = await extractChronologyEvents(selectedId, sourceIds);
+      const result = await extractChronologyEvents(selectedId, Array.from(extractDocIds));
       toast.success(`Extracted ${result?.events_created ?? 0} chronology events`);
       await loadChronologies();
       await loadEvents();
@@ -291,6 +400,14 @@ const ChronologyBuilderPage: React.FC = () => {
     }
   };
 
+  // Helpers for doc picker toggle
+  function toggleDoc(set: Set<string>, id: string): Set<string> {
+    const next = new Set(set);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -303,6 +420,48 @@ const ChronologyBuilderPage: React.FC = () => {
           Refresh
         </Button>
       </div>
+
+      {/* Org / Project scope selector */}
+      <Card className="rounded-md">
+        <CardContent className="pt-4 pb-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-1.5">
+              <Label>Organization</Label>
+              <Select
+                value={scopeOrgId}
+                onValueChange={(v) => { setScopeOrgId(v); setScopeProjectId(""); }}
+                disabled={scopeLoading}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={scopeLoading ? "Loading…" : "Select organization"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {organizations.map((org) => (
+                    <SelectItem key={org._id} value={org._id}>{org.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>Project</Label>
+              <Select
+                value={scopeProjectId}
+                onValueChange={setScopeProjectId}
+                disabled={!scopeOrgId || projects.length === 0}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder={!scopeOrgId ? "Select org first" : projects.length === 0 ? "No projects" : "Select project"} />
+                </SelectTrigger>
+                <SelectContent>
+                  {projects.map((p) => (
+                    <SelectItem key={p._id} value={p._id}>{p.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <SummaryTile label="Events" value={counts.total} />
@@ -324,19 +483,19 @@ const ChronologyBuilderPage: React.FC = () => {
             <CardContent className="space-y-3">
               <div className="grid gap-2">
                 <Label htmlFor="chronology-title">Title</Label>
-                <Input id="chronology-title" value={form.title} onChange={(e) => setForm((prev) => ({ ...prev, title: e.target.value }))} />
+                <Input
+                  id="chronology-title"
+                  value={form.title}
+                  onChange={(e) => setForm((prev) => ({ ...prev, title: e.target.value }))}
+                />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="chronology-project">Project ID</Label>
-                <Input id="chronology-project" value={form.project_id} onChange={(e) => setForm((prev) => ({ ...prev, project_id: e.target.value }))} />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="chronology-org">Organization ID</Label>
-                <Input id="chronology-org" value={form.organization_id} onChange={(e) => setForm((prev) => ({ ...prev, organization_id: e.target.value }))} />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="chronology-contract">Contract ID</Label>
-                <Input id="chronology-contract" value={form.contract_id} onChange={(e) => setForm((prev) => ({ ...prev, contract_id: e.target.value }))} />
+                <Label htmlFor="chronology-contract">Contract ID (optional)</Label>
+                <Input
+                  id="chronology-contract"
+                  value={form.contract_id}
+                  onChange={(e) => setForm((prev) => ({ ...prev, contract_id: e.target.value }))}
+                />
               </div>
               <div className="grid gap-2">
                 <Label>Type</Label>
@@ -357,10 +516,20 @@ const ChronologyBuilderPage: React.FC = () => {
                 </Select>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="chronology-sources">Source document IDs</Label>
-                <Textarea id="chronology-sources" rows={3} value={form.selected_source_ids} onChange={(e) => setForm((prev) => ({ ...prev, selected_source_ids: e.target.value }))} />
+                <Label>Source documents</Label>
+                <DocumentPicker
+                  documents={projectDocs}
+                  selected={createDocIds}
+                  loading={docsLoading}
+                  onToggle={(id) => setCreateDocIds((prev) => toggleDoc(prev, id))}
+                  onSelectAll={() => setCreateDocIds(new Set(projectDocs.map((d) => d._id)))}
+                  onClearAll={() => setCreateDocIds(new Set())}
+                />
+                {!scopeProjectId && (
+                  <p className="text-xs text-muted-foreground">Select a project above to pick documents.</p>
+                )}
               </div>
-              <Button className="w-full" onClick={submit}>
+              <Button className="w-full" onClick={submit} disabled={!scopeProjectId || !form.title.trim()}>
                 Create
               </Button>
             </CardContent>
@@ -372,7 +541,9 @@ const ChronologyBuilderPage: React.FC = () => {
             </CardHeader>
             <CardContent className="space-y-2">
               {chronologies.length === 0 ? (
-                <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No chronologies found.</div>
+                <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+                  {scopeProjectId ? "No chronologies found for this project." : "Select a project to load chronologies."}
+                </div>
               ) : (
                 chronologies.map((item) => (
                   <button
@@ -436,8 +607,40 @@ const ChronologyBuilderPage: React.FC = () => {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px_auto]">
-                <Input placeholder="Source document IDs for extraction" value={sourceInput} onChange={(e) => setSourceInput(e.target.value)} />
+              {/* Extraction: document picker scoped to same project */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Documents to extract from</Label>
+                <DocumentPicker
+                  documents={
+                    selected
+                      ? projectDocs.filter(
+                          (d) => !d.project_id || d.project_id === selected.project_id,
+                        )
+                      : projectDocs
+                  }
+                  selected={extractDocIds}
+                  loading={docsLoading && !!scopeProjectId}
+                  onToggle={(id) => setExtractDocIds((prev) => toggleDoc(prev, id))}
+                  onSelectAll={() =>
+                    setExtractDocIds(
+                      new Set(
+                        (selected
+                          ? projectDocs.filter(
+                              (d) => !d.project_id || d.project_id === selected.project_id,
+                            )
+                          : projectDocs
+                        ).map((d) => d._id),
+                      ),
+                    )
+                  }
+                  onClearAll={() => setExtractDocIds(new Set())}
+                />
+                {!scopeProjectId && !selected && (
+                  <p className="text-xs text-muted-foreground">Select a project and chronology first.</p>
+                )}
+              </div>
+
+              <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
                 <Select value={filterStatus} onValueChange={setFilterStatus}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
@@ -469,7 +672,7 @@ const ChronologyBuilderPage: React.FC = () => {
               <Search className="mb-3 h-8 w-8 text-muted-foreground" />
               <div className="font-medium text-slate-900">No chronology events found</div>
               <div className="mt-1 max-w-md text-sm text-muted-foreground">
-                Select a chronology and run extraction against uploaded document sources.
+                Select a chronology and run extraction against project documents.
               </div>
             </div>
           ) : (
@@ -492,4 +695,3 @@ const ChronologyBuilderPage: React.FC = () => {
 };
 
 export default ChronologyBuilderPage;
-
