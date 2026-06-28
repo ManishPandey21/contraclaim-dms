@@ -350,6 +350,41 @@ async def ensure_indexes(db):
         background=True,
     )
 
+    # Matter chronology builder
+    await db.matter_chronologies.create_index(
+        [("organization_id", 1), ("project_id", 1), ("contract_id", 1), ("chronology_type", 1), ("status", 1)],
+        background=True,
+    )
+    await db.matter_chronologies.create_index(
+        [("organization_id", 1), ("project_id", 1), ("updated_at", -1)],
+        background=True,
+    )
+    await db.matter_chronology_events.create_index(
+        [("chronology_id", 1), ("event_date", 1), ("created_at", 1)],
+        background=True,
+    )
+    await db.matter_chronology_events.create_index(
+        [("organization_id", 1), ("project_id", 1), ("verification_status", 1)],
+        background=True,
+    )
+    await db.matter_chronology_events.create_index(
+        [("chronology_id", 1), ("source_document_id", 1), ("metadata.content_hash", 1)],
+        background=True,
+    )
+    await db.matter_chronology_events.create_index(
+        [("chronology_id", 1), ("event_classification", 1), ("supports_party", 1), ("pleading_use", 1)],
+        background=True,
+    )
+    await db.matter_chronology_event_revisions.create_index(
+        [("chronology_id", 1), ("event_id", 1), ("revision", 1)],
+        unique=True,
+        background=True,
+    )
+    await db.matter_chronology_exports.create_index(
+        [("chronology_id", 1), ("created_at", -1)],
+        background=True,
+    )
+
     # Parties / Representatives
     await db.parties.create_index("organization_id", background=True)
     await db.parties.create_index("projects", background=True)

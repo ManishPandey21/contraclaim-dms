@@ -149,7 +149,7 @@ Fields:
 
 - `_id`
 - `draft_id`
-- `source_type`: `letter`, `document`, `clause`, `drawing`, `payment_event`, `programme_milestone`, `key_date`, `delay_event`, `claim`, `variation`, `bank_guarantee`, `project_event`, `event_link`, `manual_fact`
+- `source_type`: `letter`, `document`, `clause`, `drawing`, `payment_event`, `programme_milestone`, `key_date`, `delay_event`, `claim`, `variation`, `bank_guarantee`, `project_event`, `event_link`, `chronology_event`, `manual_fact`
 - `source_id`
 - `label`
 - `citation`
@@ -297,7 +297,8 @@ Build an arbitration context pack by combining:
 - Contract search/RAG results from `ContractService`.
 - Retrieval engine results for broader document evidence.
 - Verified/approved evidence graph downstream links from `EvidenceGraphService.downstream_links`.
-- Timeline/project events for chronology.
+- Attached verified Chronology Builder packages/events from `docs/architecture/chronology_builder_integration_plan.md`.
+- Timeline/project events for fallback chronology where no matter chronology package is attached.
 - Claims, variations, key dates, IPC bills, BGs, drawings, delay events, programme milestones, and contract master.
 
 Output a normalized source ledger compatible with the existing letter drafting `SourceEvidence` shape or an arbitration-specific extension.

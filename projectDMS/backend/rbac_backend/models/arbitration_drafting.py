@@ -60,6 +60,7 @@ class ArbitrationSourceType(str, Enum):
     BANK_GUARANTEE = "bank_guarantee"
     PROJECT_EVENT = "project_event"
     EVENT_LINK = "event_link"
+    CHRONOLOGY_EVENT = "chronology_event"
     MANUAL_FACT = "manual_fact"
 
 
@@ -366,4 +367,3 @@ class PleadingImportRequest(BaseModel):
 
 class ReturnForRevisionRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=4000)
-

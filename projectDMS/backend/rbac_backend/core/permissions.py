@@ -72,6 +72,12 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.evidence_graph.verify",
     "dms.evidence_graph.manage",
     "dms.contract.timeline.view",
+    "dms.chronology.view",
+    "dms.chronology.create",
+    "dms.chronology.edit",
+    "dms.chronology.verify",
+    "dms.chronology.export",
+    "dms.chronology.admin",
     "dms.arbitration.view",
     "dms.arbitration.create",
     "dms.arbitration.edit",
@@ -192,6 +198,12 @@ class Permissions:
     EVIDENCE_GRAPH_VERIFY = "dms.evidence_graph.verify"
     EVIDENCE_GRAPH_MANAGE = "dms.evidence_graph.manage"
     CONTRACT_TIMELINE_VIEW = "dms.contract.timeline.view"
+    CHRONOLOGY_VIEW = "dms.chronology.view"
+    CHRONOLOGY_CREATE = "dms.chronology.create"
+    CHRONOLOGY_EDIT = "dms.chronology.edit"
+    CHRONOLOGY_VERIFY = "dms.chronology.verify"
+    CHRONOLOGY_EXPORT = "dms.chronology.export"
+    CHRONOLOGY_ADMIN = "dms.chronology.admin"
     ARBITRATION_VIEW = "dms.arbitration.view"
     ARBITRATION_CREATE = "dms.arbitration.create"
     ARBITRATION_EDIT = "dms.arbitration.edit"
@@ -324,6 +336,12 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.evidence_graph.verify": ["documents:update"],
     "dms.evidence_graph.manage": ["documents:update", "projects:update"],
     "dms.contract.timeline.view": ["documents:read"],
+    "dms.chronology.view": ["documents:read"],
+    "dms.chronology.create": ["documents:create"],
+    "dms.chronology.edit": ["documents:update"],
+    "dms.chronology.verify": ["documents:update"],
+    "dms.chronology.export": ["documents:read"],
+    "dms.chronology.admin": ["documents:update", "projects:update"],
     "dms.arbitration.view": ["documents:read"],
     "dms.arbitration.create": ["documents:create"],
     "dms.arbitration.edit": ["documents:update"],

@@ -75,6 +75,7 @@ const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage")
 const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
 const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
 const ArbitrationDraftingPage = lazy(() => import("./pages/ArbitrationDraftingPage"));
+const ChronologyBuilderPage = lazy(() => import("./pages/ChronologyBuilderPage"));
 const ReferencePage = lazy(() => import("./pages/ReferencePage"));
 const ShareDocumentPage = lazy(() => import("./pages/ShareDocumentPage"));
 const EmailGroupsPage = lazy(() => import("./pages/EmailGroupsPage"));
@@ -282,6 +283,46 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/contracts/timeline" fallback="/overview">
               <ContractTimelinePage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="chronology"
+          element={
+            <RoleGuard path="/chronology" fallback="/overview">
+              <ChronologyBuilderPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="chronology/new"
+          element={
+            <RoleGuard path="/chronology/new" fallback="/overview">
+              <ChronologyBuilderPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="chronology/:chronologyId"
+          element={
+            <RoleGuard path="/chronology" fallback="/overview">
+              <ChronologyBuilderPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="chronology/:chronologyId/review"
+          element={
+            <RoleGuard path="/chronology" fallback="/overview">
+              <ChronologyBuilderPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="chronology/:chronologyId/presentation"
+          element={
+            <RoleGuard path="/chronology" fallback="/overview">
+              <ChronologyBuilderPage />
             </RoleGuard>
           }
         />

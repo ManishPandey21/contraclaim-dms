@@ -380,6 +380,19 @@ const PermissionsPage = () => {
       ],
     },
     {
+      id: "chronology-builder",
+      name: "Chronology Builder",
+      icon: ClipboardList,
+      permissions: [
+        { id: "dms.chronology.view", name: "View Chronology Builder" },
+        { id: "dms.chronology.create", name: "Create Chronologies" },
+        { id: "dms.chronology.edit", name: "Edit Chronologies" },
+        { id: "dms.chronology.verify", name: "Verify Chronology Events" },
+        { id: "dms.chronology.export", name: "Export Chronologies" },
+        { id: "dms.chronology.admin", name: "Chronology Admin" },
+      ],
+    },
+    {
       id: "tasks",
       name: "Tasks",
       icon: ClipboardList,

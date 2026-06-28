@@ -32,6 +32,12 @@ const SIDEBAR_PATHS = [
   "/contracts/qa",
   "/contracts/appraisal",
   "/contracts/timeline",
+  "/chronology",
+  "/arbitration/drafts",
+  "/arbitration/claim",
+  "/arbitration/defence",
+  "/arbitration/rejoinder",
+  "/arbitration/counterclaim",
   "/claims",
   "/sla",
   "/key-dates",
@@ -102,6 +108,11 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
   it("Contract Timeline honours its graph permission, not just the /contracts prefix", () => {
     const can = canFor(["dms.evidence_graph.view"]);
     expect(isRouteAllowedByPermission(can, "/contracts/timeline")).toBe(true);
+  });
+
+  it("Chronology Builder honours its chronology permission", () => {
+    const can = canFor(["dms.chronology.view"]);
+    expect(isRouteAllowedByPermission(can, "/chronology")).toBe(true);
   });
 
   it("Subscription management stays behind a billing permission", () => {

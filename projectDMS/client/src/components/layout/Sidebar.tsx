@@ -214,6 +214,11 @@ const Sidebar = () => {
       label: "Contract Timeline",
     },
     {
+      path: "/chronology",
+      icon: <ClipboardList size={20} />,
+      label: "Chronology Builder",
+    },
+    {
       path: "/arbitration/drafts",
       icon: <Landmark size={20} />,
       label: "Arbitration Drafting",

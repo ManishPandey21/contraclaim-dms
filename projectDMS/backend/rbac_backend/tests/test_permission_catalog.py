@@ -24,6 +24,8 @@ REQUIRED_REGISTER_PERMISSIONS = {
     "dms.keydate.manage", "dms.keydate.export",
     "dms.claim.view", "dms.claim.create", "dms.claim.edit", "dms.claim.delete",
     "dms.claim.manage",
+    "dms.chronology.view", "dms.chronology.create", "dms.chronology.edit",
+    "dms.chronology.verify", "dms.chronology.export", "dms.chronology.admin",
 }
 
 

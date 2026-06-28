@@ -88,6 +88,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Must be listed explicitly so it wins over the `/contracts` prefix match.
   "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
   "/contracts/timeline": ["dms.contract.timeline.view", "dms.evidence_graph.view", "dms.document.view"],
+  "/chronology": ["dms.chronology.view", "dms.document.view"],
+  "/chronology/new": ["dms.chronology.create", "dms.chronology.view", "dms.document.view"],
   "/arbitration": ["dms.arbitration.view", "dms.document.view"],
   "/arbitration/claim": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/defence": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],

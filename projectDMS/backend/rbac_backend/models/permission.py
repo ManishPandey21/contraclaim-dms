@@ -262,6 +262,14 @@ DEFAULT_PERMISSIONS = [
     {"name": "dms.evidence_graph.manage", "description": "Manage evidence graph events and links", "category": "document_management", "resource": "dms.evidence_graph", "action": "admin", "is_system": True},
     {"name": "dms.contract.timeline.view", "description": "View Contract Intelligence Timeline", "category": "document_management", "resource": "dms.contract.timeline", "action": "read", "is_system": True},
 
+    # --- Chronology Builder ---
+    {"name": "dms.chronology.view", "description": "View Chronology Builder", "category": "document_management", "resource": "dms.chronology", "action": "read", "is_system": True},
+    {"name": "dms.chronology.create", "description": "Create Chronologies", "category": "document_management", "resource": "dms.chronology", "action": "create", "is_system": True},
+    {"name": "dms.chronology.edit", "description": "Edit Chronologies", "category": "document_management", "resource": "dms.chronology", "action": "update", "is_system": True},
+    {"name": "dms.chronology.verify", "description": "Verify Chronology Events", "category": "document_management", "resource": "dms.chronology", "action": "update", "is_system": True},
+    {"name": "dms.chronology.export", "description": "Export Chronologies", "category": "document_management", "resource": "dms.chronology", "action": "admin", "is_system": True},
+    {"name": "dms.chronology.admin", "description": "Administer Chronology Builder", "category": "document_management", "resource": "dms.chronology", "action": "admin", "is_system": True},
+
     # --- Arbitration pleadings drafting ---
     {"name": "dms.arbitration.view", "description": "View Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "read", "is_system": True},
     {"name": "dms.arbitration.create", "description": "Create Arbitration Drafts", "category": "document_management", "resource": "dms.arbitration", "action": "create", "is_system": True},
