@@ -52,6 +52,7 @@ from .routers import (
     reports,
     roles,
     search,
+    security_terms,
     health,
     smtp_settings,
     sso,
@@ -201,6 +202,7 @@ app.include_router(notifications.test_router, prefix="/api", tags=["notification
 app.include_router(ai_assistant.router, prefix="/api", tags=["ai-assistant"])
 app.include_router(deep_planning.router, prefix="/api", tags=["deep-planning"])
 app.include_router(search.router, prefix="/api", tags=["search"])
+app.include_router(security_terms.router, prefix="/api", tags=["security-terms"])
 app.include_router(email_groups.router, prefix="/api", tags=["email-groups"])
 app.include_router(email.router, prefix="/api/email/legacy", tags=["email-legacy"])
 app.include_router(email_share.router, prefix="/api/email", tags=["email"])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -18,8 +18,17 @@ from ..models.bank_guarantee import (
     BGReleaseRequest,
     BGSummary,
 )
+from ..models.csv_import import CSVImportPreview, CSVImportResult
 from ..services.bank_guarantee_service import BankGuaranteeService
 from ..services.policy_service import PolicyService
+from ..services.register_csv_import import (
+    BG_SAMPLE_ROW,
+    BG_TEMPLATE_HEADERS,
+    collect_project_ids,
+    import_bank_guarantees_csv,
+    preview_bank_guarantees_csv,
+    template_csv,
+)
 
 router = APIRouter()
 
@@ -34,6 +43,52 @@ async def _load(bg_id: str, permission: str, db, current_user, policy) -> dict:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bank guarantee not found")
     await policy.authorize_document(current_user, permission, bg, resource_type="bank_guarantee")
     return bg
+
+
+async def _read_csv(file: UploadFile) -> bytes:
+    filename = (file.filename or "").lower()
+    if filename and not filename.endswith(".csv"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload a .csv file")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is empty")
+    return content
+
+
+async def _authorize_csv_projects(
+    content: bytes,
+    current_user,
+    policy: PolicyService,
+    *,
+    permission: str,
+    organization_id: Optional[str],
+    project_id: Optional[str],
+) -> None:
+    try:
+        project_ids = collect_project_ids(content, project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    if not project_ids and project_id:
+        project_ids = [project_id]
+    if not project_ids:
+        await policy.authorize(
+            current_user,
+            permission,
+            resource_type="bank_guarantees",
+            organization_id=organization_id or getattr(current_user, "organization_id", None),
+            project_id=None,
+            audit=False,
+        )
+        return
+    for row_project_id in project_ids:
+        await policy.authorize(
+            current_user,
+            permission,
+            resource_type="bank_guarantee",
+            organization_id=organization_id or getattr(current_user, "organization_id", None),
+            project_id=row_project_id,
+            audit=False,
+        )
 
 
 @router.get("/bank-guarantees", response_model=List[BankGuarantee])
@@ -114,6 +169,90 @@ async def export_bgs(
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     rows = await BankGuaranteeService(db).list(scope, project_id=project_id, limit=5000)
     return cx.export_response("bank-guarantee-register", cx.BG_COLUMNS, rows, format)
+
+
+@router.get("/bank-guarantees/import/template")
+async def bank_guarantees_import_template(
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user,
+        Permissions.BG_CREATE,
+        resource_type="bank_guarantees",
+        organization_id=getattr(current_user, "organization_id", None),
+        audit=False,
+    )
+    return Response(
+        content=template_csv(BG_TEMPLATE_HEADERS, BG_SAMPLE_ROW),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="bank-guarantee-import-template.csv"'},
+    )
+
+
+@router.post("/bank-guarantees/import/preview", response_model=CSVImportPreview)
+async def preview_bank_guarantees_import(
+    file: UploadFile = File(...),
+    organization_id: Optional[str] = Form(None),
+    project_id: Optional[str] = Form(None),
+    contract_id: Optional[str] = Form(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    content = await _read_csv(file)
+    await _authorize_csv_projects(
+        content,
+        current_user,
+        policy,
+        permission=Permissions.BG_CREATE,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    try:
+        preview = await preview_bank_guarantees_csv(
+            db,
+            content,
+            current_user,
+            project_id=project_id,
+            contract_id=contract_id,
+            organization_id=organization_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return preview.response
+
+
+@router.post("/bank-guarantees/import", response_model=CSVImportResult)
+async def import_bank_guarantees(
+    file: UploadFile = File(...),
+    organization_id: Optional[str] = Form(None),
+    project_id: Optional[str] = Form(None),
+    contract_id: Optional[str] = Form(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    content = await _read_csv(file)
+    await _authorize_csv_projects(
+        content,
+        current_user,
+        policy,
+        permission=Permissions.BG_CREATE,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    try:
+        return await import_bank_guarantees_csv(
+            db,
+            content,
+            current_user,
+            project_id=project_id,
+            contract_id=contract_id,
+            organization_id=organization_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @router.post("/bank-guarantees", response_model=BankGuarantee, status_code=status.HTTP_201_CREATED)

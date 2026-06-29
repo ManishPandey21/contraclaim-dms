@@ -81,6 +81,30 @@ export interface BGHistoryDTO {
   created_at?: string | null;
 }
 
+export interface CSVImportRowDTO {
+  row_number: number;
+  data: Record<string, any>;
+  errors: string[];
+  warnings: string[];
+  duplicate: boolean;
+}
+
+export interface CSVImportPreviewDTO {
+  module: string;
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  can_import: boolean;
+  rows: CSVImportRowDTO[];
+  required_headers: string[];
+  template_headers: string[];
+}
+
+export interface CSVImportResultDTO extends CSVImportPreviewDTO {
+  imported_count: number;
+  created_ids: string[];
+}
+
 const norm = (raw: any): BGDTO => ({
   ...raw, id: raw?._id ?? raw?.id, linked_document_ids: raw?.linked_document_ids ?? [],
 });
@@ -147,4 +171,38 @@ export async function getBGHistory(id: string): Promise<BGHistoryDTO[]> {
 export async function exportBGs(format: "csv" | "xlsx" | "pdf", params?: { project_id?: string }): Promise<Blob> {
   const { data } = await api.get("/bank-guarantees/export", { params: { format, ...params }, responseType: "blob" });
   return data instanceof Blob ? data : new Blob([data]);
+}
+
+function csvFormData(file: File, params?: { project_id?: string; organization_id?: string; contract_id?: string }): FormData {
+  const form = new FormData();
+  form.append("file", file);
+  if (params?.project_id) form.append("project_id", params.project_id);
+  if (params?.organization_id) form.append("organization_id", params.organization_id);
+  if (params?.contract_id) form.append("contract_id", params.contract_id);
+  return form;
+}
+
+export async function downloadBGImportTemplate(): Promise<Blob> {
+  const { data } = await api.get("/bank-guarantees/import/template", { responseType: "blob" });
+  return data instanceof Blob ? data : new Blob([data], { type: "text/csv" });
+}
+
+export async function previewBGsCsv(
+  file: File,
+  params?: { project_id?: string; organization_id?: string; contract_id?: string },
+): Promise<CSVImportPreviewDTO> {
+  const { data } = await api.post("/bank-guarantees/import/preview", csvFormData(file, params), {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as CSVImportPreviewDTO;
+}
+
+export async function importBGsCsv(
+  file: File,
+  params?: { project_id?: string; organization_id?: string; contract_id?: string },
+): Promise<CSVImportResultDTO> {
+  const { data } = await api.post("/bank-guarantees/import", csvFormData(file, params), {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as CSVImportResultDTO;
 }

@@ -71,6 +71,17 @@ def test_frontend_referenced_route_families_are_mounted():
         "/api/delay-events/{item_id}",
         "/api/programme-milestones",
         "/api/programme-milestones/{item_id}",
+        "/api/key-dates/import/template",
+        "/api/key-dates/import/preview",
+        "/api/key-dates/import",
+        "/api/bank-guarantees/import/template",
+        "/api/bank-guarantees/import/preview",
+        "/api/bank-guarantees/import",
+        "/api/security-terms/status",
+        "/api/security-terms/accept",
+        "/api/security-terms/acceptances",
+        "/api/security-terms/versions",
+        "/api/security-terms/versions/{version_id}/activate",
     }
 
     missing = sorted(expected_paths - paths)

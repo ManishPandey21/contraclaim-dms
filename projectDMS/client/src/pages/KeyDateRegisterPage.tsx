@@ -46,17 +46,21 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, RefreshCw, Trash2 } from "lucide-react";
+import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, RefreshCw, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
+import CsvImportDialog from "@/components/registers/CsvImportDialog";
 import {
   createMilestone,
   deleteMilestone,
+  downloadKeyDatesImportTemplate,
   exportKeyDates,
   getKeyDateDashboard,
   getMilestones,
+  importKeyDatesCsv,
   KeyDateDashboardDTO,
   MilestoneDTO,
   MilestonePayload,
+  previewKeyDatesCsv,
   recalculateKeyDates,
   updateMilestone,
 } from "@/services/key-dates-api";
@@ -104,6 +108,7 @@ const KeyDateRegisterPage: React.FC = () => {
   const [projectFilter, setProjectFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [csvOpen, setCsvOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<MForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
@@ -256,6 +261,9 @@ const KeyDateRegisterPage: React.FC = () => {
           </Button>
           <Button variant="outline" size="sm" onClick={() => onExport("csv")}>
             <Download className="mr-2 h-4 w-4" />CSV
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)}>
+            <Upload className="mr-2 h-4 w-4" />Upload CSV
           </Button>
           <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}>
             <Download className="mr-2 h-4 w-4" />Excel
@@ -450,6 +458,19 @@ const KeyDateRegisterPage: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CsvImportDialog
+        open={csvOpen}
+        onOpenChange={setCsvOpen}
+        title="Upload Key Dates CSV"
+        description="Preview imported milestones and fix row errors before saving."
+        sampleFileName="key-date-import-template.csv"
+        onDownloadTemplate={downloadKeyDatesImportTemplate}
+        onPreview={(file) => previewKeyDatesCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onImport={(file) => importKeyDatesCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onImported={load}
+        rowLabel={(row) => String(row.data?.title || row.data?.milestone_ref || `Row ${row.row_number}`)}
+      />
     </div>
   );
 };

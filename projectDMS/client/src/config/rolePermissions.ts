@@ -59,6 +59,7 @@ const DRAFTING_ROLES: Role[] = [
 
 export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/overview": [], // Open to all authenticated users
+  "/security-terms": [],
   "/dashboard": ["dms.dashboard.view"],
   // C3: align with backend permission names. `admin.user.create` does not exist
   // on the backend; user creation requires `users:create` (POST /api/users).
@@ -142,7 +143,7 @@ export function isRouteAllowedByPermission(
 ): boolean {
   const normalizedPath = path.split("?")[0].replace(/\/+$/, "") || "/overview";
   
-  if (normalizedPath === "/overview" || normalizedPath === "/profile" || normalizedPath === "/notifications") {
+  if (normalizedPath === "/overview" || normalizedPath === "/security-terms" || normalizedPath === "/profile" || normalizedPath === "/notifications") {
     return true; // Universally allowed authenticated routes
   }
 

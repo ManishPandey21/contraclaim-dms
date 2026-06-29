@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
@@ -25,8 +25,17 @@ from ..models.key_date import (
     KeyDateMilestoneCreate,
     KeyDateMilestoneUpdate,
 )
+from ..models.csv_import import CSVImportPreview, CSVImportResult
 from ..services.key_date_service import KeyDateError, KeyDateService
 from ..services.policy_service import PolicyService
+from ..services.register_csv_import import (
+    KEY_DATE_SAMPLE_ROW,
+    KEY_DATE_TEMPLATE_HEADERS,
+    collect_project_ids,
+    import_key_dates_csv,
+    preview_key_dates_csv,
+    template_csv,
+)
 
 router = APIRouter()
 
@@ -46,6 +55,54 @@ async def _load(milestone_id: str, permission: str, db, current_user, policy) ->
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Milestone not found")
     await policy.authorize_document(current_user, permission, m, resource_type="key_date_milestone")
     return m
+
+
+async def _read_csv(file: UploadFile) -> bytes:
+    filename = (file.filename or "").lower()
+    if filename and not filename.endswith(".csv"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload a .csv file")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is empty")
+    return content
+
+
+async def _authorize_csv_projects(
+    content: bytes,
+    current_user,
+    policy: PolicyService,
+    *,
+    permission: str,
+    organization_id: Optional[str],
+    project_id: Optional[str],
+) -> None:
+    try:
+        project_ids = collect_project_ids(content, project_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    if not project_ids and project_id:
+        project_ids = [project_id]
+    if not project_ids:
+        # Let row validation return the project_id required errors; this call
+        # still checks the user has create rights in the organization.
+        await policy.authorize(
+            current_user,
+            permission,
+            resource_type="key_dates",
+            organization_id=organization_id or getattr(current_user, "organization_id", None),
+            project_id=None,
+            audit=False,
+        )
+        return
+    for row_project_id in project_ids:
+        await policy.authorize(
+            current_user,
+            permission,
+            resource_type="key_date_milestone",
+            organization_id=organization_id or getattr(current_user, "organization_id", None),
+            project_id=row_project_id,
+            audit=False,
+        )
 
 
 @router.get("/key-dates", response_model=List[KeyDateMilestone])
@@ -132,6 +189,86 @@ async def export_key_dates(
         content=content, media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{name}.pdf"'},
     )
+
+
+@router.get("/key-dates/import/template")
+async def key_dates_import_template(
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await policy.authorize(
+        current_user,
+        Permissions.KEYDATE_CREATE,
+        resource_type="key_dates",
+        organization_id=getattr(current_user, "organization_id", None),
+        audit=False,
+    )
+    return Response(
+        content=template_csv(KEY_DATE_TEMPLATE_HEADERS, KEY_DATE_SAMPLE_ROW),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="key-date-import-template.csv"'},
+    )
+
+
+@router.post("/key-dates/import/preview", response_model=CSVImportPreview)
+async def preview_key_dates_import(
+    file: UploadFile = File(...),
+    organization_id: Optional[str] = Form(None),
+    project_id: Optional[str] = Form(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    content = await _read_csv(file)
+    await _authorize_csv_projects(
+        content,
+        current_user,
+        policy,
+        permission=Permissions.KEYDATE_CREATE,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    try:
+        preview = await preview_key_dates_csv(
+            db,
+            content,
+            current_user,
+            project_id=project_id,
+            organization_id=organization_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return preview.response
+
+
+@router.post("/key-dates/import", response_model=CSVImportResult)
+async def import_key_dates(
+    file: UploadFile = File(...),
+    organization_id: Optional[str] = Form(None),
+    project_id: Optional[str] = Form(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    content = await _read_csv(file)
+    await _authorize_csv_projects(
+        content,
+        current_user,
+        policy,
+        permission=Permissions.KEYDATE_CREATE,
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    try:
+        return await import_key_dates_csv(
+            db,
+            content,
+            current_user,
+            project_id=project_id,
+            organization_id=organization_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
 
 @router.post("/key-dates", response_model=KeyDateMilestone, status_code=status.HTTP_201_CREATED)

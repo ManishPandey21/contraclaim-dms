@@ -36,6 +36,7 @@ const FolderStructurePage = lazy(() => import("./pages/FolderStructurePage"));
 const TasksPage = lazy(() => import("./pages/TasksPage"));
 const PartiesInvolvedPage = lazy(() => import("./pages/PartiesInvolvedPage"));
 const LoginPage = lazy(() => import("./pages/LoginPage"));
+const SecurityTermsPage = lazy(() => import("./pages/SecurityTermsPage"));
 const LetterWorkflowPage = lazy(() => import("./pages/LetterWorkflowPage"));
 const LetterInputPage = lazy(() => import("./pages/LetterInputPage"));
 const LetterStrategicPlanPage = lazy(
@@ -89,6 +90,14 @@ const AppRoutes = () => (
       <Route
         path="/"
         element={<LandingPage />}
+      />
+      <Route
+        path="/security-terms"
+        element={
+          <ProtectedRoute>
+            <SecurityTermsPage />
+          </ProtectedRoute>
+        }
       />
       <Route
         element={

@@ -131,6 +131,30 @@ export interface KeyDateDashboardDTO {
   achieved_early: number;
 }
 
+export interface CSVImportRowDTO {
+  row_number: number;
+  data: Record<string, any>;
+  errors: string[];
+  warnings: string[];
+  duplicate: boolean;
+}
+
+export interface CSVImportPreviewDTO {
+  module: string;
+  total_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  can_import: boolean;
+  rows: CSVImportRowDTO[];
+  required_headers: string[];
+  template_headers: string[];
+}
+
+export interface CSVImportResultDTO extends CSVImportPreviewDTO {
+  imported_count: number;
+  created_ids: string[];
+}
+
 function normalize(raw: any): MilestoneDTO {
   return {
     ...raw,
@@ -246,6 +270,39 @@ export async function exportKeyDates(
     responseType: "blob",
   });
   return data instanceof Blob ? data : new Blob([data]);
+}
+
+function csvFormData(file: File, params?: { project_id?: string; organization_id?: string }): FormData {
+  const form = new FormData();
+  form.append("file", file);
+  if (params?.project_id) form.append("project_id", params.project_id);
+  if (params?.organization_id) form.append("organization_id", params.organization_id);
+  return form;
+}
+
+export async function downloadKeyDatesImportTemplate(): Promise<Blob> {
+  const { data } = await api.get("/key-dates/import/template", { responseType: "blob" });
+  return data instanceof Blob ? data : new Blob([data], { type: "text/csv" });
+}
+
+export async function previewKeyDatesCsv(
+  file: File,
+  params?: { project_id?: string; organization_id?: string },
+): Promise<CSVImportPreviewDTO> {
+  const { data } = await api.post("/key-dates/import/preview", csvFormData(file, params), {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as CSVImportPreviewDTO;
+}
+
+export async function importKeyDatesCsv(
+  file: File,
+  params?: { project_id?: string; organization_id?: string },
+): Promise<CSVImportResultDTO> {
+  const { data } = await api.post("/key-dates/import", csvFormData(file, params), {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as CSVImportResultDTO;
 }
 
 export async function recordAchievement(

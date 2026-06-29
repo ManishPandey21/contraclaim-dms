@@ -34,18 +34,22 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, CalendarPlus, Download, Edit, Landmark, Loader2, PlusCircle, Unlock } from "lucide-react";
+import { AlertTriangle, CalendarPlus, Download, Edit, Landmark, Loader2, PlusCircle, Unlock, Upload } from "lucide-react";
 import { toast } from "sonner";
+import CsvImportDialog from "@/components/registers/CsvImportDialog";
 import {
   BGDTO,
   BGPayload,
   BGSummaryDTO,
   createBG,
+  downloadBGImportTemplate,
   exportBGs,
   extendBG,
   getBGs,
   getBGAlerts,
   getBGSummary,
+  importBGsCsv,
+  previewBGsCsv,
   releaseBG,
   updateBG,
 } from "@/services/bank-guarantees-api";
@@ -89,6 +93,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [csvOpen, setCsvOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<BForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
@@ -255,6 +260,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>
+          <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)}><Upload className="mr-2 h-4 w-4" />Upload CSV</Button>
           <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>
           <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>
           <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add BG</Button>
@@ -494,6 +500,19 @@ const BankGuaranteeRegisterPage: React.FC = () => {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CsvImportDialog
+        open={csvOpen}
+        onOpenChange={setCsvOpen}
+        title="Upload Bank Guarantees CSV"
+        description="Preview imported bank guarantees and fix row errors before saving."
+        sampleFileName="bank-guarantee-import-template.csv"
+        onDownloadTemplate={downloadBGImportTemplate}
+        onPreview={(file) => previewBGsCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onImport={(file) => importBGsCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onImported={load}
+        rowLabel={(row) => String(row.data?.bg_number || row.data?.issuing_bank || `Row ${row.row_number}`)}
+      />
     </div>
   );
 };

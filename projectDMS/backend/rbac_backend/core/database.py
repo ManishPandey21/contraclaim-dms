@@ -658,6 +658,17 @@ async def ensure_indexes(db):
         [("actor_id", 1), ("action", 1), ("created_at", -1)],
         background=True,
     )
+    await db.terms_versions.create_index("version", unique=True, background=True)
+    await db.terms_versions.create_index([("is_active", 1), ("created_at", -1)], background=True)
+    await db.security_terms_acceptances.create_index(
+        [("user_id", 1), ("org_id", 1), ("terms_version", 1), ("terms_hash", 1)],
+        unique=True,
+        background=True,
+    )
+    await db.security_terms_acceptances.create_index(
+        [("org_id", 1), ("accepted_at", -1)],
+        background=True,
+    )
 
     # Bulk upload jobs
     await db.bulk_upload_jobs.create_index("job_id", unique=True, background=True)

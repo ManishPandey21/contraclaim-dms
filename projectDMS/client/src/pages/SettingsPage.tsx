@@ -1,11 +1,12 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Bell, Building, FolderClosed, Settings, Cloud, Mail } from 'lucide-react';
+import { Bell, Building, FolderClosed, Settings, Cloud, Mail, ShieldCheck } from 'lucide-react';
 import OrganizationStorageSettings from '@/components/settings/OrganizationStorageSettings';
 import ProjectStorageSettings from '@/components/settings/ProjectStorageSettings';
 import StorageProvidersSettings from '@/components/settings/StorageProvidersSettings';
 import NotificationSettings from '@/components/settings/NotificationSettings';
 import SmtpSettingsPanel from '@/components/settings/SmtpSettingsPanel';
 import PromptSettingsPanel from '@/components/settings/PromptSettingsPanel';
+import LegalSettingsPanel from '@/components/settings/LegalSettingsPanel';
 import { useRBAC } from '@/hooks/useRBAC';
 
 const SettingsPage = () => {
@@ -25,7 +26,7 @@ const SettingsPage = () => {
       </div>
 
       <Tabs defaultValue="organization" className="w-full">
-        <TabsList className={`grid w-full grid-cols-3 gap-1 ${isSuperadmin ? 'sm:grid-cols-7 lg:w-[1050px]' : 'sm:grid-cols-6 lg:w-[900px]'}`}>
+        <TabsList className={`grid w-full grid-cols-3 gap-1 ${isSuperadmin ? 'sm:grid-cols-4 lg:w-[1200px] lg:grid-cols-8' : 'sm:grid-cols-4 lg:w-[1050px] lg:grid-cols-7'}`}>
           <TabsTrigger value="organization" className="flex items-center gap-2">
             <Building className="h-4 w-4" />
             <span className="hidden sm:inline">Organization</span>
@@ -49,6 +50,10 @@ const SettingsPage = () => {
           <TabsTrigger value="project-smtp" className="flex items-center gap-2">
             <Mail className="h-4 w-4" />
             <span className="hidden sm:inline">Project SMTP</span>
+          </TabsTrigger>
+          <TabsTrigger value="legal" className="flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4" />
+            <span className="hidden sm:inline">Legal</span>
           </TabsTrigger>
           {isSuperadmin && (
             <TabsTrigger value="ai-prompts" className="flex items-center gap-2">
@@ -80,6 +85,10 @@ const SettingsPage = () => {
 
         <TabsContent value="project-smtp" className="mt-6">
           <SmtpSettingsPanel scope="project" />
+        </TabsContent>
+
+        <TabsContent value="legal" className="mt-6">
+          <LegalSettingsPanel />
         </TabsContent>
 
         {isSuperadmin && (
