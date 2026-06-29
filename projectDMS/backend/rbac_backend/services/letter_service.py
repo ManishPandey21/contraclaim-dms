@@ -17,7 +17,7 @@ from ..models.ai_models import (
 from ..models.document import Document
 from ..utils.notification_service import NotificationService
 from ..utils.date_parser import parse_date_safely
-from .workflow import WorkflowUtils
+from .workflow import WorkflowUtils, workflow_engine
 from .common import fetch_paginated, validate_pagination
 from .document_service import (
     DocumentService,
@@ -40,6 +40,10 @@ class LetterNotFoundError(LetterServiceError):
 
 class InvalidLetterIdError(LetterServiceError):
     """Exception raised when letter ID is invalid"""
+    pass
+
+class InvalidLetterTransitionError(LetterServiceError):
+    """Exception raised when a workflow status transition is not allowed."""
     pass
 
 class LetterService:
@@ -690,11 +694,12 @@ class LetterService:
             raise LetterServiceError(f"Letter deletion failed: {str(e)}")
     
     async def change_status(
-        self, 
-        letter_id: str, 
-        new_status: str, 
+        self,
+        letter_id: str,
+        new_status: str,
         comment: Optional[str] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        validate_transition: bool = False,
     ) -> bool:
         """
         Change the status of a letter.
@@ -704,16 +709,49 @@ class LetterService:
             new_status: New status to set
             comment: Optional comment about the status change
             user_id: Optional user ID who changed the status
+            validate_transition: When True, enforce the workflow state machine
+                (``workflow_engine.can_transition``) against the letter's current
+                status and reject invalid jumps. Off by default so system/compat
+                callers (notifications, aliases) keep their existing behaviour.
 
         Returns:
             True if status was changed successfully
 
         Raises:
-            LetterServiceError: If status change fails
+            LetterServiceError: If status change fails or the transition is invalid
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
+
+            # Defense-in-depth: never write a non-string comment into Mongo. A
+            # pydantic/user object here is both unencodable (BSON) and a data leak.
+            if comment is not None and not isinstance(comment, str):
+                logger.warning(
+                    "change_status received a non-string comment (%s); coercing to str",
+                    type(comment).__name__,
+                )
+                comment = None
+
+            if validate_transition:
+                current = await self.db.letters.find_one(
+                    {'_id': letter_oid}, {'status': 1}
+                )
+                current_status = (current or {}).get('status')
+                if current_status:
+                    try:
+                        allowed_transition = workflow_engine.can_transition(
+                            str(current_status), str(new_status)
+                        )
+                    except Exception:
+                        # Unrecognized legacy status -> cannot validate; allow and
+                        # let the change proceed rather than block a real letter.
+                        allowed_transition = True
+                    if not allowed_transition:
+                        allowed = workflow_engine.get_valid_transitions(str(current_status))
+                        raise InvalidLetterTransitionError(
+                            f"Invalid transition '{current_status}' -> '{new_status}'. Allowed: {allowed}"
+                        )
 
             logger.info(f"Changing status of letter {letter_id} to {new_status}")
 
@@ -768,6 +806,8 @@ class LetterService:
 
             return success
 
+        except InvalidLetterTransitionError:
+            raise
         except InvalidLetterIdError:
             raise
         except ValueError:

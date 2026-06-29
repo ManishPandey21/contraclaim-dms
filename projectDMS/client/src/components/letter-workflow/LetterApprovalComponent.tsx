@@ -23,31 +23,26 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
   const [comment, setComment] = useState('');
   const [isSendingBack, setIsSendingBack] = useState(false);
   
+  // Toasts are owned by the parent page, which awaits the API call and reports
+  // real success/failure. Firing them here would show false success before the
+  // request resolves (and even when it errors).
   const handleApprove = () => {
     const now = new Date().toISOString();
-    
+
     onApproval({
       ...letter,
       status: 'Completed',
       updatedAt: now
     });
-    
-    toast.success("Letter has been approved", {
-      description: "The letter has been approved and marked as completed."
-    });
   };
-  
+
   const handleReject = () => {
     const now = new Date().toISOString();
-    
+
     onApproval({
       ...letter,
       status: 'Rejected',
       updatedAt: now
-    });
-    
-    toast.error("Letter has been rejected", {
-      description: "The letter has been rejected and marked accordingly."
     });
   };
   
@@ -67,10 +62,6 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
       status: 'Review',
       comments: updatedComments,
       updatedAt: now
-    });
-    
-    toast.info("Letter sent back for review", {
-      description: "The letter has been returned to review stage with your comments."
     });
   };
   

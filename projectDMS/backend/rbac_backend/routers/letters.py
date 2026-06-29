@@ -67,6 +67,7 @@ from ..services.strategy_context_service import StrategyContextService
 
 
 from ..services.authorization_service import AuthorizationService
+from ..services.workflow import workflow_engine
 
 
 
@@ -2474,6 +2475,53 @@ async def update_strategy_role(
 
 # Status management endpoints
 
+def _enforce_letter_separation_of_duties(letter: Any, current_user: CurrentUser) -> None:
+    """Block self-approval: the approver must not be the letter's creator or
+    assigned drafter. Mirrors ApprovalService._guard_decider for letters."""
+    actor_id = str(getattr(current_user, "id", "") or "")
+    if not actor_id:
+        return
+
+    def _field(obj: Any, *names: str) -> str:
+        for name in names:
+            value = getattr(obj, name, None)
+            if value is None and isinstance(obj, dict):
+                value = obj.get(name)
+            if value:
+                return str(value)
+        return ""
+
+    creator = _field(letter, "created_by", "createdBy")
+    drafter = _field(letter, "assigned_to", "assignedTo", "drafting_assigned_to")
+    if (creator or drafter) and actor_id in {creator, drafter}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Separation of duties: the drafter/creator cannot approve their own letter",
+        )
+
+
+def _enforce_letter_transition(letter: Any, new_status: str) -> None:
+    """Reject invalid workflow jumps with a clean 409 (the state machine lives in
+    services.workflow). Unrecognized legacy statuses can't be validated, so allow."""
+    current = getattr(letter, "status", None)
+    if current is None and isinstance(letter, dict):
+        current = letter.get("status")
+    if not current:
+        return
+    try:
+        allowed = workflow_engine.can_transition(str(current), str(new_status))
+    except Exception:
+        return
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Invalid transition '{current}' -> '{new_status}'. "
+                f"Allowed: {workflow_engine.get_valid_transitions(str(current))}"
+            ),
+        )
+
+
 @router.post("/letters/{letter_id}/move-to-strategy")
 @handle_exceptions
 async def move_letter_to_strategy(
@@ -2488,6 +2536,7 @@ async def move_letter_to_strategy(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Letter not found",
         )
+    await controller.auth_service.check_letter_access(current_user, letter, "admin")
     if (letter.status or "").lower() != "input":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -2498,6 +2547,7 @@ async def move_letter_to_strategy(
         letter_id,
         "Strategy",
         user_id=getattr(current_user, "id", None),
+        validate_transition=True,
     )
     return {"letter_id": letter_id, "status": "Strategy"}
 
@@ -2531,7 +2581,12 @@ async def submit_letter(
 
 
 
-    """Submit letter for review."""
+    """Submit a drafted letter for review (enforces scope)."""
+    letter = await controller.letter_service.get_letter(letter_id)
+    if not letter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Letter not found")
+    await controller.auth_service.check_letter_access(current_user, letter, "admin")
+    _enforce_letter_transition(letter, "Review")
 
 
     comment = None
@@ -2558,7 +2613,7 @@ async def submit_letter(
     return await controller.letter_service.change_status(
 
 
-        letter_id, "Review", comment, user_id=getattr(current_user, "id", None)
+        letter_id, "Review", comment, user_id=getattr(current_user, "id", None), validate_transition=True
 
 
 
@@ -2602,7 +2657,13 @@ async def approve_letter(
 
 
 
-    """Approve letter."""
+    """Move a reviewed letter into the approval stage (enforces scope + SoD)."""
+    letter = await controller.letter_service.get_letter(letter_id)
+    if not letter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Letter not found")
+    await controller.auth_service.check_letter_access(current_user, letter, "admin")
+    _enforce_letter_separation_of_duties(letter, current_user)
+    _enforce_letter_transition(letter, "Approval")
 
 
 
@@ -2610,7 +2671,7 @@ async def approve_letter(
 
 
 
-        letter_id, "Approval", current_user
+        letter_id, "Approval", user_id=getattr(current_user, "id", None), validate_transition=True
 
 
 
@@ -2650,7 +2711,13 @@ async def complete_letter(
 
 
 
-    """Mark letter as completed."""
+    """Finalize an approved letter as completed (enforces scope + SoD)."""
+    letter = await controller.letter_service.get_letter(letter_id)
+    if not letter:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Letter not found")
+    await controller.auth_service.check_letter_access(current_user, letter, "admin")
+    _enforce_letter_separation_of_duties(letter, current_user)
+    _enforce_letter_transition(letter, "Completed")
 
 
 
@@ -2658,7 +2725,7 @@ async def complete_letter(
 
 
 
-        letter_id, "Completed", current_user
+        letter_id, "Completed", user_id=getattr(current_user, "id", None), validate_transition=True
 
 
 
