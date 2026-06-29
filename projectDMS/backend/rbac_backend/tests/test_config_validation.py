@@ -22,6 +22,10 @@ def test_settings_do_not_embed_secret_placeholders_as_defaults():
         assert Settings.model_fields[field_name].default == ""
 
 
+def test_entitlement_checks_fail_closed_by_default():
+    assert Settings.model_fields["RBAC_ENTITLEMENT_FAIL_OPEN"].default is False
+
+
 def test_settings_reject_empty_critical_fields():
     with pytest.raises(ValueError):
         Settings(
@@ -83,6 +87,7 @@ def test_production_validation_rejects_standalone_mongodb():
         APP_REDIS_URL="redis://redis:6379/1",
         METRICS_TOKEN="metrics-token",
         AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
     )
 
     with pytest.raises(ValueError, match="replica set"):
@@ -106,6 +111,7 @@ def test_production_validation_accepts_replicaset_mongodb():
         METRICS_TOKEN="metrics-token",
         RBAC_ENTITLEMENT_FAIL_OPEN=False,
         AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
     )
 
     settings.validate_runtime_configuration()
@@ -128,7 +134,65 @@ def test_production_validation_rejects_entitlement_fail_open():
         METRICS_TOKEN="metrics-token",
         RBAC_ENTITLEMENT_FAIL_OPEN=True,
         AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
     )
 
     with pytest.raises(ValueError, match="RBAC_ENTITLEMENT_FAIL_OPEN"):
+        settings.validate_runtime_configuration()
+
+
+def test_production_validation_rejects_insecure_auth_surface():
+    settings = Settings(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="short",
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["http://localhost:5173"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        ALLOW_DEV_HEADERS=True,
+        RBAC_ENTITLEMENT_FAIL_OPEN=True,
+        AUTH_COOKIE_SECURE=False,
+        BACKUP_S3_BUCKET="backup-bucket",
+    )
+
+    with pytest.raises(ValueError) as exc:
+        settings.validate_runtime_configuration()
+
+    message = str(exc.value)
+    assert "ALLOW_DEV_HEADERS" in message
+    assert "RBAC_ENTITLEMENT_FAIL_OPEN" in message
+    assert "SECRET_KEY" in message
+    assert "AUTH_COOKIE_SECURE" in message
+    assert "CORS_ORIGINS" in message
+
+
+def test_production_validation_rejects_missing_backup_bucket_when_required():
+    settings = Settings(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="x" * 32,
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["https://app.contraclaim.com"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        RBAC_ENTITLEMENT_FAIL_OPEN=False,
+        AUTH_COOKIE_SECURE=True,
+        BACKUP_REQUIRED_IN_PRODUCTION=True,
+        BACKUP_S3_BUCKET="",
+    )
+
+    with pytest.raises(ValueError, match="BACKUP_S3_BUCKET"):
         settings.validate_runtime_configuration()

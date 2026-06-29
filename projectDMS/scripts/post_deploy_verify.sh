@@ -64,10 +64,29 @@ SMOKE_ATTEMPTS="$SMOKE_ATTEMPTS" \
 SMOKE_SLEEP_SECONDS="$SMOKE_SLEEP_SECONDS" \
 python "$ROOT_DIR/scripts/smoke_health.py" && pass "Backend live/ready smoke checks passed" || fail "Backend live/ready smoke checks failed"
 
-http_check "$BACKEND_BASE_URL/health/observability" "Observability health endpoint responded"
-
 metrics_token=$(get_env METRICS_TOKEN)
 metrics_enabled=$(get_env METRICS_ENABLED)
+if [[ -n "$metrics_token" ]]; then
+  http_check "$BACKEND_BASE_URL/health/observability" "Observability health endpoint responded" "X-Metrics-Token: $metrics_token"
+  http_check "$BACKEND_BASE_URL/health/operations" "Operations health endpoint responded" "X-Metrics-Token: $metrics_token"
+else
+  http_check "$BACKEND_BASE_URL/health/observability" "Observability health endpoint responded"
+  http_check "$BACKEND_BASE_URL/health/operations" "Operations health endpoint responded"
+fi
+
+backup_root=$(get_env BACKUP_ROOT)
+backup_max_age=$(get_env BACKUP_MAX_AGE_HOURS)
+require_fresh_backup=${REQUIRE_FRESH_BACKUP:-false}
+if python "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+  pass "Backup freshness check passed"
+else
+  if [[ "$require_fresh_backup" == "true" || "$require_fresh_backup" == "True" ]]; then
+    fail "Backup freshness check failed"
+  else
+    warn "Backup freshness check failed; set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
+  fi
+fi
+
 if [[ "$metrics_enabled" == "false" || "$metrics_enabled" == "False" ]]; then
   warn "Metrics disabled"
 else

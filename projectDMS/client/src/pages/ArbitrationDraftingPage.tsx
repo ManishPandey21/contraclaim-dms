@@ -27,7 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { Download, FilePlus2, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, Download, FilePlus2, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { enhancedApi } from "@/services/enhanced-api";
 import {
@@ -41,6 +41,7 @@ import {
   importDefenceParagraphs,
   importSocParagraphs,
   listArbitrationDrafts,
+  regenerateArbitrationSection,
 } from "@/services/arbitration-drafting-api";
 
 const DRAFT_TYPES: Record<string, { value: ArbitrationDraftType; label: string; role: "claimant" | "respondent" }> = {
@@ -134,6 +135,7 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [selectedSection, setSelectedSection] = useState("");
 
   const loadDrafts = useCallback(async () => {
     setLoading(true);
@@ -256,6 +258,20 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
+  const regenerateSection = async () => {
+    if (!draft || !selectedSection) return;
+    setGenerating(true);
+    try {
+      const next = await regenerateArbitrationSection(draft._id, selectedSection);
+      setDraft(next);
+      toast.success("Section regenerated");
+    } catch {
+      toast.error("Section regeneration failed");
+    } finally {
+      setGenerating(false);
+    }
+  };
+
   const importParagraphs = async () => {
     if (!draft || !pleadingText.trim()) return;
     setGenerating(true);
@@ -286,7 +302,12 @@ const ArbitrationDraftingPage: React.FC = () => {
   };
 
   if (draftId) {
-    const markdown = draft?.latest_version?.full_markdown || "";
+    const latestVersion = draft?.latest_version;
+    const markdown = latestVersion?.full_markdown || "";
+    const sections = latestVersion?.sections || [];
+    const safetyWarnings = latestVersion?.warnings || latestVersion?.structured_output?.validation_warnings || [];
+    const approvalBlockers = latestVersion?.structured_output?.approval_blockers || [];
+    const sourceLedger = latestVersion?.source_ledger || [];
     return (
       <div className="space-y-6 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -350,20 +371,82 @@ const ArbitrationDraftingPage: React.FC = () => {
                 </Card>
               )}
 
+              {sections.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Section Regeneration</CardTitle>
+                    <CardDescription>Regenerate one section using the same source-ledger guardrails</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <Select value={selectedSection} onValueChange={setSelectedSection}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select section" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {sections.map((section) => (
+                          <SelectItem key={section.key} value={section.key}>
+                            {section.heading}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button className="w-full" variant="outline" onClick={regenerateSection} disabled={generating || !selectedSection}>
+                      {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                      Regenerate Section
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base">Evidence Status</CardTitle>
                   <CardDescription>Source ledger and missing proof markers</CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
-                  <div>Sources: {draft?.latest_version?.source_ledger?.length || draft?.selected_references?.length || 0}</div>
-                  {(draft?.latest_version?.missing_evidence || []).map((item, idx) => (
+                  <div>Sources: {sourceLedger.length || draft?.selected_references?.length || 0}</div>
+                  {latestVersion?.validation_status && <div>Validation: {pretty(latestVersion.validation_status)}</div>}
+                  {(latestVersion?.missing_evidence || []).map((item, idx) => (
                     <div key={`${item}-${idx}`} className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
                       {item}
                     </div>
                   ))}
+                  {sourceLedger.slice(0, 5).map((source, idx) => (
+                    <div key={`${String(source.source_id || idx)}-${idx}`} className="rounded-md border p-2">
+                      <div className="font-medium">{String(source.source_key || `S${idx + 1}`)} - {String(source.citation || source.label || "Source")}</div>
+                      {Array.isArray(source.quality_flags) && source.quality_flags.length > 0 && (
+                        <div className="mt-1 text-xs text-muted-foreground">{source.quality_flags.join(", ")}</div>
+                      )}
+                    </div>
+                  ))}
                 </CardContent>
               </Card>
+
+              {(approvalBlockers.length > 0 || safetyWarnings.length > 0) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <AlertTriangle className="h-4 w-4 text-amber-600" />
+                      Legal Safety
+                    </CardTitle>
+                    <CardDescription>Validation warnings before legal approval or filing</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm">
+                    {approvalBlockers.map((item, idx) => (
+                      <div key={`blocker-${idx}`} className="rounded-md border border-red-200 bg-red-50 p-2 text-red-900">
+                        {item}
+                      </div>
+                    ))}
+                    {safetyWarnings
+                      .filter((item) => !approvalBlockers.includes(item))
+                      .map((item, idx) => (
+                        <div key={`warning-${idx}`} className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                          {item}
+                        </div>
+                      ))}
+                  </CardContent>
+                </Card>
+              )}
             </aside>
           </div>
         )}

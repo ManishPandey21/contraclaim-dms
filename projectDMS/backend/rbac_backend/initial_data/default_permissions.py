@@ -7,6 +7,7 @@ DEFAULT_PERMISSIONS = [
     {"_id": "roles:create", "name": "Create Roles"},
     {"_id": "roles:update", "name": "Edit Roles"},
     {"_id": "roles:delete", "name": "Delete Roles"},
+    {"_id": "roles:assign", "name": "Assign Roles"},
     {"_id": "permissions:read", "name": "Read Permissions"},
     {"_id": "documents:read", "name": "View Documents"},
     {"_id": "documents:create", "name": "Draft Documents"},

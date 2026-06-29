@@ -14,6 +14,51 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class _FakeDocument:
+    def __init__(self, text: str = "", metadata: Optional[Dict] = None, embedding=None):
+        self.text = text
+        self.metadata = metadata or {}
+        self.embedding = embedding
+
+
+class _FakeVectorStoreIndex:
+    @classmethod
+    def from_vector_store(cls, vector_store=None):
+        return cls()
+
+
+class _FakeOpenAIEmbedding:
+    def __init__(self, model: str = "", api_key: str = ""):
+        self.model = model
+        self.api_key = api_key
+
+    def get_text_embedding(self, text: str) -> List[float]:
+        return [0.1] * 10
+
+    def get_text_embedding_batch(self, texts: List[str]) -> List[List[float]]:
+        return [[0.1] * 10 for _ in texts]
+
+
+class _FakeMongoDBAtlasVectorSearch:
+    def __init__(
+        self,
+        mongodb_client=None,
+        db_name=None,
+        collection_name=None,
+        embed_model=None,
+        collection=None,
+    ):
+        self._docs: List[Any] = []
+        self._deleted: List[str] = []
+
+    def add(self, nodes: List[Any]) -> List[str]:
+        self._docs.extend(nodes)
+        return [f"node_{i}" for i in range(len(nodes))]
+
+    def delete(self, ref_doc_id: str = "") -> None:
+        self._deleted.append(ref_doc_id)
+
+
 # ---------------------------------------------------------------------------
 # Stub out llama_index modules so that the service can be imported without
 # the actual library installed (mirrors the approach in test_vector_sync_status).
@@ -28,17 +73,6 @@ def _ensure_llama_index_stub() -> None:
 
     core_pkg = types.ModuleType("llama_index.core")
 
-    class _FakeDocument:
-        def __init__(self, text: str = "", metadata: Optional[Dict] = None, embedding=None):
-            self.text = text
-            self.metadata = metadata or {}
-            self.embedding = embedding
-
-    class _FakeVectorStoreIndex:
-        @classmethod
-        def from_vector_store(cls, vector_store=None):
-            return cls()
-
     core_pkg.Document = _FakeDocument
     core_pkg.VectorStoreIndex = _FakeVectorStoreIndex
     sys.modules["llama_index.core"] = core_pkg
@@ -48,17 +82,6 @@ def _ensure_llama_index_stub() -> None:
 
     openai_pkg = types.ModuleType("llama_index.embeddings.openai")
 
-    class _FakeOpenAIEmbedding:
-        def __init__(self, model: str = "", api_key: str = ""):
-            self.model = model
-            self.api_key = api_key
-
-        def get_text_embedding(self, text: str) -> List[float]:
-            return [0.1] * 10
-
-        def get_text_embedding_batch(self, texts: List[str]) -> List[List[float]]:
-            return [[0.1] * 10 for _ in texts]
-
     openai_pkg.OpenAIEmbedding = _FakeOpenAIEmbedding
     sys.modules["llama_index.embeddings.openai"] = openai_pkg
 
@@ -67,19 +90,6 @@ def _ensure_llama_index_stub() -> None:
 
     mongo_pkg = types.ModuleType("llama_index.vector_stores.mongodb")
 
-    class _FakeMongoDBAtlasVectorSearch:
-        def __init__(self, mongodb_client=None, db_name=None, collection_name=None,
-                     embed_model=None, collection=None):
-            self._docs: List[Any] = []
-            self._deleted: List[str] = []
-
-        def add(self, nodes: List[Any]) -> List[str]:
-            self._docs.extend(nodes)
-            return [f"node_{i}" for i in range(len(nodes))]
-
-        def delete(self, ref_doc_id: str = "") -> None:
-            self._deleted.append(ref_doc_id)
-
     mongo_pkg.MongoDBAtlasVectorSearch = _FakeMongoDBAtlasVectorSearch
     sys.modules["llama_index.vector_stores.mongodb"] = mongo_pkg
 
@@ -87,7 +97,21 @@ def _ensure_llama_index_stub() -> None:
 _ensure_llama_index_stub()
 
 # Now we can safely import the service
+from backend.rbac_backend.services import llamaindex_service as llamaindex_service_module
 from backend.rbac_backend.services.llamaindex_service import LlamaIndexVectorService
+
+
+@pytest.fixture(autouse=True)
+def _patch_llamaindex_dependencies(monkeypatch):
+    """Keep these unit tests hermetic even when real llama-index packages exist."""
+    monkeypatch.setattr(llamaindex_service_module, "Document", _FakeDocument)
+    monkeypatch.setattr(llamaindex_service_module, "VectorStoreIndex", _FakeVectorStoreIndex)
+    monkeypatch.setattr(llamaindex_service_module, "OpenAIEmbedding", _FakeOpenAIEmbedding)
+    monkeypatch.setattr(
+        llamaindex_service_module,
+        "MongoDBAtlasVectorSearch",
+        _FakeMongoDBAtlasVectorSearch,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -13,8 +13,14 @@ from rbac_backend.services.contract_service import ContractService
 
 def _matches(doc: Dict[str, Any], query: Dict[str, Any]) -> bool:
     if "$or" in query:
-        return any(_matches(doc, item) for item in query["$or"])
+        remaining = {key: value for key, value in query.items() if key != "$or"}
+        return _matches(doc, remaining) and any(_matches(doc, item) for item in query["$or"])
     for key, expected in query.items():
+        if isinstance(expected, dict):
+            if "$in" in expected:
+                if doc.get(key) not in expected["$in"]:
+                    return False
+                continue
         if doc.get(key) != expected:
             return False
     return True
@@ -56,8 +62,9 @@ class _Collection:
 
 
 class _DB:
-    def __init__(self, docs: List[Dict[str, Any]]) -> None:
+    def __init__(self, docs: List[Dict[str, Any]], documents: List[Dict[str, Any]] | None = None) -> None:
         self.document_vectors = _Collection(docs)
+        self.documents = _Collection(documents or [])
 
 
 class _Embedding:
@@ -73,6 +80,13 @@ class _Vector:
 class _LLM:
     async def generate(self, prompt: str, max_tokens: int = 512, model=None):
         return "draft"
+
+
+class _CitationLLM:
+    async def generate(self, prompt: str, max_tokens: int = 512, model=None):
+        if "Return JSON only" in prompt:
+            return '{"issues":["sufficient"],"refinements":[]}'
+        return "Clause 8.4 supports extension of time when the cited conditions are met [C1]."
 
 
 class _Observability:
@@ -184,3 +198,76 @@ def test_contract_search_extracts_graph_clause_seeds():
     request = ContractSearchRequest(query="How does GCC 8.4 affect EOT?", organization_id="org-A", project_id="proj-A")
 
     assert service._extract_clause_numbers_for_graph(request) == ["8.4"]
+
+
+@pytest.mark.asyncio
+async def test_contract_qa_mongo_fallback_expands_complete_clause_and_rewrites_citations(monkeypatch):
+    import rbac_backend.services.contract_graph_service as graph_module
+
+    monkeypatch.setattr(graph_module, "ContractGraphService", lambda: SimpleNamespace(find_related_clauses=lambda **_kwargs: []))
+    db = _DB(
+        [
+            {
+                "uploadType": "contract",
+                "document_type": "contract",
+                "organization_id": "org-A",
+                "project_id": "proj-A",
+                "document_id": "doc-gcc",
+                "upload_id": "upload-gcc",
+                "clause_number": "8.4",
+                "clause_title": "Extension of Time",
+                "section_heading": "GCC",
+                "clause_start_position": 100,
+                "chunk_id": "gcc-8.4-0",
+                "chunk_index": 0,
+                "text": "GCC 8.4 entitles the Contractor to extension of time for Employer delay.",
+                "text_enriched": "Clause 8.4: Extension of Time\nGCC 8.4 entitles the Contractor to extension of time for Employer delay.",
+                "page_numbers": [5],
+                "page_number": 5,
+            },
+            {
+                "uploadType": "contract",
+                "document_type": "contract",
+                "organization_id": "org-A",
+                "project_id": "proj-A",
+                "document_id": "doc-gcc",
+                "upload_id": "upload-gcc",
+                "clause_number": "8.4",
+                "clause_title": "Extension of Time",
+                "section_heading": "GCC",
+                "clause_start_position": 100,
+                "chunk_id": "gcc-8.4-1",
+                "chunk_index": 1,
+                "text": "The Contractor must give notice and particulars under GCC 8.4.",
+                "text_enriched": "Clause 8.4: Extension of Time\nThe Contractor must give notice and particulars under GCC 8.4.",
+                "page_numbers": [6],
+                "page_number": 6,
+            },
+        ],
+        documents=[{"_id": "doc-gcc", "subject": "GCC Contract", "filename": "gcc.pdf"}],
+    )
+    service = RetrievalService(
+        db=db,  # type: ignore[arg-type]
+        embedding_client=_Embedding(),
+        vector_client=_Vector(),  # type: ignore[arg-type]
+        llm_generator=_CitationLLM(),  # type: ignore[arg-type]
+        observability=_Observability(),  # type: ignore[arg-type]
+    )
+
+    response = await service.contract_iterative_qa(
+        ContractQARequest(
+            query="What does GCC 8.4 say about extension of time?",
+            filters=SearchFilters(org_id="org-A", project_id="proj-A", metadata={"uploadType": "contract"}),
+            max_iterations=1,
+        ),
+        current_user=None,
+    )
+
+    assert "GCC>8.4" in response.answer
+    assert response.citations
+    assert response.citations[0].document_id == "doc-gcc"
+    assert response.citations[0].clause_number == "8.4"
+    assert response.citations[0].clause_title == "Extension of Time"
+    assert response.citations[0].page_numbers == [5, 6]
+    assert "notice and particulars" in response.citations[0].snippet
+    assert response.trace[0].retrieved_ids == ["GCC>8.4"]

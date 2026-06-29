@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -30,13 +31,59 @@ from ...models.arbitration_drafting import (
 from ..audit_event_service import AuditEventService
 from .context import ArbitrationContextBuilder, condense
 from .exporter import ArbitrationDraftExporter
-from .generator import ArbitrationDraftGenerator, PROMPT_VERSION
+from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_BY_DRAFT_TYPE, SOURCE_POLICY
 from .repository import ArbitrationDraftingRepository
 from .validator import ArbitrationDraftValidator
 
 
 def _actor_id(user: Any) -> Optional[str]:
     return getattr(user, "id", None) or getattr(user, "email", None)
+
+
+_DRAFT_HASH_FIELDS = [
+    "organization_id",
+    "project_id",
+    "contract_id",
+    "draft_type",
+    "party_role",
+    "dispute_type",
+    "title",
+    "case_details",
+    "tribunal_details",
+    "arbitration_clause",
+    "governing_law",
+    "relief_sought",
+    "manual_facts",
+    "claim_amount",
+    "currency",
+    "interest_rate",
+]
+
+
+def stable_generation_input_hash(
+    context: Dict[str, Any],
+    *,
+    section_key: Optional[str] = None,
+    additional_instruction: Optional[str] = None,
+    include_unverified_graph_links: bool = False,
+    run_type: GenerationRunType | str = GenerationRunType.FULL_DRAFT,
+) -> str:
+    draft = context.get("draft") or {}
+    payload = {
+        "draft": {key: draft.get(key) for key in _DRAFT_HASH_FIELDS},
+        "source_hashes": [row.get("source_hash") for row in context.get("source_ledger") or []],
+        "claim_heads": context.get("claim_heads") or [],
+        "paragraph_responses": context.get("paragraph_responses") or [],
+        "missing_evidence": context.get("missing_evidence") or [],
+        "section_key": section_key,
+        "additional_instruction": additional_instruction,
+        "include_unverified_graph_links": include_unverified_graph_links,
+        "run_type": getattr(run_type, "value", run_type),
+        "prompt_version": PROMPT_VERSION,
+        "source_policy": SOURCE_POLICY,
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class ArbitrationDraftingService:
@@ -173,18 +220,32 @@ class ArbitrationDraftingService:
         run_type: GenerationRunType = GenerationRunType.FULL_DRAFT,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
+        self._validate_section_key(draft, payload.section_key)
         context = await self._context(
             draft_id,
             current_user,
             include_unverified_graph_links=payload.include_unverified_graph_links,
         )
-        input_hash = hashlib.sha256(str(context).encode("utf-8")).hexdigest()
+        input_hash = stable_generation_input_hash(
+            context,
+            section_key=payload.section_key,
+            additional_instruction=payload.additional_instruction,
+            include_unverified_graph_links=payload.include_unverified_graph_links,
+            run_type=run_type,
+        )
+        latest = await self.repo.latest_version(draft_id)
+        latest_structured = (latest or {}).get("structured_output") or {}
+        if latest and latest_structured.get("input_hash") == input_hash and latest_structured.get("prompt_version") == PROMPT_VERSION:
+            await self._emit("generation_reused", draft, current_user, after={"version": latest.get("version"), "input_hash": input_hash})
+            return await self.detail(draft_id)
+        retrieval_queries = self._retrieval_queries(context)
         run = ArbitrationGenerationRun(
             draft_id=draft_id,
             run_type=run_type,
             section_key=payload.section_key,
             status=GenerationRunStatus.RUNNING,
             input_hash=input_hash,
+            retrieval_queries=retrieval_queries,
             prompt_version=PROMPT_VERSION,
             model="deterministic-source-grounded",
             source_ids=[row.get("source_id") for row in context["source_ledger"]],
@@ -198,7 +259,17 @@ class ArbitrationDraftingService:
                 section_key=payload.section_key,
                 additional_instruction=payload.additional_instruction,
             )
-            warnings = self.validator.validate_generated(context, generated)
+            safety_report = self.validator.validation_report(context, generated["full_markdown"])
+            warnings = self._merge_warnings(context.get("context_warnings") or [], safety_report["warnings"])
+            structured_output = {
+                **generated["structured_output"],
+                "input_hash": input_hash,
+                "retrieval_queries": retrieval_queries,
+                "validation_warnings": warnings,
+                "approval_blockers": safety_report["approval_blockers"],
+                "legal_review_required": bool(warnings or generated["missing_evidence"]),
+                "context_warnings": context.get("context_warnings") or [],
+            }
             version_no = await self.repo.next_version(draft_id)
             version = ArbitrationDraftVersion(
                 draft_id=draft_id,
@@ -206,12 +277,14 @@ class ArbitrationDraftingService:
                 status=ArbitrationDraftStatus.DRAFT,
                 sections=generated["sections"],
                 full_markdown=generated["full_markdown"],
-                structured_output=generated["structured_output"],
+                structured_output=structured_output,
                 source_ledger=context["source_ledger"],
                 missing_evidence=generated["missing_evidence"],
                 paragraph_responses=context["paragraph_responses"],
                 claim_heads=context["claim_heads"],
                 annexures=generated["annexures"],
+                warnings=warnings,
+                validation_status="blocked" if safety_report["approval_blockers"] else ("needs_review" if warnings else "passed"),
                 ai_prompt_version=generated["ai_prompt_version"],
                 model=generated["model"],
                 generation_run_id=run["_id"],
@@ -223,7 +296,7 @@ class ArbitrationDraftingService:
                 {
                     "status": GenerationRunStatus.COMPLETED.value,
                     "completed_at": datetime.utcnow(),
-                    "parsed_output": generated["structured_output"],
+                    "parsed_output": structured_output,
                     "raw_output": generated["full_markdown"],
                     "warnings": warnings,
                 },
@@ -251,16 +324,31 @@ class ArbitrationDraftingService:
     async def create_manual_version(self, draft_id: str, full_markdown: str, current_user: Any) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         context = await self._context(draft_id, current_user)
+        safety_report = self.validator.validation_report(context, full_markdown)
+        warnings = self._merge_warnings(context.get("context_warnings") or [], safety_report["warnings"])
         version_no = await self.repo.next_version(draft_id)
+        input_hash = stable_generation_input_hash(context, run_type="manual_version")
         version = ArbitrationDraftVersion(
             draft_id=draft_id,
             version=version_no,
             status=ArbitrationDraftStatus.DRAFT,
             full_markdown=full_markdown,
+            structured_output={
+                "draft_type": draft.get("draft_type"),
+                "prompt_version": None,
+                "source_policy": SOURCE_POLICY,
+                "input_hash": input_hash,
+                "validation_warnings": warnings,
+                "approval_blockers": safety_report["approval_blockers"],
+                "legal_review_required": bool(warnings or context["missing_evidence"]),
+                "manual_version": True,
+            },
             source_ledger=context["source_ledger"],
             missing_evidence=context["missing_evidence"],
             paragraph_responses=context["paragraph_responses"],
             claim_heads=context["claim_heads"],
+            warnings=warnings,
+            validation_status="blocked" if safety_report["approval_blockers"] else ("needs_review" if warnings else "passed"),
             created_by=_actor_id(current_user),
         ).model_dump(by_alias=True)
         await self.repo.create_version(version)
@@ -283,6 +371,13 @@ class ArbitrationDraftingService:
         draft = await self._load(draft_id)
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
+        latest = await self.repo.latest_version(draft_id)
+        blockers = ((latest or {}).get("structured_output") or {}).get("approval_blockers") or []
+        if blockers:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "Legal drafting safety blockers must be resolved before approval", "blockers": blockers},
+            )
         updated = await self.repo.update_draft(
             draft_id,
             {
@@ -420,6 +515,45 @@ class ArbitrationDraftingService:
         except Exception:
             return []
         return out
+
+    def _validate_section_key(self, draft: Dict[str, Any], section_key: Optional[str]) -> None:
+        if not section_key:
+            return
+        draft_type = str(draft.get("draft_type") or "statement_of_claim")
+        allowed = SECTION_KEYS_BY_DRAFT_TYPE.get(draft_type, set())
+        if section_key not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": "Unsupported arbitration drafting section key",
+                    "section_key": section_key,
+                    "allowed_section_keys": sorted(allowed),
+                },
+            )
+
+    def _retrieval_queries(self, context: Dict[str, Any]) -> List[str]:
+        draft = context.get("draft") or {}
+        queries = [
+            str(draft.get("title") or "").strip(),
+            str(draft.get("manual_facts") or "").strip(),
+            str(draft.get("relief_sought") or "").strip(),
+            str(draft.get("arbitration_clause") or "").strip(),
+        ]
+        for head in context.get("claim_heads") or []:
+            queries.append(str(head.get("description") or "").strip())
+            queries.append(str(head.get("calculation_basis") or "").strip())
+        return [query[:800] for query in queries if query]
+
+    def _merge_warnings(self, *groups: List[str]) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for group in groups:
+            for item in group or []:
+                if item in seen:
+                    continue
+                seen.add(item)
+                merged.append(item)
+        return merged
 
     def _split_paragraphs(self, text: str) -> List[tuple[str, str]]:
         paragraphs: List[tuple[str, str]] = []

@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from rbac_backend.core.permissions import Permissions
+from rbac_backend.core.permissions import CLIENT_DMS_PERMISSIONS, Permissions
 from rbac_backend.models.rbac_monetization import AccountType
 from rbac_backend.routers.storage_sync import _require_superadmin_user
-from rbac_backend.services.entitlement_service import EntitlementService
+from rbac_backend.services.entitlement_service import DMS_FEATURE_PERMISSIONS, EntitlementService
 from rbac_backend.services.policy_service import PolicyService
 from rbac_backend.services.scope_service import ScopeService
 from rbac_backend.services.step_up_service import StepUpService, require_step_up
@@ -55,6 +55,24 @@ class _AuditService:
 
     async def emit(self, **kwargs) -> None:
         self.events.append(kwargs)
+
+
+class _CountableCollection:
+    def __init__(self, count: int = 0, document=None) -> None:
+        self.count = count
+        self.document = document
+
+    async def count_documents(self, *_args, **_kwargs) -> int:
+        return self.count
+
+    async def find_one(self, *_args, **_kwargs):
+        return dict(self.document) if self.document else None
+
+
+class _EntitlementDB:
+    def __init__(self, *, subscription_count: int = 0, subscription=None) -> None:
+        self.subscriptions = _CountableCollection(subscription_count, subscription)
+        self.plans = _CountableCollection()
 
 
 def _user(*, roles=None, account_type=AccountType.CLIENT_USER.value):
@@ -224,6 +242,119 @@ async def test_entitlement_does_not_require_subscription_for_non_service_permiss
 
     assert allowed is True
     assert reason == "not_entitlement_scoped"
+
+
+def test_every_client_dms_permission_is_entitlement_scoped() -> None:
+    missing = sorted(set(CLIENT_DMS_PERMISSIONS) - DMS_FEATURE_PERMISSIONS)
+    assert not missing, f"Client DMS permissions bypass entitlement checks: {missing}"
+
+
+@pytest.mark.asyncio
+async def test_dms_entitlement_fails_closed_when_subscription_catalog_absent(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rbac_backend.services.entitlement_service.settings.RBAC_ENTITLEMENT_FAIL_OPEN",
+        False,
+    )
+    service = EntitlementService(db=_EntitlementDB(subscription_count=0))
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CONTRACT_TIMELINE_VIEW,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is False
+    assert reason == "no_subscription_records"
+
+
+@pytest.mark.asyncio
+async def test_dms_entitlement_fail_open_requires_explicit_override(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rbac_backend.services.entitlement_service.settings.RBAC_ENTITLEMENT_FAIL_OPEN",
+        True,
+    )
+    service = EntitlementService(db=_EntitlementDB(subscription_count=0))
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CONTRACT_TIMELINE_VIEW,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is True
+    assert reason == "legacy_no_subscription_records"
+
+
+@pytest.mark.asyncio
+async def test_newer_dms_permissions_require_active_dms_entitlement() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "active",
+                "plan_code": None,
+                "entitlement_overrides": {"feature.dms.enabled": False},
+            },
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CONTRACT_TIMELINE_VIEW,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is False
+    assert reason == "dms_entitlement"
+
+
+@pytest.mark.asyncio
+async def test_archive_subscription_blocks_newer_dms_write_permissions() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "archive",
+                "plan_code": None,
+                "entitlement_overrides": {"feature.dms.enabled": True},
+            },
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.EVIDENCE_GRAPH_VERIFY,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is False
+    assert reason == "archive_read_only"
+
+
+@pytest.mark.asyncio
+async def test_archive_subscription_allows_newer_dms_read_permissions() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "archive",
+                "plan_code": None,
+                "entitlement_overrides": {"feature.dms.enabled": True},
+            },
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CONTRACT_TIMELINE_VIEW,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is True
+    assert reason == "archive_read_only"
 
 
 @pytest.mark.asyncio

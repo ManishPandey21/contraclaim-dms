@@ -294,6 +294,8 @@ class ArbitrationDraftVersion(BaseModel):
     paragraph_responses: List[Dict[str, Any]] = Field(default_factory=list)
     claim_heads: List[Dict[str, Any]] = Field(default_factory=list)
     annexures: List[Dict[str, Any]] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    validation_status: str = "not_checked"
     ai_prompt_version: Optional[str] = None
     model: Optional[str] = None
     generation_run_id: Optional[str] = None

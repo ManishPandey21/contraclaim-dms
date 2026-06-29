@@ -274,7 +274,7 @@ class Settings(BaseSettings):
 
     # Explicit toggle for legacy dev header authentication (disabled by default)
     ALLOW_DEV_HEADERS: bool = Field(default=False, validation_alias="ALLOW_DEV_HEADERS")
-    RBAC_ENTITLEMENT_FAIL_OPEN: bool = Field(default=True, validation_alias="RBAC_ENTITLEMENT_FAIL_OPEN")
+    RBAC_ENTITLEMENT_FAIL_OPEN: bool = Field(default=False, validation_alias="RBAC_ENTITLEMENT_FAIL_OPEN")
 
     # Contract upload/ingestion hard limits
     CONTRACT_UPLOAD_MAX_FILE_SIZE_MB: int = Field(default=50, validation_alias="CONTRACT_UPLOAD_MAX_FILE_SIZE_MB")
@@ -314,6 +314,15 @@ class Settings(BaseSettings):
     METRICS_ENABLED: bool = Field(default=True, validation_alias="METRICS_ENABLED")
     METRICS_TOKEN: Optional[str] = Field(default=None, validation_alias="METRICS_TOKEN")
     SLOW_REQUEST_THRESHOLD_MS: int = Field(default=2000, validation_alias="SLOW_REQUEST_THRESHOLD_MS")
+    BACKUP_ROOT: str = Field(default="/var/backups/contractdms", validation_alias="BACKUP_ROOT")
+    BACKUP_MAX_AGE_HOURS: int = Field(default=26, ge=1, validation_alias="BACKUP_MAX_AGE_HOURS")
+    BACKUP_REQUIRED_IN_PRODUCTION: bool = Field(default=True, validation_alias="BACKUP_REQUIRED_IN_PRODUCTION")
+    BACKUP_REQUIRED_VOLUME_LABELS: str = Field(
+        default="backend-uploads,qdrant-data,falkordb-data,redis-data",
+        validation_alias="BACKUP_REQUIRED_VOLUME_LABELS",
+    )
+    BACKUP_S3_BUCKET: str = Field(default="", validation_alias="BACKUP_S3_BUCKET")
+    BACKUP_S3_PREFIX: str = Field(default="contraclaim/backups", validation_alias="BACKUP_S3_PREFIX")
     
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod
@@ -485,6 +494,13 @@ class Settings(BaseSettings):
                 production_errors.append("APP_REDIS_URL or RUNTIME_STATE_REDIS_URL is required in production")
             if self.METRICS_ENABLED and not str(self.METRICS_TOKEN or "").strip():
                 production_errors.append("METRICS_TOKEN is required when METRICS_ENABLED=true in production")
+            if self.BACKUP_REQUIRED_IN_PRODUCTION:
+                if not str(self.BACKUP_ROOT or "").strip():
+                    production_errors.append("BACKUP_ROOT is required when BACKUP_REQUIRED_IN_PRODUCTION=true")
+                elif not os.path.isabs(str(self.BACKUP_ROOT)):
+                    production_errors.append("BACKUP_ROOT must be an absolute path in production")
+                if not str(self.BACKUP_S3_BUCKET or "").strip():
+                    production_errors.append("BACKUP_S3_BUCKET is required when BACKUP_REQUIRED_IN_PRODUCTION=true")
             if self.ANTIVIRUS_ENABLED and self.CLAMAV_FAIL_OPEN:
                 production_errors.append("CLAMAV_FAIL_OPEN must be false in production antivirus environments")
             if getattr(self, "OBSERVABILITY_STORE_RAW_QUERIES", False):

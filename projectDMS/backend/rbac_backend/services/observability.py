@@ -35,6 +35,7 @@ class ObservabilityRegistry:
     _request_latency_count: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _errors_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _domain_events_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _backup_health: Dict[str, float] = field(default_factory=dict)
 
     async def record_request(
         self,
@@ -66,6 +67,22 @@ class ObservabilityRegistry:
         async with self._lock:
             self._domain_events_total[key] = self._domain_events_total.get(key, 0) + 1
 
+    async def record_backup_health(
+        self,
+        *,
+        healthy: bool,
+        latest_age_hours: float | None,
+        missing_artifacts: int,
+        unhealthy_artifacts: int,
+    ) -> None:
+        async with self._lock:
+            self._backup_health = {
+                "healthy": 1.0 if healthy else 0.0,
+                "latest_age_seconds": -1.0 if latest_age_hours is None else latest_age_hours * 3600,
+                "missing_artifacts": float(missing_artifacts),
+                "unhealthy_artifacts": float(unhealthy_artifacts),
+            }
+
     def snapshot(self) -> Dict[str, object]:
         total_requests = sum(self._request_total.values())
         total_errors = sum(self._errors_total.values())
@@ -75,6 +92,7 @@ class ObservabilityRegistry:
             "request_total": total_requests,
             "server_error_total": total_errors,
             "domain_event_total": sum(self._domain_events_total.values()),
+            "backup_health": dict(self._backup_health),
         }
 
     def render_prometheus(self) -> str:
@@ -132,6 +150,23 @@ class ObservabilityRegistry:
         for (resource_type, event_type), value in sorted(self._domain_events_total.items()):
             labels = _labels((("resource_type", resource_type), ("event_type", event_type)))
             lines.append(f"contractdms_document_audit_events_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_backup_health Backup freshness health, 1 means healthy and 0 means failed.",
+                "# TYPE contractdms_backup_health gauge",
+                f"contractdms_backup_health {self._backup_health.get('healthy', -1.0):.0f}",
+                "# HELP contractdms_backup_latest_age_seconds Age in seconds of the oldest required latest backup artifact, -1 when unavailable.",
+                "# TYPE contractdms_backup_latest_age_seconds gauge",
+                f"contractdms_backup_latest_age_seconds {self._backup_health.get('latest_age_seconds', -1.0):.3f}",
+                "# HELP contractdms_backup_missing_artifacts Number of required backup artifacts not found.",
+                "# TYPE contractdms_backup_missing_artifacts gauge",
+                f"contractdms_backup_missing_artifacts {self._backup_health.get('missing_artifacts', 0.0):.0f}",
+                "# HELP contractdms_backup_unhealthy_artifacts Number of missing, stale, or empty required backup artifacts.",
+                "# TYPE contractdms_backup_unhealthy_artifacts gauge",
+                f"contractdms_backup_unhealthy_artifacts {self._backup_health.get('unhealthy_artifacts', 0.0):.0f}",
+            ]
+        )
 
         return "\n".join(lines) + "\n"
 

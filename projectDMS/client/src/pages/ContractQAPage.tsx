@@ -309,6 +309,7 @@ const ContractQAPage: React.FC = () => {
             <div className="space-y-2">
               <label className="text-sm font-medium text-gray-700">Organization *</label>
               <select
+                data-testid="contract-qa-org-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 value={orgId}
                 onChange={(e) => {
@@ -329,6 +330,7 @@ const ContractQAPage: React.FC = () => {
             <div className="space-y-2">
               <label className="text-sm font-medium text-gray-700">Project *</label>
               <select
+                data-testid="contract-qa-project-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
                 value={projId}
                 onChange={(e) => {
@@ -349,6 +351,7 @@ const ContractQAPage: React.FC = () => {
           <div className="space-y-2">
             <label className="text-sm font-medium text-gray-700">Contract File *</label>
             <select
+              data-testid="contract-qa-file-select"
               className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
               value={selectedUpload}
               onChange={(e) => setSelectedUpload(e.target.value)}
@@ -383,6 +386,7 @@ const ContractQAPage: React.FC = () => {
         </CardHeader>
         <CardContent className="space-y-3">
           <textarea
+            data-testid="contract-qa-question-input"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
             rows={3}
@@ -411,7 +415,7 @@ const ContractQAPage: React.FC = () => {
                 Cancel
               </Button>
             )}
-            <Button onClick={handleAsk} disabled={loading || fetching}>
+            <Button data-testid="contract-qa-submit" onClick={handleAsk} disabled={loading || fetching}>
               {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
               Ask
             </Button>
@@ -427,7 +431,7 @@ const ContractQAPage: React.FC = () => {
           </CardTitle>
           <CardDescription>Grounded response with clause references.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent data-testid="contract-qa-answer" className="space-y-3">
           {loading ? (
             <p className="text-sm text-gray-600 flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" /> Generating answer...

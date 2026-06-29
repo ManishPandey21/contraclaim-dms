@@ -15,6 +15,7 @@ from ..core.config import settings
 from ..core.database import get_database
 from ..services.runtime_state import get_runtime_state
 from ..services.observability import observability_registry
+from ..services.operations_health import build_backup_health
 
 router = APIRouter(tags=["health"])
 
@@ -172,6 +173,43 @@ async def observability_health(
         "timestamp": datetime.utcnow().isoformat(),
         "metrics_enabled": bool(settings.METRICS_ENABLED),
         "snapshot": snapshot,
+    }
+
+
+@router.get("/health/operations")
+async def operations_health(
+    response: Response,
+    x_metrics_token: str | None = Header(default=None),
+) -> Dict[str, Any]:
+    if str(settings.ENVIRONMENT).lower() == "production" and not _has_metrics_token(x_metrics_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid metrics token")
+
+    required_labels = [
+        item.strip()
+        for item in str(settings.BACKUP_REQUIRED_VOLUME_LABELS or "").split(",")
+        if item.strip()
+    ]
+    backup = build_backup_health(
+        settings.BACKUP_ROOT,
+        max_age_hours=settings.BACKUP_MAX_AGE_HOURS,
+        required_volume_labels=required_labels,
+    )
+    healthy = backup["status"] == "ok"
+    await observability_registry.record_backup_health(
+        healthy=healthy,
+        latest_age_hours=backup.get("latest_backup_age_hours"),
+        missing_artifacts=len(backup.get("missing_artifacts") or []),
+        unhealthy_artifacts=len(backup.get("unhealthy_artifacts") or []),
+    )
+
+    if settings.BACKUP_REQUIRED_IN_PRODUCTION and not healthy:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+
+    return {
+        "status": "ok" if healthy else "degraded",
+        "service": "backend",
+        "timestamp": datetime.utcnow().isoformat(),
+        "backup": backup,
     }
 
 

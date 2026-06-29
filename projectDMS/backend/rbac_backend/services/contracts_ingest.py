@@ -405,6 +405,25 @@ class ClauseExtractor:
     
     def __init__(self):
         self.patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE) for p in self.CLAUSE_PATTERNS]
+
+    @staticmethod
+    def _parse_clause_match(match: re.Match[str]) -> Tuple[str, str, str]:
+        groups = [str(group or "").strip() for group in match.groups()]
+        if not groups:
+            return "clause", "", ""
+
+        first = groups[0].upper()
+        if first in {"CLAUSE", "SECTION", "ARTICLE"}:
+            clause_type = first.lower()
+            clause_number = groups[1] if len(groups) > 1 else ""
+            clause_title = groups[2] if len(groups) > 2 else ""
+        else:
+            clause_type = "clause"
+            clause_number = groups[0]
+            clause_title = groups[1] if len(groups) > 1 else ""
+
+        clause_number = clause_number.rstrip(".")
+        return clause_type, clause_number, clause_title
     
     def extract_clauses(self, text: str) -> List[ClauseInfo]:
         """
@@ -429,16 +448,9 @@ class ClauseExtractor:
             for pattern in self.patterns:
                 match = pattern.match(line)
                 if match:
-                    groups = match.groups()
-                    if len(groups) >= 2:
-                        clause_type = groups[0] if groups[0].upper() in ['CLAUSE', 'SECTION', 'ARTICLE'] else 'clause'
-                        clause_number = groups[1] if len(groups) > 1 else groups[0]
-                        clause_title = groups[2].strip() if len(groups) > 2 and groups[2] else ""
-                    else:
-                        clause_type = 'clause'
-                        clause_number = groups[0]
-                        clause_title = ""
-                    
+                    clause_type, clause_number, clause_title = self._parse_clause_match(match)
+                    if not clause_number:
+                        continue
                     clause_markers.append((idx, clause_number, clause_title, clause_type))
                     break
         

@@ -701,6 +701,7 @@ const [projId, setProjId] = useState<string>(
                 Organization *
               </label>
               <select
+                data-testid="contract-upload-org-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 value={orgId}
                 onChange={(e) => {
@@ -729,6 +730,7 @@ const [projId, setProjId] = useState<string>(
                 Project *
               </label>
               <select
+                data-testid="contract-upload-project-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
                 value={projId}
                 onChange={(e) => setProjId(e.target.value)}
@@ -802,6 +804,7 @@ const [projId, setProjId] = useState<string>(
             `}
           >
             <input
+              data-testid="contract-upload-file-input"
               type="file"
               multiple
               accept=".pdf,.docx"
@@ -870,6 +873,7 @@ const [projId, setProjId] = useState<string>(
         </CardContent>
         <CardFooter className="flex gap-3">
           <button
+            data-testid="contract-upload-submit"
             onClick={handleUpload}
             disabled={!canUpload || uploadingBatch}
             className={`
@@ -973,7 +977,7 @@ const [projId, setProjId] = useState<string>(
 
       {/* Upload Progress */}
       {uploads.length > 0 && (
-        <Card>
+        <Card data-testid="contract-upload-progress">
           <CardHeader>
             <CardTitle>Upload Progress</CardTitle>
             <CardDescription>

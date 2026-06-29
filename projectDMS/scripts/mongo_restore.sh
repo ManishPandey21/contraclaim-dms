@@ -20,6 +20,11 @@ if [[ ! -f "${ARCHIVE}" ]]; then
   exit 1
 fi
 
+if command -v gzip >/dev/null 2>&1 && ! gzip -t "${ARCHIVE}"; then
+  echo "Archive failed gzip integrity check: ${ARCHIVE}" >&2
+  exit 1
+fi
+
 mongorestore \
   --uri="${MONGO_URI}" \
   --archive="${ARCHIVE}" \

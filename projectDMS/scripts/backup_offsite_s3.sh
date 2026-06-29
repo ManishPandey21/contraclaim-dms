@@ -2,7 +2,7 @@
 #
 # Offsite backup (Week 4.1)
 #
-# Runs the existing local backup (scripts/production_backup.sh — MongoDB +
+# Runs the existing local backup (scripts/production_backup.sh - MongoDB +
 # Docker volumes) and then mirrors the backup root to S3 so backups survive
 # host loss. Intended to run from host cron (see docs/OPERATIONS.md).
 #

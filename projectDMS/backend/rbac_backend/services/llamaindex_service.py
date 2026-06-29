@@ -218,12 +218,14 @@ class LlamaIndexVectorService:
         if not vector_refs:
             return
 
+        valid_refs = [ref for ref in vector_refs if ref]
+        if not valid_refs:
+            return
+
         vector_store = self._ensure_vector_store()
 
         def _delete_nodes():
-            for ref in vector_refs:
-                if not ref:
-                    continue
+            for ref in valid_refs:
                 try:
                     vector_store.delete(ref_doc_id=ref)
                     logger.debug("Deleted vector ref %s", ref)

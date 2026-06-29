@@ -8,6 +8,9 @@ COMPOSE_FILES=${COMPOSE_FILES:-"-f docker-compose.prod.yml"}
 MIN_DISK_GB=${MIN_DISK_GB:-20}
 MIN_MEM_MB=${MIN_MEM_MB:-3500}
 ALLOW_PUBLIC_DATA_PORTS=${ALLOW_PUBLIC_DATA_PORTS:-false}
+REQUIRE_FRESH_BACKUP=${REQUIRE_FRESH_BACKUP:-false}
+RUN_MIGRATION_DRY_RUN=${RUN_MIGRATION_DRY_RUN:-false}
+REQUIRE_MIGRATION_DRY_RUN=${REQUIRE_MIGRATION_DRY_RUN:-false}
 
 failures=0
 warnings=0
@@ -136,10 +139,48 @@ else
   fail "scripts/mongo_backup.sh is missing"
 fi
 
-if [[ -f "$ROOT_DIR/docs/Phase6_Observability_Incident_Response.md" && -f "$ROOT_DIR/docs/Phase7_Collaboration_Auditability.md" ]]; then
-  pass "Phase 6/7 runbooks exist"
+backup_root=$(get_env BACKUP_ROOT)
+backup_max_age=$(get_env BACKUP_MAX_AGE_HOURS)
+backup_bucket=$(get_env BACKUP_S3_BUCKET)
+if [[ -n "$backup_bucket" ]]; then
+  pass "BACKUP_S3_BUCKET is configured"
 else
-  fail "Phase 6/7 runbooks are missing"
+  fail "BACKUP_S3_BUCKET is required for offsite production backups"
+fi
+if python "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+  pass "Fresh local backup is present"
+else
+  if [[ "$REQUIRE_FRESH_BACKUP" == "true" || "$REQUIRE_FRESH_BACKUP" == "True" ]]; then
+    fail "Fresh local backup is required before deploy"
+  else
+    warn "Fresh local backup not found; set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
+  fi
+fi
+
+if [[ -f "$ROOT_DIR/docs/OPERATIONS.md" && -f "$ROOT_DIR/docs/PRODUCTION_READINESS_RELEASE_GATE.md" ]]; then
+  pass "Operations runbook and release gate exist"
+else
+  fail "Operations runbook or release gate is missing"
+fi
+
+if [[ -f "$ROOT_DIR/backend/rbac_backend/scripts/migrate_database.py" ]]; then
+  pass "Versioned database migration runner exists"
+else
+  fail "backend/rbac_backend/scripts/migrate_database.py is missing"
+fi
+
+if [[ "$RUN_MIGRATION_DRY_RUN" == "true" || "$RUN_MIGRATION_DRY_RUN" == "True" ]]; then
+  if (cd "$ROOT_DIR/backend" && python -m rbac_backend.scripts.migrate_database --fail-on-warning); then
+    pass "Database migration dry-run passed"
+  else
+    fail "Database migration dry-run failed"
+  fi
+else
+  if [[ "$REQUIRE_MIGRATION_DRY_RUN" == "true" || "$REQUIRE_MIGRATION_DRY_RUN" == "True" ]]; then
+    fail "Database migration dry-run is required; set RUN_MIGRATION_DRY_RUN=true"
+  else
+    warn "Database migration dry-run not executed; set RUN_MIGRATION_DRY_RUN=true for staging/prod release checks"
+  fi
 fi
 
 printf '\nPre-deploy readiness complete: %s failure(s), %s warning(s).\n' "$failures" "$warnings"

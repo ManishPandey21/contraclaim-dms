@@ -45,16 +45,27 @@ class ArbitrationContextBuilder:
         *,
         include_unverified_graph_links: bool = False,
     ) -> Dict[str, Any]:
+        context_warnings: List[str] = []
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
         source_ledger.extend(await self._contract_search_sources(draft, current_user, len(source_ledger)))
-        source_ledger.extend(await self._verified_graph_sources(draft, include_unverified_graph_links, len(source_ledger)))
+        source_ledger.extend(
+            await self._verified_graph_sources(
+                draft,
+                include_unverified_graph_links,
+                len(source_ledger),
+                context_warnings,
+            )
+        )
+        source_ledger = self._dedupe(source_ledger)
+        self._annotate_source_quality(source_ledger, context_warnings)
         missing = self._missing_evidence(draft, source_ledger, claim_heads, paragraph_responses)
         return {
             "draft": draft,
-            "source_ledger": self._dedupe(source_ledger),
+            "source_ledger": source_ledger,
             "claim_heads": claim_heads,
             "paragraph_responses": paragraph_responses,
             "missing_evidence": missing,
+            "context_warnings": context_warnings,
         }
 
     def _ledger_row(self, ref: Dict[str, Any], idx: int) -> Dict[str, Any]:
@@ -70,6 +81,9 @@ class ArbitrationContextBuilder:
             "page_numbers": ref.get("page_numbers") or [],
             "clause_number": ref.get("clause_number"),
             "letter_no": ref.get("letter_no"),
+            "verification_status": ref.get("metadata", {}).get("verification_status") or ref.get("verification_status") or "selected",
+            "is_user_supplied": ref.get("source_type") == "manual_fact",
+            "quality_flags": [],
             "source_hash": "",
         }
         row["source_hash"] = source_hash(row)
@@ -114,6 +128,9 @@ class ArbitrationContextBuilder:
                 "page_numbers": result.page_numbers or ([result.page] if result.page else []),
                 "clause_number": result.clause_number,
                 "letter_no": None,
+                "verification_status": "retrieved_clause",
+                "is_user_supplied": False,
+                "quality_flags": [],
                 "source_hash": "",
             }
             row["source_hash"] = source_hash(row)
@@ -125,9 +142,12 @@ class ArbitrationContextBuilder:
         draft: Dict[str, Any],
         include_unverified_graph_links: bool,
         offset: int,
+        context_warnings: List[str],
     ) -> List[Dict[str, Any]]:
         if not draft.get("project_id"):
             return []
+        if include_unverified_graph_links:
+            context_warnings.append("Unverified AI-suggested graph links were included for review mode only.")
         try:
             rows = await EvidenceGraphService(self.db).downstream_links(
                 {
@@ -151,6 +171,9 @@ class ArbitrationContextBuilder:
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
+                "verification_status": link.get("status") or "verified",
+                "is_user_supplied": False,
+                "quality_flags": [],
                 "source_hash": "",
             }
             row["source_hash"] = source_hash(row)
@@ -167,6 +190,8 @@ class ArbitrationContextBuilder:
         missing: List[str] = []
         if not source_ledger:
             missing.append("No selected or retrieved evidence is available for this pleading.")
+        if draft.get("manual_facts") and not any(row.get("source_type") != "manual_fact" for row in source_ledger):
+            missing.append("Manual facts are user-provided and require independent source support before filing.")
         if draft.get("claim_amount") and not any(row.get("allowed_use") == "quantum" for row in source_ledger):
             missing.append("Claim amount is entered but no quantum/payment source is selected.")
         if draft.get("draft_type") == "rejoinder" and not paragraph_responses:
@@ -174,6 +199,16 @@ class ArbitrationContextBuilder:
         for head in claim_heads:
             if not head.get("supporting_source_ids"):
                 missing.append(f"Claim head needs support: {head.get('description')}")
+            else:
+                known_ids = {str(row.get("source_id")) for row in source_ledger}
+                unknown = [str(item) for item in head.get("supporting_source_ids") or [] if str(item) not in known_ids]
+                if unknown:
+                    missing.append(f"Claim head references unavailable source ids: {', '.join(unknown)}")
+        known_ids = {str(row.get("source_id")) for row in source_ledger}
+        for response in paragraph_responses:
+            unknown = [str(item) for item in response.get("supporting_source_ids") or [] if str(item) not in known_ids]
+            if unknown:
+                missing.append(f"Paragraph {response.get('source_paragraph_number')} references unavailable source ids: {', '.join(unknown)}")
         return missing
 
     def _dedupe(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -188,3 +223,20 @@ class ArbitrationContextBuilder:
             out.append(row)
         return out
 
+    def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
+        for row in rows:
+            flags: List[str] = list(row.get("quality_flags") or [])
+            if not row.get("citation"):
+                flags.append("missing_citation")
+            if not row.get("snippet"):
+                flags.append("missing_snippet")
+            if row.get("is_user_supplied"):
+                flags.append("user_supplied")
+            if str(row.get("verification_status") or "").startswith("ai_"):
+                flags.append("unverified_ai_suggestion")
+            row["quality_flags"] = sorted(set(flags))
+            row["evidence_strength"] = "strong" if not flags else ("medium" if flags == ["missing_snippet"] else "needs_review")
+        if any("user_supplied" in row.get("quality_flags", []) for row in rows):
+            context_warnings.append("Manual fact sources are not independent evidence and require legal review.")
+        if any("unverified_ai_suggestion" in row.get("quality_flags", []) for row in rows):
+            context_warnings.append("Source ledger includes unverified AI graph suggestions.")

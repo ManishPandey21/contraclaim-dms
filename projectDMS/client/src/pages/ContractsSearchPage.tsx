@@ -966,6 +966,7 @@ const ContractsSearchPage: React.FC = () => {
                 Organization *
               </label>
               <select
+                data-testid="contract-search-org-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 value={orgId}
                 onChange={(e) => {
@@ -995,6 +996,7 @@ const ContractsSearchPage: React.FC = () => {
                 Project (optional)
               </label>
               <select
+                data-testid="contract-search-project-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
                 value={projId}
                 onChange={(e) => {
@@ -1106,6 +1108,7 @@ const ContractsSearchPage: React.FC = () => {
                 Target file
               </label>
               <select
+                data-testid="contract-search-file-select"
                 className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
                 value={docId}
                 onChange={(e) => {
@@ -1142,6 +1145,7 @@ const ContractsSearchPage: React.FC = () => {
               </label>
               <div className="relative">
                 <input
+                  data-testid="contract-search-query-input"
                   type="text"
                   className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   placeholder='e.g., "termination clause", "payment terms", "liability"'
@@ -1301,6 +1305,7 @@ const ContractsSearchPage: React.FC = () => {
                   Save Search
                 </button>
                 <button
+                  data-testid="contract-search-submit"
                   onClick={handleSearch}
                   disabled={searching || !expandedQuery.trim()}
                   className={`

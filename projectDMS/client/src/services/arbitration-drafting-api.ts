@@ -78,9 +78,19 @@ export interface ArbitrationDraftVersion {
   version: number;
   full_markdown: string;
   sections?: Array<{ key: string; heading: string; body: string }>;
+  structured_output?: {
+    validation_warnings?: string[];
+    approval_blockers?: string[];
+    legal_review_required?: boolean;
+    source_policy?: string;
+    source_count?: number;
+    input_hash?: string;
+  } | null;
   source_ledger?: Array<Record<string, unknown>>;
   missing_evidence?: string[];
   annexures?: Array<Record<string, unknown>>;
+  warnings?: string[];
+  validation_status?: string;
   created_at?: string;
 }
 
@@ -101,6 +111,18 @@ export async function getArbitrationDraft(draftId: string) {
 
 export async function generateArbitrationDraft(draftId: string, payload: Record<string, unknown> = {}) {
   const { data } = await api.post<ArbitrationDraft>(`/arbitration/drafts/${draftId}/generate`, payload);
+  return data;
+}
+
+export async function regenerateArbitrationSection(
+  draftId: string,
+  sectionKey: string,
+  payload: Record<string, unknown> = {},
+) {
+  const { data } = await api.post<ArbitrationDraft>(
+    `/arbitration/drafts/${draftId}/sections/${sectionKey}/regenerate`,
+    payload,
+  );
   return data;
 }
 
@@ -126,4 +148,3 @@ export async function exportArbitrationDraft(draftId: string, format: "docx" | "
   });
   return data as Blob;
 }
-

@@ -14,10 +14,15 @@ BASE_URL = os.getenv("SMOKE_BASE_URL", "http://localhost:8000").rstrip("/")
 TIMEOUT_SECONDS = float(os.getenv("SMOKE_TIMEOUT_SECONDS", "5"))
 ATTEMPTS = int(os.getenv("SMOKE_ATTEMPTS", "12"))
 SLEEP_SECONDS = float(os.getenv("SMOKE_SLEEP_SECONDS", "5"))
+CHECK_OPERATIONS = os.getenv("SMOKE_CHECK_OPERATIONS", "false").lower() == "true"
+METRICS_TOKEN = os.getenv("METRICS_TOKEN", "").strip()
 
 
 def _get_json(path: str) -> dict:
-    request = Request(f"{BASE_URL}{path}", headers={"Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    if METRICS_TOKEN and path in {"/health/operations", "/health/observability"}:
+        headers["X-Metrics-Token"] = METRICS_TOKEN
+    request = Request(f"{BASE_URL}{path}", headers=headers)
     with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
         data = response.read().decode("utf-8")
         return json.loads(data) if data else {}
@@ -25,6 +30,8 @@ def _get_json(path: str) -> dict:
 
 def main() -> int:
     checks = ["/health/live", "/health/ready"]
+    if CHECK_OPERATIONS:
+        checks.append("/health/operations")
     last_error = ""
     for attempt in range(1, ATTEMPTS + 1):
         try:

@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from ..core.config import settings
 from ..core.database import get_database
+from ..core.permissions import CLIENT_DMS_PERMISSIONS
 
 
 WRITE_PERMISSIONS = {
@@ -16,24 +17,6 @@ WRITE_PERMISSIONS = {
     "dms.comment.add",
     "dms.user.manage",
     "dms.project.manage",
-    "dms.admin",
-}
-
-DMS_FEATURE_PERMISSIONS = {
-    "dms.document.view",
-    "dms.document.upload",
-    "dms.document.edit_metadata",
-    "dms.document.delete",
-    "dms.document.download",
-    "dms.document.bulk_download",
-    "dms.document.link_reference",
-    "dms.status.update",
-    "dms.comment.add",
-    "dms.dashboard.view",
-    "dms.report.view",
-    "dms.user.manage",
-    "dms.project.manage",
-    "dms.audit.view",
     "dms.admin",
 }
 
@@ -52,6 +35,29 @@ DRAFTING_FEATURE_PERMISSIONS = {
     "drafting.audit.view",
     "drafting.admin",
 }
+
+DMS_FEATURE_PERMISSIONS = set(CLIENT_DMS_PERMISSIONS)
+
+DMS_READ_ONLY_ACTIONS = {
+    "view",
+    "download",
+    "bulk_download",
+    "export",
+}
+
+
+def _permission_action(permission: str) -> str:
+    return (permission or "").replace(":", ".").split(".")[-1].lower()
+
+
+def _is_write_or_admin_permission(permission: str) -> bool:
+    if permission in WRITE_PERMISSIONS:
+        return True
+    if permission.startswith("drafting."):
+        return True
+    if permission.startswith("dms."):
+        return _permission_action(permission) not in DMS_READ_ONLY_ACTIONS
+    return False
 
 
 class EntitlementService:
@@ -237,7 +243,7 @@ class EntitlementService:
         features.update(subscription.get("entitlement_overrides") or {})
 
         if status in self.ARCHIVE_STATUSES:
-            if permission in WRITE_PERMISSIONS or permission.startswith("drafting."):
+            if _is_write_or_admin_permission(permission):
                 return False, "archive_read_only"
             return True, "archive_read_only"
 
@@ -363,4 +369,3 @@ class EntitlementService:
             "auto_renew": subscription.get("auto_renew", True) if subscription else False,
             "cancelled_at": subscription.get("cancelled_at") if subscription else None,
         }
-

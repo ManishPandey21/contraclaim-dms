@@ -12,7 +12,7 @@ if [[ -z "${MONGO_URI}" ]]; then
 fi
 
 mkdir -p "${BACKUP_DIR}"
-STAMP=$(date '+%Y%m%d-%H%M%S')
+STAMP=${STAMP:-$(date '+%Y%m%d-%H%M%S')}
 ARCHIVE="${BACKUP_DIR}/${MONGO_DB}-${STAMP}.archive.gz"
 
 mongodump \

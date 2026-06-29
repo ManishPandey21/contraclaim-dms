@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { Sparkles, Save, RotateCcw, AlertCircle, CheckCircle, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -107,7 +107,7 @@ export const PromptSettingsPanel: React.FC = () => {
   const selectedPrompt = prompts.find(p => p.prompt_key === selectedKey);
   const requiredVariables = REQUIRED_VARS[selectedKey] || [];
   
-  const fetchPrompts = async () => {
+  const fetchPrompts = useCallback(async (activePromptKey: string = STRATEGY_PROMPT_KEY) => {
     try {
       setLoading(true);
       const res = await authenticatedFetch(joinApiUrl("/ai-assistant/prompts"), {
@@ -117,7 +117,7 @@ export const PromptSettingsPanel: React.FC = () => {
       const data = await res.json();
       setPrompts(data);
       
-      const active = data.find((p: PromptConfig) => p.prompt_key === selectedKey);
+      const active = data.find((p: PromptConfig) => p.prompt_key === activePromptKey);
       if (active) {
         setTemplateText(active.template);
       }
@@ -130,11 +130,11 @@ export const PromptSettingsPanel: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
-    void fetchPrompts();
-  }, []);
+    void fetchPrompts(STRATEGY_PROMPT_KEY);
+  }, [fetchPrompts]);
 
   const handleKeyChange = (key: string) => {
     setSelectedKey(key);
@@ -187,7 +187,7 @@ export const PromptSettingsPanel: React.FC = () => {
         description: "Prompt template updated successfully.",
       });
       
-      await fetchPrompts();
+      await fetchPrompts(selectedKey);
     } catch (err: any) {
       toast({
         title: "Error",

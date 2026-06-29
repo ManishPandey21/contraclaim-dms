@@ -3,7 +3,57 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
-PROMPT_VERSION = "arbitration_pleadings.v1"
+PROMPT_VERSION = "arbitration_pleadings.v2"
+SOURCE_POLICY = "source-ledger-only-with-evidence-required-fallback"
+
+SECTION_KEYS_BY_DRAFT_TYPE: Dict[str, set[str]] = {
+    "statement_of_claim": {
+        "caption",
+        "introduction",
+        "parties",
+        "jurisdiction",
+        "factual_background",
+        "legal_claims",
+        "quantum",
+        "relief",
+        "annexures",
+    },
+    "statement_of_defence": {
+        "caption",
+        "overview",
+        "preliminary_objections",
+        "paragraph_response",
+        "respondent_facts",
+        "legal_defences",
+        "quantum_challenge",
+        "counterclaim",
+        "relief",
+        "annexures",
+    },
+    "rejoinder": {
+        "caption",
+        "scope",
+        "preliminary_objections",
+        "paragraph_replies",
+        "clarified_facts",
+        "legal_defences_reply",
+        "quantum_reply",
+        "counterclaim_reply",
+        "reaffirmed_relief",
+        "annexures",
+    },
+    "counterclaim": {
+        "caption",
+        "introduction",
+        "parties",
+        "jurisdiction",
+        "factual_background",
+        "legal_claims",
+        "quantum",
+        "relief",
+        "annexures",
+    },
+}
 
 
 def _source_label(row: Dict[str, Any]) -> str:
@@ -61,6 +111,7 @@ class ArbitrationDraftGenerator:
             if not sections:
                 sections = [{"key": section_key, "heading": section_key.replace("_", " ").title(), "body": "[Evidence required]"}]
         markdown = self._markdown(draft, sections, context, additional_instruction=additional_instruction)
+        source_ledger = context.get("source_ledger") or []
         return {
             "sections": sections,
             "full_markdown": markdown,
@@ -68,6 +119,12 @@ class ArbitrationDraftGenerator:
                 "draft_type": draft_type,
                 "section_keys": [section["key"] for section in sections],
                 "prompt_version": PROMPT_VERSION,
+                "source_policy": SOURCE_POLICY,
+                "source_count": len(source_ledger),
+                "source_hashes": [row.get("source_hash") for row in source_ledger if row.get("source_hash")],
+                "missing_evidence_count": len(context.get("missing_evidence") or []),
+                "section_key": section_key,
+                "generation_instruction_included": bool(additional_instruction),
             },
             "missing_evidence": context.get("missing_evidence") or [],
             "annexures": self._annexures(context.get("source_ledger") or []),
@@ -124,7 +181,7 @@ class ArbitrationDraftGenerator:
             {
                 "key": "paragraph_response",
                 "heading": "Paragraph-by-Paragraph Response to SoC",
-                "body": self._paragraph_responses(responses, default="Statement of Claim paragraphs must be imported."),
+                "body": self._paragraph_responses(responses, evidence, default="Statement of Claim paragraphs must be imported."),
             },
             {"key": "respondent_facts", "heading": "Respondent's Factual Background", "body": self._numbered(_facts(context))},
             {"key": "legal_defences", "heading": "Legal Defences on Merits", "body": self._defence_text(evidence)},
@@ -153,7 +210,7 @@ class ArbitrationDraftGenerator:
             {
                 "key": "paragraph_replies",
                 "heading": "Paragraph-by-Paragraph Reply to the Statement of Defence",
-                "body": self._paragraph_responses(responses, default="Statement of Defence paragraphs must be imported."),
+                "body": self._paragraph_responses(responses, evidence, default="Statement of Defence paragraphs must be imported."),
             },
             {"key": "clarified_facts", "heading": "Claimant's Clarified Factual Position", "body": self._numbered(_facts(context))},
             {"key": "legal_defences_reply", "heading": "Reply to Legal Defences", "body": self._defence_text(evidence)},
@@ -209,14 +266,26 @@ class ArbitrationDraftGenerator:
             f"Payment/quantum support: {_evidence_note([row for row in evidence if row.get('allowed_use') == 'quantum'])}"
         )
 
-    def _paragraph_responses(self, responses: List[Dict[str, Any]], *, default: str) -> str:
+    def _paragraph_responses(self, responses: List[Dict[str, Any]], evidence: List[Dict[str, Any]], *, default: str) -> str:
         if not responses:
             return f"[Evidence required] {default}"
         lines = []
         for response in responses:
             status = str(response.get("response_type") or "require_proof").replace("_", " ").title()
             text = response.get("response_text") or response.get("response_reason") or "[Evidence required]"
-            lines.append(f"{response.get('source_paragraph_number')}. {status}: {text}")
+            support_ids = {str(item) for item in response.get("supporting_source_ids") or []}
+            support = _evidence_note([row for row in evidence if str(row.get("source_id")) in support_ids], "")
+            if not support and response.get("response_type") in {
+                "deny",
+                "part_admit_part_deny",
+                "not_admitted",
+                "misconceived",
+                "incorrect",
+                "misleading",
+            }:
+                support = "[Evidence required]"
+            suffix = f" {support}" if support else ""
+            lines.append(f"{response.get('source_paragraph_number')}. {status}: {text}{suffix}")
         return "\n".join(lines)
 
     def _numbered(self, rows: List[str]) -> str:
@@ -255,4 +324,3 @@ class ArbitrationDraftGenerator:
         if additional_instruction:
             lines.extend(["## User Generation Instruction", "", additional_instruction, ""])
         return "\n".join(lines).strip() + "\n"
-

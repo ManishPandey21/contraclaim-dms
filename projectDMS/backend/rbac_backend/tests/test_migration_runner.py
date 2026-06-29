@@ -1,0 +1,133 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List
+
+import pytest
+
+from rbac_backend.initial_data.seed_catalog import (
+    SEED_CATALOG_ID,
+    seed_catalog_digest,
+    seed_catalog_payload,
+    seed_catalog_record,
+    seed_catalog_validation_issues,
+)
+from rbac_backend.migrations import MIGRATIONS, Migration, MigrationResult, MigrationRunner
+from rbac_backend.migrations.runner import LEDGER_COLLECTION
+
+
+class _Cursor:
+    def __init__(self, docs: List[Dict[str, Any]]):
+        self.docs = docs
+
+    async def to_list(self, length=None):
+        return [dict(doc) for doc in self.docs]
+
+
+class _Collection:
+    def __init__(self, name: str):
+        self.name = name
+        self.docs: Dict[Any, Dict[str, Any]] = {}
+        self.indexes: List[tuple[Any, Dict[str, Any]]] = []
+        self.update_calls = 0
+
+    def find(self, query: Dict[str, Any]):
+        if not query:
+            return _Cursor(list(self.docs.values()))
+        matched = []
+        for doc in self.docs.values():
+            if all(doc.get(key) == value for key, value in query.items()):
+                matched.append(doc)
+        return _Cursor(matched)
+
+    async def find_one(self, query: Dict[str, Any]):
+        rows = await self.find(query).to_list()
+        return rows[0] if rows else None
+
+    async def create_index(self, keys, **kwargs):
+        self.indexes.append((keys, kwargs))
+        return kwargs.get("name") or "idx"
+
+    async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+        self.update_calls += 1
+        doc_id = query.get("_id")
+        doc = self.docs.get(doc_id)
+        if doc is None and upsert:
+            doc = {"_id": doc_id}
+            doc.update(update.get("$setOnInsert") or {})
+            self.docs[doc_id] = doc
+        if doc is not None:
+            doc.update(update.get("$set") or {})
+
+
+class _DB:
+    def __init__(self):
+        self.collections: Dict[str, _Collection] = {}
+
+    def __getitem__(self, name: str):
+        return self.collections.setdefault(name, _Collection(name))
+
+    def __getattr__(self, name: str):
+        return self[name]
+
+
+async def _noop_upgrade(db, dry_run: bool):
+    if not dry_run:
+        await db.example.update_one({"_id": "applied"}, {"$set": {"applied": True}}, upsert=True)
+    return MigrationResult(
+        version="20260629_9999",
+        name="noop",
+        status="dry_run" if dry_run else "applied",
+        operations=[{"operation": "noop"}],
+    )
+
+
+@pytest.mark.asyncio
+async def test_migration_dry_run_does_not_write_ledger_or_data():
+    db = _DB()
+    runner = MigrationRunner(
+        db,
+        [Migration("20260629_9999", "noop", "No-op test migration", _noop_upgrade)],
+    )
+
+    results = await runner.run(apply=False)
+
+    assert [result.status for result in results] == ["dry_run"]
+    assert db[LEDGER_COLLECTION].docs == {}
+    assert db["example"].docs == {}
+    assert db[LEDGER_COLLECTION].indexes == []
+
+
+@pytest.mark.asyncio
+async def test_migration_apply_records_once_and_rerun_skips():
+    db = _DB()
+    runner = MigrationRunner(
+        db,
+        [Migration("20260629_9999", "noop", "No-op test migration", _noop_upgrade)],
+    )
+
+    first = await runner.run(apply=True)
+    second = await runner.run(apply=True)
+
+    assert [result.status for result in first] == ["applied"]
+    assert [result.status for result in second] == ["skipped"]
+    assert db["example"].docs["applied"]["applied"] is True
+    assert db[LEDGER_COLLECTION].docs["20260629_9999"]["version"] == "20260629_9999"
+    assert db[LEDGER_COLLECTION].update_calls == 1
+    assert db[LEDGER_COLLECTION].indexes[0] == ("version", {"unique": True, "background": True})
+
+
+def test_migration_catalog_versions_are_unique_and_sorted():
+    versions = [migration.version for migration in MIGRATIONS]
+    assert versions == sorted(versions)
+    assert len(versions) == len(set(versions))
+
+
+def test_seed_catalog_digest_is_stable_and_validates_current_seeds():
+    payload = seed_catalog_payload()
+    assert seed_catalog_digest(payload) == seed_catalog_digest(payload)
+    assert seed_catalog_validation_issues(payload) == []
+
+    record = seed_catalog_record()
+    assert record["_id"] == SEED_CATALOG_ID
+    assert record["digest"] == seed_catalog_digest(payload)
+    assert record["permission_count"] >= record["client_dms_permission_count"]

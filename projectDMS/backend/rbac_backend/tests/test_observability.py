@@ -23,6 +23,12 @@ async def test_observability_registry_renders_prometheus_metrics():
         resource_type="document",
         event_type="document.updated",
     )
+    await registry.record_backup_health(
+        healthy=False,
+        latest_age_hours=30.0,
+        missing_artifacts=1,
+        unhealthy_artifacts=2,
+    )
 
     rendered = registry.render_prometheus()
 
@@ -30,6 +36,8 @@ async def test_observability_registry_renders_prometheus_metrics():
     assert 'path="/api/documents/{id}"' in rendered
     assert "contractdms_server_errors_total" in rendered
     assert "contractdms_document_audit_events_total" in rendered
+    assert "contractdms_backup_health 0" in rendered
+    assert "contractdms_backup_latest_age_seconds 108000.000" in rendered
 
 
 def test_observability_snapshot_counts_recorded_events():

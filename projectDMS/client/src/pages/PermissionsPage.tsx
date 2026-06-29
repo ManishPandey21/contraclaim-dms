@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useCallback, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -54,6 +54,35 @@ import { useStepUp } from "@/hooks/useStepUp";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
 
+// Helper to normalize role id across potential API variations
+const getRoleId = (role: any) =>
+  (role && (role as any)._id) ?? (role && (role as any).id);
+
+// Super Admin bypasses all permission checks, so it always has complete
+// rights. Render its column as fully granted + read-only rather than relying
+// on stored role permissions (which may be empty / not seeded).
+const isSuperAdminRole = (role: any) => {
+  const id = String(getRoleId(role) || "").toLowerCase().replace(/[-_\s]/g, "");
+  const name = String(role?.name || "").toLowerCase().replace(/[-_\s]/g, "");
+  return id === "superadmin" || name === "superadmin";
+};
+
+const deriveRoleLevel = (role: any) => {
+  // If backend provides level, prefer it
+  const raw = (role?.level || "").toString().toLowerCase();
+  if (raw === "system" || raw === "organization" || raw === "project") {
+    return raw;
+  }
+
+  // Fallback heuristics based on role id/name
+  const source = `${role?._id || role?.id || ""} ${role?.name || ""}`.toLowerCase();
+  if (source.includes("super")) return "system";
+  if (source.includes("org")) return "organization";
+  if (source.includes("project")) return "project";
+  // Default to project-level to keep permissions scoped conservatively
+  return "project";
+};
+
 const PermissionsPage = () => {
   const [selectedRole, setSelectedRole] = useState("all");
   const [roles, setRoles] = useState([]);
@@ -73,36 +102,7 @@ const PermissionsPage = () => {
   const { toast } = useToast();
   const { requestToken, StepUpDialog } = useStepUp();
 
-  // Helper to normalize role id across potential API variations
-  const getRoleId = (role: any) =>
-    (role && (role as any)._id) ?? (role && (role as any).id);
-
-  // Super Admin bypasses all permission checks, so it always has complete
-  // rights. Render its column as fully granted + read-only rather than relying
-  // on stored role permissions (which may be empty / not seeded).
-  const isSuperAdminRole = (role: any) => {
-    const id = String(getRoleId(role) || "").toLowerCase().replace(/[-_\s]/g, "");
-    const name = String(role?.name || "").toLowerCase().replace(/[-_\s]/g, "");
-    return id === "superadmin" || name === "superadmin";
-  };
-
-  const deriveRoleLevel = (role: any) => {
-    // If backend provides level, prefer it
-    const raw = (role?.level || "").toString().toLowerCase();
-    if (raw === "system" || raw === "organization" || raw === "project") {
-      return raw;
-    }
-
-    // Fallback heuristics based on role id/name
-    const source = `${role?._id || role?.id || ""} ${role?.name || ""}`.toLowerCase();
-    if (source.includes("super")) return "system";
-    if (source.includes("org")) return "organization";
-    if (source.includes("project")) return "project";
-    // Default to project-level to keep permissions scoped conservatively
-    return "project";
-  };
-
-  const fetchRoles = async () => {
+  const fetchRoles = useCallback(async () => {
     try {
       const data = await api.getRoles();
       // Normalize missing level from backend so edit dialog shows the right selection
@@ -119,9 +119,9 @@ const PermissionsPage = () => {
         variant: "destructive",
       });
     }
-  };
+  }, [toast]);
 
-  const fetchPermissions = async () => {
+  const fetchPermissions = useCallback(async () => {
     try {
       const data = await api.getPermissions();
       setPermissions(data);
@@ -133,9 +133,9 @@ const PermissionsPage = () => {
         variant: "destructive",
       });
     }
-  };
+  }, [toast]);
 
-  const fetchRolePermissions = async (roleId) => {
+  const fetchRolePermissions = useCallback(async (roleId) => {
     try {
       const data = await api.getRolePermissions(roleId);
       // Extract permission identifiers; prefer stable permission 'name'
@@ -153,7 +153,7 @@ const PermissionsPage = () => {
     } catch (error) {
       console.error(`Error fetching permissions for role ${roleId}:`, error);
     }
-  };
+  }, [roles]);
 
   // Handlers for create, edit, delete roles
   const openCreateRole = () => setCreateRoleOpen(true);
@@ -272,17 +272,15 @@ const PermissionsPage = () => {
       setLoading(false);
     };
 
-    fetchData();
-    // Initial RBAC bootstrap intentionally runs once; mutations refresh roles explicitly.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void fetchData();
+  }, [fetchPermissions, fetchRoles]);
 
   useEffect(() => {
     // Fetch permissions for each role when roles are loaded
     if (roles.length > 0) {
       roles.forEach((role) => fetchRolePermissions(getRoleId(role)));
     }
-  }, [roles]);
+  }, [fetchRolePermissions, roles]);
 
   const permissionGroups = [
     {

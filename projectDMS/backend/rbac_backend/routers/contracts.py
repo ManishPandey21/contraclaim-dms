@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, Response
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..core.config import settings
+from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..models.contract_models import (
     ChunkUploadResponse,
@@ -235,16 +236,38 @@ async def get_file_service() -> SecureFileService:
     return SecureFileService(config=config)
 
 
+async def _authorize_contract_scope(
+    policy: PolicyService,
+    current_user: CurrentUser,
+    permission: str,
+    *,
+    organization_id: Optional[str],
+    project_id: Optional[str],
+    resource_type: str,
+    audit: bool = True,
+) -> None:
+    await policy.authorize(
+        current_user,
+        permission,
+        resource_type=resource_type,
+        organization_id=organization_id,
+        project_id=project_id,
+        audit=audit,
+    )
+
+
 @router.post("/contracts/upload-session", response_model=ContractUploadSessionResponse)
 @handle_exceptions
 async def create_contract_upload_session(
     payload: ContractUploadSessionRequest,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
-    await PolicyService().authorize(
+    await _authorize_contract_scope(
+        policy,
         current_user,
-        "dms.document.upload",
+        Permissions.DOCUMENT_UPLOAD,
         resource_type="project",
         organization_id=payload.organization_id,
         project_id=payload.project_id,
@@ -268,6 +291,7 @@ async def upload_contracts_multipart(
     contract_service: ContractService = Depends(get_contract_service),
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
     if not files:
         raise ContractError("At least one contract file is required", status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -284,6 +308,34 @@ async def upload_contracts_multipart(
     for index, file in enumerate(files):
         if not file.filename:
             raise ContractError("File missing filename", status.HTTP_400_BAD_REQUEST)
+        upload_id = upload_ids[index] if upload_ids else None
+        if upload_id:
+            session_doc = await contract_service.validate_upload_session(
+                upload_id,
+                current_user,
+                organization_id,
+                project_id,
+                file.filename,
+            )
+            await _authorize_contract_scope(
+                policy,
+                current_user,
+                Permissions.DOCUMENT_UPLOAD,
+                organization_id=str(session_doc.get("organization_id") or ""),
+                project_id=str(session_doc.get("project_id") or "") or None,
+                resource_type="contract_upload",
+                audit=index == 0,
+            )
+        else:
+            await _authorize_contract_scope(
+                policy,
+                current_user,
+                Permissions.DOCUMENT_UPLOAD,
+                organization_id=organization_id,
+                project_id=project_id,
+                resource_type="contract_upload",
+                audit=index == 0,
+            )
         async with upload_concurrency_limiter.slot(
             f"user:{current_user.id}",
             int(settings.UPLOAD_MAX_CONCURRENT_PER_USER),
@@ -308,7 +360,6 @@ async def upload_contracts_multipart(
                         )
                 # ------------------------------
 
-                upload_id = upload_ids[index] if upload_ids else None
                 if not upload_id:
                     session = await contract_service.create_upload_session(file.filename, organization_id, project_id, current_user)
                     upload_id = session.upload_id
@@ -322,6 +373,15 @@ async def upload_contracts_multipart(
                 )
                 effective_org = str(session_doc.get("organization_id") or organization_id or "")
                 effective_project = str(session_doc.get("project_id") or "") or None
+                await _authorize_contract_scope(
+                    policy,
+                    current_user,
+                    Permissions.DOCUMENT_UPLOAD,
+                    organization_id=effective_org,
+                    project_id=effective_project,
+                    resource_type="contract_upload",
+                    audit=False,
+                )
                 store_result = await _write_spooled_to_providers(
                     spooled=spooled,
                     organization_id=effective_org,
@@ -397,14 +457,9 @@ async def upload_contract_chunk(
     contract_service: ContractService = Depends(get_contract_service),
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
     max_file_size_bytes, max_chunk_size_bytes = _contract_limits()
-    chunk_bytes = await chunk.read()
-    await chunk.seek(0)
-    chunk_sha256 = hashlib.sha256(chunk_bytes).hexdigest()
-    if len(chunk_bytes) > max_chunk_size_bytes:
-        raise ContractError("Chunk exceeds the maximum allowed chunk size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
-
     session_doc = await contract_service.validate_upload_session(
         upload_id,
         current_user,
@@ -415,6 +470,21 @@ async def upload_contract_chunk(
     )
     effective_org = str(session_doc.get("organization_id") or "")
     effective_project = str(session_doc.get("project_id") or "") or None
+    await _authorize_contract_scope(
+        policy,
+        current_user,
+        Permissions.DOCUMENT_UPLOAD,
+        organization_id=effective_org,
+        project_id=effective_project,
+        resource_type="contract_upload",
+        audit=False,
+    )
+    chunk_bytes = await chunk.read()
+    await chunk.seek(0)
+    chunk_sha256 = hashlib.sha256(chunk_bytes).hexdigest()
+    if len(chunk_bytes) > max_chunk_size_bytes:
+        raise ContractError("Chunk exceeds the maximum allowed chunk size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+
     safe_filename = sanitize_filename(filename)
     if session_doc.get("document_id"):
         received_chunks = sorted(
@@ -596,8 +666,19 @@ async def get_contract_status(
     upload_id: str = Query(...),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
-    return await contract_service.get_job_status(upload_id, current_user)
+    status_response = await contract_service.get_job_status(upload_id, current_user)
+    await _authorize_contract_scope(
+        policy,
+        current_user,
+        Permissions.DOCUMENT_VIEW,
+        organization_id=status_response.organization_id,
+        project_id=status_response.project_id,
+        resource_type="contract_upload_status",
+        audit=False,
+    )
+    return status_response
 
 
 @router.get("/contracts/list", response_model=ContractListResponse)
@@ -609,10 +690,12 @@ async def list_contract_uploads(
     skip: int = Query(0, ge=0),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
-    await PolicyService().authorize(
+    await _authorize_contract_scope(
+        policy,
         current_user,
-        "dms.document.view",
+        Permissions.DOCUMENT_VIEW,
         resource_type="contracts",
         organization_id=organization_id,
         project_id=project_id,
@@ -627,10 +710,12 @@ async def search_contracts(
     request: ContractSearchRequest,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
 ):
-    await PolicyService().authorize(
+    await _authorize_contract_scope(
+        policy,
         current_user,
-        "dms.document.view",
+        Permissions.DOCUMENT_VIEW,
         resource_type="contracts",
         organization_id=request.organization_id,
         project_id=request.project_id,

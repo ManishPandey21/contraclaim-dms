@@ -36,6 +36,11 @@ if [[ ! -f "$archive" ]]; then
   exit 1
 fi
 
+if ! tar -tzf "$archive" >/dev/null; then
+  echo "Archive is not a readable gzip tarball: $archive" >&2
+  exit 1
+fi
+
 if [[ -f "$ENV_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090

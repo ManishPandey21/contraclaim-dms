@@ -58,6 +58,12 @@ x-backend-env: &backend-env
   METRICS_TOKEN: "${METRICS_TOKEN:?METRICS_TOKEN is required when metrics are enabled}"
   LOG_LEVEL: "${LOG_LEVEL:-INFO}"
   SLOW_REQUEST_THRESHOLD_MS: "${SLOW_REQUEST_THRESHOLD_MS:-2000}"
+  BACKUP_ROOT: "${BACKUP_ROOT:-/var/backups/contractdms}"
+  BACKUP_MAX_AGE_HOURS: "${BACKUP_MAX_AGE_HOURS:-26}"
+  BACKUP_REQUIRED_IN_PRODUCTION: "${BACKUP_REQUIRED_IN_PRODUCTION:-true}"
+  BACKUP_REQUIRED_VOLUME_LABELS: "${BACKUP_REQUIRED_VOLUME_LABELS:-backend-uploads,qdrant-data,falkordb-data,redis-data}"
+  BACKUP_S3_BUCKET: "${BACKUP_S3_BUCKET:?BACKUP_S3_BUCKET is required for production backups}"
+  BACKUP_S3_PREFIX: "${BACKUP_S3_PREFIX:-contraclaim/backups}"
   UPLOADS_DIR: "/app/uploads"
   SECURE_UPLOADS_DIR: "/app/uploads"
   UPLOAD_STREAM_CHUNK_SIZE_MB: "${UPLOAD_STREAM_CHUNK_SIZE_MB:-1}"
@@ -95,6 +101,7 @@ services:
     volumes:
       - backend_uploads:/app/uploads
       - backend_logs:/app/logs
+      - ${BACKUP_ROOT:-/var/backups/contractdms}:${BACKUP_ROOT:-/var/backups/contractdms}:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
       interval: 30s
@@ -149,6 +156,7 @@ services:
     volumes:
       - backend_uploads:/app/uploads
       - backend_logs:/app/logs
+      - ${BACKUP_ROOT:-/var/backups/contractdms}:${BACKUP_ROOT:-/var/backups/contractdms}:ro
     logging: *default-logging
 
   qdrant:

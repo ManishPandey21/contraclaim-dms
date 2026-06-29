@@ -25,6 +25,10 @@ build/
 .parcel-cache/
 coverage/
 **/coverage/
+playwright-report/
+**/playwright-report/
+test-results/
+**/test-results/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

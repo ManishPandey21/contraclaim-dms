@@ -1,73 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { FileText, Search, AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, ExternalLink, FileText, Loader2 } from "lucide-react";
 import { useParams } from "react-router-dom";
-import { Viewer as PdfViewer, Worker, SpecialZoomLevel } from "@react-pdf-viewer/core";
-import { defaultLayoutPlugin } from "@react-pdf-viewer/default-layout";
-import { searchPlugin } from "@react-pdf-viewer/search";
-import { zoomPlugin } from "@react-pdf-viewer/zoom";
-// SECURITY (H3): bundle the pdf.js worker as a same-origin asset instead of
-// loading it from cdnjs. The production CSP (config/httpd.conf) sets
-// `script-src 'self'` and `worker-src 'self' blob:`, which blocks the CDN
-// worker and breaks PDF preview. Vite's `?url` import emits the worker from the
-// installed pdfjs-dist (version-matched to @react-pdf-viewer) served from our
-// own origin, so it loads under the strict CSP without weakening it.
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.js?url";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
-
-import "@react-pdf-viewer/core/lib/styles/index.css";
-import "@react-pdf-viewer/default-layout/lib/styles/index.css";
-import "@react-pdf-viewer/search/lib/styles/index.css";
-import "@react-pdf-viewer/zoom/lib/styles/index.css";
 
 import type { LocalDocument as Document } from "../../pages/DocumentViewerPage";
 
 interface DocumentViewerProps {
   document: Document;
 }
-
-interface ZoomControlsProps {
-  zoomPluginInstance: ReturnType<typeof zoomPlugin>;
-}
-
-const ZoomControls: React.FC<ZoomControlsProps> = ({ zoomPluginInstance }) => {
-  const { ZoomIn, ZoomOut, CurrentScale } = zoomPluginInstance;
-
-  return (
-    <div className="flex items-center space-x-2">
-      <ZoomOut>
-        {(props: { onClick: () => void }) => (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={props.onClick}
-            aria-label="Zoom Out"
-          >
-            <span>-</span>
-          </Button>
-        )}
-      </ZoomOut>
-      <div className="w-16 text-center">
-        <CurrentScale />
-      </div>
-      <ZoomIn>
-        {(props: { onClick: () => void }) => (
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={props.onClick}
-            aria-label="Zoom In"
-          >
-            <span>+</span>
-          </Button>
-        )}
-      </ZoomIn>
-    </div>
-  );
-};
 
 const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -79,15 +22,6 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
   const isPdfDocument =
     (document.filetype?.toLowerCase()?.includes("pdf") ?? false) ||
     (document.filename?.toLowerCase()?.endsWith(".pdf") ?? false);
-  const defaultLayoutPluginInstance = defaultLayoutPlugin();
-  const searchPluginInstance = searchPlugin();
-  const zoomPluginInstance = zoomPlugin();
-
-  const plugins = useMemo(() => [
-    defaultLayoutPluginInstance,
-    searchPluginInstance,
-    zoomPluginInstance,
-  ], [defaultLayoutPluginInstance, searchPluginInstance, zoomPluginInstance]);
 
   const isLikelySignedUrl = useCallback((url: string): boolean => {
     try {
@@ -201,48 +135,39 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
     };
   }, [pdfUrl]);
 
-  const { Search: SearchComponent } = searchPluginInstance;
+  const iframeUrl = useMemo(() => {
+    if (!pdfUrl) return null;
+    return `${pdfUrl}#toolbar=1&navpanes=0&view=FitH`;
+  }, [pdfUrl]);
+
+  const openPdf = useCallback(() => {
+    if (!pdfUrl) return;
+    window.open(pdfUrl, "_blank", "noopener,noreferrer");
+  }, [pdfUrl]);
 
   return (
     <div className="h-full flex flex-col">
       <div className="bg-white border-b flex justify-between items-center py-2 px-4">
         <div className="flex items-center space-x-4">
-          {isPdfDocument && pdfUrl && (
-            <ZoomControls zoomPluginInstance={zoomPluginInstance} />
+          {isPdfDocument && (
+            <span className="text-sm text-muted-foreground">
+              PDF preview uses the browser's native viewer.
+            </span>
           )}
         </div>
 
         {isPdfDocument && pdfUrl && (
           <div className="flex items-center space-x-2">
-            <SearchComponent>
-              {(renderSearchProps) => (
-                <div className="flex items-center">
-                  <div className="relative">
-                    <Search className="absolute left-2 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                    <Input
-                      placeholder="Search in document..."
-                      className="pl-8 h-8 text-sm w-48"
-                      value={renderSearchProps.keyword}
-                      onChange={(e) =>
-                        renderSearchProps.setKeyword(e.target.value)
-                      }
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && renderSearchProps.search()
-                      }
-                    />
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={renderSearchProps.search}
-                    className="h-8 ml-2"
-                    aria-label="Search Document"
-                  >
-                    Search
-                  </Button>
-                </div>
-              )}
-            </SearchComponent>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={openPdf}
+              className="h-8 gap-2"
+              aria-label="Open PDF in new tab"
+            >
+              <ExternalLink className="h-4 w-4" />
+              Open
+            </Button>
           </div>
         )}
       </div>
@@ -278,34 +203,22 @@ const DocumentViewer: React.FC<DocumentViewerProps> = ({ document }) => {
                   </AlertDescription>
                 </Alert>
               </div>
+            ) : iframeUrl ? (
+              <iframe
+                title={document.filename || "PDF document"}
+                src={iframeUrl}
+                className="h-full w-full border-0 bg-white"
+              />
             ) : (
-              <Worker workerUrl={pdfWorkerUrl}>
-                <div style={{ height: "100%" }}>
-                  <PdfViewer
-                    fileUrl={pdfUrl}
-                    plugins={plugins}
-                    defaultScale={SpecialZoomLevel.PageWidth}
-                    renderError={(error: Error) => (
-                      <div
-                        style={{
-                          padding: "1rem",
-                          color: "red",
-                          textAlign: "center",
-                        }}
-                      >
-                        <p>
-                          <strong>Viewer Error:</strong> {error.message}
-                        </p>
-                        <p>
-                          Could not load the PDF. Check the file URL and the
-                          worker script.
-                        </p>
-                        {/* {console.error("React PDF Viewer Error:", error)} */}
-                      </div>
-                    )}
-                  />
-                </div>
-              </Worker>
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Alert className="w-3/4">
+                  <FileText className="h-4 w-4" />
+                  <AlertTitle>PDF preview unavailable</AlertTitle>
+                  <AlertDescription>
+                    The PDF URL could not be prepared for preview.
+                  </AlertDescription>
+                </Alert>
+              </div>
             )}
           </div>
         ) : (

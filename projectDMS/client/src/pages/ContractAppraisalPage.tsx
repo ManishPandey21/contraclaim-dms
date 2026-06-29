@@ -421,7 +421,7 @@ const ContractAppraisalPage: React.FC = () => {
                   setProjectId("");
                 }}
               >
-                <SelectTrigger>
+                <SelectTrigger data-testid="contract-appraisal-org-select">
                   <SelectValue placeholder="Select organisation" />
                 </SelectTrigger>
                 <SelectContent>
@@ -436,7 +436,7 @@ const ContractAppraisalPage: React.FC = () => {
             <div>
               <Label>Project</Label>
               <Select value={projectId} onValueChange={setProjectId} disabled={projectsForOrg.length === 0}>
-                <SelectTrigger>
+                <SelectTrigger data-testid="contract-appraisal-project-select">
                   <SelectValue placeholder={orgId ? "Select project" : "Select organisation first"} />
                 </SelectTrigger>
                 <SelectContent>
@@ -451,7 +451,7 @@ const ContractAppraisalPage: React.FC = () => {
             <div>
               <Label>Contract document</Label>
               <Select value={contractDocId} onValueChange={setContractDocId} disabled={!projectId}>
-                <SelectTrigger>
+                <SelectTrigger data-testid="contract-appraisal-document-select">
                   <SelectValue placeholder="All project contracts" />
                 </SelectTrigger>
                 <SelectContent>
@@ -471,7 +471,11 @@ const ContractAppraisalPage: React.FC = () => {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={onGenerate} disabled={busy || !!jobActive || !projectId || !!existingForSelection}>
+            <Button
+              data-testid="contract-appraisal-generate"
+              onClick={onGenerate}
+              disabled={busy || !!jobActive || !projectId || !!existingForSelection}
+            >
               {busy || jobActive ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
@@ -503,7 +507,7 @@ const ContractAppraisalPage: React.FC = () => {
       </Card>
 
       {reports.length > 0 && !selected && (
-        <Card>
+        <Card data-testid="contract-appraisal-reports">
           <CardHeader>
             <CardTitle>Reports</CardTitle>
             <CardDescription>Select a version to review.</CardDescription>
@@ -531,7 +535,7 @@ const ContractAppraisalPage: React.FC = () => {
       )}
 
       {selected && (
-        <Card>
+        <Card data-testid="contract-appraisal-report-detail">
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-2">

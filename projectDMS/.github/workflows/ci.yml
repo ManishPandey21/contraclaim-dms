@@ -26,6 +26,7 @@ env:
   CONTRACT_QUEUE_ENABLED: "false"
   FALKORDB_ENABLED: "false"
   ALLOW_DEV_HEADERS: "false"
+  RBAC_ENTITLEMENT_FAIL_OPEN: "false"
 
 jobs:
   secret-scan:
@@ -112,6 +113,12 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: npm test -- --run
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run frontend E2E tests
+        run: npm run test:e2e
 
       - name: Build frontend
         run: npm run build
