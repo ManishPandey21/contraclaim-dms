@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 32/100 and Python dependency scan blocker remains.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 38/100 after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Python dependency scan, live-integration, E2E, backup/restore, and sign-off blockers remain.
 
 Current verdict: Not Ready for production.
 
@@ -97,10 +97,10 @@ Current baseline:
 
 ### Gate 5: Upload And Content Safety
 
-- [ ] `ANTIVIRUS_ENABLED=true` in production.
-- [ ] `CLAMAV_FAIL_OPEN=false` in production.
+- [x] `ANTIVIRUS_ENABLED=true` in production. Enforced by `Settings.validate_runtime_configuration`: production refuses to boot when antivirus is disabled unless `ANTIVIRUS_REQUIRED_IN_PRODUCTION=false` is set as a recorded override. Proven by `test_config_validation.py::test_production_validation_requires_antivirus_enabled` and `::test_production_validation_allows_explicit_antivirus_opt_out`.
+- [x] `CLAMAV_FAIL_OPEN=false` in production. Enforced by startup validation; proven by `test_config_validation.py::test_production_validation_rejects_antivirus_fail_open`.
 - [ ] Upload MIME, extension, size, and concurrency limits are validated.
-- [ ] Contract uploads fail closed when ClamAV is unavailable.
+- [x] Contract uploads fail closed when ClamAV is unavailable. `routers/contracts.py` and `routers/documents.py` reject with HTTP 400 when `scan_file` returns not-clean; `AntivirusService` returns not-clean when the daemon is unreachable with `fail_open=false` (`test_antivirus_service.py::test_scan_offline_fail_closed`, `::test_scan_clamav_error_fail_closed`). In production the scan branch is always active because antivirus is required.
 - [ ] Sensitive extracted text is not logged.
 
 ### Gate 6: Database, Migrations, And Seeds
@@ -172,14 +172,14 @@ Current score evidence:
 | P0-002 | Open | Live AI/vector/graph integrations are skipped by default | `RUN_EXTERNAL_INTEGRATION_TESTS=1` required for live tests | Add a staging live-integration release gate and capture results |
 | P0-003 | Partially mitigated | Browser E2E incomplete | Phase 5 adds Playwright coverage for contract upload/search/Q&A/appraisal, but auth/session, document workflows, timeline, chronology, arbitration, and broad empty/error/mobile coverage remain uncovered | Expand E2E harness to all launch-critical workflows |
 | P0-004 | Resolved locally | Migration discipline incomplete | Phase 3 adds `rbac_backend.migrations`, `schema_migrations` ledger, RBAC seed digesting, and `python -m rbac_backend.scripts.migrate_database` dry-run/apply support | Run against staging/fresh MongoDB and confirm in CI/release evidence |
-| P0-005 | Open | Upload antivirus can be disabled | Production examples now set `CLAMAV_FAIL_OPEN=false`, but `ANTIVIRUS_ENABLED=false` until ClamAV is deployed and verified | Require antivirus enabled and fail-closed for production launch |
-| P0-006 | Open | Production Org-Admin permission flow not yet validated | Prior production issue reported for Client DMS permission save/retrieve | Validate and add regression coverage |
-| P0-007 | Open | Python dependency scan is red | Local `pip-audit -r backend/rbac_backend/requirements.txt` found 62 vulnerabilities in 22 packages after resolver conflicts were fixed | Plan and execute framework/AI-stack security upgrade, then rerun backend tests and Docker build |
+| P0-005 | Resolved (code) | Upload antivirus can be disabled | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py` | Deploy ClamAV in staging and capture a live infected/clean scan as final Gate 5 proof |
+| P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box |
+| P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
 | P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/8 and current readiness score is 32/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **32/100** against a target of
+The current production launch-readiness score is **38/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -197,7 +197,7 @@ Current gate score summary:
 | Gate 2: Live Integration Baseline | 0.00 / 10 | 0 / 6 |
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
-| Gate 5: Upload And Content Safety | 0.00 / 10 | 0 / 5 |
+| Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
 | Gate 7: Deployment And Environment | 0.00 / 10 | 0 / 7 |
 | Gate 8: Backup, Restore, And Rollback | 0.00 / 10 | 0 / 8 |

@@ -161,6 +161,12 @@ class Settings(BaseSettings):
     
     # Antivirus Configuration
     ANTIVIRUS_ENABLED: bool = Field(default=False, validation_alias="ANTIVIRUS_ENABLED")
+    # P0-005: production launch requires upload antivirus to be enabled and
+    # fail-closed. Mirrors BACKUP_REQUIRED_IN_PRODUCTION: defaults to required, with
+    # an explicit, auditable escape hatch for environments that consciously accept
+    # the risk (e.g. ClamAV not yet deployed). Setting this false in production is a
+    # deliberate, recorded decision rather than a silent gap.
+    ANTIVIRUS_REQUIRED_IN_PRODUCTION: bool = Field(default=True, validation_alias="ANTIVIRUS_REQUIRED_IN_PRODUCTION")
     CLAMAV_HOST: str = Field(default="localhost", validation_alias="CLAMAV_HOST")
     CLAMAV_PORT: int = Field(default=3310, validation_alias="CLAMAV_PORT")
     CLAMAV_TIMEOUT: int = Field(default=30, validation_alias="CLAMAV_TIMEOUT")
@@ -501,6 +507,11 @@ class Settings(BaseSettings):
                     production_errors.append("BACKUP_ROOT must be an absolute path in production")
                 if not str(self.BACKUP_S3_BUCKET or "").strip():
                     production_errors.append("BACKUP_S3_BUCKET is required when BACKUP_REQUIRED_IN_PRODUCTION=true")
+            # P0-005: upload antivirus must be enabled and fail-closed for launch.
+            if self.ANTIVIRUS_REQUIRED_IN_PRODUCTION and not self.ANTIVIRUS_ENABLED:
+                production_errors.append(
+                    "ANTIVIRUS_ENABLED must be true in production; set ANTIVIRUS_REQUIRED_IN_PRODUCTION=false only to explicitly accept the risk"
+                )
             if self.ANTIVIRUS_ENABLED and self.CLAMAV_FAIL_OPEN:
                 production_errors.append("CLAMAV_FAIL_OPEN must be false in production antivirus environments")
             if getattr(self, "OBSERVABILITY_STORE_RAW_QUERIES", False):

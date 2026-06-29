@@ -104,6 +104,7 @@ Pygments==2.19.2
 # install / container boot failed with ImportError. python-magic needs the
 # libmagic1 system lib (added to backend/Dockerfile).
 pandas==2.2.3
-requests==2.32.3
+# CVE-2024-47081: requests <2.32.4 can leak .netrc credentials to a malicious URL.
+requests==2.32.4
 ratelimit==2.2.1
 python-magic==0.4.27

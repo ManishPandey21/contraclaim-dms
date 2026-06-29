@@ -112,6 +112,87 @@ def test_production_validation_accepts_replicaset_mongodb():
         RBAC_ENTITLEMENT_FAIL_OPEN=False,
         AUTH_COOKIE_SECURE=True,
         BACKUP_S3_BUCKET="backup-bucket",
+        ANTIVIRUS_ENABLED=True,
+        CLAMAV_FAIL_OPEN=False,
+    )
+
+    settings.validate_runtime_configuration()
+
+
+def test_production_validation_requires_antivirus_enabled():
+    """P0-005: production must run with upload antivirus enabled by default."""
+    settings = Settings(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="x" * 32,
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["https://app.contraclaim.com"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        RBAC_ENTITLEMENT_FAIL_OPEN=False,
+        AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
+        ANTIVIRUS_ENABLED=False,
+    )
+
+    with pytest.raises(ValueError, match="ANTIVIRUS_ENABLED"):
+        settings.validate_runtime_configuration()
+
+
+def test_production_validation_rejects_antivirus_fail_open():
+    """P0-005: enabled antivirus must fail closed (CLAMAV_FAIL_OPEN=false)."""
+    settings = Settings(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="x" * 32,
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["https://app.contraclaim.com"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        RBAC_ENTITLEMENT_FAIL_OPEN=False,
+        AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
+        ANTIVIRUS_ENABLED=True,
+        CLAMAV_FAIL_OPEN=True,
+    )
+
+    with pytest.raises(ValueError, match="CLAMAV_FAIL_OPEN"):
+        settings.validate_runtime_configuration()
+
+
+def test_production_validation_allows_explicit_antivirus_opt_out():
+    """The risk can be explicitly accepted, but only via a recorded override."""
+    settings = Settings(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="x" * 32,
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["https://app.contraclaim.com"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        RBAC_ENTITLEMENT_FAIL_OPEN=False,
+        AUTH_COOKIE_SECURE=True,
+        BACKUP_S3_BUCKET="backup-bucket",
+        ANTIVIRUS_ENABLED=False,
+        ANTIVIRUS_REQUIRED_IN_PRODUCTION=False,
     )
 
     settings.validate_runtime_configuration()
