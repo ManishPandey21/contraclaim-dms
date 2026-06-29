@@ -87,6 +87,38 @@ async def _maybe_notify_assignment(db, task: Dict[str, Any], actor_id: Optional[
         logger.debug("Task assignment notification skipped", exc_info=True)
 
 
+def _apply_task_filters(
+    query: Dict[str, Any],
+    *,
+    status_filter: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    linked_claim_id: Optional[str] = None,
+    task_type: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    resource_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Layer optional filters onto a tenant scope query (shared by list/board)."""
+    if status_filter:
+        query["status"] = status_filter
+    if assigned_to:
+        query["assigned_to"] = assigned_to
+    if organization_id:
+        query["organization_id"] = organization_id
+    if project_id:
+        query["project_id"] = project_id
+    if linked_claim_id:
+        query["linked_claim_id"] = linked_claim_id
+    if task_type:
+        query["task_type"] = task_type
+    if resource_type:
+        query["resource_type"] = resource_type
+    if resource_id:
+        query["resource_id"] = resource_id
+    return query
+
+
 @router.get("/tasks", response_model=List[Task])
 async def list_tasks(
     status_filter: Optional[str] = Query(None),
@@ -94,6 +126,9 @@ async def list_tasks(
     project_id: Optional[str] = Query(None),
     organization_id: Optional[str] = Query(None),
     linked_claim_id: Optional[str] = Query(None),
+    task_type: Optional[str] = Query(None),
+    resource_type: Optional[str] = Query(None),
+    resource_id: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db=Depends(get_db),
@@ -111,20 +146,65 @@ async def list_tasks(
         project_id=project_id,
         audit=False,
     )
-    query: Dict[str, Any] = build_scope_query(current_user)
-    if status_filter:
-        query["status"] = status_filter
-    if assigned_to:
-        query["assigned_to"] = assigned_to
-    if organization_id:
-        query["organization_id"] = organization_id
-    if project_id:
-        query["project_id"] = project_id
-    if linked_claim_id:
-        query["linked_claim_id"] = linked_claim_id
+    query = _apply_task_filters(
+        build_scope_query(current_user),
+        status_filter=status_filter,
+        assigned_to=assigned_to,
+        organization_id=organization_id,
+        project_id=project_id,
+        linked_claim_id=linked_claim_id,
+        task_type=task_type,
+        resource_type=resource_type,
+        resource_id=resource_id,
+    )
 
     tasks = await db.tasks.find(query).skip(skip).limit(limit).to_list(length=limit)
     return [Task(**t) for t in tasks]
+
+
+@router.get("/tasks/board")
+async def task_board(
+    assigned_to: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
+    organization_id: Optional[str] = Query(None),
+    resource_type: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    """Assignment board: tasks grouped by lifecycle stage (task_type), tenant-scoped.
+
+    Powers the Draft / Review / Approve columns on the Tasks page. Returns a
+    ``columns`` map keyed by task_type so the client renders without re-grouping.
+    """
+    await policy.authorize(
+        current_user,
+        Permissions.TASK_VIEW,
+        resource_type="tasks",
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
+        project_id=project_id,
+        audit=False,
+    )
+    query = _apply_task_filters(
+        build_scope_query(current_user),
+        assigned_to=assigned_to,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type=resource_type,
+    )
+    rows = await db.tasks.find(query).limit(limit).to_list(length=limit)
+    tasks = [Task(**t) for t in rows]
+
+    columns: Dict[str, List[Task]] = {"draft": [], "review": [], "approve": [], "general": []}
+    for task in tasks:
+        key = (task.task_type or "general").lower()
+        columns.setdefault(key, []).append(task)
+    return {
+        "columns": {key: [t.model_dump(by_alias=True) for t in items] for key, items in columns.items()},
+        "counts": {key: len(items) for key, items in columns.items()},
+        "total": len(tasks),
+    }
 
 
 @router.post("/tasks", response_model=Task, status_code=status.HTTP_201_CREATED)

@@ -15,6 +15,10 @@ from .v20260629_0002_seed_catalog_version import DESCRIPTION as SEED_DESCRIPTION
 from .v20260629_0002_seed_catalog_version import NAME as SEED_NAME
 from .v20260629_0002_seed_catalog_version import VERSION as SEED_VERSION
 from .v20260629_0002_seed_catalog_version import upgrade as upgrade_seed_catalog
+from .v20260630_0001_task_assignment_fields import DESCRIPTION as TASK_FIELDS_DESCRIPTION
+from .v20260630_0001_task_assignment_fields import NAME as TASK_FIELDS_NAME
+from .v20260630_0001_task_assignment_fields import VERSION as TASK_FIELDS_VERSION
+from .v20260630_0001_task_assignment_fields import upgrade as upgrade_task_fields
 
 
 MIGRATIONS = [
@@ -29,5 +33,11 @@ MIGRATIONS = [
         name=SEED_NAME,
         description=SEED_DESCRIPTION,
         upgrade=upgrade_seed_catalog,
+    ),
+    Migration(
+        version=TASK_FIELDS_VERSION,
+        name=TASK_FIELDS_NAME,
+        description=TASK_FIELDS_DESCRIPTION,
+        upgrade=upgrade_task_fields,
     ),
 ]

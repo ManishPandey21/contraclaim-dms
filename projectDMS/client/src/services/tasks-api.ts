@@ -14,6 +14,10 @@ export interface TaskComment {
   created_at: string;
 }
 
+// Workflow assignment linkage (Phase 0). Mirrors backend Task fields.
+export type TaskType = "draft" | "review" | "approve" | "input" | "general";
+export type TaskResourceType = "letter" | "arbitration_draft" | "document" | "claim";
+
 export interface TaskDTO {
   id: string;
   title: string;
@@ -26,6 +30,10 @@ export interface TaskDTO {
   linked_claim_id?: string | null;
   organization_id?: string | null;
   project_id?: string | null;
+  task_type?: TaskType | null;
+  resource_type?: TaskResourceType | string | null;
+  resource_id?: string | null;
+  workflow_stage?: string | null;
   comments: TaskComment[];
   created_at: string;
   updated_at?: string | null;
@@ -42,6 +50,16 @@ export interface CreateTaskPayload {
   linked_claim_id?: string;
   organization_id?: string;
   project_id?: string;
+  task_type?: TaskType;
+  resource_type?: TaskResourceType | string;
+  resource_id?: string;
+  workflow_stage?: string;
+}
+
+export interface TaskBoard {
+  columns: Record<string, TaskDTO[]>;
+  counts: Record<string, number>;
+  total: number;
 }
 
 function normalize(raw: any): TaskDTO {
@@ -58,9 +76,31 @@ export async function getTasks(params?: {
   project_id?: string;
   organization_id?: string;
   linked_claim_id?: string;
+  task_type?: string;
+  resource_type?: string;
+  resource_id?: string;
 }): Promise<TaskDTO[]> {
   const { data } = await api.get("/tasks", { params });
   return Array.isArray(data) ? data.map(normalize) : [];
+}
+
+export async function getTaskBoard(params?: {
+  assigned_to?: string;
+  project_id?: string;
+  organization_id?: string;
+  resource_type?: string;
+}): Promise<TaskBoard> {
+  const { data } = await api.get("/tasks/board", { params });
+  const rawColumns = (data?.columns ?? {}) as Record<string, any[]>;
+  const columns: Record<string, TaskDTO[]> = {};
+  for (const [key, items] of Object.entries(rawColumns)) {
+    columns[key] = Array.isArray(items) ? items.map(normalize) : [];
+  }
+  return {
+    columns,
+    counts: (data?.counts ?? {}) as Record<string, number>,
+    total: Number(data?.total ?? 0),
+  };
 }
 
 export async function createTask(payload: CreateTaskPayload): Promise<TaskDTO> {

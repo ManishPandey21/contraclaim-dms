@@ -402,6 +402,13 @@ async def ensure_indexes(db):
     await db.tasks.create_index("project_id", background=True)
     await db.tasks.create_index("assigned_to", background=True)
     await db.tasks.create_index("linked_claim_id", background=True)
+    # Workflow assignment linkage (Phase 0): list tasks for an artifact, build the
+    # "my tasks" board, and group by stage/type within a tenant.
+    await db.tasks.create_index([("resource_type", 1), ("resource_id", 1)], background=True)
+    await db.tasks.create_index([("assigned_to", 1), ("status", 1)], background=True)
+    await db.tasks.create_index(
+        [("organization_id", 1), ("project_id", 1), ("task_type", 1)], background=True
+    )
 
     # Key Date / Milestone Tracker
     await db.key_date_milestones.create_index(
