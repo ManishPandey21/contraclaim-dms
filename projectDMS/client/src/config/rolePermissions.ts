@@ -74,18 +74,13 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/documentsearch": ["dms.document.view"],
   "/documentviewer": ["dms.document.view"],
   "/reference": ["dms.document.view"],
-  // C3: backend permission is `documents:share` (routers/email_share.py), not `dms.document.share`.
-  "/share": ["documents:share"],
+  "/share": ["dms.document.share"],
   // C3: canonical backend permission is `drafting.request.view` (default_roles.py,
   // letter_drafting.py), not `draft.request.view`.
   "/letters": ["drafting.request.view"],
   "/letter-quality": ["drafting.request.view"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
-  // Contract Appraisal (CAR): canonical backend permission is
-  // `dms.contract.appraisal.view`, which is legacy-aliased to `documents:read`
-  // on the backend. The frontend permission set does not expand that alias, so we
-  // also accept `dms.document.view` to match the population the backend authorizes.
   // Must be listed explicitly so it wins over the `/contracts` prefix match.
   "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
   "/contracts/timeline": ["dms.contract.timeline.view", "dms.evidence_graph.view", "dms.document.view"],
@@ -97,15 +92,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/arbitration/rejoinder": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/counterclaim": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/drafts": ["dms.arbitration.view", "dms.document.view"],
-  // Claims register + SLA tracker (Phase 4). Backend `dms.claim.view` is
-  // legacy-aliased to `documents:read`; accept `dms.document.view` as the
-  // frontend-visible equivalent so the links surface for document viewers.
   "/claims": ["dms.claim.view", "dms.document.view"],
   "/sla": ["dms.claim.view", "dms.document.view"],
-  // Key Date / Milestone Tracker. Backend dms.keydate.view is aliased to
-  // documents:read; accept dms.document.view as the frontend-visible equivalent.
   "/key-dates": ["dms.keydate.view", "dms.document.view"],
-  // Contract Controls registers (backend perms aliased to documents:read).
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
   "/ipc-bills": ["dms.ipc.view", "dms.document.view"],

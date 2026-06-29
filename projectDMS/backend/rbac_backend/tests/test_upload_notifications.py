@@ -281,7 +281,7 @@ def _make_controller(notification_service=None) -> tuple[DocumentController, Stu
         document_service=document_service,
         file_service=SimpleNamespace(),
         export_service=SimpleNamespace(),
-        auth_service=SimpleNamespace(check_document_access=lambda *args, **kwargs: None),
+        auth_service=SimpleNamespace(),
         bulk_upload_service=bulk_upload_service,
     )
     return controller, bulk_upload_service

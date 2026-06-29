@@ -13,9 +13,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
-from ..core.security import CurrentUser, get_current_user, require_permission
+from ..core.permissions import Permissions
+from ..core.security import CurrentUser, get_current_user
 from ..dependencies import get_email_service
-from ..services.authorization_service import AuthorizationService
 from ..services.email_group_service import EmailGroupService
 from ..services.email_service import EmailService
 from ..services.policy_service import PolicyService
@@ -23,7 +23,6 @@ from ..utils.rate_limiter import RateLimiter
 from ..utils.validation import sanitize_filename, sanitize_html
 
 router = APIRouter()
-auth_service = AuthorizationService()
 group_service = EmailGroupService()
 public_share_limiter = RateLimiter(requests_per_minute=120, window_seconds=3600)
 
@@ -813,7 +812,6 @@ async def share_document(
     payload: DocumentShareRequest,
     current_user: CurrentUser = Depends(get_current_user),
     email_service: EmailService = Depends(get_email_service),
-    _: None = Depends(require_permission("documents:share")),
 ):
     """Share a document via email."""
     to_emails = payload.to.copy()
@@ -836,16 +834,11 @@ async def share_document(
         document.get("organization_id") or document.get("organizationId")
     )
     project_id = document.get("project_id") or document.get("projectId")
-    await auth_service.check_document_access(
-        current_user, organization_id, project_id, "share"
-    )
-    await PolicyService(email_service.db).authorize(
+    await PolicyService(email_service.db).authorize_document(
         current_user,
-        "dms.document.download",
+        Permissions.DOCUMENT_SHARE,
+        document,
         resource_type="document_share",
-        resource_id=str(document.get("_id") or payload.document_id),
-        organization_id=str(organization_id) if organization_id else None,
-        project_id=str(project_id) if project_id else None,
     )
 
     if payload.group_ids:

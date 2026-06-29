@@ -19,11 +19,13 @@ import aiosmtplib
 from jinja2 import Environment, BaseLoader, select_autoescape
 import bleach
 
+from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser, authorize_scope
 from ..core.database import get_db
 from ..core.config import settings
 from ..services.email_service import EmailService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..services.template_service import TemplateService
 from ..models.email_models import (
     EmailRequest, EmailResponse, EmailTemplate, EmailAttachment
@@ -222,15 +224,12 @@ class EmailController:
         if not document:
             raise EmailError("Document not found", status.HTTP_404_NOT_FOUND)
         
-        # Check document access permission
-        has_access = await self.auth_service.check_document_access(
-            current_user, document, "share"
+        await PolicyService().authorize_document(
+            current_user,
+            Permissions.DOCUMENT_SHARE,
+            document,
+            resource_type="document_share",
         )
-        if not has_access:
-            raise EmailError(
-                "No permission to share this document",
-                status.HTTP_403_FORBIDDEN
-            )
         
         return document
 

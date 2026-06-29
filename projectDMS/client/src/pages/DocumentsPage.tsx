@@ -1030,7 +1030,7 @@ const DocumentsPage = () => {
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
-  const canDeleteDocuments = useHasPermission("documents:delete");
+  const canDeleteDocuments = useHasPermission("dms.document.delete");
 
   const handleViewDocument = (docId: string) => {
     // navigate(`api/documents/${docId}`);

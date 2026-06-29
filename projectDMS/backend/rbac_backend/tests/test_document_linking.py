@@ -67,38 +67,38 @@ class _StubDocumentService:
         return list(self.linked_payload.get(document_id, []))
 
 
-class _StubAuthService:
+class _StubPolicyService:
     def __init__(self) -> None:
         self.calls: List[Dict[str, Any]] = []
 
-    async def check_document_access(
+    async def authorize_document(
         self,
         current_user: CurrentUser,
-        organization_id: str,
-        project_id: str,
         permission: str,
+        document: _StubDocument,
+        **_: Any,
     ) -> None:
         self.calls.append(
             {
                 "user_id": current_user.id,
-                "organization_id": organization_id,
-                "project_id": project_id,
+                "document_id": document.id,
                 "permission": permission,
             }
         )
 
 
-def _make_controller() -> tuple[DocumentController, _StubDocumentService, _StubAuthService]:
+def _make_controller() -> tuple[DocumentController, _StubDocumentService, _StubPolicyService]:
     document_service = _StubDocumentService()
-    auth_service = _StubAuthService()
+    policy_service = _StubPolicyService()
     controller = DocumentController(
         document_service=document_service,  # type: ignore[arg-type]
         file_service=SimpleNamespace(),
         export_service=SimpleNamespace(),
-        auth_service=auth_service,  # type: ignore[arg-type]
+        auth_service=SimpleNamespace(),  # type: ignore[arg-type]
         bulk_upload_service=SimpleNamespace(),
     )
-    return controller, document_service, auth_service
+    controller.policy_service = policy_service  # type: ignore[assignment]
+    return controller, document_service, policy_service
 
 
 def _make_user() -> CurrentUser:
@@ -114,7 +114,7 @@ def _make_user() -> CurrentUser:
 
 
 async def test_controller_link_documents_uses_current_payload_schema() -> None:
-    controller, document_service, auth_service = _make_controller()
+    controller, document_service, policy_service = _make_controller()
     user = _make_user()
 
     document_service.documents["doc-a"] = _StubDocument(id="doc-a")
@@ -144,24 +144,22 @@ async def test_controller_link_documents_uses_current_payload_schema() -> None:
             "current_user_id": "user-123",
         }
     ]
-    assert auth_service.calls == [
+    assert policy_service.calls == [
         {
             "user_id": "user-123",
-            "organization_id": "org-1",
-            "project_id": "proj-1",
-            "permission": "update",
+            "document_id": "doc-a",
+            "permission": "dms.document.link_reference",
         },
         {
             "user_id": "user-123",
-            "organization_id": "org-1",
-            "project_id": "proj-1",
-            "permission": "read",
+            "document_id": "doc-b",
+            "permission": "dms.document.view",
         },
     ]
 
 
 async def test_controller_list_linked_documents_returns_service_payload() -> None:
-    controller, document_service, auth_service = _make_controller()
+    controller, document_service, policy_service = _make_controller()
     user = _make_user()
 
     document_service.documents["doc-a"] = _StubDocument(id="doc-a")
@@ -182,12 +180,11 @@ async def test_controller_list_linked_documents_returns_service_payload() -> Non
             "description": "Related workstream",
         }
     ]
-    assert auth_service.calls == [
+    assert policy_service.calls == [
         {
             "user_id": "user-123",
-            "organization_id": "org-1",
-            "project_id": "proj-1",
-            "permission": "read",
+            "document_id": "doc-a",
+            "permission": "dms.document.view",
         }
     ]
 

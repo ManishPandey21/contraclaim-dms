@@ -277,25 +277,29 @@ class FakeDatabase:
 
 
 class StubAuthorizationService:
-    async def check_document_access(self, *_: Any, **__: Any) -> None:
-        return None
-
     async def build_document_query(
         self, _user: CurrentUser, filters: Dict[str, Any]
     ) -> Dict[str, Any]:
         return {k: v for k, v in filters.items() if v not in (None, "", [], {})}
 
 
+class StubPolicyService:
+    async def authorize_document(self, *_: Any, **__: Any) -> None:
+        return None
+
+
 def _make_controller(fake_db: FakeDatabase) -> DocumentController:
     service = DocumentService(fake_db)
     # Lazy imports avoided by using lightweight lambda stubs for other dependencies
-    return DocumentController(
+    controller = DocumentController(
         document_service=service,
         file_service=SimpleNamespace(),
         export_service=SimpleNamespace(),
         auth_service=StubAuthorizationService(),
         bulk_upload_service=SimpleNamespace(),
     )
+    controller.policy_service = StubPolicyService()  # type: ignore[assignment]
+    return controller
 
 
 def _make_user() -> CurrentUser:
@@ -364,14 +368,6 @@ async def test_add_and_remove_reference_round_trip(monkeypatch) -> None:
     controller = _make_controller(fake_db)
     user = _make_user()
 
-    async def _allow_access(*_args: Any, **_kwargs: Any) -> bool:
-        return True
-
-    monkeypatch.setattr(
-        "rbac_backend.routers.documents.permission_service.check_resource_access",
-        _allow_access,
-    )
-
     updated = await controller_add_reference(
         controller,
         str(source_id),
@@ -422,13 +418,10 @@ async def test_link_documents_endpoint_creates_bidirectional_relationship(monkey
     app.dependency_overrides[get_document_controller] = override_controller
     app.dependency_overrides[get_current_user] = _make_user
 
-    async def _allow_access(*_args: Any, **_kwargs: Any) -> bool:
-        return True
+    async def _fake_get_database() -> FakeDatabase:
+        return fake_db
 
-    monkeypatch.setattr(
-        "rbac_backend.routers.documents.permission_service.check_resource_access",
-        _allow_access,
-    )
+    monkeypatch.setattr("rbac_backend.routers.documents.get_database", _fake_get_database)
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

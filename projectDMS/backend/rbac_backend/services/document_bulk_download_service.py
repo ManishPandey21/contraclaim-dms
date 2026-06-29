@@ -18,10 +18,9 @@ from fastapi import HTTPException, status
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.security import CurrentUser, authorize_scope
+from ..core.security import CurrentUser
 from ..services.document_audit_service import DocumentAuditService
 from ..services.file_object_service import FileObjectService
-from ..services.permission_service import PermissionService
 from ..services.policy_service import PolicyService
 from ..services.s3_service import S3Service
 from ..services.storage_settings_service import StorageSettingsService
@@ -59,14 +58,12 @@ class DocumentBulkDownloadService:
         self,
         *,
         db: Any = None,
-        permission_service: Optional[PermissionService] = None,
         audit_service: Optional[DocumentAuditService] = None,
         file_object_service: Optional[FileObjectService] = None,
         storage_settings: Optional[StorageSettingsService] = None,
         s3_service: Optional[S3Service] = None,
     ) -> None:
         self.db = db
-        self.permission_service = permission_service or PermissionService()
         self.policy_service = PolicyService(db)
         self.audit_service = audit_service or DocumentAuditService(db)
         self.file_object_service = file_object_service or FileObjectService(db)
@@ -231,61 +228,6 @@ class DocumentBulkDownloadService:
             total_size=total_size,
             cleanup_paths=[zip_path, *cleanup_paths],
         )
-
-    async def _authorize_bulk_download(
-        self,
-        current_user: CurrentUser,
-        organization_id: str,
-        project_id: str,
-    ) -> None:
-        roles = {str(role).lower() for role in (getattr(current_user, "roles", []) or [])}
-
-        if "superadmin" in roles:
-            return
-
-        if "orgadmin" in roles:
-            allowed_orgs = {
-                str(org) for org in (getattr(current_user, "organizations", []) or []) if org
-            }
-            if getattr(current_user, "organization_id", None):
-                allowed_orgs.add(str(current_user.organization_id))
-            if str(organization_id) in allowed_orgs:
-                return
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Not authorized for this organization",
-            )
-
-        authorize_scope(
-            current_user,
-            organization_id=organization_id,
-            project_id=project_id,
-        )
-
-        if "projectadmin" in roles:
-            return
-
-        assigned_projects = {
-            str(project) for project in (getattr(current_user, "projects", []) or []) if project
-        }
-        if str(project_id) not in assigned_projects:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Bulk downloads are limited to assigned projects",
-            )
-
-        allowed = await self.permission_service.user_has_permission(
-            current_user.id,
-            "documents:download_all",
-            log=False,
-            resource_type="project",
-            resource_id=project_id,
-        )
-        if not allowed:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Missing required permission: documents:download_all",
-            )
 
     async def _resolve_short_names(
         self,

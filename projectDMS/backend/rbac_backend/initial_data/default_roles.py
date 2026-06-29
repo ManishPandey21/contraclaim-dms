@@ -2,6 +2,17 @@ from datetime import datetime
 
 from ..core.permissions import CLIENT_DMS_PERMISSIONS
 
+DOCUMENT_EDITOR_PERMISSIONS = [
+    "dms.document.view",
+    "dms.document.upload",
+    "dms.document.edit_metadata",
+    "dms.document.delete",
+    "dms.document.download",
+    "dms.document.share",
+    "dms.status.update",
+    "dms.comment.add",
+]
+
 DEFAULT_ROLES = [
     {
         "_id": "superadmin",
@@ -12,21 +23,12 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
             "drafting.request.create",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:download_all",
             "dms.document.bulk_download",
-            "documents:comment",
             "tags:read",
             "tags:create",
             "tags:update",
@@ -64,20 +66,11 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:download_all",
             "dms.document.bulk_download",
-            "documents:comment",
             "tags:read",
             "tags:create",
             "tags:update",
@@ -118,18 +111,10 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:comment",
             "tags:read",
             "projects:read",
             "users:read",
@@ -151,18 +136,10 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:comment",
             "tags:read",
             "projects:read",
             "users:read",
@@ -184,20 +161,11 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:download_all",
             "dms.document.bulk_download",
-            "documents:comment",
             "tags:read",
             "tags:create",
             "tags:update",
@@ -225,18 +193,10 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:create",
             "dms.document.upload",
-            "documents:update",
-            "documents:delete",
-            "documents:approve",
-            "documents:share",
-            "documents:upload",
             "dms.document.download",
-            "documents:comment",
             "tags:read",
             "projects:read",
             "users:read",
@@ -258,10 +218,9 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
-            "documents:upload",
+            "dms.document.upload",
             "dms.document.download",
             "tags:read",
             "projects:read",
@@ -305,7 +264,6 @@ DEFAULT_ROLES = [
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
         "permissions": [
-            "documents:read",
             "dms.document.view",
             "dms.dashboard.view",
             "tags:read",
@@ -407,4 +365,19 @@ def _merge_role_permissions(role_ids: set[str], permissions: list[str]) -> None:
 _merge_role_permissions(
     {"superadmin", "orgadmin", "projectadmin", "contractmgr_org"},
     CLIENT_DMS_PERMISSIONS,
+)
+
+_merge_role_permissions(
+    {"orguser", "projectuser"},
+    DOCUMENT_EDITOR_PERMISSIONS,
+)
+
+_merge_role_permissions(
+    {"doccontroller"},
+    [
+        "dms.document.view",
+        "dms.document.upload",
+        "dms.document.download",
+        "dms.dashboard.view",
+    ],
 )

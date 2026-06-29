@@ -301,8 +301,8 @@ export const useLetterWorkflow = () => {
             ? rawUsersPayload.data
             : [];
           const sourceUsers = Array.isArray(rawUsers) ? rawUsers : [];
-          // Only include roles that have drafting capability (docs:create).
-          // Based on seeded roles, exclude doccontroller (no docs:create).
+          // Only include roles that have drafting capability.
+          // Based on seeded roles, exclude document controllers.
           const draftingRoles = new Set([
             "superadmin",
             "orgadmin",

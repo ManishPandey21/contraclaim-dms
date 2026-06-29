@@ -8,7 +8,9 @@ from ..core.security import (
     validate_role_assignment as core_validate_role_assignment,
     authorize_scope,
 )
+from ..core.permissions import Permissions
 from ..core.database import get_database
+from ..services.policy_service import PolicyService
 from ..services.permission_service import PermissionService
 from ..utils.audit_logger import get_audit_logger
 
@@ -146,17 +148,24 @@ class AuthorizationService:
 
         action_normalized = (action or "read").lower()
         perm_map = {
-            "read": "documents:read",
-            "view": "documents:read",
-            "create": "documents:create",
-            "write": "documents:create",
-            "update": "documents:update",
-            "edit": "documents:update",
-            "delete": "documents:delete",
-            "admin": "documents:approve",
+            "read": Permissions.DOCUMENT_VIEW,
+            "view": Permissions.DOCUMENT_VIEW,
+            "create": Permissions.DOCUMENT_UPLOAD,
+            "write": Permissions.DOCUMENT_UPLOAD,
+            "update": Permissions.DOCUMENT_EDIT_METADATA,
+            "edit": Permissions.DOCUMENT_EDIT_METADATA,
+            "delete": Permissions.DOCUMENT_DELETE,
+            "admin": Permissions.STATUS_UPDATE,
         }
-        perm = perm_map.get(action_normalized, "documents:read")
-        await self.require_permission(current_user, perm)
+        permission = perm_map.get(action_normalized, Permissions.DOCUMENT_VIEW)
+        await PolicyService().authorize(
+            current_user,
+            permission,
+            resource_type="letter",
+            resource_id=str(getattr(letter, "id", None) or getattr(letter, "_id", "") or "") or None,
+            organization_id=str(org_id) if org_id else None,
+            project_id=str(proj_id) if proj_id else None,
+        )
 
     @staticmethod
     def _is_contract_letter_drafter(role_names: set[str]) -> bool:
@@ -192,8 +201,13 @@ class AuthorizationService:
         if proj_id is None and isinstance(letter_data, dict):
             proj_id = letter_data.get("project_id") or letter_data.get("projectId")
 
-        authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
-        await self.require_permission(current_user, "documents:create")
+        await PolicyService().authorize(
+            current_user,
+            Permissions.DOCUMENT_UPLOAD,
+            resource_type="letter",
+            organization_id=str(org_id) if org_id else None,
+            project_id=str(proj_id) if proj_id else None,
+        )
 
     # ------------------------------------------------------------------
     # Roles / permissions
@@ -487,38 +501,6 @@ class AuthorizationService:
     # ------------------------------------------------------------------
     # Documents
     # ------------------------------------------------------------------
-    async def check_document_access(
-        self,
-        current_user: Any,
-        organization_id: Optional[str],
-        project_id: Optional[str],
-        action: str,
-    ) -> None:
-        if current_user is None:
-            raise AuthorizationError("Authentication required for document access")
-
-        role_names = self._extract_role_names(current_user)
-        if "superadmin" in role_names:
-            return
-
-        action_normalized = (action or "read").lower()
-        allowed_orgs = self._collect_user_org_ids(current_user)
-        allowed_projects = self._collect_user_project_ids(current_user)
-
-        if organization_id and (organization_id not in allowed_orgs):
-            raise AuthorizationError("Access denied to documents within this organization")
-
-        if project_id and (
-            project_id not in allowed_projects
-            and not ({"orgadmin", "orguser"} & role_names)
-        ):
-            raise AuthorizationError("Access denied to documents within this project")
-
-        if action_normalized in {"create", "update", "delete", "write", "admin"}:
-            if {"orgadmin", "projectadmin"} & role_names:
-                return
-            raise AuthorizationError(f"Access denied to {action_normalized} document", 403)
-
     async def _expand_lookup_filter_values(
         self, collection_name: str, values: Any
     ) -> list[str]:

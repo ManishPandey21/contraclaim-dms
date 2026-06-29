@@ -1,4 +1,5 @@
 import inspect
+from pathlib import Path
 
 from fastapi.routing import APIRoute
 
@@ -120,7 +121,6 @@ def test_unsafe_routes_have_explicit_auth_or_public_classification():
         "require_step_up",
         "ensure_manage_",
         "auth_service.require_permission",
-        "check_document_access",
         "check_organization_access",
         "check_project_access",
         "verify_langgraph_token",
@@ -138,6 +138,43 @@ def test_unsafe_routes_have_explicit_auth_or_public_classification():
             missing.append(f"{','.join(sorted(methods))} {route.path} {route.name}")
 
     assert missing == []
+
+
+def test_legacy_document_permission_flow_is_removed_from_active_source():
+    repo_root = Path(__file__).resolve().parents[2]
+    active_roots = [
+        repo_root / "rbac_backend",
+        repo_root.parent / "client" / "src",
+    ]
+    forbidden = (
+        "Legacy Document Permissions",
+        "Legacy Documents Permission",
+        "documents:read",
+        "documents:create",
+        "documents:update",
+        "documents:delete",
+        "documents:approve",
+        "documents:share",
+        "documents:upload",
+        "documents:download_all",
+        "documents:comment",
+        "check_document_access",
+    )
+    allowed_files = {
+        Path(__file__).resolve(),
+    }
+
+    hits: list[str] = []
+    for root in active_roots:
+        for path in root.rglob("*"):
+            if path in allowed_files or not path.is_file() or path.suffix not in {".py", ".ts", ".tsx"}:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for token in forbidden:
+                if token in text:
+                    hits.append(f"{path.relative_to(repo_root.parent)}: {token}")
+
+    assert hits == []
 
 
 def test_critical_dangerous_routes_require_step_up():

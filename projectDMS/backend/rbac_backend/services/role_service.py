@@ -956,7 +956,10 @@ class RoleService:
                     "description": "Organization Administrator",
                     "permissions": [
                         "users:read", "users:create", "users:update",
-                        "documents:read", "documents:create", "documents:update", "documents:delete",
+                        "dms.document.view", "dms.document.upload",
+                        "dms.document.edit_metadata", "dms.document.delete",
+                        "dms.document.download", "dms.document.share",
+                        "dms.status.update", "dms.comment.add",
                         "projects:read", "projects:create", "projects:update", "projects:delete"
                     ],
                     "is_system": True
@@ -965,7 +968,8 @@ class RoleService:
                     "name": "user",
                     "description": "Standard User",
                     "permissions": [
-                        "documents:read", "documents:create", "documents:update",
+                        "dms.document.view", "dms.document.upload",
+                        "dms.document.edit_metadata", "dms.comment.add",
                         "profile:read", "profile:update"
                     ],
                     "is_system": True

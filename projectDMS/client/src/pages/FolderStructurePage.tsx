@@ -280,7 +280,7 @@ const FolderStructurePage: React.FC = () => {
       ["superadmin", "orgadmin", "projectadmin"].includes(
         String(role).toLowerCase()
       )
-    ) || can("documents:download_all");
+    ) || can("dms.document.bulk_download");
 
   const selectedProject = projects.find((project) => project._id === selectedProjId);
   const tree = useMemo(() => buildDocumentTree(documents), [documents]);

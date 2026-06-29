@@ -22,7 +22,7 @@ import tempfile
 
 from ..core.database import get_db, get_database
 from ..core.permissions import Permissions
-from ..core.security import get_current_user, CurrentUser, authorize_scope, require_permission
+from ..core.security import get_current_user, CurrentUser
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..services.document_service import DocumentConflictError, DocumentService
@@ -33,7 +33,6 @@ from ..services.bulk_upload_service import BulkUploadService
 from ..services.langchain_vector_service import LangChainVectorService
 from ..dependencies import get_notification_service
 from ..services.reference_sync_service import ReferenceSyncError
-from ..services.permission_service import PermissionService
 from ..services.storage_settings_service import StorageSettingsService
 from ..services.s3_service import S3Service
 from ..services.storage_key_builder import StorageKeyBuilder
@@ -70,7 +69,6 @@ from fastapi.responses import FileResponse, Response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-permission_service = PermissionService()
 
 
 async def get_policy_service() -> PolicyService:
@@ -89,22 +87,35 @@ def verify_langgraph_token(x_api_token: str = Header(...)) -> None:
             detail="Invalid service token",
         )
 
+
+def _current_user_policy_scope(current_user: CurrentUser) -> tuple[Optional[str], Optional[str]]:
+    organization_id = getattr(current_user, "organization_id", None)
+    if not organization_id:
+        organizations = getattr(current_user, "organizations", None) or []
+        organization_id = organizations[0] if organizations else None
+    projects = getattr(current_user, "projects", None) or []
+    project_id = projects[0] if projects else None
+    return (
+        str(organization_id) if organization_id else None,
+        str(project_id) if project_id else None,
+    )
+
+
 async def _ensure_document_access(
     current_user: CurrentUser,
     document_id: str,
     permission: str,
 ) -> None:
-    allowed = await permission_service.check_resource_access(
-        current_user.id,
-        permission,
-        "document",
-        document_id,
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to access this document",
-        )
+    db = await get_database()
+    candidates: list[Any] = [document_id]
+    try:
+        candidates.append(ObjectId(document_id))
+    except Exception:
+        pass
+    document = await db.documents.find_one({"_id": {"$in": candidates}})
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    await PolicyService(db).authorize_document(current_user, permission, document)
 
 
 def _parse_revision_header(
@@ -163,6 +174,7 @@ class DocumentController:
         self.auth_service = auth_service
         self.bulk_upload_service = bulk_upload_service
         self.storage_settings = StorageSettingsService()
+        self.policy_service = PolicyService()
         self.s3_service = S3Service()
         self.storage_key_builder = StorageKeyBuilder()
         self.file_object_service = FileObjectService(
@@ -340,6 +352,15 @@ class DocumentController:
                 status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        scope_org, scope_project = _current_user_policy_scope(current_user)
+        await self.policy_service.authorize(
+            current_user,
+            Permissions.DOCUMENT_VIEW,
+            resource_type="document_vector_search",
+            organization_id=filters.get("organization_id") or scope_org,
+            project_id=filters.get("project_id") or scope_project,
+        )
+
         validated_filters = await self.auth_service.build_document_query(
             current_user,
             filters,
@@ -409,11 +430,8 @@ class DocumentController:
             document = doc_lookup.get(doc_id)
             doc_summary: Optional[Dict[str, Any]] = None
             if document:
-                await self.auth_service.check_document_access(
-                    current_user,
-                    str(document.organization_id),
-                    str(document.project_id) if document.project_id else None,
-                    "read",
+                await self.policy_service.authorize_document(
+                    current_user, Permissions.DOCUMENT_VIEW, document
                 )
                 doc_summary = {
                     "id": doc_id,
@@ -473,9 +491,13 @@ class DocumentController:
     ) -> Document:
         """Create document with comprehensive validation and security."""
         try:
-            # Authorization check
-            await self.auth_service.check_document_access(
-                current_user, organization_id, project_id, "create"
+            await self.policy_service.authorize(
+                current_user,
+                Permissions.DOCUMENT_UPLOAD,
+                resource_type="project",
+                resource_id=project_id,
+                organization_id=organization_id,
+                project_id=project_id,
             )
 
             # Validate required fields
@@ -614,9 +636,13 @@ class DocumentController:
     ) -> BulkUploadResponse:
         """Handle bulk document upload with CSV metadata."""
         try:
-            # Authorization check
-            await self.auth_service.check_document_access(
-                current_user, organization_id, project_id, "create"
+            await self.policy_service.authorize(
+                current_user,
+                Permissions.DOCUMENT_UPLOAD,
+                resource_type="project",
+                resource_id=project_id,
+                organization_id=organization_id,
+                project_id=project_id,
             )
 
             # Validate CSV file
@@ -1135,11 +1161,8 @@ class DocumentController:
             if not skip_authorization:
                 if current_user is None:
                     raise DocumentError("Unauthorized", status.HTTP_401_UNAUTHORIZED)
-                await self.auth_service.check_document_access(
-                    current_user,
-                    document.organization_id,
-                    document.project_id,
-                    "update",
+                await self.policy_service.authorize_document(
+                    current_user, Permissions.DOCUMENT_EDIT_METADATA, document
                 )
 
             file_path = await self._materialize_for_processing(document)
@@ -1207,8 +1230,8 @@ async def controller_get_document(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, document
         )
 
         return await self.document_service.enrich_document(document)
@@ -1292,8 +1315,8 @@ async def controller_update_document(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_EDIT_METADATA, document
         )
 
         validated_update = await self.document_service.validate_update(
@@ -1358,8 +1381,8 @@ async def controller_delete_document(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "delete"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_DELETE, document
         )
 
         deleted = await self.document_service.delete_document(
@@ -1412,8 +1435,8 @@ async def controller_add_enclosure(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_EDIT_METADATA, document
         )
 
         if not file.filename:
@@ -1528,8 +1551,8 @@ async def controller_list_enclosures(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, document
         )
 
         return await self.document_service.list_enclosures(document_id)
@@ -1554,8 +1577,8 @@ async def controller_remove_enclosure(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_EDIT_METADATA, document
         )
 
         await self.document_service.remove_enclosure(document_id, enclosure_id)
@@ -1584,8 +1607,8 @@ async def controller_list_references(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, document
         )
 
         return await self.document_service.list_references(document_id)
@@ -1610,8 +1633,8 @@ async def controller_add_reference(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_LINK_REFERENCE, document
         )
 
         target = await self.document_service.get_document_by_id(
@@ -1620,10 +1643,8 @@ async def controller_add_reference(
         if not target:
             raise DocumentError("Referenced document not found", status.HTTP_404_NOT_FOUND)
 
-        await _ensure_document_access(current_user, reference_data.referenced_document_id, "dms.document.view")
-
-        await self.auth_service.check_document_access(
-            current_user, target.organization_id, target.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, target
         )
 
         return await self.document_service.add_reference(
@@ -1652,8 +1673,8 @@ async def controller_remove_reference(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_LINK_REFERENCE, document
         )
 
         return await self.document_service.remove_reference(document_id, reference_id)
@@ -1677,8 +1698,8 @@ async def controller_sync_references(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_LINK_REFERENCE, document
         )
 
         references_payload: List[Dict[str, Any]] = []
@@ -1774,11 +1795,11 @@ async def controller_link_documents(
         if not source or not target:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, source.organization_id, source.project_id, "update"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_LINK_REFERENCE, source
         )
-        await self.auth_service.check_document_access(
-            current_user, target.organization_id, target.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, target
         )
 
         return await self.document_service.link_documents(
@@ -1813,8 +1834,8 @@ async def controller_list_linked_documents(
         if not document:
             raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
 
-        await self.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "read"
+        await self.policy_service.authorize_document(
+            current_user, Permissions.DOCUMENT_VIEW, document
         )
 
         return await self.document_service.list_linked_documents(document_id)
@@ -1856,7 +1877,6 @@ async def vector_search_documents_endpoint(
     uploadType: Optional[str] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ) -> Dict[str, Any]:
     filters = {
         "organization_id": organization_id,
@@ -1884,7 +1904,6 @@ async def export_documents(
     date_to: Optional[date] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Export documents with filtering. Returns a downloadable file.
@@ -1904,6 +1923,15 @@ async def export_documents(
         "date_from": date_from,
         "date_to": date_to,
     }
+
+    scope_org, scope_project = _current_user_policy_scope(current_user)
+    await PolicyService().authorize(
+        current_user,
+        Permissions.DOCUMENT_DOWNLOAD,
+        resource_type="documents_export",
+        organization_id=organization_id or scope_org,
+        project_id=project_id or scope_project,
+    )
 
     # Authorization-aware query
     authorized_query = await controller.auth_service.build_document_query(
@@ -2146,7 +2174,6 @@ async def create_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
-    _: None = Depends(require_permission("documents:create")),
 ):
     """Create a new document."""
     await policy.authorize(
@@ -2157,17 +2184,6 @@ async def create_document(
         organization_id=organization_id,
         project_id=project_id,
     )
-    allowed = await permission_service.check_resource_access(
-        current_user.id,
-        "documents:create",
-        "project",
-        project_id,
-    )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to create documents for this project",
-        )
     return await controller.create_document(
         background_tasks=background_tasks,
         file=file,
@@ -2197,12 +2213,11 @@ async def get_document(
     response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Get a specific document."""
-    await _ensure_document_access(current_user, id, "dms.document.view")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
     document = await controller_get_document(controller, id, current_user)
-    await PolicyService().authorize_document(current_user, "dms.document.view", document)
+    await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
     await _set_document_revision_headers(response, controller, id)
     return document
 
@@ -2213,10 +2228,9 @@ async def process_document_endpoint(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ) -> DocumentProcessingResult:
     """Trigger OCR/AI processing for an existing document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
     return await controller.process_document(id, current_user)
 
 
@@ -2250,7 +2264,7 @@ async def download_all_project_documents(
     - superadmin: any project
     - orgadmin: projects in their organization
     - projectadmin: assigned projects
-    - other users: assigned project plus documents:download_all
+    - other users: assigned project plus dms.document.bulk_download
     """
     result = await service.create_project_archive(
         project_id=project_id,
@@ -2373,7 +2387,6 @@ async def list_documents(
     limit: int = Query(100, ge=1, le=1000),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """List documents with filtering and pagination."""
     filters = {
@@ -2391,12 +2404,13 @@ async def list_documents(
     }
     pagination = {"skip": skip, "limit": limit}
 
+    scope_org, scope_project = _current_user_policy_scope(current_user)
     await PolicyService().authorize(
         current_user,
-        "dms.document.view",
+        Permissions.DOCUMENT_VIEW,
         resource_type="documents",
-        organization_id=organization_id,
-        project_id=project_id,
+        organization_id=organization_id or scope_org,
+        project_id=project_id or scope_project,
         audit=False,
     )
     return await controller_list_documents(controller, filters, pagination, current_user)
@@ -2412,14 +2426,13 @@ async def update_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Update a document."""
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_EDIT_METADATA, existing)
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
     expected_revision = _parse_revision_header(if_match, x_document_revision)
     document = await controller_update_document(
         controller,
@@ -2441,7 +2454,6 @@ async def delete_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:delete")),
 ):
     """Delete a document."""
     await require_step_up(request, current_user, action="documents.delete")
@@ -2449,7 +2461,7 @@ async def delete_document(
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
     await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_DELETE, existing)
-    await _ensure_document_access(current_user, id, "documents:delete")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_DELETE)
     expected_revision = _parse_revision_header(if_match, x_document_revision)
     await controller_delete_document(
         controller,
@@ -2467,16 +2479,12 @@ async def list_document_audit_events(
     limit: int = Query(100, ge=1, le=500),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Return immutable audit events for a document."""
-    await _ensure_document_access(current_user, id, "dms.document.view")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
     document = await controller.document_service.get_document_by_id(id)
     if not document:
         raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
-    await controller.auth_service.check_document_access(
-        current_user, document.organization_id, document.project_id, "read"
-    )
     return await controller.audit_service.list_events(
         resource_type="document",
         resource_id=id,
@@ -2491,10 +2499,9 @@ async def list_enclosures(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """List all enclosures for a document."""
-    await _ensure_document_access(current_user, id, "dms.document.view")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
     return await controller_list_enclosures(controller, id, current_user)
 
 
@@ -2505,10 +2512,9 @@ async def add_enclosure(
     file: UploadFile = File(...),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Add an enclosure to a document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
     return await controller_add_enclosure(controller, id, file, current_user)
 
 
@@ -2519,10 +2525,9 @@ async def remove_enclosure(
     enclosure_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Remove an enclosure from a document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
     await controller_remove_enclosure(controller, id, enclosure_id, current_user)
 
 
@@ -2532,10 +2537,9 @@ async def get_document_references(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Retrieve parsed and linked references for a document."""
-    await _ensure_document_access(current_user, id, "dms.document.view")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
     return await controller_list_references(controller, id, current_user)
 
 
@@ -2546,10 +2550,9 @@ async def add_document_reference(
     reference_data: ReferenceCreate,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Add or update a linked reference for a document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
     return await controller_add_reference(controller, id, reference_data, current_user)
 
 
@@ -2560,10 +2563,9 @@ async def delete_document_reference(
     reference_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Remove a linked reference from a document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
     return await controller_remove_reference(controller, id, reference_id, current_user)
 
 
@@ -2573,10 +2575,9 @@ async def trigger_reference_sync(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Manually trigger bidirectional reference synchronisation for a document."""
-    await _ensure_document_access(current_user, id, "documents:update")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
     return await controller_sync_references(controller, id, current_user)
 
 
@@ -2586,11 +2587,10 @@ async def link_documents_endpoint(
     payload: LinkDocumentsRequest,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:update")),
 ):
     """Link two documents together."""
-    await _ensure_document_access(current_user, payload.source_document_id, "documents:update")
-    await _ensure_document_access(current_user, payload.target_document_id, "dms.document.view")
+    await _ensure_document_access(current_user, payload.source_document_id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, payload.target_document_id, Permissions.DOCUMENT_VIEW)
     return await controller_link_documents(controller, payload, current_user)
 
 
@@ -2600,10 +2600,9 @@ async def get_linked_documents(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """Return documents linked to the given document."""
-    await _ensure_document_access(current_user, id, "dms.document.view")
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
     return await controller_list_linked_documents(controller, id, current_user)
 
 # ---------------------------------------------
@@ -2615,7 +2614,6 @@ async def get_document_comments(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Return comments for a document: [{ id, text, author, createdAt }, ...]
@@ -2625,12 +2623,7 @@ async def get_document_comments(
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    await _ensure_document_access(current_user, id, "dms.document.view")
-
-    # Authorization
-    await controller.auth_service.check_document_access(
-        current_user, document.organization_id, document.project_id, "read"
-    )
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
 
     return await controller.document_service.get_comments(id)
 
@@ -2641,7 +2634,6 @@ async def add_document_comment(
     text: str = Body(..., embed=True),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:comment")),
 ):
     """
     Add a comment to a document. Body shape: { "text": "..." }
@@ -2650,12 +2642,7 @@ async def add_document_comment(
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-    await _ensure_document_access(current_user, id, "documents:comment")
-
-    # Require update/write privileges to add comments
-    await controller.auth_service.check_document_access(
-        current_user, document.organization_id, document.project_id, "update"
-    )
+    await _ensure_document_access(current_user, id, Permissions.COMMENT_ADD)
 
     comment = await controller.document_service.add_comment(id, text, current_user)
     await controller.audit_service.emit(
@@ -2682,7 +2669,6 @@ async def bulk_upload_documents(
     # Add validation for bulk upload limits
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:upload")),
 ):
     """
     Bulk upload documents with CSV metadata.
@@ -2690,17 +2676,14 @@ async def bulk_upload_documents(
     The CSV file should contain metadata for each document file.
     File names in CSV must match the uploaded file names.
     """
-    allowed = await permission_service.check_resource_access(
-        current_user.id,
-        "documents:upload",
-        "project",
-        project_id,
+    await PolicyService().authorize(
+        current_user,
+        Permissions.DOCUMENT_UPLOAD,
+        resource_type="project",
+        resource_id=project_id,
+        organization_id=organization_id,
+        project_id=project_id,
     )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized to upload documents for this project",
-        )
     # Check bulk upload limits
     if len(files) > settings.BULK_UPLOAD_MAX_FILES:
         raise DocumentError(
@@ -2739,19 +2722,33 @@ async def get_bulk_upload_status(
     job_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:upload")),
 ):
     """Get the status of a bulk upload job."""
+    scope_org, scope_project = _current_user_policy_scope(current_user)
+    await PolicyService().authorize(
+        current_user,
+        Permissions.DOCUMENT_UPLOAD,
+        resource_type="documents_bulk_upload_status",
+        organization_id=scope_org,
+        project_id=scope_project,
+    )
     return await controller.get_bulk_upload_status(job_id, current_user)
 
 @router.get("/documents/bulk-upload/template")
 async def download_bulk_upload_template(
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("documents:upload")),
 ):
     """Download CSV template for bulk upload."""
     # Return CSV template file
     from fastapi.responses import Response
+    scope_org, scope_project = _current_user_policy_scope(current_user)
+    await PolicyService().authorize(
+        current_user,
+        Permissions.DOCUMENT_UPLOAD,
+        resource_type="documents_bulk_upload_template",
+        organization_id=scope_org,
+        project_id=scope_project,
+    )
     
     csv_template = """filename,uploadType,letterNo,date,ocrEnabled
 sample-letter-001.pdf,incoming,LTR-2024-001,2024-01-15,true
@@ -2771,7 +2768,6 @@ async def request_draft_for_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
-    _: None = Depends(require_permission("dms.document.view")),
 ):
     """
     Initialize a draft letter request for a document.
@@ -2783,12 +2779,7 @@ async def request_draft_for_document(
         if not document:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
-        await _ensure_document_access(current_user, id, "dms.document.view")
-
-        # Authorization check
-        await controller.auth_service.check_document_access(
-            current_user, document.organization_id, document.project_id, "read"
-        )
+        await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
 
         await policy.authorize(
             current_user,

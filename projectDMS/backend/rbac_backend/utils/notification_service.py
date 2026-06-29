@@ -426,17 +426,29 @@ class NotificationService:
                 return await self._record_action_result(notification_id, user_id, action_key, "completed", {"resource_link": notification.resource_link})
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Action is not supported for this resource")
 
-        from ..services.authorization_service import AuthorizationService
+        from ..core.permissions import Permissions
         from ..services.letter_service import LetterService
+        from ..services.policy_service import PolicyService
 
         letter_service = LetterService(self.db, notification_service=self)
         letter = await letter_service.get_letter(notification.resource_id)
         if not letter:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Letter not found")
 
-        auth_action = "read" if action_key.startswith("view") else "update"
+        permission = (
+            Permissions.DOCUMENT_VIEW
+            if action_key.startswith("view")
+            else Permissions.DOCUMENT_EDIT_METADATA
+        )
         try:
-            await AuthorizationService().check_letter_access(current_user, letter, auth_action)
+            await PolicyService(self.db).authorize(
+                current_user,
+                permission,
+                resource_type="letter",
+                resource_id=str(getattr(letter, "id", None) or getattr(letter, "_id", "") or "") or None,
+                organization_id=str(getattr(letter, "organization_id", "") or "") or None,
+                project_id=str(getattr(letter, "project_id", "") or "") or None,
+            )
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 

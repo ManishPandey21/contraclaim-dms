@@ -125,7 +125,8 @@ class PermissionService:
     def __init__(self):
         self.db = None
         self.audit_logger = AuditLogger()
-        # Backward-compatible permission aliases so legacy role strings still satisfy new router checks.
+        # Non-document aliases retained for older project/org labels. Document
+        # access is intentionally canonical-only and enforced by PolicyService.
         self._permission_aliases = {
             **LEGACY_PERMISSION_ALIASES,
             # Organizations
@@ -136,18 +137,6 @@ class PermissionService:
             # Projects
             "projects:read": ["projects:view"],
             "projects:update": ["projects:edit"],
-            # Documents / Letters
-            "documents:read": ["docs:view", "letters:view"],
-            "documents:create": ["docs:create", "letters:create"],
-            "documents:update": ["docs:edit", "letters:edit"],
-            "documents:delete": ["docs:delete", "letters:delete"],
-            "documents:upload": ["docs:upload", "letters:upload"],
-            "documents:comment": ["docs:comment", "letters:comment"],
-            "documents:share": ["docs:share"],
-            "documents:approve": ["docs:approve"],
-            "documents:download_all": ["docs:download_all", "docs:download-all"],
-            # Tags
-            "tags:read": ["docs:view", "documents:read"],
         }
         for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
             for alias in aliases:
