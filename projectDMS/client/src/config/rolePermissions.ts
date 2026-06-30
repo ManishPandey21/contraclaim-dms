@@ -97,6 +97,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/key-dates": ["dms.keydate.view", "dms.document.view"],
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
+  "/insurance": ["dms.insurance.view", "dms.document.view"],
   "/ipc-bills": ["dms.ipc.view", "dms.document.view"],
   "/concerns": ["concerns:read"],
   "/admin/billing-catalog": ["billing.plan.manage", "system:admin"],

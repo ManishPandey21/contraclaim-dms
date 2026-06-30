@@ -58,6 +58,7 @@ const KeyDateRegisterPage = lazy(() => import("./pages/KeyDateRegisterPage"));
 const KeyDateDetailPage = lazy(() => import("./pages/KeyDateDetailPage"));
 const VariationRegisterPage = lazy(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazy(() => import("./pages/BankGuaranteeRegisterPage"));
+const InsuranceRegisterPage = lazy(() => import("./pages/InsuranceRegisterPage"));
 const ConcernsPage = lazy(() => import("./pages/ConcernsPage"));
 const BillingCatalogPage = lazy(() => import("./pages/BillingCatalogPage"));
 const RetrievalConsolePage = lazy(() => import("./pages/RetrievalConsolePage"));
@@ -234,6 +235,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/bank-guarantees" fallback="/overview">
               <BankGuaranteeRegisterPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="insurance"
+          element={
+            <RoleGuard path="/insurance" fallback="/overview">
+              <InsuranceRegisterPage />
             </RoleGuard>
           }
         />

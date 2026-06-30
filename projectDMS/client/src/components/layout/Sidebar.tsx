@@ -35,6 +35,7 @@ import {
   FileSignature,
   PackageOpen,
   Network,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -219,6 +220,7 @@ const Sidebar = () => {
     { path: "/contracts/master", icon: <FileSignature size={20} />, label: "Contract Master" },
     { path: "/key-dates", icon: <CalendarClock size={20} />, label: "Key Dates" },
     { path: "/bank-guarantees", icon: <Landmark size={20} />, label: "Bank Guarantee Register" },
+    { path: "/insurance", icon: <ShieldCheck size={20} />, label: "Insurance Management" },
     { path: "/ipc-bills", icon: <FileSignature size={20} />, label: "IPC / Bill Register" },
     { path: "/variations", icon: <GitCompareArrows size={20} />, label: "Variation Register" },
 
