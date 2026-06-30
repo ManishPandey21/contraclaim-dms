@@ -19,6 +19,10 @@ from .v20260630_0001_task_assignment_fields import DESCRIPTION as TASK_FIELDS_DE
 from .v20260630_0001_task_assignment_fields import NAME as TASK_FIELDS_NAME
 from .v20260630_0001_task_assignment_fields import VERSION as TASK_FIELDS_VERSION
 from .v20260630_0001_task_assignment_fields import upgrade as upgrade_task_fields
+from .v20260630_0002_insurance_indexes import DESCRIPTION as INSURANCE_IDX_DESCRIPTION
+from .v20260630_0002_insurance_indexes import NAME as INSURANCE_IDX_NAME
+from .v20260630_0002_insurance_indexes import VERSION as INSURANCE_IDX_VERSION
+from .v20260630_0002_insurance_indexes import upgrade as upgrade_insurance_indexes
 
 
 MIGRATIONS = [
@@ -39,5 +43,11 @@ MIGRATIONS = [
         name=TASK_FIELDS_NAME,
         description=TASK_FIELDS_DESCRIPTION,
         upgrade=upgrade_task_fields,
+    ),
+    Migration(
+        version=INSURANCE_IDX_VERSION,
+        name=INSURANCE_IDX_NAME,
+        description=INSURANCE_IDX_DESCRIPTION,
+        upgrade=upgrade_insurance_indexes,
     ),
 ]

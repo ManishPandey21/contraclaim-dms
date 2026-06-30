@@ -61,6 +61,12 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.bankguarantee.extend",
     "dms.bankguarantee.release",
     "dms.bankguarantee.export",
+    "dms.insurance.view",
+    "dms.insurance.create",
+    "dms.insurance.edit",
+    "dms.insurance.delete",
+    "dms.insurance.export",
+    "dms.insurance.manage_types",
     "dms.contract.master.view",
     "dms.contract.master.manage",
     "dms.ipc.view",
@@ -188,6 +194,12 @@ class Permissions:
     BG_EXTEND = "dms.bankguarantee.extend"
     BG_RELEASE = "dms.bankguarantee.release"
     BG_EXPORT = "dms.bankguarantee.export"
+    INSURANCE_VIEW = "dms.insurance.view"
+    INSURANCE_CREATE = "dms.insurance.create"
+    INSURANCE_EDIT = "dms.insurance.edit"
+    INSURANCE_DELETE = "dms.insurance.delete"
+    INSURANCE_EXPORT = "dms.insurance.export"
+    INSURANCE_MANAGE_TYPES = "dms.insurance.manage_types"
     CONTRACT_MASTER_VIEW = "dms.contract.master.view"
     CONTRACT_MASTER_MANAGE = "dms.contract.master.manage"
     IPC_VIEW = "dms.ipc.view"

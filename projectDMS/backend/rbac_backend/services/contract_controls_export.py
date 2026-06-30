@@ -41,6 +41,24 @@ BG_COLUMNS: List[Tuple[str, str]] = [
 ]
 
 
+INSURANCE_COLUMNS: List[Tuple[str, str]] = [
+    ("contract_id", "Contract ID"),
+    ("contractor_name", "Contractor"),
+    ("insurance_type", "Insurance Type"),
+    ("policy_number", "Policy Number"),
+    ("insurance_company", "Insurance Company"),
+    ("sum_insured", "Sum Insured"),
+    ("currency", "Currency"),
+    ("date_of_issue", "Date of Issue"),
+    ("date_of_expiry", "Date of Expiry"),
+    ("days_remaining", "Validity Remaining"),
+    ("status", "Status"),
+    ("created_by_name", "Uploaded By"),
+    ("created_at", "Upload Date"),
+    ("remarks", "Remarks"),
+]
+
+
 IPC_COLUMNS: List[Tuple[str, str]] = [
     ("ipc_number", "IPC No"),
     ("ipc_date", "IPC Date"),

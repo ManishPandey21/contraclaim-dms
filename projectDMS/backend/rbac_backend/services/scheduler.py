@@ -38,6 +38,7 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
 
     from ..dependencies import get_email_service
     from .bank_guarantee_service import run_bg_expiry_scan
+    from .insurance_service import run_insurance_expiry_scan
     from .contract_appraisal.service import AppraisalService
     from .key_date_service import run_key_date_notification_scan
     from .reference_sync_service import run_reference_sync_reaper
@@ -57,6 +58,7 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
         ("sla_deadline_scan", run_sla_scan, CronTrigger(hour=8, minute=0)),
         ("key_date_notification_scan", run_key_date_notification_scan, CronTrigger(hour=8, minute=15)),
         ("bg_expiry_scan", run_bg_expiry_scan, CronTrigger(hour=8, minute=30)),
+        ("insurance_expiry_scan", run_insurance_expiry_scan, CronTrigger(hour=8, minute=35)),
         ("reference_sync_reaper", run_reference_sync_reaper, CronTrigger(hour=8, minute=45)),
         ("appraisal_stuck_job_reaper", reap_appraisal_jobs, CronTrigger(minute="*/15")),
     ]

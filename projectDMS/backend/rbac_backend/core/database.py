@@ -441,6 +441,26 @@ async def ensure_indexes(db):
     await db.bg_notifications.create_index(
         [("bg_id", 1), ("notification_type", 1)], background=True
     )
+    # Insurance Register
+    await db.insurance_policies.create_index(
+        [("organization_id", 1), ("project_id", 1), ("date_of_expiry", 1)], background=True
+    )
+    await db.insurance_policies.create_index("contract_id", background=True)
+    await db.insurance_policies.create_index("insurance_type", background=True)
+    await db.insurance_policies.create_index("created_by", background=True)
+    # Enforce the no-duplicate-policy rule (same contract + type + number).
+    await db.insurance_policies.create_index(
+        [("project_id", 1), ("contract_id", 1), ("insurance_type", 1), ("policy_number", 1)],
+        unique=True,
+        partialFilterExpression={"policy_number": {"$type": "string"}},
+        background=True,
+    )
+    await db.insurance_types.create_index(
+        [("organization_id", 1), ("name", 1)], background=True
+    )
+    await db.insurance_notifications.create_index(
+        [("insurance_id", 1), ("notification_type", 1)], background=True
+    )
     await db.contract_master.create_index(
         [("organization_id", 1), ("project_id", 1), ("contract_id", 1)], background=True, unique=True
     )

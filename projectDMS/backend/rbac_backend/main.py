@@ -23,6 +23,7 @@ from .routers import (
     key_dates,
     variations,
     bank_guarantees,
+    insurance,
     ipc_bills,
     evidence_graph,
     evidence_registers,
@@ -185,6 +186,7 @@ app.include_router(contract_master.router, prefix="/api", tags=["contract-master
 app.include_router(key_dates.router, prefix="/api", tags=["key-dates"])
 app.include_router(variations.router, prefix="/api", tags=["variations"])
 app.include_router(bank_guarantees.router, prefix="/api", tags=["bank-guarantees"])
+app.include_router(insurance.router, prefix="/api", tags=["insurance"])
 app.include_router(ipc_bills.router, prefix="/api", tags=["ipc-bills"])
 app.include_router(evidence_graph.router, prefix="/api", tags=["evidence-graph"])
 app.include_router(evidence_registers.router, prefix="/api", tags=["evidence-registers"])
