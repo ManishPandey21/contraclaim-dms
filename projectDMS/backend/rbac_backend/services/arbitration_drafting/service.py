@@ -585,3 +585,18 @@ class ArbitrationDraftingService:
             before=before,
             after=after,
         )
+        # Best-effort: keep the assignment board in step with the pleading.
+        try:
+            from ..task_sync_service import TaskSyncService
+
+            sync = TaskSyncService(self.db)
+            if action == "created":
+                await sync.on_arbitration_draft_created(draft, _actor_id(current_user))
+            elif action == "returned_for_revision":
+                await sync.on_arbitration_status_changed(draft, "under_review", _actor_id(current_user))
+            elif action == "approved":
+                await sync.on_arbitration_status_changed(draft, "approved", _actor_id(current_user))
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).debug("Arbitration task sync skipped", exc_info=True)

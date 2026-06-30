@@ -357,6 +357,9 @@ const TasksPage = () => {
       if (stage === "approval") return `/letters/${t.resource_id}/approval`;
       return `/letters/${t.resource_id}/draft`;
     }
+    if (t.resource_type === "arbitration_draft" && t.resource_id) {
+      return `/arbitration/drafts/${t.resource_id}`;
+    }
     return null;
   };
 

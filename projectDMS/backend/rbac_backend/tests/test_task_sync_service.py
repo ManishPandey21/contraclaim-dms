@@ -53,13 +53,21 @@ class _DB:
 
 
 LETTER = {"_id": "L1", "title": "EOT letter", "organization_id": "org-A", "project_id": "p1"}
+ARB = {
+    "_id": "A1", "title": "EOT Claim", "draft_type": "statement_of_claim",
+    "organization_id": "org-A", "project_id": "p1", "created_by": "drafter-7",
+}
+
+
+def _open_res(db: _DB, task_type: str, resource_id: str) -> List[Dict[str, Any]]:
+    return [
+        d for d in db.tasks.docs
+        if d.get("task_type") == task_type and d.get("resource_id") == resource_id and d.get("status") != "done"
+    ]
 
 
 def _open(db: _DB, task_type: str) -> List[Dict[str, Any]]:
-    return [
-        d for d in db.tasks.docs
-        if d.get("task_type") == task_type and d.get("resource_id") == "L1" and d.get("status") != "done"
-    ]
+    return _open_res(db, task_type, "L1")
 
 
 async def test_drafter_assignment_opens_one_draft_task():
@@ -124,6 +132,42 @@ async def test_completed_closes_all_stages():
     assert _open(db, "draft") == []
     assert _open(db, "review") == []
     assert _open(db, "approve") == []
+
+
+async def test_arbitration_create_opens_draft_task_for_author():
+    db = _DB()
+    svc = TaskSyncService(db)
+
+    await svc.on_arbitration_draft_created(ARB, "drafter-7")
+
+    drafts = _open_res(db, "draft", "A1")
+    assert len(drafts) == 1
+    assert drafts[0]["assigned_to"] == "drafter-7"
+    assert drafts[0]["resource_type"] == "arbitration_draft"
+    assert drafts[0]["title"] == "Draft: SOC — EOT Claim"
+
+
+async def test_arbitration_under_review_opens_review_task():
+    db = _DB()
+    svc = TaskSyncService(db)
+    await svc.on_arbitration_draft_created(ARB, "drafter-7")
+
+    await svc.on_arbitration_status_changed(ARB, "under_review", "reviewer-1")
+
+    assert _open_res(db, "draft", "A1") == []
+    assert len(_open_res(db, "review", "A1")) == 1
+
+
+async def test_arbitration_approved_closes_all_stages():
+    db = _DB()
+    svc = TaskSyncService(db)
+    await svc.on_arbitration_draft_created(ARB, "drafter-7")
+    await svc.on_arbitration_status_changed(ARB, "under_review", "reviewer-1")
+
+    await svc.on_arbitration_status_changed(ARB, "approved", "approver-1")
+
+    assert _open_res(db, "draft", "A1") == []
+    assert _open_res(db, "review", "A1") == []
 
 
 async def test_never_raises_on_db_error():
