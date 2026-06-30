@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -45,7 +45,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { AlertTriangle, Download, Edit, FileText, Loader2, PlusCircle, Search, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, Download, Edit, Eye, FileText, Loader2, PlusCircle, Search, ShieldCheck, Trash2, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   InsuranceDTO,
@@ -59,10 +59,12 @@ import {
   getInsuranceAlerts,
   getInsuranceSummary,
   getInsuranceTypes,
+  insuranceFileUrl,
   updateInsurance,
+  uploadInsuranceFile,
 } from "@/services/insurance-api";
+import { listContractMaster } from "@/services/contract-master-api";
 import { enhancedApi } from "@/services/enhanced-api";
-import { downloadDocumentFile } from "@/services/documents-api";
 import { fmtAmount } from "@/lib/contract-controls-helpers";
 
 const STATUSES = ["active", "expiring_soon", "expired"];
@@ -100,12 +102,14 @@ interface IForm {
   date_of_issue: string;
   date_of_expiry: string;
   document_id: string;
+  document_name: string;
+  document_content_type: string;
   remarks: string;
 }
 const EMPTY: IForm = {
   project_id: "", contract_id: "", contractor_name: "", insurance_type: "", insurance_company: "",
   policy_number: "", sum_insured: "", currency: "INR", date_of_issue: "", date_of_expiry: "",
-  document_id: "", remarks: "",
+  document_id: "", document_name: "", document_content_type: "", remarks: "",
 };
 
 const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label, value, cls }) => (
@@ -134,6 +138,10 @@ const InsuranceRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<IForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
+  // Contracts for the selected project drive the Contract ID dropdown + auto-fill.
+  const [contracts, setContracts] = useState<{ contract_id: string; contractor_name?: string | null }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
@@ -169,6 +177,61 @@ const InsuranceRegisterPage: React.FC = () => {
     return () => { active = false; };
   }, []);
 
+  // Load the project's contracts whenever the dialog's project changes.
+  useEffect(() => {
+    if (!dialogOpen || !form.project_id) {
+      setContracts([]);
+      return;
+    }
+    let active = true;
+    listContractMaster({ project_id: form.project_id })
+      .then((cs) => {
+        if (active) setContracts(cs.map((c) => ({ contract_id: c.contract_id, contractor_name: c.contractor_name })));
+      })
+      .catch(() => { if (active) setContracts([]); });
+    return () => { active = false; };
+  }, [dialogOpen, form.project_id]);
+
+  const onContractChange = (contractId: string) => {
+    const c = contracts.find((x) => x.contract_id === contractId);
+    setForm((f) => ({ ...f, contract_id: contractId, contractor_name: c?.contractor_name || f.contractor_name }));
+  };
+
+  const onPickFile = () => fileInputRef.current?.click();
+
+  const onFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same file
+    if (!file) return;
+    const ext = file.name.split(".").pop()?.toLowerCase() || "";
+    if (!["pdf", "jpg", "jpeg", "png"].includes(ext)) {
+      toast.error("Only PDF, JPG, or PNG files are allowed");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error("File exceeds the 20 MB limit");
+      return;
+    }
+    setUploading(true);
+    try {
+      const res = await uploadInsuranceFile(file);
+      setForm((f) => ({
+        ...f,
+        document_id: res.document_id,
+        document_name: res.document_name,
+        document_content_type: res.content_type,
+      }));
+      toast.success("File uploaded");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const clearFile = () =>
+    setForm((f) => ({ ...f, document_id: "", document_name: "", document_content_type: "" }));
+
   const openCreate = () => {
     setEditingId(null);
     setForm({ ...EMPTY, project_id: projectFilter !== "all" ? projectFilter : "" });
@@ -183,7 +246,8 @@ const InsuranceRegisterPage: React.FC = () => {
       currency: b.currency || "INR",
       date_of_issue: b.date_of_issue ? b.date_of_issue.slice(0, 10) : "",
       date_of_expiry: b.date_of_expiry ? b.date_of_expiry.slice(0, 10) : "",
-      document_id: b.document_id || "", remarks: b.remarks || "",
+      document_id: b.document_id || "", document_name: b.document_name || "",
+      document_content_type: b.document_content_type || "", remarks: b.remarks || "",
     });
     setDialogOpen(true);
   };
@@ -200,12 +264,18 @@ const InsuranceRegisterPage: React.FC = () => {
     date_of_issue: toISO(form.date_of_issue),
     date_of_expiry: toISO(form.date_of_expiry),
     document_id: form.document_id.trim() || undefined,
+    document_name: form.document_name.trim() || undefined,
+    document_content_type: form.document_content_type.trim() || undefined,
     remarks: form.remarks.trim() || undefined,
   });
 
   const submit = async (addAnother = false) => {
     if (!form.project_id || !form.insurance_type || !form.policy_number.trim() || !form.date_of_issue || !form.date_of_expiry) {
       toast.error("Project, insurance type, policy number, issue and expiry dates are required");
+      return;
+    }
+    if (!editingId && !form.document_id) {
+      toast.error("Please upload the insurance document");
       return;
     }
     setSaving(true);
@@ -234,15 +304,6 @@ const InsuranceRegisterPage: React.FC = () => {
       toast.success("Policy deleted");
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to delete policy");
-    }
-  };
-
-  const onDownloadFile = async (b: InsuranceDTO) => {
-    if (!b.document_id) return;
-    try {
-      await downloadDocumentFile({ upload_id: b.document_id, filenameFallback: `${b.policy_number || "policy"}.pdf` });
-    } catch {
-      toast.error("Unable to download file");
     }
   };
 
@@ -391,9 +452,24 @@ const InsuranceRegisterPage: React.FC = () => {
                     <TableCell className="text-xs">{b.created_by_name || "—"}</TableCell>
                     <TableCell>
                       {b.document_id ? (
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Download file" onClick={() => onDownloadFile(b)}>
-                          <FileText className="h-4 w-4" />
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <a
+                            href={insuranceFileUrl(b.id)}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Preview"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </a>
+                          <a
+                            href={insuranceFileUrl(b.id, true)}
+                            title="Download"
+                            className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
+                          >
+                            <Download className="h-4 w-4" />
+                          </a>
+                        </div>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
@@ -444,10 +520,37 @@ const InsuranceRegisterPage: React.FC = () => {
                   <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
-              <div><Label>Contract ID</Label><Input value={form.contract_id} onChange={(e) => setForm({ ...form, contract_id: e.target.value })} /></div>
+              <div>
+                <Label>Contract ID</Label>
+                {contracts.length > 0 ? (
+                  <Select value={form.contract_id} onValueChange={onContractChange}>
+                    <SelectTrigger><SelectValue placeholder="Select contract" /></SelectTrigger>
+                    <SelectContent>
+                      {contracts.map((c) => (
+                        <SelectItem key={c.contract_id} value={c.contract_id}>
+                          {c.contract_id}{c.contractor_name ? ` — ${c.contractor_name}` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    value={form.contract_id}
+                    onChange={(e) => setForm({ ...form, contract_id: e.target.value })}
+                    placeholder={form.project_id ? "No contracts — type ID" : "Select a project first"}
+                  />
+                )}
+              </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <div><Label>Contractor</Label><Input value={form.contractor_name} onChange={(e) => setForm({ ...form, contractor_name: e.target.value })} /></div>
+              <div>
+                <Label>Contractor</Label>
+                <Input
+                  value={form.contractor_name}
+                  onChange={(e) => setForm({ ...form, contractor_name: e.target.value })}
+                  placeholder="Auto-filled from contract"
+                />
+              </div>
               <div>
                 <Label>Insurance type</Label>
                 <Select value={form.insurance_type} onValueChange={(v) => setForm({ ...form, insurance_type: v })}>
@@ -465,7 +568,43 @@ const InsuranceRegisterPage: React.FC = () => {
               <div><Label>Date of issue</Label><Input type="date" value={form.date_of_issue} onChange={(e) => setForm({ ...form, date_of_issue: e.target.value })} /></div>
               <div><Label>Date of expiry</Label><Input type="date" value={form.date_of_expiry} onChange={(e) => setForm({ ...form, date_of_expiry: e.target.value })} /></div>
             </div>
-            <div><Label>Document ID (uploaded policy file)</Label><Input value={form.document_id} onChange={(e) => setForm({ ...form, document_id: e.target.value })} placeholder="upload_id of the policy PDF/JPG/PNG" /></div>
+            <div>
+              <Label>Policy document (PDF, JPG, PNG · max 20MB)</Label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".pdf,.jpg,.jpeg,.png"
+                className="hidden"
+                onChange={onFileSelected}
+              />
+              {form.document_id ? (
+                <div className="flex items-center gap-2 rounded-md border p-2">
+                  <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="flex-1 truncate text-sm">{form.document_name || "Uploaded file"}</span>
+                  {editingId && (
+                    <a
+                      href={insuranceFileUrl(editingId)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-blue-600 hover:underline"
+                    >
+                      View
+                    </a>
+                  )}
+                  <Button type="button" variant="ghost" size="sm" onClick={onPickFile} disabled={uploading}>
+                    {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Replace"}
+                  </Button>
+                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7" onClick={clearFile}>
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+              ) : (
+                <Button type="button" variant="outline" className="w-full" onClick={onPickFile} disabled={uploading}>
+                  {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                  {uploading ? "Uploading…" : "Upload policy file"}
+                </Button>
+              )}
+            </div>
             <div><Label>Remarks</Label><Textarea value={form.remarks} onChange={(e) => setForm({ ...form, remarks: e.target.value })} rows={2} /></div>
           </div>
           <DialogFooter className="flex-wrap gap-2">

@@ -212,14 +212,27 @@ class InsuranceService:
         await self._emit("insurance.updated", current_user, ins, before=ins, after=updated)
         return decorate(updated or ins)
 
-    async def replace_file(self, ins: Dict[str, Any], document_id: str, current_user: Any) -> Dict[str, Any]:
+    async def replace_file(
+        self,
+        ins: Dict[str, Any],
+        document_id: str,
+        current_user: Any,
+        *,
+        document_name: Optional[str] = None,
+        document_content_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
         db = await self._get_db()
         prev = ins.get("document_id")
-        await db.insurance_policies.update_one(
-            {"_id": ins["_id"]},
-            {"$set": {"document_id": document_id, "updated_at": datetime.utcnow(),
-                      "updated_by": getattr(current_user, "id", None)}},
-        )
+        set_fields: Dict[str, Any] = {
+            "document_id": document_id,
+            "updated_at": datetime.utcnow(),
+            "updated_by": getattr(current_user, "id", None),
+        }
+        if document_name is not None:
+            set_fields["document_name"] = document_name
+        if document_content_type is not None:
+            set_fields["document_content_type"] = document_content_type
+        await db.insurance_policies.update_one({"_id": ins["_id"]}, {"$set": set_fields})
         await self._emit("insurance.file_replaced", current_user, ins, before={"document_id": prev}, after={"document_id": document_id})
         return decorate(await db.insurance_policies.find_one({"_id": ins["_id"]}) or ins)
 

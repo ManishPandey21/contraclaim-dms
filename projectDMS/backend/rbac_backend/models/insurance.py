@@ -50,8 +50,11 @@ class InsuranceBase(BaseModel):
     currency: str = "INR"
     date_of_issue: Optional[datetime] = None
     date_of_expiry: Optional[datetime] = None
-    # Primary policy file (document/upload id) plus any additional linked docs.
+    # Primary policy file: document_id is the stored token returned by
+    # POST /insurance/upload; document_name/content_type drive preview & download.
     document_id: Optional[str] = None
+    document_name: Optional[str] = None
+    document_content_type: Optional[str] = None
     linked_document_ids: List[str] = Field(default_factory=list)
     remarks: Optional[str] = None
     organization_id: Optional[str] = None
@@ -75,6 +78,8 @@ class InsuranceUpdate(BaseModel):
     date_of_issue: Optional[datetime] = None
     date_of_expiry: Optional[datetime] = None
     document_id: Optional[str] = None
+    document_name: Optional[str] = None
+    document_content_type: Optional[str] = None
     linked_document_ids: Optional[List[str]] = None
     remarks: Optional[str] = None
     contract_id_set: Optional[bool] = None  # reserved

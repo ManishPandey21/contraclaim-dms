@@ -16,6 +16,8 @@ export interface InsuranceDTO {
   date_of_issue?: string | null;
   date_of_expiry?: string | null;
   document_id?: string | null;
+  document_name?: string | null;
+  document_content_type?: string | null;
   linked_document_ids: string[];
   remarks?: string | null;
   project_id?: string | null;
@@ -40,9 +42,17 @@ export interface InsurancePayload {
   date_of_issue?: string;
   date_of_expiry?: string;
   document_id?: string;
+  document_name?: string;
+  document_content_type?: string;
   linked_document_ids?: string[];
   remarks?: string;
   organization_id?: string;
+}
+
+export interface InsuranceUploadResult {
+  document_id: string;
+  document_name: string;
+  content_type: string;
 }
 
 export interface InsuranceSummaryDTO {
@@ -111,8 +121,32 @@ export async function updateInsurance(id: string, payload: Partial<InsurancePayl
   return norm(data);
 }
 
-export async function replaceInsuranceFile(id: string, documentId: string): Promise<InsuranceDTO> {
-  const { data } = await api.post(`/insurance/${id}/replace-file`, { document_id: documentId });
+// Upload a policy file (PDF/JPG/PNG, <=20MB). Returns the token to persist on
+// the insurance record via create / update / replace-file.
+export async function uploadInsuranceFile(file: File): Promise<InsuranceUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  const { data } = await api.post("/insurance/upload", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+  return data as InsuranceUploadResult;
+}
+
+// URL for inline preview (default) or attachment download of a policy file.
+export function insuranceFileUrl(id: string, download = false): string {
+  return `/api/insurance/${id}/file${download ? "?download=true" : ""}`;
+}
+
+export async function replaceInsuranceFile(
+  id: string,
+  documentId: string,
+  meta?: { document_name?: string; document_content_type?: string },
+): Promise<InsuranceDTO> {
+  const { data } = await api.post(`/insurance/${id}/replace-file`, {
+    document_id: documentId,
+    document_name: meta?.document_name,
+    document_content_type: meta?.document_content_type,
+  });
   return norm(data);
 }
 
