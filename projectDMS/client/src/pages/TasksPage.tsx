@@ -28,6 +28,7 @@ import {
   Search,
   Trash2,
   UserCheck,
+  UserPlus,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -60,6 +61,8 @@ import {
 import { getCurrentUserProfile } from "@/services/session-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import { listDocuments } from "@/services/documents-api";
+import { api } from "@/services/api";
+import { Label } from "@/components/ui/label";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -121,6 +124,13 @@ const BOARD_COLUMNS = [
   { key: "approve", label: "Approve" },
 ] as const;
 
+// Valid drafting profiles accepted by POST /letters/{id}/assign-drafter.
+const DRAFTING_PROFILES = [
+  { value: "contractor", label: "Contractor" },
+  { value: "engineer_representation", label: "Engineer Representation" },
+  { value: "employer_contract_review", label: "Employer / Contract Review" },
+] as const;
+
 const TasksPage = () => {
   const [activeTab, setActiveTab] = useState<string>("tasks");
   const [isNewTaskDialogOpen, setIsNewTaskDialogOpen] = useState(false);
@@ -129,6 +139,17 @@ const TasksPage = () => {
   // Assignment board (GET /api/tasks/board), grouped by lifecycle stage.
   const [board, setBoard] = useState<TaskBoard | null>(null);
   const [boardMine, setBoardMine] = useState(false);
+
+  // Assign-drafter dialog (two-way: assigning a drafter drives the letter
+  // workflow and the sync service opens a Draft task on the board).
+  const [isAssignOpen, setIsAssignOpen] = useState(false);
+  const [assignLetterId, setAssignLetterId] = useState("");
+  const [assignUserId, setAssignUserId] = useState("");
+  const [assignProfile, setAssignProfile] = useState("");
+  const [isAssigning, setIsAssigning] = useState(false);
+  const [assignableLetters, setAssignableLetters] = useState<
+    { id: string; title: string; status: string }[]
+  >([]);
 
   // Real tasks loaded from the backend (GET /api/tasks, tenant-scoped).
   const [taskDtos, setTaskDtos] = useState<TaskDTO[]>([]);
@@ -164,6 +185,56 @@ const TasksPage = () => {
   useEffect(() => {
     if (activeTab === "board") void reloadBoard();
   }, [activeTab, reloadBoard]);
+
+  // Letters that can still be assigned a drafter (open lifecycle states).
+  const loadAssignableLetters = useCallback(async () => {
+    try {
+      const { data } = await api.get("/letters");
+      const rows: any[] = Array.isArray(data) ? data : data?.letters ?? [];
+      setAssignableLetters(
+        rows
+          .map((l) => ({
+            id: String(l?._id ?? l?.id ?? ""),
+            title: l?.title ?? "Untitled",
+            status: l?.status ?? "",
+          }))
+          .filter(
+            (l) =>
+              l.id && !["completed", "rejected"].includes(String(l.status).toLowerCase())
+          )
+      );
+    } catch {
+      /* dialog falls back to an empty list */
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "board") void loadAssignableLetters();
+  }, [activeTab, loadAssignableLetters]);
+
+  const submitAssignDrafter = async () => {
+    if (!assignLetterId || !assignUserId || !assignProfile) {
+      toast.error("Select a letter, drafter, and drafting profile");
+      return;
+    }
+    try {
+      setIsAssigning(true);
+      await api.post(`/letters/${assignLetterId}/assign-drafter`, {
+        user_id: assignUserId,
+        drafting_profile: assignProfile,
+      });
+      toast.success("Drafter assigned");
+      setIsAssignOpen(false);
+      setAssignLetterId("");
+      setAssignUserId("");
+      setAssignProfile("");
+      await reloadBoard();
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail ?? "Failed to assign drafter");
+    } finally {
+      setIsAssigning(false);
+    }
+  };
 
   // Real org members + documents for the create dialog and list resolution.
   const [orgUsers, setOrgUsers] = useState<User[]>([]);
@@ -779,6 +850,10 @@ const TasksPage = () => {
                   </CardDescription>
                 </div>
                 <div className="flex gap-2">
+                  <Button size="sm" onClick={() => setIsAssignOpen(true)}>
+                    <UserPlus className="mr-2 h-4 w-4" />
+                    Assign drafter
+                  </Button>
                   <Button
                     size="sm"
                     variant={boardMine ? "default" : "outline"}
@@ -873,6 +948,79 @@ const TasksPage = () => {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Assign drafter (two-way: drives the letter workflow + opens a Draft task) */}
+      <Dialog open={isAssignOpen} onOpenChange={setIsAssignOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Assign drafter</DialogTitle>
+            <DialogDescription>
+              Assign a drafter to a letter. This moves the letter into drafting and opens a Draft task on the board.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>Letter</Label>
+              <Select value={assignLetterId} onValueChange={setAssignLetterId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a letter" />
+                </SelectTrigger>
+                <SelectContent>
+                  {assignableLetters.map((l) => (
+                    <SelectItem key={l.id} value={l.id}>
+                      {l.title}
+                      {l.status ? ` · ${l.status}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Drafter</Label>
+              <Select value={assignUserId} onValueChange={setAssignUserId}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a drafter" />
+                </SelectTrigger>
+                <SelectContent>
+                  {orgUsers.map((u) => (
+                    <SelectItem key={u.id} value={u.id}>
+                      {u.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Drafting profile</Label>
+              <Select value={assignProfile} onValueChange={setAssignProfile}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a profile" />
+                </SelectTrigger>
+                <SelectContent>
+                  {DRAFTING_PROFILES.map((p) => (
+                    <SelectItem key={p.value} value={p.value}>
+                      {p.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsAssignOpen(false)} disabled={isAssigning}>
+              Cancel
+            </Button>
+            <Button onClick={submitAssignDrafter} disabled={isAssigning}>
+              {isAssigning ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <UserPlus className="mr-2 h-4 w-4" />
+              )}
+              Assign
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Per-task comments */}
       <Dialog open={!!commentsTask} onOpenChange={(open) => !open && setCommentsTask(null)}>
