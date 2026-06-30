@@ -801,6 +801,14 @@ class LetterService:
                         actor_id,
                         extra={'message': comment} if comment else None,
                     )
+                # Best-effort: keep the assignment board in step with the lifecycle.
+                if letter is not None:
+                    try:
+                        from .task_sync_service import TaskSyncService
+
+                        await TaskSyncService(self.db).on_letter_status_changed(letter, new_status, actor_id)
+                    except Exception:
+                        logger.debug("Task board sync skipped for letter %s", letter_id, exc_info=True)
             else:
                 logger.warning(f"Letter not found when changing status: {letter_id}")
 

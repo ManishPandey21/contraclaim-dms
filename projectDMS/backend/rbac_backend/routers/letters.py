@@ -2221,6 +2221,15 @@ async def assign_contract_drafter(
     )
     if not updated:
         raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+    # Two-way sync: assigning a drafter opens a Draft task on the board.
+    try:
+        from ..services.task_sync_service import TaskSyncService
+
+        await TaskSyncService(controller.letter_service.db).on_drafter_assigned(
+            updated, payload.user_id, getattr(current_user, "id", None)
+        )
+    except Exception:
+        logger.debug("Draft task sync skipped for letter %s", letter_id, exc_info=True)
     return updated
 
 
