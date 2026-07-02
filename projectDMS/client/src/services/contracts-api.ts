@@ -264,6 +264,15 @@ export async function downloadContractDocument(documentId: string): Promise<Blob
   return data instanceof Blob ? data : new Blob([data]);
 }
 
+/**
+ * Re-run ingestion for an existing contract to rebuild its vector index without
+ * re-uploading. Mirrors POST /contracts/{document_id}/reindex.
+ */
+export async function reindexContract(documentId: string): Promise<StatusResponse> {
+  const { data } = await api.post(`/contracts/${documentId}/reindex`, {});
+  return data as StatusResponse;
+}
+
 export type ContractRagRequest = {
   query: string;
   filters: {

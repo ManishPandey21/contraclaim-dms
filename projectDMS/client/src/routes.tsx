@@ -73,6 +73,7 @@ const ContractsPage = lazy(() => import("./pages/ContractsPage"));
 const ContractsUploadPage = lazy(() => import("./pages/ContractsUploadPage"));
 const ContractsSearchPage = lazy(() => import("./pages/ContractsSearchPage"));
 const ContractQAPage = lazy(() => import("./pages/ContractQAPage"));
+const ContractViewerPage = lazy(() => import("./pages/ContractViewerPage"));
 const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
 const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
@@ -296,6 +297,8 @@ const AppRoutes = () => (
         <Route path="contracts/upload" element={<ContractsUploadPage />} />
         <Route path="contracts/search" element={<ContractsSearchPage />} />
         <Route path="contracts/qa" element={<ContractQAPage />} />
+        <Route path="contracts/viewer" element={<ContractViewerPage />} />
+        <Route path="contracts/viewer/:id" element={<ContractViewerPage />} />
         <Route
           path="contracts/timeline"
           element={

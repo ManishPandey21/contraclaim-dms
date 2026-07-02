@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -564,8 +565,12 @@ class RetrievalService:
         Hybrid retrieval: reuse search() (vector-backed) across multiple queries, then rerank with clause/keyword cues.
         """
         all_results: Dict[str, SearchResult] = {}
-        for q in queries:
-            search_req = SearchRequest(
+        # Each query's retrieval is independent, so fan them out concurrently
+        # instead of serializing an embedding + vector search round-trip per
+        # query. On an agentic multi-query iteration this cuts retrieval latency
+        # from O(N) to ~O(1) in wall-clock terms.
+        search_reqs = [
+            SearchRequest(
                 query=q,
                 strategy=request.strategy,
                 limit=max(limit * 2, limit + 2),
@@ -573,7 +578,16 @@ class RetrievalService:
                 use_enriched_text=request.use_enriched_text,
                 backend=request.backend,
             )
-            resp = await self.search(search_req, current_user, log_run=False)
+            for q in queries
+        ]
+        responses = await asyncio.gather(
+            *(self.search(req, current_user, log_run=False) for req in search_reqs),
+            return_exceptions=True,
+        )
+        for q, resp in zip(queries, responses):
+            if isinstance(resp, Exception):
+                logger.warning("Contract evidence retrieval failed for query %r: %s", q, resp)
+                continue
             for res in resp.results:
                 key = res.chunk_id
                 existing = all_results.get(key)

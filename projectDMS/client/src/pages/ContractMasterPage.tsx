@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -25,7 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CalendarClock, FileSignature, Loader2, PlusCircle, Save, Trash2 } from "lucide-react";
+import { CalendarClock, Eye, FileSignature, Loader2, PlusCircle, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   BGRequiredDate,
@@ -57,7 +58,8 @@ const EMPTY: CForm = {
 };
 
 const ContractMasterPage: React.FC = () => {
-  const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
+  const navigate = useNavigate();
+  const [projects, setProjects] = useState<{ id: string; name: string; organizationId: string }[]>([]);
   const [projectId, setProjectId] = useState("");
   const [master, setMaster] = useState<ContractMasterDTO | null>(null);
   const [form, setForm] = useState<CForm>({ ...EMPTY });
@@ -75,7 +77,11 @@ const ContractMasterPage: React.FC = () => {
     (async () => {
       try {
         const ps = await enhancedApi.getProjects();
-        if (active) setProjects((ps || []).map((p: any) => ({ id: String(p._id || p.id || ""), name: p.name || "Project" })));
+        if (active) setProjects((ps || []).map((p: any) => ({
+          id: String(p._id || p.id || ""),
+          name: p.name || "Project",
+          organizationId: String(p.organization_id || p.organizationId || p.org_id || ""),
+        })));
       } catch { /* optional */ }
     })();
     return () => { active = false; };
@@ -203,11 +209,25 @@ const ContractMasterPage: React.FC = () => {
           <CardTitle>Project</CardTitle>
           <CardDescription>Select a project to manage its contract master.</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex flex-wrap items-center gap-3">
           <Select value={projectId} onValueChange={setProjectId}>
             <SelectTrigger className="w-72"><SelectValue placeholder="Select project" /></SelectTrigger>
             <SelectContent>{projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}</SelectContent>
           </Select>
+          {projectId && (
+            <Button
+              variant="outline"
+              className="gap-2"
+              onClick={() => {
+                const org = projects.find((p) => p.id === projectId)?.organizationId;
+                if (org) window.localStorage.setItem("org_id", org);
+                window.localStorage.setItem("proj_id", projectId);
+                navigate("/contracts/viewer");
+              }}
+            >
+              <Eye className="h-4 w-4" /> View contract documents
+            </Button>
+          )}
         </CardContent>
       </Card>
 

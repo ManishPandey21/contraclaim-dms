@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from rbac_backend.config.document_processing_config import DocumentProcessingConfig
 from rbac_backend.services.database_service import DatabaseService
+from rbac_backend.services.reference_parser import parse_legacy_reference_text
 from rbac_backend.services.text_processing_service import TextProcessingService
 
 
@@ -70,6 +71,31 @@ def _sample_report() -> str:
 """.strip()
 
 
+def _sample_reference_report() -> str:
+    return """
+1) Date: 2025-11-08
+2) Letter No.: KNPCC-01634-E01
+5) Subject: Reminder for submission of cost
+6) References (Ref.):
+   - letter no. AFC/PM/KNPCC-06/4905 dated 05.11.2025
+   - LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dtd. 14-03-2022
+10) Full content: Example full content here.
+""".strip()
+
+
+def test_legacy_reference_parser_extracts_letter_no_date_and_raw() -> None:
+    parsed = parse_legacy_reference_text(
+        "LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dated 14.03.2022"
+    )
+
+    assert parsed == {
+        "letterNo": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+        "letter_no": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+        "date": "14-03-2022",
+        "raw": "LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dated 14.03.2022",
+    }
+
+
 def test_parse_extraction_report_extracts_critical_metadata() -> None:
     service = TextProcessingService(DocumentProcessingConfig())
 
@@ -86,6 +112,27 @@ def test_parse_extraction_report_extracts_critical_metadata() -> None:
     assert parsed.contractual_clauses
     assert parsed.contractual_clauses[0] == "Clause 14.2 - Payment schedule"
     assert parsed.full_content == "Example full content here."
+
+
+def test_parse_extraction_report_structures_legacy_letter_references() -> None:
+    service = TextProcessingService(DocumentProcessingConfig())
+
+    parsed = service.parse_extraction_report(_sample_reference_report())
+
+    assert parsed.references == [
+        {
+            "letterNo": "AFC/PM/KNPCC-06/4905",
+            "letter_no": "AFC/PM/KNPCC-06/4905",
+            "date": "05-11-2025",
+            "raw": "letter no. AFC/PM/KNPCC-06/4905 dated 05.11.2025",
+        },
+        {
+            "letterNo": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+            "letter_no": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+            "date": "14-03-2022",
+            "raw": "LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dtd. 14-03-2022",
+        },
+    ]
 
 
 async def test_upsert_document_metadata_inserts_and_updates() -> None:
@@ -119,6 +166,37 @@ async def test_upsert_document_metadata_inserts_and_updates() -> None:
     assert "createdAt" in inserted
     assert "updatedAt" in inserted
 
+
+async def test_upsert_document_metadata_preserves_structured_reference_rows() -> None:
+    config = DocumentProcessingConfig()
+    text_service = TextProcessingService(config)
+    database_service = DatabaseService(config)
+    fake_db = FakeDatabase()
+
+    parsed = text_service.parse_extraction_report(_sample_reference_report())
+    inserted = await database_service._upsert_document_metadata(
+        fake_db,
+        document_id=None,
+        file_path="uploads/process_file/reference-sample.pdf",
+        parsed_metadata=parsed,
+        full_text="OCRTEXT",
+    )
+
+    assert inserted["reference"] == [
+        {
+            "letterNo": "AFC/PM/KNPCC-06/4905",
+            "letter_no": "AFC/PM/KNPCC-06/4905",
+            "date": "05-11-2025",
+            "raw": "letter no. AFC/PM/KNPCC-06/4905 dated 05.11.2025",
+        },
+        {
+            "letterNo": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+            "letter_no": "378/LMRC/CE-Contract/KNPCC-06/2021-22",
+            "date": "14-03-2022",
+            "raw": "LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dtd. 14-03-2022",
+        },
+    ]
+
     updated_metadata = parsed.model_copy(
         update={
             "keywords": ["variation order", "price adjustment"],
@@ -128,7 +206,7 @@ async def test_upsert_document_metadata_inserts_and_updates() -> None:
     updated = await database_service._upsert_document_metadata(
         fake_db,
         document_id=str(inserted["_id"]),
-        file_path="uploads/process_file/sample.pdf",
+        file_path="uploads/process_file/reference-sample.pdf",
         parsed_metadata=updated_metadata,
         full_text="OCRTEXT-V2",
     )

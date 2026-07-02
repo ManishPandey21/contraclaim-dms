@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   searchContracts,
   ContractSearchResponse,
@@ -39,6 +40,7 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronUp,
+  Eye,
 } from "lucide-react";
 
 type Organization = { id: string; name: string; shortName?: string | null };
@@ -247,14 +249,17 @@ type ClauseResultCardProps = {
     fallbackTextForHighlight?: string
   ) => React.ReactNode;
   expandedQuery: string;
+  onViewSource?: (documentId: string) => void;
 };
 
 const ClauseResultCard: React.FC<ClauseResultCardProps> = ({
   clause,
   renderHighlighted,
   expandedQuery,
+  onViewSource,
 }) => {
   const [expanded, setExpanded] = useState(false);
+  const sourceDocumentId = clause.chunks.find((c) => c.document_id)?.document_id ?? null;
 
   const firstChunk = clause.chunks[0];
   const fullClauseText =
@@ -335,14 +340,27 @@ const ClauseResultCard: React.FC<ClauseResultCardProps> = ({
               )}
             </div>
           </div>
-          {typeof clause.score === "number" && (
-            <div className="text-right min-w-[90px]">
-              <p className="text-xs text-gray-500">Matches</p>
-              <p className="text-lg font-semibold text-gray-900">
-                {clause.score}
-              </p>
-            </div>
-          )}
+          <div className="flex items-start gap-3">
+            {typeof clause.score === "number" && (
+              <div className="text-right min-w-[90px]">
+                <p className="text-xs text-gray-500">Matches</p>
+                <p className="text-lg font-semibold text-gray-900">
+                  {clause.score}
+                </p>
+              </div>
+            )}
+            {sourceDocumentId && onViewSource && (
+              <button
+                type="button"
+                onClick={() => onViewSource(sourceDocumentId)}
+                className="shrink-0 inline-flex items-center gap-1 rounded-md border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50"
+                title="Open this document in the Contract Viewer"
+              >
+                <Eye className="h-3.5 w-3.5" />
+                View
+              </button>
+            )}
+          </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -415,6 +433,7 @@ const HISTORY_LIMIT = 20;
 const SEARCH_TIMEOUT_MS = 30_000;
 
 const ContractsSearchPage: React.FC = () => {
+  const navigate = useNavigate();
   // Organization / Project fetching and selection
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -1419,11 +1438,24 @@ const ContractsSearchPage: React.FC = () => {
                           )}
                         </p>
                       </div>
-                      {src.clause_number && (
-                        <span className="text-xs text-gray-500">
-                          Clause {src.clause_number}
-                        </span>
-                      )}
+                      <div className="flex items-center gap-3">
+                        {src.clause_number && (
+                          <span className="text-xs text-gray-500">
+                            Clause {src.clause_number}
+                          </span>
+                        )}
+                        {src.document_id && (
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/contracts/viewer/${src.document_id}`)}
+                            className="shrink-0 inline-flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                            title="Open this document in the Contract Viewer"
+                          >
+                            <Eye className="h-3.5 w-3.5" />
+                            View
+                          </button>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -1449,6 +1481,7 @@ const ContractsSearchPage: React.FC = () => {
                     clause={clause}
                     renderHighlighted={renderHighlighted}
                     expandedQuery={expandedQuery}
+                    onViewSource={(docId) => navigate(`/contracts/viewer/${docId}`)}
                   />
                 ))}
               </div>

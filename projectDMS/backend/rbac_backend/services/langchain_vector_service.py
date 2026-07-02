@@ -29,7 +29,11 @@ class LangChainVectorService:
 
     def _initialize(self) -> None:
         if not self.config.qdrant_enabled:
-            logger.info("Qdrant dual-write disabled via configuration")
+            auth_error = self.config.qdrant_auth_configuration_error
+            if auth_error:
+                logger.warning("Qdrant dual-write disabled: %s", auth_error)
+            else:
+                logger.info("Qdrant dual-write disabled via configuration")
             self._enabled = False
             return
 
@@ -54,11 +58,7 @@ class LangChainVectorService:
                     timeout=self.config.qdrant_timeout,
                 )
             else:
-                self._client = QdrantClient(
-                    url=self.config.qdrant_url,
-                    api_key=self.config.qdrant_api_key,
-                    timeout=self.config.qdrant_timeout,
-                )
+                self._client = QdrantClient(**self.config.qdrant_client_kwargs())
 
             self._ensure_collection(self._client, qmodels, distance)
 

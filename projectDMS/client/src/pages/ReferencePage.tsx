@@ -107,7 +107,12 @@ const prettifyDate = (value?: string) => {
   const trimmed = value.trim();
   if (!trimmed) return "--";
 
-  const candidateFormats = ["dd-MM-yyyy", "dd/MM/yyyy", "yyyy-MM-dd"] as const;
+  const candidateFormats = [
+    "dd-MM-yyyy",
+    "dd/MM/yyyy",
+    "dd.MM.yyyy",
+    "yyyy-MM-dd",
+  ] as const;
 
   const tryParse = (fmt: string) => {
     try {

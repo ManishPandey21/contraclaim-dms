@@ -13,6 +13,7 @@ from redis.asyncio import Redis
 
 from ..core.config import settings
 from ..core.database import get_database
+from ..services.contract_ingest_queue import get_contract_ingest_queue
 from ..services.runtime_state import get_runtime_state
 from ..services.observability import observability_registry
 from ..services.operations_health import build_backup_health
@@ -70,13 +71,13 @@ async def readiness(
     redis_ok = True
     if settings.CONTRACT_QUEUE_ENABLED:
         redis_ok = False
-        redis_url = settings.CONTRACT_QUEUE_REDIS_URL or settings.FALKORDB_URL
+        queue = get_contract_ingest_queue()
         try:
             redis = Redis.from_url(
-                redis_url,
+                queue.redis_url,
                 decode_responses=True,
                 socket_connect_timeout=2.0,
-                socket_timeout=2.0,
+                socket_timeout=None,
                 retry_on_timeout=False,
             )
             try:
@@ -90,7 +91,11 @@ async def readiness(
                 "error": _health_error(exc, include_details),
             }
         else:
-            checks["contract_queue_redis"] = {"status": "ok"}
+            checks["contract_queue_redis"] = {
+                "status": "ok",
+                "db": queue.redis_db_number,
+                "queue": settings.CONTRACT_QUEUE_NAME,
+            }
     else:
         checks["contract_queue_redis"] = {"status": "skipped", "reason": "disabled"}
 

@@ -172,13 +172,19 @@ class FalkorGraphService:
             except Exception as e:
                 logger.debug("Schema creation had issues but continuing: %s", str(e))
 
-            # Cleanup old references if enabled - use simpler approach
-            if (cleanup if cleanup is not None else self.cleanup_enabled) and ref_list:
+            # Cleanup old Mongo-owned references even when the current reference
+            # list is empty, so processed documents and manual removals do not
+            # leave stale parser/manual edges behind.
+            if (cleanup if cleanup is not None else self.cleanup_enabled):
                 try:
-                    # Simple cleanup: delete all CITES and REPLIES_TO relationships from this letter where source is parser or null
+                    # Preserve agent/other ad-hoc graph edges; Mongo owns parser,
+                    # legacy null, and manual document-reference edges.
                     cleanup_params = {"normCode": norm_code}
                     self._execute(
-                        "MATCH (src:Letter {normCode: $normCode})-[e:CITES|REPLIES_TO]->(dst:Letter) WHERE e.source IS NULL OR e.source = 'parser' DELETE e",
+                        (
+                            "MATCH (src:Letter {normCode: $normCode})-[e:CITES|REPLIES_TO]->(dst:Letter) "
+                            "WHERE e.source IS NULL OR e.source IN ['parser', 'manual'] DELETE e"
+                        ),
                         cleanup_params,
                     )
                 except FalkorGraphError as e:
@@ -501,10 +507,32 @@ class FalkorGraphService:
                 serialized[key] = value.isoformat()
             elif isinstance(value, (str, int, float, bool)):
                 serialized[key] = value
+            elif isinstance(value, (list, tuple, set)):
+                serialized[key] = [self._serialize_param_value(item) for item in value]
+            elif isinstance(value, dict):
+                serialized[key] = {
+                    str(item_key): self._serialize_param_value(item_value)
+                    for item_key, item_value in value.items()
+                }
             else:
-                # Convert other types to string
                 serialized[key] = str(value)
         return serialized
+
+    def _serialize_param_value(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return [self._serialize_param_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                str(item_key): self._serialize_param_value(item_value)
+                for item_key, item_value in value.items()
+            }
+        return str(value)
 
     def _prepend_params_header(self, cypher: str, params: Dict[str, Any]) -> str:
         """Prefix Cypher text with a CYPHER params header."""

@@ -36,6 +36,7 @@ import {
   PackageOpen,
   Network,
   ShieldCheck,
+  Eye,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -204,6 +205,11 @@ const Sidebar = () => {
       path: "/contracts/qa",
       icon: <MessageSquare size={20} />,
       label: "Contract Q&A",
+    },
+    {
+      path: "/contracts/viewer",
+      icon: <Eye size={20} />,
+      label: "Contract Viewer",
     },
     {
       path: "/contracts/appraisal",

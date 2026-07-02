@@ -37,6 +37,7 @@ class ReferenceSyncService:
         source: str = "parser",
         default_link_type: str = "indirect",
         enqueue_missing: bool = True,
+        clear_existing: bool = False,
     ) -> Dict[str, Any]:
         """
         Ensure forward (`references`) and backward (`referencedBy`) links are in sync.
@@ -47,6 +48,8 @@ class ReferenceSyncService:
             source: Origin hint for generated links (e.g. "parser", "manual").
             default_link_type: Fallback link type when not provided.
             enqueue_missing: Whether to queue unresolved references for later processing.
+            clear_existing: When true, an empty reference set clears existing
+                links for this source bucket instead of behaving as a no-op.
 
         Returns:
             Summary statistics about the synchronisation operation.
@@ -61,6 +64,7 @@ class ReferenceSyncService:
             raise ReferenceSyncError(f"Document {document_id} not found")
 
         source_letter = source_doc.get("letterNo")
+        source_scope = self._scope_filter(source_doc)
 
         normalized_references: List[Dict[str, Any]] = []
         for item in references or []:
@@ -73,12 +77,32 @@ class ReferenceSyncService:
                 normalized_references.append(payload)
 
         if not normalized_references:
+            removed_count = 0
+            if clear_existing:
+                removed_targets = await self._upsert_source_references(
+                    db=db,
+                    source_doc=source_doc,
+                    new_references={},
+                    source_key=source,
+                )
+                removed_count = await self._remove_target_backlinks(
+                    db=db,
+                    source_id=str(source_oid),
+                    target_ids=removed_targets,
+                    source_key=source,
+                )
             logger.debug(
-                "No references to synchronise for document_id=%s (source=%s)",
+                "No references to synchronise for document_id=%s (source=%s, clear_existing=%s)",
                 document_id,
                 source,
+                clear_existing,
             )
-            return {"resolved": 0, "missing": [], "updated_targets": 0, "removed_targets": 0}
+            return {
+                "resolved": 0,
+                "missing": [],
+                "updated_targets": 0,
+                "removed_targets": removed_count,
+            }
 
         resolved: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
         missing: List[Dict[str, Any]] = []
@@ -88,6 +112,7 @@ class ReferenceSyncService:
                 db=db,
                 reference=payload,
                 skip_ids={str(source_oid)},
+                scope_filter=source_scope,
             )
             if target_doc:
                 target_id = str(target_doc["_id"])
@@ -149,7 +174,7 @@ class ReferenceSyncService:
             )
 
         if enqueue_missing and missing:
-            await self.enqueue_missing(document_id, missing)
+            await self.enqueue_missing(document_id, missing, scope=source_scope)
 
         return {
             "resolved": len(resolved),
@@ -162,6 +187,8 @@ class ReferenceSyncService:
         self,
         document_id: str,
         references: Iterable[Dict[str, Any]],
+        *,
+        scope: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Store unresolved references for later inspection or offline processing.
@@ -177,6 +204,8 @@ class ReferenceSyncService:
                 {
                     "document_id": document_id,
                     "reference": ref,
+                    "organization_id": (scope or {}).get("organization_id"),
+                    "project_id": (scope or {}).get("project_id"),
                     "status": "pending",
                     "createdAt": now,
                     "updatedAt": now,
@@ -276,7 +305,10 @@ class ReferenceSyncService:
 
             for e in entries:
                 target = await self._resolve_target_document(
-                    db=db, reference=e.get("reference") or {}, skip_ids={document_id}
+                    db=db,
+                    reference=e.get("reference") or {},
+                    skip_ids={document_id},
+                    scope_filter=self._scope_filter(source_doc),
                 )
                 if target:
                     await db.reference_sync_queue.update_one(
@@ -310,6 +342,18 @@ class ReferenceSyncService:
             return ObjectId(str(value))
         except (InvalidId, TypeError):
             return None
+
+    def _scope_filter(self, document: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not document:
+            return {}
+        scope: Dict[str, Any] = {}
+        organization_id = document.get("organization_id") or document.get("organizationId")
+        project_id = document.get("project_id") or document.get("projectId")
+        if organization_id:
+            scope["organization_id"] = str(organization_id)
+        if project_id:
+            scope["project_id"] = str(project_id)
+        return scope
 
     def _normalize_reference_payload(
         self,
@@ -370,17 +414,28 @@ class ReferenceSyncService:
         db: Database,
         reference: Dict[str, Any],
         skip_ids: Optional[Iterable[str]] = None,
+        scope_filter: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Try to resolve a reference payload to an existing MongoDB document."""
         skip_set = {str(doc_id) for doc_id in (skip_ids or []) if doc_id}
+        scoped = {k: v for k, v in (scope_filter or {}).items() if v}
 
         target_id = reference.get("documentId")
         if target_id:
             target_oid = self._to_object_id(target_id)
             if target_oid:
+                query: Dict[str, Any] = {"_id": target_oid}
+                query.update(scoped)
                 doc = await db.documents.find_one(
-                    {"_id": target_oid},
-                    {"_id": 1, "letterNo": 1, "referencedBy": 1, "references": 1},
+                    query,
+                    {
+                        "_id": 1,
+                        "letterNo": 1,
+                        "referencedBy": 1,
+                        "references": 1,
+                        "organization_id": 1,
+                        "project_id": 1,
+                    },
                 )
                 if doc and str(doc["_id"]) not in skip_set:
                     return doc
@@ -393,17 +448,37 @@ class ReferenceSyncService:
         if not normalized_letter:
             return None
 
+        normalized_query: Dict[str, Any] = {"letterNoNormalized": normalized_letter}
+        normalized_query.update(scoped)
         normalized_match = await db.documents.find_one(
-            {"letterNoNormalized": normalized_letter},
-            {"_id": 1, "letterNo": 1, "referencedBy": 1, "references": 1},
+            normalized_query,
+            {
+                "_id": 1,
+                "letterNo": 1,
+                "referencedBy": 1,
+                "references": 1,
+                "organization_id": 1,
+                "project_id": 1,
+            },
         )
         if normalized_match and str(normalized_match.get("_id")) not in skip_set:
             return normalized_match
 
+        regex_query: Dict[str, Any] = {
+            "letterNo": {"$regex": f"^{letter_no}$", "$options": "i"}
+        }
+        regex_query.update(scoped)
         cursor = (
             db.documents.find(
-                {"letterNo": {"$regex": f"^{letter_no}$", "$options": "i"}},
-                {"_id": 1, "letterNo": 1, "referencedBy": 1, "references": 1},
+                regex_query,
+                {
+                    "_id": 1,
+                    "letterNo": 1,
+                    "referencedBy": 1,
+                    "references": 1,
+                    "organization_id": 1,
+                    "project_id": 1,
+                },
             )
             .sort("updatedAt", -1)
             .limit(10)

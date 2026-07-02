@@ -30,6 +30,7 @@ const SIDEBAR_PATHS = [
   "/contracts/upload",
   "/contracts/search",
   "/contracts/qa",
+  "/contracts/viewer",
   "/contracts/appraisal",
   "/contracts/timeline",
   "/chronology",

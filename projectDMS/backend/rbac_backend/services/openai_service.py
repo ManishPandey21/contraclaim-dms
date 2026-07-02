@@ -201,10 +201,10 @@ class OpenAIService:
             "3) From (Company): [sender company or 'Not found']\n"
             "4) To (Company): [recipient company or 'Not found']\n"
             "5) Subject: [document subject or 'Not found']\n"
-            "6) References: [list each reference on a new line with - prefix or 'Not found']\n"
-            "7) Summary: [3-7 concise bullet points with - prefix summarizing the content]\n"
-            "8) Key Words: [comma-separated list of key contractual words mentioned]\n"
-            "9) Contractual Clauses: [comma-separated list of specific mentioned contractual clauses]\n"
+            "6) References: [list each reference Letter no. on a new line with - prefix or 'Not found']\n"
+            "7) Summary: [Write a 4-6 line Contractual/legal summary/Fact of the matter suitable for vector search/RAG.]\n"
+            "8) Key Words: [comma-separated list of key contractual words mentioned,Tags,Topic,Claim Type]\n"
+            "9) Contractual Clauses: [comma-separated list of clauses, Employer’s Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records are relied upon]\n"
             "10) Full content: [cleaned text of the full letter]\n"
         )
     

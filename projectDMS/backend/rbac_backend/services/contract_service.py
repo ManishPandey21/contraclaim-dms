@@ -36,7 +36,6 @@ from .document_audit_service import DocumentAuditService
 from .document_service import DocumentService, DocumentServiceError
 from .file_object_service import FileObjectService
 from .contract_graph_service import ContractGraphService
-from .ocr_service import OCRService
 
 logger = logging.getLogger(__name__)
 
@@ -459,6 +458,7 @@ class ContractService:
         tags: List[str],
         upload_id: str,
         document_id: str,
+        retry_ocr_pages: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         return await (await self._get_ingestor()).ingest_file(
             organization_id=organization_id,
@@ -468,6 +468,7 @@ class ContractService:
             tags=tags,
             upload_id=upload_id,
             document_id=document_id,
+            retry_ocr_pages=retry_ocr_pages,
         )
 
     async def process_ingest_job(self, payload: Dict[str, Any]) -> None:
@@ -477,6 +478,11 @@ class ContractService:
         project_id = str(payload.get("project_id") or "") or None
         filename = str(payload.get("filename") or "")
         tags = [str(tag) for tag in (payload.get("tags") or []) if tag]
+        retry_ocr_pages = [
+            int(page)
+            for page in (payload.get("retry_ocr_pages") or [])
+            if str(page).isdigit() and int(page) > 0
+        ]
         file_object_id = str(payload.get("file_object_id") or "")
         processing_path_value = str(payload.get("processing_path") or "")
         if not upload_id or not document_id or not organization_id or not filename:
@@ -505,7 +511,6 @@ class ContractService:
             },
         )
         await self.update_contract_document(document_id, status_value="processing", tags=tags)
-        processed_path = processing_path
         try:
             await self.update_job_status(
                 upload_id,
@@ -514,23 +519,28 @@ class ContractService:
                     "document_id": document_id,
                     "filename": filename,
                     "processing_stage": "ocr",
-                    "stage_label": "Running OCR / text preparation",
+                    "stage_label": "Starting page/batch OCR and contract ingestion",
                     "progress": 20,
                 },
             )
-            processed_path = await OCRService(self._processing_config).process_document(processing_path, language="eng")
-            await self.update_job_status(
+            result = await self.ingest_contract(
+                processing_path,
+                organization_id,
+                project_id,
+                filename,
+                tags,
                 upload_id,
-                "processing",
-                metadata={
-                    "document_id": document_id,
-                    "filename": filename,
-                    "processing_stage": "ingestion",
-                    "stage_label": "Extracting clauses and indexing vectors",
-                    "progress": 35,
-                },
+                document_id,
+                retry_ocr_pages=retry_ocr_pages,
             )
-            result = await self.ingest_contract(processed_path, organization_id, project_id, filename, tags, upload_id, document_id)
+            # ingest_file reports failures via {"ok": False} rather than raising,
+            # so a failed ingest must not fall through to marking the contract
+            # "completed" (that is how unsearchable documents ended up completed).
+            if not result.get("ok", False):
+                raise ContractError(
+                    result.get("error") or "Contract ingestion failed",
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
             categories = result.get("categories") or []
             await self.update_job_status(
                 upload_id,
@@ -562,8 +572,6 @@ class ContractService:
         finally:
             if materialized_temp or processing_path_value:
                 self._cleanup_tmp_file(processing_path)
-            if processed_path != processing_path:
-                self._cleanup_tmp_file(processed_path)
 
     async def get_job_status(self, upload_id: str, current_user: CurrentUser) -> StatusResponse:
         doc = await (await self._get_jobs()).find_one({"upload_id": upload_id})
@@ -604,6 +612,25 @@ class ContractService:
             raise ContractError("Contract document not found", status.HTTP_404_NOT_FOUND)
         self._authorize_scope(document, current_user)
         return document
+
+    async def get_failed_ocr_pages(self, document_id: str) -> List[int]:
+        rows = await (
+            (await self._get_db())
+            .contract_ocr_pages.find(
+                {
+                    "document_id": str(document_id),
+                    "status": {"$in": ["ocr_failed", "ocr_empty", "ocr_disabled"]},
+                },
+                {"page_number": 1},
+            )
+            .sort("page_number", 1)
+            .to_list(length=5000)
+        )
+        return [
+            int(row.get("page_number"))
+            for row in rows
+            if isinstance(row.get("page_number"), int) or str(row.get("page_number")).isdigit()
+        ]
 
     def _hybrid_enabled(self, request: ContractSearchRequest) -> bool:
         return bool((request.query or "").strip() and self._processing_config.qdrant_enabled and self._vector_client.enabled)

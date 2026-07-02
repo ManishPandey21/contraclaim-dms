@@ -79,6 +79,24 @@ from .observability.tracing import setup_tracing, current_trace_id
 
 logger = logging.getLogger(__name__)
 
+# Some endpoints are inherently multi-second because they run agentic,
+# multi-LLM-call loops (draft + critique + iterative retrieval). Holding them to
+# the same 2s slow-request threshold as a plain CRUD call just produces noise, so
+# give those paths a higher threshold while everything else stays tight.
+SLOW_REQUEST_PATH_OVERRIDES_MS: dict[str, int] = {
+    "/api/v1/retrieval/contract-qa": 12000,
+    "/api/v1/retrieval/agent": 12000,
+    "/api/v1/retrieval/rag": 8000,
+}
+
+
+def _slow_request_threshold_ms(path: str) -> int:
+    override = SLOW_REQUEST_PATH_OVERRIDES_MS.get(path)
+    if override is not None:
+        return override
+    return int(settings.SLOW_REQUEST_THRESHOLD_MS)
+
+
 api_docs_enabled = bool(settings.ENABLE_API_DOCS) and str(settings.ENVIRONMENT).lower() != "production"
 app = FastAPI(
     title="ContractDMS",
@@ -150,7 +168,8 @@ async def request_context_middleware(request: Request, call_next):
         status_code=response.status_code,
         duration_ms=duration_ms,
     )
-    if duration_ms >= int(settings.SLOW_REQUEST_THRESHOLD_MS):
+    slow_threshold_ms = _slow_request_threshold_ms(request.url.path)
+    if duration_ms >= slow_threshold_ms:
         logger.warning(
             "slow request request_id=%s method=%s path=%s status_code=%s duration_ms=%s threshold_ms=%s",
             request_id,
@@ -158,7 +177,7 @@ async def request_context_middleware(request: Request, call_next):
             request.url.path,
             response.status_code,
             duration_ms,
-            settings.SLOW_REQUEST_THRESHOLD_MS,
+            slow_threshold_ms,
         )
     logger.info(
         "request completed request_id=%s trace_id=%s method=%s path=%s status_code=%s duration_ms=%s",

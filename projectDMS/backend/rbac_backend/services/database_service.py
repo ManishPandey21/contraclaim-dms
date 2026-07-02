@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency
         def __init__(self, *args, **kwargs):
             raise ImportError("llama_index is not installed; enable it or switch to LangChain vector service.")
 from .langchain_vector_service import LangChainVectorService
+from .reference_parser import parse_legacy_reference_text
 from ..utils.pipeline_logging import configure_pipeline_logger
 from ..ingestion.chunk_ids import deterministic_chunk_id
 
@@ -83,7 +84,7 @@ class DatabaseService:
         if not references:
             return normalized
 
-        seen: Set[Tuple[Optional[str], Optional[str], Optional[str]]] = set()
+        seen: Set[Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]] = set()
         for ref in references:
             if hasattr(ref, "model_dump"):
                 try:
@@ -93,11 +94,11 @@ class DatabaseService:
             elif isinstance(ref, dict):
                 data = {k: v for k, v in ref.items() if v not in (None, "", [], {})}
             elif isinstance(ref, str):
-                data = {"text": ref}
+                data = parse_legacy_reference_text(ref) or {"text": ref}
             elif ref is None:
                 continue
             else:
-                data = {"text": str(ref)}
+                data = parse_legacy_reference_text(str(ref)) or {"text": str(ref)}
 
             def _clean(value: Any) -> Optional[str]:
                 if value is None:
@@ -111,11 +112,21 @@ class DatabaseService:
             letter_no = _clean(data.get("letterNo") or data.get("letter_no"))
             text_value = _clean(data.get("text"))
             date_value = _clean(data.get("date"))
+            raw_value = _clean(data.get("raw"))
+
+            if not letter_no and not date_value:
+                parsed = parse_legacy_reference_text(raw_value or text_value or "")
+                if parsed:
+                    letter_no = parsed["letterNo"]
+                    date_value = parsed["date"]
+                    raw_value = parsed["raw"]
 
             entry: Dict[str, Any] = {}
             primary = letter_no or text_value
             if primary:
                 entry["letterNo"] = primary
+                if letter_no:
+                    entry["letter_no"] = letter_no
 
             if date_value:
                 try:
@@ -129,11 +140,14 @@ class DatabaseService:
 
             if text_value and primary and text_value != primary:
                 entry["text"] = text_value
+            if raw_value:
+                entry["raw"] = raw_value
 
             key = (
                 entry.get("letterNo"),
                 entry.get("date"),
                 entry.get("text"),
+                entry.get("raw"),
             )
             if not entry or key in seen:
                 continue
@@ -602,4 +616,3 @@ class DatabaseService:
             pass
 
         return os.getenv("OPENAI_API_KEY")
-

@@ -2,10 +2,11 @@
 import re
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ..models.document_metadata import ParsedDocumentMetadata
 from ..utils.date_parser import format_date_ddmmyyyy
+from .reference_parser import parse_legacy_reference_text
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +171,7 @@ class TextProcessingService:
                 return value if value else None
         return None
     
-    def _extract_list_field(self, text: str, patterns: List[str]) -> List[str]:
+    def _extract_list_field(self, text: str, patterns: List[str]) -> List[Any]:
         """Extract list field using regex patterns
         Note: Search against (text + "\
 End:") so '$' can match properly without forcing End: immediately after."""
@@ -181,7 +182,7 @@ End:") so '$' can match properly without forcing End: immediately after."""
                 return self._parse_list_block(block)
         return []
     
-    def _parse_list_block(self, block: str) -> List[str]:
+    def _parse_list_block(self, block: str) -> List[Any]:
         """Parse block of text into list items"""
         if not block:
             return []
@@ -191,18 +192,25 @@ End:") so '$' can match properly without forcing End: immediately after."""
             # Remove bullet prefixes and clean up
             cleaned = re.sub(r"^[\-\u2013\u2022\*\d\.\)\s]+", "", line).strip()
             if cleaned:
-                items.append(cleaned)
+                items.append(parse_legacy_reference_text(cleaned) or cleaned)
         
         # Handle comma-separated single line
-        if len(items) == 1 and "," in items[0]:
+        if len(items) == 1 and isinstance(items[0], str) and "," in items[0]:
             comma_items = [item.strip() for item in items[0].split(",") if item.strip()]
             if len(comma_items) > 1:
-                items = comma_items
+                items = [parse_legacy_reference_text(item) or item for item in comma_items]
         
         # Clean up punctuation
-        items = [re.sub(r"[;\.\s]+$", "", item).strip() for item in items if item.strip()]
+        cleaned_items = []
+        for item in items:
+            if isinstance(item, str):
+                cleaned = re.sub(r"[;\.\s]+$", "", item).strip()
+                if cleaned:
+                    cleaned_items.append(parse_legacy_reference_text(cleaned) or cleaned)
+            elif item:
+                cleaned_items.append(item)
         
-        return items
+        return cleaned_items
     
     def _extract_summary(self, text: str) -> Optional[str]:
         """Extract summary with special formatting.

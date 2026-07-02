@@ -298,6 +298,16 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_WORKERS: int = Field(default=1, validation_alias="CONTRACT_QUEUE_WORKERS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
+
+    # Contract OCR / clause chunking controls. OCR is performed page/batch-wise
+    # during contract ingestion so large PDFs do not require one monolithic
+    # OCRmyPDF run before indexing can start.
+    CONTRACT_OCR_BATCH_SIZE: int = Field(default=25, ge=1, le=100, validation_alias="CONTRACT_OCR_BATCH_SIZE")
+    CONTRACT_OCR_MIN_TEXT_CHARS_PER_PAGE: int = Field(default=40, ge=0, validation_alias="CONTRACT_OCR_MIN_TEXT_CHARS_PER_PAGE")
+    CONTRACT_TEXT_CLEANING_ENABLED: bool = Field(default=True, validation_alias="CONTRACT_TEXT_CLEANING_ENABLED")
+    CONTRACT_AI_CHUNKING_ENABLED: bool = Field(default=False, validation_alias="CONTRACT_AI_CHUNKING_ENABLED")
+    CONTRACT_AI_CHUNKING_MIN_CONFIDENCE: float = Field(default=0.70, ge=0.0, le=1.0, validation_alias="CONTRACT_AI_CHUNKING_MIN_CONFIDENCE")
+
     # H2: whether this process runs the APScheduler cron jobs. Default True keeps
     # single-process deploys working; jobs are leader-locked so it stays correct
     # even if several processes enable it. In a scaled deploy run it only on the

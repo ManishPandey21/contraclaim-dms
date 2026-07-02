@@ -48,8 +48,8 @@ class LLMGenerator:
         return self._fallback(prompt)
 
     def _fallback(self, prompt: str) -> str:
-        # Keep a deterministic, concise output for offline/testing modes
-        lines = [line.strip() for line in prompt.splitlines() if line.strip()]
-        summary = " ".join(lines[:3])
-        return f"Context-based draft: {summary[:400]}"
-
+        return (
+            "Answer unavailable: the language model could not generate a grounded "
+            "response from the retrieved contract context. Please retry when the AI "
+            "service is available; do not treat this as legal or contractual advice."
+        )

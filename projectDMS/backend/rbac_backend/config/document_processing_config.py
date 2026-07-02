@@ -22,6 +22,17 @@ DEFAULT_FALKORDB_URL_HOSTS = {"localhost", "127.0.0.1"}
 DEFAULT_FALKORDB_URLS = {
     f"redis://{host}:{DEFAULT_FALKORDB_PORT}" for host in DEFAULT_FALKORDB_URL_HOSTS
 }
+LOCAL_QDRANT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+QDRANT_API_KEY_PLACEHOLDERS = {
+    "none",
+    "null",
+    "changeme",
+    "change-me",
+    "dummy",
+    "placeholder",
+    "your-qdrant-api-key",
+    "replace-with-qdrant-api-key",
+}
 
 
 def _parse_bool(raw_value: str) -> bool:
@@ -63,6 +74,17 @@ def _normalize_falkordb_url(value: Optional[str]) -> Optional[str]:
     return normalized or None
 
 
+def _normalize_qdrant_api_key(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip().strip('"').strip("'")
+    if normalized.startswith("="):
+        normalized = normalized.lstrip("=").strip()
+    if not normalized or normalized.lower() in QDRANT_API_KEY_PLACEHOLDERS:
+        return None
+    return normalized
+
+
 def _load_project_settings():
     try:
         from ..core.config import settings as project_settings
@@ -91,6 +113,11 @@ class DocumentProcessingConfig:
     # OCR Settings
     ocr_language: str = "eng"
     ocr_enabled: bool = True
+    contract_ocr_batch_size: int = 25
+    contract_ocr_min_text_chars_per_page: int = 40
+    contract_text_cleaning_enabled: bool = True
+    contract_ai_chunking_enabled: bool = False
+    contract_ai_chunking_min_confidence: float = 0.70
 
     # File Processing
     uploads_dir: str = "uploads"
@@ -114,7 +141,7 @@ class DocumentProcessingConfig:
     database_name: str = "contraclaim"
     vector_store_enabled: bool = True
     vector_store_collection: str = "document_vectors"
-    use_pydantic_ai: bool = True
+    use_pydantic_ai: bool = False
     pydantic_ai_model: Optional[str] = None
 
     qdrant_url: Optional[str] = None
@@ -145,6 +172,50 @@ class DocumentProcessingConfig:
 
         if not self.openai_api_key:
             self.openai_api_key = os.getenv("OPENAI_API_KEY")
+
+        contract_ocr_batch_env = os.getenv("CONTRACT_OCR_BATCH_SIZE")
+        if contract_ocr_batch_env:
+            self.contract_ocr_batch_size = max(
+                1,
+                _coerce_int(
+                    contract_ocr_batch_env,
+                    "CONTRACT_OCR_BATCH_SIZE",
+                    self.contract_ocr_batch_size,
+                ),
+            )
+
+        contract_ocr_min_env = os.getenv("CONTRACT_OCR_MIN_TEXT_CHARS_PER_PAGE")
+        if contract_ocr_min_env:
+            self.contract_ocr_min_text_chars_per_page = max(
+                0,
+                _coerce_int(
+                    contract_ocr_min_env,
+                    "CONTRACT_OCR_MIN_TEXT_CHARS_PER_PAGE",
+                    self.contract_ocr_min_text_chars_per_page,
+                ),
+            )
+
+        text_cleaning_env = os.getenv("CONTRACT_TEXT_CLEANING_ENABLED")
+        if text_cleaning_env is not None:
+            self.contract_text_cleaning_enabled = _parse_bool(text_cleaning_env)
+
+        ai_chunking_env = os.getenv("CONTRACT_AI_CHUNKING_ENABLED")
+        if ai_chunking_env is not None:
+            self.contract_ai_chunking_enabled = _parse_bool(ai_chunking_env)
+
+        ai_chunking_conf_env = os.getenv("CONTRACT_AI_CHUNKING_MIN_CONFIDENCE")
+        if ai_chunking_conf_env:
+            self.contract_ai_chunking_min_confidence = max(
+                0.0,
+                min(
+                    1.0,
+                    _coerce_float(
+                        ai_chunking_conf_env,
+                        "CONTRACT_AI_CHUNKING_MIN_CONFIDENCE",
+                        self.contract_ai_chunking_min_confidence,
+                    ),
+                ),
+            )
 
         marker_enabled_env = os.getenv("MARKER_ENABLED")
         if marker_enabled_env is not None:
@@ -264,6 +335,14 @@ class DocumentProcessingConfig:
         if verify_env is not None:
             self.vector_verify_after_write = _parse_bool(verify_env)
 
+        pydantic_ai_enabled_env = os.getenv("PYDANTIC_AI_ENABLED")
+        if pydantic_ai_enabled_env is not None:
+            self.use_pydantic_ai = _parse_bool(pydantic_ai_enabled_env)
+
+        pydantic_ai_model_env = os.getenv("PYDANTIC_AI_MODEL")
+        if pydantic_ai_model_env:
+            self.pydantic_ai_model = pydantic_ai_model_env
+
         local_override = os.getenv("LOCAL_MONGODB_URI")
         if local_override:
             self.mongo_uri = local_override
@@ -290,6 +369,25 @@ class DocumentProcessingConfig:
             )
             self.clause_extraction_max_chars = getattr(
                 settings, "CLAUSE_EXTRACTION_MAX_CHARS", self.clause_extraction_max_chars
+            )
+            self.contract_ocr_batch_size = getattr(
+                settings, "CONTRACT_OCR_BATCH_SIZE", self.contract_ocr_batch_size
+            )
+            self.contract_ocr_min_text_chars_per_page = getattr(
+                settings,
+                "CONTRACT_OCR_MIN_TEXT_CHARS_PER_PAGE",
+                self.contract_ocr_min_text_chars_per_page,
+            )
+            self.contract_text_cleaning_enabled = getattr(
+                settings, "CONTRACT_TEXT_CLEANING_ENABLED", self.contract_text_cleaning_enabled
+            )
+            self.contract_ai_chunking_enabled = getattr(
+                settings, "CONTRACT_AI_CHUNKING_ENABLED", self.contract_ai_chunking_enabled
+            )
+            self.contract_ai_chunking_min_confidence = getattr(
+                settings,
+                "CONTRACT_AI_CHUNKING_MIN_CONFIDENCE",
+                self.contract_ai_chunking_min_confidence,
             )
 
             settings_local_uri = getattr(settings, "LOCAL_MONGODB_URI", None)
@@ -370,10 +468,52 @@ class DocumentProcessingConfig:
         if not self.openai_api_key:
             self.ai_enabled = False
             self.use_pydantic_ai = False
+        self.qdrant_api_key = _normalize_qdrant_api_key(self.qdrant_api_key)
+
+    @property
+    def qdrant_url_scheme(self) -> str:
+        return urlparse((self.qdrant_url or "").strip()).scheme.lower()
+
+    @property
+    def qdrant_url_host(self) -> str:
+        return (urlparse((self.qdrant_url or "").strip()).hostname or "").lower()
+
+    @property
+    def qdrant_is_local_http(self) -> bool:
+        return self.qdrant_url_scheme == "http" and self.qdrant_url_host in LOCAL_QDRANT_HOSTS
+
+    @property
+    def qdrant_auth_configuration_error(self) -> Optional[str]:
+        api_key = _normalize_qdrant_api_key(self.qdrant_api_key)
+        if api_key and self.qdrant_url_scheme == "http" and not self.qdrant_is_local_http:
+            return (
+                "QDRANT_API_KEY is configured for an insecure QDRANT_URL; "
+                "use https:// for authenticated Qdrant or unset QDRANT_API_KEY."
+            )
+        return None
+
+    @property
+    def effective_qdrant_api_key(self) -> Optional[str]:
+        api_key = _normalize_qdrant_api_key(self.qdrant_api_key)
+        if not api_key or self.qdrant_auth_configuration_error:
+            return None
+        return api_key
+
+    def qdrant_client_kwargs(self) -> dict[str, Any]:
+        return {
+            "url": self.qdrant_url,
+            "api_key": self.effective_qdrant_api_key,
+            "timeout": self.qdrant_timeout,
+        }
 
     @property
     def qdrant_enabled(self) -> bool:
-        return bool(self.vector_store_enabled and self.vector_dual_write_enabled and self.qdrant_url)
+        return bool(
+            self.vector_store_enabled
+            and self.vector_dual_write_enabled
+            and self.qdrant_url
+            and not self.qdrant_auth_configuration_error
+        )
 
     @property
     def embedding_model(self) -> str:

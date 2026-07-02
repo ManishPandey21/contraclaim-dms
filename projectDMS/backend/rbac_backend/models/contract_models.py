@@ -76,6 +76,16 @@ class StatusResponse(BaseModel):
     progress: Optional[int] = None
     processing_stage: Optional[str] = None
     stage_label: Optional[str] = None
+    ocr_pages_total: Optional[int] = None
+    ocr_batches_total: Optional[int] = None
+    ocr_failed_pages: List[int] = Field(default_factory=list)
+    ocr_page_status_counts: Dict[str, int] = Field(default_factory=dict)
+
+
+class OCRRetryRequest(BaseModel):
+    """Request to retry OCR for failed or selected contract PDF pages."""
+
+    page_numbers: List[int] = Field(default_factory=list)
 
 
 class ContractUploadRecord(BaseModel):
@@ -118,9 +128,11 @@ class ContractClauseChunk(BaseModel):
     filename: Optional[str] = None
     chunk_index: Optional[int] = None
     clause_number: Optional[str] = None
+    clause_no: Optional[str] = None
     clause_title: Optional[str] = None
     clause_id: Optional[str] = None
     clause_type: Optional[str] = None
+    chunk_type: Optional[str] = None
     clause_level: Optional[int] = None
     parent_clause_number: Optional[str] = None
     is_complete_clause: Optional[bool] = True
@@ -132,11 +144,18 @@ class ContractClauseChunk(BaseModel):
     page_number: Optional[int] = None
     page: Optional[int] = None
     page_numbers: Optional[List[int]] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    source_pdf_page_link: Optional[str] = None
     section: Optional[str] = None
     section_heading: Optional[str] = None
+    section_title: Optional[str] = None
     clause_tags: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
     offsets: Optional[List[HighlightOffset]] = None
+    contract_id: Optional[str] = None
+    ai_chunked: Optional[bool] = False
+    ai_confidence: Optional[float] = None
     createdAt: Optional[datetime] = None
 
 
@@ -204,6 +223,7 @@ __all__ = [
     "ContractUploadSessionRequest",
     "ContractUploadSessionResponse",
     "HighlightOffset",
+    "OCRRetryRequest",
     "StatusResponse",
     "UploadMultipartResponse",
     "UploadResult",

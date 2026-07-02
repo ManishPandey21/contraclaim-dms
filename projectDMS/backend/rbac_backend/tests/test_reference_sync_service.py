@@ -32,18 +32,29 @@ class FakeDocumentsCollection:
         self._documents = documents
         self.updates: List[Dict[str, Any]] = []
 
+    def _matches_scope(self, document: Dict[str, Any], query: Dict[str, Any]) -> bool:
+        for key, value in query.items():
+            if key in {"_id", "letterNoNormalized", "letterNo"}:
+                continue
+            if document.get(key) != value:
+                return False
+        return True
+
     async def find_one(self, query: Dict[str, Any], projection: Optional[Dict[str, Any]] = None):
         doc_id = query.get("_id")
         if doc_id is not None:
             for document in self._documents.values():
-                if document.get("_id") == doc_id:
+                if document.get("_id") == doc_id and self._matches_scope(document, query):
                     return document
             return None
 
         norm_letter = query.get("letterNoNormalized")
         if norm_letter:
             for document in self._documents.values():
-                if document.get("letterNoNormalized") == norm_letter:
+                if (
+                    document.get("letterNoNormalized") == norm_letter
+                    and self._matches_scope(document, query)
+                ):
                     return document
             return None
         return None
@@ -57,6 +68,7 @@ class FakeDocumentsCollection:
             document
             for document in self._documents.values()
             if str(document.get("letterNo", "")).lower() == needle.lower()
+            and self._matches_scope(document, query)
         ]
         return FakeCursor(matches)
 
@@ -151,6 +163,56 @@ def test_sync_bidirectional_records_missing_references():
     queued = fake_queue.items[0]
     assert queued["document_id"] == str(source_id)
     assert queued["reference"]["letterNo"] == "UNKNOWN-REF"
+
+
+def test_sync_bidirectional_scopes_letter_resolution_to_source_project():
+    source_id = ObjectId()
+    wrong_target_id = ObjectId()
+    target_id = ObjectId()
+    documents = {
+        "source": {
+            "_id": source_id,
+            "organization_id": "org-1",
+            "project_id": "proj-1",
+            "letterNo": "DOC-001",
+            "letterNoNormalized": "doc-001",
+            "references": [],
+            "referencedBy": [],
+        },
+        "wrong_target": {
+            "_id": wrong_target_id,
+            "organization_id": "org-2",
+            "project_id": "proj-9",
+            "letterNo": "DOC-002",
+            "letterNoNormalized": "doc-002",
+            "references": [],
+            "referencedBy": [],
+        },
+        "target": {
+            "_id": target_id,
+            "organization_id": "org-1",
+            "project_id": "proj-1",
+            "letterNo": "DOC-002",
+            "letterNoNormalized": "doc-002",
+            "references": [],
+            "referencedBy": [],
+        },
+    }
+    fake_documents = FakeDocumentsCollection(documents)
+    fake_queue = FakeQueueCollection()
+    fake_db = SimpleNamespace(documents=fake_documents, reference_sync_queue=fake_queue)
+
+    service = ReferenceSyncService(fake_db)
+
+    result = asyncio.run(service.sync_bidirectional(
+        str(source_id),
+        [{"letterNo": "DOC-002"}],
+        source="parser",
+    ))
+
+    assert result["resolved"] == 1
+    source_refs = fake_documents.updates[0]["update"]["$set"]["references"]
+    assert source_refs[0]["documentId"] == str(target_id)
 
 
 

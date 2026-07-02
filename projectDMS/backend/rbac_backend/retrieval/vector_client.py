@@ -38,16 +38,16 @@ class VectorClient:
         if not self.config.qdrant_url:
             logger.info("Vector client offline: QDRANT_URL not configured")
             return
+        auth_error = self.config.qdrant_auth_configuration_error
+        if auth_error:
+            logger.warning("Vector client offline: %s", auth_error)
+            return
         try:
             from qdrant_client import QdrantClient  # type: ignore
             from qdrant_client.http import models as qm  # type: ignore
 
             self._qmodels = qm
-            self._client = QdrantClient(
-                url=self.config.qdrant_url,
-                api_key=self.config.qdrant_api_key,
-                timeout=self.config.qdrant_timeout,
-            )
+            self._client = QdrantClient(**self.config.qdrant_client_kwargs())
             self.enabled = True
         except Exception as exc:  # pragma: no cover - best-effort init
             logger.warning("Qdrant client unavailable; using in-memory index: %s", exc)

@@ -24,6 +24,13 @@ def test_qdrant_hint_flags_insecure_url_with_api_key():
     assert hint and "https" in hint and "QDRANT_API_KEY" in hint
 
 
+def test_qdrant_hint_explains_config_error():
+    cfg = _config("http://qdrant.example.com:6333", "secret")
+    hint = _qdrant_hint(cfg, "qdrant_config_error")
+
+    assert hint and "https" in hint and "QDRANT_API_KEY" in hint
+
+
 def test_qdrant_hint_quiet_when_config_is_fine():
     assert _qdrant_hint(_config("https://qdrant:6333", "secret"), "client_init_failed") is None
     assert _qdrant_hint(_config("http://qdrant:6333", None), "client_init_failed") is None

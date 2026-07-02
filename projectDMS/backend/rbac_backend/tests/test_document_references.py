@@ -185,22 +185,44 @@ class FakeCollection:
             return str(value)
         return str(value)
 
+    @staticmethod
+    def _matches_filter(doc: Dict[str, Any], filter: Dict[str, Any]) -> bool:
+        for key, expected in filter.items():
+            actual = doc.get(key)
+            if key == "_id":
+                if isinstance(expected, dict) and "$in" in expected:
+                    if all(str(actual) != str(candidate) for candidate in expected["$in"]):
+                        return False
+                elif str(actual) != str(expected):
+                    return False
+            elif isinstance(expected, dict) and "$regex" in expected:
+                needle = str(expected["$regex"]).strip("^$").lower()
+                if str(actual or "").lower() != needle:
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
     async def find_one(self, filter: Dict[str, Any], *_args: Any, **_kwargs: Any) -> Optional[Dict[str, Any]]:
         if "_id" not in filter:
             if "letterNoNormalized" in filter:
                 for doc in self._docs.values():
-                    if doc.get("letterNoNormalized") == filter["letterNoNormalized"]:
+                    if self._matches_filter(doc, filter):
                         return doc
             return None
         identifier = filter["_id"]
         if isinstance(identifier, dict) and "$in" in identifier:
             for candidate in identifier["$in"]:
                 key = self._key(candidate)
-                if key in self._docs:
-                    return self._docs[key]
+                doc = self._docs.get(key)
+                if doc is not None and self._matches_filter(doc, filter):
+                    return doc
             return None
         key = self._key(identifier)
-        return self._docs.get(key)
+        doc = self._docs.get(key)
+        if doc is not None and self._matches_filter(doc, filter):
+            return doc
+        return None
 
     async def insert_one(self, document: Dict[str, Any]) -> SimpleNamespace:
         identifier = document.get("_id") or ObjectId()
@@ -237,17 +259,29 @@ class FakeCollection:
             for key, value in update["$push"].items():
                 document.setdefault(key, []).append(value)
                 modified = True
+        if "$pull" in update:
+            for key, criteria in update["$pull"].items():
+                values = document.get(key) or []
+                if isinstance(values, list) and isinstance(criteria, dict):
+                    document[key] = [
+                        item
+                        for item in values
+                        if not (
+                            isinstance(item, dict)
+                            and all(item.get(k) == v for k, v in criteria.items())
+                        )
+                    ]
+                    modified = True
 
         self._docs[self._key(document["_id"])] = document
         return _FakeUpdateResult(1, 1 if modified else 0)
 
     def find(self, filter: Dict[str, Any], *_args: Any, **_kwargs: Any) -> FakeCursor:
         if "letterNo" in filter and isinstance(filter["letterNo"], dict) and "$regex" in filter["letterNo"]:
-            needle = str(filter["letterNo"]["$regex"]).strip("^$").lower()
             matches = [
                 doc
                 for doc in self._docs.values()
-                if str(doc.get("letterNo", "")).lower() == needle
+                if self._matches_filter(doc, filter)
             ]
             return FakeCursor(matches)
 
@@ -358,6 +392,35 @@ async def test_list_references_returns_parsed_and_linked_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_references_structures_legacy_parsed_reference_strings() -> None:
+    source_id = ObjectId()
+    raw_ref = "letter no. AFC/PM/KNPCC-06/4905 dated 05.11.2025"
+    source_doc = _make_document_dict(
+        _id=source_id,
+        reference=[raw_ref],
+        references=[],
+    )
+    fake_db = FakeDatabase([source_doc])
+    controller = _make_controller(fake_db)
+
+    response = await controller_list_references(
+        controller,
+        str(source_id),
+        _make_user(),
+    )
+
+    assert response["parsed"] == [
+        {
+            "raw": raw_ref,
+            "letterNo": "AFC/PM/KNPCC-06/4905",
+            "letter_no": "AFC/PM/KNPCC-06/4905",
+            "date": "05-11-2025",
+        }
+    ]
+    assert response["linked"] == []
+
+
+@pytest.mark.asyncio
 async def test_add_and_remove_reference_round_trip(monkeypatch) -> None:
     source_id = ObjectId()
     target_id = ObjectId()
@@ -398,6 +461,52 @@ async def test_add_and_remove_reference_round_trip(monkeypatch) -> None:
     target_after_removal = await controller.document_service.get_document(str(target_id))
     assert target_after_removal is not None
     assert target_after_removal.referencedBy == []
+
+
+@pytest.mark.asyncio
+async def test_add_reference_preserves_existing_manual_links(monkeypatch) -> None:
+    source_id = ObjectId()
+    target_a_id = ObjectId()
+    target_b_id = ObjectId()
+
+    source_doc = _make_document_dict(_id=source_id)
+    target_a = _make_document_dict(_id=target_a_id, letterNo="LTR-A")
+    target_b = _make_document_dict(_id=target_b_id, letterNo="LTR-B")
+    fake_db = FakeDatabase([source_doc, target_a, target_b])
+    controller = _make_controller(fake_db)
+    user = _make_user()
+
+    await controller_add_reference(
+        controller,
+        str(source_id),
+        ReferenceCreate(
+            referenced_document_id=str(target_a_id),
+            link_type="direct",
+            description="First manual link",
+        ),
+        user,
+    )
+
+    updated = await controller_add_reference(
+        controller,
+        str(source_id),
+        ReferenceCreate(
+            referenced_document_id=str(target_b_id),
+            link_type="direct",
+            description="Second manual link",
+        ),
+        user,
+    )
+
+    linked_ids = {ref.documentId for ref in updated.references}
+    assert linked_ids == {str(target_a_id), str(target_b_id)}
+
+    target_a_after = await controller.document_service.get_document(str(target_a_id))
+    target_b_after = await controller.document_service.get_document(str(target_b_id))
+    assert target_a_after is not None
+    assert target_b_after is not None
+    assert any(ref.documentId == str(source_id) for ref in target_a_after.referencedBy)
+    assert any(ref.documentId == str(source_id) for ref in target_b_after.referencedBy)
 
 
 @pytest.mark.asyncio
@@ -485,11 +594,20 @@ async def test_process_document_async_updates_metadata(monkeypatch, tmp_path) ->
             )
 
     stub_processor = StubProcessor()
+    falkor_sync_calls: list[dict[str, Any]] = []
+
+    async def _fake_ingest_document(**_kwargs: Any) -> None:
+        return None
+
+    def _fake_sync_document_to_falkor(**kwargs: Any) -> None:
+        falkor_sync_calls.append(kwargs)
 
     monkeypatch.setattr(
         "rbac_backend.services.document_service.create_document_processor",
         lambda: stub_processor,
     )
+    monkeypatch.setattr(service.graph_ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(service.graph_ingestion, "sync_document_to_falkor", _fake_sync_document_to_falkor)
 
     await service.process_document_async(
         str(doc_id),
@@ -509,6 +627,98 @@ async def test_process_document_async_updates_metadata(monkeypatch, tmp_path) ->
     assert stored.subject == "Updated subject"
     # Ensure processor invoked with identifying information
     assert stub_processor.calls and stub_processor.calls[0]["document_id"] == str(doc_id)
+    assert falkor_sync_calls
+    assert falkor_sync_calls[-1]["document_id"] == str(doc_id)
 
 
+@pytest.mark.asyncio
+async def test_process_document_async_clears_stale_parser_references(monkeypatch, tmp_path) -> None:
+    source_id = ObjectId()
+    target_id = ObjectId()
+    now = datetime.utcnow()
+    source_doc = _make_document_dict(
+        _id=source_id,
+        references=[
+            {
+                "documentId": str(target_id),
+                "linkType": "indirect",
+                "linkedAt": now,
+                "linkedBy": "parser",
+                "letterNo": "LTR-OLD",
+                "source": "parser",
+            }
+        ],
+    )
+    target_doc = _make_document_dict(
+        _id=target_id,
+        letterNo="LTR-OLD",
+        referencedBy=[
+            {
+                "documentId": str(source_id),
+                "linkType": "indirect",
+                "linkedAt": now,
+                "linkedBy": "parser",
+                "letterNo": "LTR-001",
+                "source": "parser",
+            }
+        ],
+    )
+    fake_db = FakeDatabase([source_doc, target_doc])
+    service = DocumentService(fake_db)
+    input_path = tmp_path / "example-no-refs.pdf"
+    input_path.write_bytes(b"%PDF-1.4\n% test pdf")
+
+    class StubProcessor:
+        async def process_document(self, **_kwargs: Any) -> SimpleNamespace:
+            metadata = SimpleNamespace(
+                summary="No refs summary",
+                keywords=[],
+                contractual_clauses=[],
+                references=[],
+                full_content="Full text",
+                subject="Updated without refs",
+                letter_no="LTR-001",
+                from_company=None,
+                to_company=None,
+                date="2024-02-01",
+            )
+            return SimpleNamespace(
+                success=True,
+                metadata=metadata,
+                processing_time=1.0,
+                chunks_created=1,
+                processed_path="/processed/example-no-refs.pdf",
+            )
+
+    falkor_sync_calls: list[dict[str, Any]] = []
+
+    async def _fake_ingest_document(**_kwargs: Any) -> None:
+        return None
+
+    def _fake_sync_document_to_falkor(**kwargs: Any) -> None:
+        falkor_sync_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "rbac_backend.services.document_service.create_document_processor",
+        lambda: StubProcessor(),
+    )
+    monkeypatch.setattr(service.graph_ingestion, "ingest_document", _fake_ingest_document)
+    monkeypatch.setattr(service.graph_ingestion, "sync_document_to_falkor", _fake_sync_document_to_falkor)
+
+    await service.process_document_async(
+        str(source_id),
+        file_path=str(input_path),
+        organization_id="org-1",
+        project_id="proj-1",
+        upload_type="incoming",
+    )
+
+    stored_source = await service.get_document(str(source_id))
+    stored_target = await service.get_document(str(target_id))
+    assert stored_source is not None
+    assert stored_target is not None
+    assert stored_source.references == []
+    assert stored_target.referencedBy == []
+    assert falkor_sync_calls
+    assert falkor_sync_calls[-1]["document"]["references"] == []
 

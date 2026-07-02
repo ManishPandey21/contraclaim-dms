@@ -7,12 +7,14 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import uuid
+from collections import Counter
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator, Set
+from typing import Any, Dict, List, Optional, Tuple, AsyncGenerator, Set, Sequence
 import tempfile
 
 from ..core.config import settings
@@ -88,6 +90,9 @@ class ClauseInfo:
     parent_number: Optional[str] = None  # Parent clause number if nested
     clause_id: Optional[str] = None  # Stable clause identifier when available
     toc_path: Optional[List[str]] = None  # Hierarchical path from Marker/LLM
+    chunk_type: Optional[str] = None
+    ai_chunked: bool = False
+    ai_confidence: Optional[float] = None
 
 
 @dataclass
@@ -204,6 +209,12 @@ class DocumentParser:
 
     async def _extract_pdf_text(self, file_path: Path) -> ParsedDocument:
         """Extract text from PDF using pdfminer with page spans for grounding."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._extract_pdf_text_sync, file_path)
+
+    @staticmethod
+    def _extract_pdf_text_sync(file_path: Path) -> ParsedDocument:
+        """Synchronous pdfminer extraction, run through an executor by callers."""
         from pdfminer.high_level import extract_pages
         from pdfminer.layout import LTTextContainer
 
@@ -271,6 +282,155 @@ class DocumentParser:
             ],
             file_path=str(file_path),
         )
+
+
+class ContractTextPreprocessor:
+    """Clean page text before contract chunking while preserving legal meaning."""
+
+    _PAGE_NUMBER_RE = re.compile(
+        r"^(?:page\s*)?(?:[-–—]?\s*)?\d{1,5}(?:\s*(?:of|/)\s*\d{1,5})?(?:\s*[-–—]?)?$",
+        re.IGNORECASE,
+    )
+    _CLAUSE_HEADING_RE = re.compile(
+        r"^\s*(?:(?:GCC|SCC|PCC|Clause|Section|Article|Sub-Clause)\s+)?\d+(?:\.\d+){0,5}\b",
+        re.IGNORECASE,
+    )
+    _WATERMARK_RE = re.compile(
+        r"^(?:confidential|draft|sample|specimen|copy|generated\s+by|printed\s+by)\b",
+        re.IGNORECASE,
+    )
+
+    def clean_document(self, parsed_doc: ParsedDocument) -> Tuple[ParsedDocument, List[Dict[str, Any]]]:
+        if not parsed_doc.pages:
+            return parsed_doc, []
+
+        repeated_margin_lines = self._detect_repeated_margin_lines(parsed_doc.pages)
+        cleaned_pages: List[ParsedPage] = []
+        page_audit: List[Dict[str, Any]] = []
+        offset = 0
+
+        for page in parsed_doc.pages:
+            cleaned_text, removed = self.clean_page_text(page.text, page.number, repeated_margin_lines)
+            start = offset
+            end = start + len(cleaned_text)
+            cleaned_pages.append(
+                ParsedPage(
+                    number=page.number,
+                    text=cleaned_text,
+                    start=start,
+                    end=end,
+                )
+            )
+            offset = end + 2
+            page_audit.append(
+                {
+                    "page_number": page.number,
+                    "raw_text_length": len(page.text or ""),
+                    "cleaned_text_length": len(cleaned_text),
+                    "removed_lines": removed,
+                }
+            )
+
+        combined_text = "\n\n".join(page.text for page in cleaned_pages)
+        if cleaned_pages:
+            last = cleaned_pages[-1]
+            cleaned_pages[-1] = ParsedPage(
+                number=last.number,
+                text=last.text,
+                start=last.start,
+                end=last.start + len(last.text),
+            )
+        return ParsedDocument(text=combined_text, pages=cleaned_pages, file_path=parsed_doc.file_path), page_audit
+
+    def clean_page_text(
+        self,
+        text: str,
+        page_number: int,
+        repeated_margin_lines: Set[str],
+    ) -> Tuple[str, List[str]]:
+        if not text:
+            return "", []
+
+        cleaned_lines: List[str] = []
+        removed: List[str] = []
+        previous_blank = False
+
+        raw_lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        line_count = len(raw_lines)
+        for line_index, raw_line in enumerate(raw_lines):
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            normalized = self._normalize_line(stripped)
+            in_margin = line_index < 5 or line_index >= max(0, line_count - 5)
+
+            should_remove = False
+            if stripped:
+                should_remove = (
+                    (in_margin and self._is_page_number(stripped, page_number))
+                    or (normalized in repeated_margin_lines and not self._looks_like_clause_heading(stripped))
+                    or self._looks_like_watermark(stripped)
+                )
+
+            if should_remove:
+                removed.append(stripped[:160])
+                continue
+
+            if not stripped:
+                if previous_blank:
+                    continue
+                previous_blank = True
+                cleaned_lines.append("")
+                continue
+
+            previous_blank = False
+            cleaned_lines.append(line)
+
+        return "\n".join(cleaned_lines).strip(), removed[:50]
+
+    def _detect_repeated_margin_lines(self, pages: Sequence[ParsedPage]) -> Set[str]:
+        if len(pages) < 3:
+            return set()
+
+        counter: Counter[str] = Counter()
+        for page in pages:
+            lines = [line.strip() for line in (page.text or "").splitlines() if line.strip()]
+            if not lines:
+                continue
+            margin_lines = lines[:5] + lines[-5:]
+            seen_on_page: Set[str] = set()
+            for line in margin_lines:
+                normalized = self._normalize_line(line)
+                if not normalized or len(normalized) < 4 or self._looks_like_clause_heading(line):
+                    continue
+                seen_on_page.add(normalized)
+            counter.update(seen_on_page)
+
+        threshold = max(3, int(len(pages) * 0.30))
+        return {line for line, count in counter.items() if count >= threshold}
+
+    @classmethod
+    def _is_page_number(cls, line: str, page_number: int) -> bool:
+        if not cls._PAGE_NUMBER_RE.match(line.strip()):
+            return False
+        digits = re.findall(r"\d+", line)
+        if not digits:
+            return False
+        return str(page_number) in digits or len(line.strip()) <= 6
+
+    @classmethod
+    def _looks_like_clause_heading(cls, line: str) -> bool:
+        return bool(cls._CLAUSE_HEADING_RE.match(line.strip()))
+
+    @classmethod
+    def _looks_like_watermark(cls, line: str) -> bool:
+        stripped = line.strip()
+        return bool(cls._WATERMARK_RE.match(stripped))
+
+    @staticmethod
+    def _normalize_line(line: str) -> str:
+        lowered = re.sub(r"\s+", " ", line.strip().lower())
+        lowered = re.sub(r"\b\d{1,5}\b", "#", lowered)
+        return lowered.strip(" -–—|")
 
 
 class MarkerService:
@@ -395,12 +555,15 @@ class ClauseExtractor:
     CLAUSE_PATTERNS = [
         # "CLAUSE 1.2.3 - Title" or "CLAUSE 1.2.3: Title"
         r'^\s*(CLAUSE|SECTION|ARTICLE)\s+([\d\.]+)\s*[-:]?\s*(.*)$',
+        # "GCC 8.4 - Extension of Time" or "SCC 20.1: Loss and Expense"
+        r'^\s*((?:GCC|SCC|PCC|Sub-Clause))\s+(\d+(?:\.\d+){0,5})\s*[-:]?\s*(.*)$',
         # "1.2.3 Title" (numbered with title)
-        r'^\s*(\d+(?:\.\d+){0,3})\s+([A-Z][\w\s,]+)\s*$',
+        r'^\s*(\d+(?:\.\d+){0,5})\s+([A-Z][\w\s,()/&\'"-]{2,})\s*$',
         # "1.2.3. Title" (with period)
-        r'^\s*(\d+(?:\.\d+){0,3})\.\s+([A-Z][\w\s,]+)\s*$',
-        # Standalone numbered clause
-        r'^\s*(\d+(?:\.\d+){0,3})\s*$',
+        r'^\s*(\d+(?:\.\d+){0,5})\.\s+([A-Z][\w\s,()/&\'"-]{2,})\s*$',
+        # Standalone numbered sub-clause. Bare integers are often page numbers,
+        # so require at least one dot when there is no title on the line.
+        r'^\s*(\d+(?:\.\d+){1,5})\s*$',
     ]
     
     def __init__(self):
@@ -413,7 +576,7 @@ class ClauseExtractor:
             return "clause", "", ""
 
         first = groups[0].upper()
-        if first in {"CLAUSE", "SECTION", "ARTICLE"}:
+        if first in {"CLAUSE", "SECTION", "ARTICLE", "GCC", "SCC", "PCC", "SUB-CLAUSE"}:
             clause_type = first.lower()
             clause_number = groups[1] if len(groups) > 1 else ""
             clause_title = groups[2] if len(groups) > 2 else ""
@@ -450,6 +613,8 @@ class ClauseExtractor:
                 if match:
                     clause_type, clause_number, clause_title = self._parse_clause_match(match)
                     if not clause_number:
+                        continue
+                    if self._looks_like_false_positive_heading(stripped, clause_number, clause_title):
                         continue
                     clause_markers.append((idx, clause_number, clause_title, clause_type))
                     break
@@ -506,6 +671,25 @@ class ClauseExtractor:
             clauses.append(clause_info)
         
         return clauses
+
+    @staticmethod
+    def _looks_like_false_positive_heading(line: str, clause_number: str, clause_title: str) -> bool:
+        if not line:
+            return True
+        if ContractTextPreprocessor._PAGE_NUMBER_RE.match(line) and "." not in clause_number and not clause_title:
+            return True
+        if re.fullmatch(r"\d{1,5}", line.strip()) and "." not in clause_number:
+            return True
+        if re.search(r"\.{5,}\s*\d{1,5}\s*$", line):
+            return True
+        title = (clause_title or "").strip()
+        if title and not re.search(r"[A-Za-z]", title):
+            return True
+        # Very high bare integer headings in contracts are usually page numbers
+        # or table artifacts unless explicitly prefixed as a clause/section.
+        if "." not in clause_number and clause_number.isdigit() and int(clause_number) > 80:
+            return True
+        return False
     
     def split_long_clause(self, clause: ClauseInfo, max_length: int = 6000) -> List[Dict[str, Any]]:
         """
@@ -716,6 +900,7 @@ class DatabaseService:
             await asyncio.gather(
                 self._create_document_vectors_index(),
                 self._create_ingest_jobs_index(),
+                self._create_ocr_status_indexes(),
                 return_exceptions=True
             )
         except Exception as e:
@@ -765,6 +950,92 @@ class DatabaseService:
             ], name="contract_ingest_jobs_upload_id_idx", background=True)
         except Exception as e:
             logger.debug(f"Ingest jobs index creation failed: {e}")
+
+    async def _create_ocr_status_indexes(self) -> None:
+        """Create indexes for page/batch OCR audit collections."""
+        try:
+            await self.db.contract_ocr_batches.create_index(
+                [("document_id", 1), ("page_start", 1), ("page_end", 1)],
+                name="contract_ocr_batches_doc_pages_idx",
+                background=True,
+            )
+            await self.db.contract_ocr_batches.create_index(
+                [("upload_id", 1), ("status", 1)],
+                name="contract_ocr_batches_upload_status_idx",
+                background=True,
+            )
+            await self.db.contract_ocr_pages.create_index(
+                [("document_id", 1), ("page_number", 1)],
+                name="contract_ocr_pages_doc_page_idx",
+                unique=True,
+                background=True,
+            )
+            await self.db.contract_ocr_pages.create_index(
+                [("upload_id", 1), ("status", 1)],
+                name="contract_ocr_pages_upload_status_idx",
+                background=True,
+            )
+        except Exception as e:
+            logger.debug(f"OCR status index creation failed: {e}")
+
+    async def upsert_ocr_batch(
+        self,
+        *,
+        document_id: str,
+        upload_id: str,
+        organization_id: str,
+        project_id: Optional[str],
+        page_start: int,
+        page_end: int,
+        status: str,
+        error: Optional[str] = None,
+        retry_count: int = 0,
+    ) -> str:
+        batch_id = f"{document_id}:{page_start}-{page_end}"
+        now = datetime.utcnow()
+        await self.db.contract_ocr_batches.update_one(
+            {"batch_id": batch_id},
+            {
+                "$set": {
+                    "batch_id": batch_id,
+                    "document_id": document_id,
+                    "upload_id": upload_id,
+                    "organization_id": str(organization_id),
+                    "project_id": str(project_id) if project_id else None,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "status": status,
+                    "error": error,
+                    "retry_count": retry_count,
+                    "updatedAt": now,
+                    "completed_at": now if status in {"completed", "failed", "skipped"} else None,
+                },
+                "$setOnInsert": {"createdAt": now, "started_at": now},
+            },
+            upsert=True,
+        )
+        return batch_id
+
+    async def upsert_ocr_pages(self, page_records: List[Dict[str, Any]]) -> None:
+        if not page_records:
+            return
+        now = datetime.utcnow()
+        for record in page_records:
+            document_id = str(record.get("document_id") or "")
+            page_number = int(record.get("page_number") or 0)
+            if not document_id or page_number <= 0:
+                continue
+            update_doc = {
+                **record,
+                "document_id": document_id,
+                "page_number": page_number,
+                "updatedAt": now,
+            }
+            await self.db.contract_ocr_pages.update_one(
+                {"document_id": document_id, "page_number": page_number},
+                {"$set": update_doc, "$setOnInsert": {"createdAt": now}},
+                upsert=True,
+            )
 
     async def upsert_job_status(
         self,
@@ -902,6 +1173,7 @@ class ContractIngestor:
         self.config.EMBEDDING_MODEL = self.processing_config.openai_embedding_model
         self.db_service = DatabaseService(db)
         self.parser = DocumentParser()
+        self.text_preprocessor = ContractTextPreprocessor()
         self.clause_extractor = ClauseExtractor()
         self.vector_service = self._initialize_vector_service(self.processing_config)
         self.marker_service = MarkerService(self.processing_config)
@@ -947,6 +1219,386 @@ class ContractIngestor:
             logger.error("Failed to initialize LlamaIndex vector service: %s", exc)
             return None
 
+    async def _extract_and_prepare_document(
+        self,
+        file_path: Path,
+        *,
+        upload_id: str,
+        document_id: str,
+        organization_id: str,
+        project_id: Optional[str],
+        filename: str,
+        final_tags: List[str],
+        file_size: Optional[int],
+        retry_ocr_pages: Optional[List[int]] = None,
+    ) -> Tuple[ParsedDocument, Dict[str, Any]]:
+        if file_path.suffix.lower() != ".pdf":
+            raw_doc = await self.parser.extract_text(file_path)
+            cleaned_doc, page_audit = (
+                self.text_preprocessor.clean_document(raw_doc)
+                if self.processing_config.contract_text_cleaning_enabled
+                else (raw_doc, [])
+            )
+            return cleaned_doc, {
+                "ocr_required": False,
+                "ocr_pages_total": len(cleaned_doc.pages),
+                "ocr_failed_pages": [],
+                "page_cleaning": page_audit,
+            }
+
+        await self.db_service.upsert_job_status(
+            upload_id,
+            str(file_path),
+            filename,
+            "processing",
+            organization_id=organization_id,
+            project_id=project_id,
+            tags=final_tags,
+            file_size=file_size,
+            extra={
+                "processing_stage": "ocr",
+                "stage_label": "Extracting PDF pages and OCR batches",
+                "progress": 25,
+            },
+        )
+
+        raw_doc, page_records = await self._extract_pdf_pages_with_ocr_batches(
+            file_path,
+            upload_id=upload_id,
+            document_id=document_id,
+            organization_id=organization_id,
+            project_id=project_id,
+            retry_ocr_pages=retry_ocr_pages,
+        )
+        cleaned_doc, page_audit = (
+            self.text_preprocessor.clean_document(raw_doc)
+            if self.processing_config.contract_text_cleaning_enabled
+            else (raw_doc, [])
+        )
+        cleaned_by_page = {page.number: page.text for page in cleaned_doc.pages}
+        audit_by_page = {item.get("page_number"): item for item in page_audit}
+        for record in page_records:
+            page_number = int(record.get("page_number") or 0)
+            record["cleaned_text"] = cleaned_by_page.get(page_number, "")
+            record["cleaned_text_length"] = len(record["cleaned_text"])
+            record["cleaning"] = audit_by_page.get(page_number, {})
+            record["source_pdf_page_link"] = self._source_pdf_page_link(document_id, page_number)
+        await self.db_service.upsert_ocr_pages(page_records)
+
+        summary = self._summarize_ocr_records(page_records)
+        summary["page_cleaning"] = page_audit
+        await self.db_service.upsert_job_status(
+            upload_id,
+            str(file_path),
+            filename,
+            "processing",
+            organization_id=organization_id,
+            project_id=project_id,
+            tags=final_tags,
+            file_size=file_size,
+            extra={
+                "processing_stage": "parsing",
+                "stage_label": "Cleaned OCR text for clause extraction",
+                "progress": 40,
+                **summary,
+            },
+        )
+        return cleaned_doc, summary
+
+    async def _extract_pdf_pages_with_ocr_batches(
+        self,
+        file_path: Path,
+        *,
+        upload_id: str,
+        document_id: str,
+        organization_id: str,
+        project_id: Optional[str],
+        retry_ocr_pages: Optional[List[int]] = None,
+    ) -> Tuple[ParsedDocument, List[Dict[str, Any]]]:
+        raw_doc = await self.parser._extract_pdf_text(file_path)
+        page_count = max(len(raw_doc.pages), await self._get_pdf_page_count(file_path))
+        pages_by_number = {page.number: page for page in raw_doc.pages}
+        raw_pages: List[ParsedPage] = [
+            pages_by_number.get(page_number)
+            or ParsedPage(number=page_number, text="", start=0, end=0)
+            for page_number in range(1, page_count + 1)
+        ]
+
+        min_chars = max(0, int(self.processing_config.contract_ocr_min_text_chars_per_page))
+        retry_set = {int(page) for page in (retry_ocr_pages or []) if int(page) > 0}
+        pages_needing_ocr = [
+            page.number
+            for page in raw_pages
+            if (retry_set and page.number in retry_set)
+            or (not retry_set and len((page.text or "").strip()) < min_chars)
+        ]
+
+        page_text_overrides: Dict[int, str] = {}
+        page_status: Dict[int, Dict[str, Any]] = {}
+        for page in raw_pages:
+            page_status[page.number] = {
+                "status": "text_layer" if len((page.text or "").strip()) >= min_chars else "ocr_pending",
+                "batch_id": None,
+                "error": None,
+            }
+
+        if self.processing_config.ocr_enabled and pages_needing_ocr:
+            batches = self._group_page_numbers(
+                pages_needing_ocr,
+                max(1, int(self.processing_config.contract_ocr_batch_size)),
+            )
+            for batch_index, batch_pages in enumerate(batches, start=1):
+                page_start, page_end = batch_pages[0], batch_pages[-1]
+                batch_id = await self.db_service.upsert_ocr_batch(
+                    document_id=document_id,
+                    upload_id=upload_id,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    page_start=page_start,
+                    page_end=page_end,
+                    status="running",
+                    retry_count=1 if retry_set else 0,
+                )
+                try:
+                    extracted = await self._run_ocr_page_batch(file_path, upload_id, batch_pages)
+                    page_text_overrides.update(extracted)
+                    for page_number in batch_pages:
+                        page_status[page_number] = {
+                            "status": "ocr_completed" if extracted.get(page_number, "").strip() else "ocr_empty",
+                            "batch_id": batch_id,
+                            "error": None if extracted.get(page_number, "").strip() else "OCR completed but no text was extracted",
+                        }
+                    await self.db_service.upsert_ocr_batch(
+                        document_id=document_id,
+                        upload_id=upload_id,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        page_start=page_start,
+                        page_end=page_end,
+                        status="completed",
+                        retry_count=1 if retry_set else 0,
+                    )
+                except Exception as exc:
+                    error = str(exc)
+                    logger.warning(
+                        "OCR batch failed for %s pages %s-%s: %s",
+                        file_path.name,
+                        page_start,
+                        page_end,
+                        error,
+                    )
+                    for page_number in batch_pages:
+                        page_status[page_number] = {
+                            "status": "ocr_failed",
+                            "batch_id": batch_id,
+                            "error": error[:500],
+                        }
+                    await self.db_service.upsert_ocr_batch(
+                        document_id=document_id,
+                        upload_id=upload_id,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        page_start=page_start,
+                        page_end=page_end,
+                        status="failed",
+                        error=error[:500],
+                        retry_count=1 if retry_set else 0,
+                    )
+        elif pages_needing_ocr:
+            for page_number in pages_needing_ocr:
+                page_status[page_number] = {
+                    "status": "ocr_disabled",
+                    "batch_id": None,
+                    "error": "OCR is disabled",
+                }
+
+        merged_pages: List[ParsedPage] = []
+        page_records: List[Dict[str, Any]] = []
+        for page in raw_pages:
+            page_text = page_text_overrides.get(page.number, page.text or "")
+            merged_pages.append(ParsedPage(number=page.number, text=page_text, start=0, end=0))
+            state = page_status.get(page.number) or {}
+            page_records.append(
+                {
+                    "document_id": document_id,
+                    "upload_id": upload_id,
+                    "organization_id": str(organization_id),
+                    "project_id": str(project_id) if project_id else None,
+                    "page_number": page.number,
+                    "batch_id": state.get("batch_id"),
+                    "status": state.get("status") or "text_layer",
+                    "error": state.get("error"),
+                    "raw_text": page_text,
+                    "raw_text_length": len(page_text),
+                    "cleaned_text": "",
+                    "cleaned_text_length": 0,
+                    "source_pdf_page_link": self._source_pdf_page_link(document_id, page.number),
+                }
+            )
+
+        return self._combine_pages(merged_pages, file_path), page_records
+
+    async def _get_pdf_page_count(self, file_path: Path) -> int:
+        def count_pages() -> int:
+            try:
+                import PyPDF2
+
+                with open(file_path, "rb") as handle:
+                    return len(PyPDF2.PdfReader(handle).pages)
+            except Exception:
+                return 0
+
+        return await asyncio.to_thread(count_pages)
+
+    @staticmethod
+    def _group_page_numbers(page_numbers: Sequence[int], batch_size: int) -> List[List[int]]:
+        groups: List[List[int]] = []
+        current: List[int] = []
+        previous: Optional[int] = None
+        for page_number in sorted({int(page) for page in page_numbers if int(page) > 0}):
+            if current and (previous is None or page_number != previous + 1 or len(current) >= batch_size):
+                groups.append(current)
+                current = []
+            current.append(page_number)
+            previous = page_number
+        if current:
+            groups.append(current)
+        return groups
+
+    async def _run_ocr_page_batch(self, file_path: Path, upload_id: str, page_numbers: Sequence[int]) -> Dict[int, str]:
+        if not page_numbers:
+            return {}
+        page_range = self._format_page_range(page_numbers)
+        batch_dir = BASE_UPLOAD_PATH / "ocr_batches" / upload_id
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        output_path = batch_dir / f"{file_path.stem}_pages_{page_range.replace('-', '_')}.pdf"
+        sidecar_path = output_path.with_suffix(".txt")
+
+        executable = shutil.which("ocrmypdf")
+        if executable:
+            cmd = [
+                executable,
+                "--pages",
+                page_range,
+                "--language",
+                self.processing_config.ocr_language,
+                "--rotate-pages",
+                "--deskew",
+                "--optimize",
+                "1",
+                "--jobs",
+                str(min(2, os.cpu_count() or 2)),
+                "--sidecar",
+                str(sidecar_path),
+                str(file_path),
+                str(output_path),
+            ]
+        else:
+            cmd = [
+                sys.executable,
+                "-m",
+                "ocrmypdf",
+                "--pages",
+                page_range,
+                "--language",
+                self.processing_config.ocr_language,
+                "--rotate-pages",
+                "--deskew",
+                "--optimize",
+                "1",
+                "--jobs",
+                str(min(2, os.cpu_count() or 2)),
+                "--sidecar",
+                str(sidecar_path),
+                str(file_path),
+                str(output_path),
+            ]
+
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if result.returncode != 0:
+            raise IngestionError((result.stderr or result.stdout or "OCRmyPDF batch failed").strip())
+
+        return await self._extract_selected_pages_from_pdf(output_path, page_numbers)
+
+    @staticmethod
+    def _format_page_range(page_numbers: Sequence[int]) -> str:
+        ordered = sorted({int(page) for page in page_numbers if int(page) > 0})
+        if not ordered:
+            return ""
+        if len(ordered) == 1:
+            return str(ordered[0])
+        return f"{ordered[0]}-{ordered[-1]}"
+
+    async def _extract_selected_pages_from_pdf(self, pdf_path: Path, page_numbers: Sequence[int]) -> Dict[int, str]:
+        ordered = list(sorted(page_numbers))
+
+        def extract() -> Dict[int, str]:
+            try:
+                import pdfplumber
+
+                out: Dict[int, str] = {}
+                with pdfplumber.open(pdf_path) as pdf:
+                    output_count = len(pdf.pages)
+                    for index, page_number in enumerate(ordered):
+                        if output_count >= max(ordered):
+                            source_index = page_number - 1
+                        else:
+                            source_index = index
+                        if 0 <= source_index < output_count:
+                            out[page_number] = pdf.pages[source_index].extract_text() or ""
+                return out
+            except Exception as exc:
+                raise IngestionError(f"Failed to extract OCR batch text: {exc}") from exc
+
+        return await asyncio.to_thread(extract)
+
+    @staticmethod
+    def _combine_pages(pages: Sequence[ParsedPage], file_path: Path) -> ParsedDocument:
+        combined_text = "\n\n".join(page.text or "" for page in pages)
+        combined_pages: List[ParsedPage] = []
+        offset = 0
+        for page in pages:
+            text = page.text or ""
+            start = offset
+            end = start + len(text)
+            combined_pages.append(ParsedPage(number=page.number, text=text, start=start, end=end))
+            offset = end + 2
+        if combined_pages:
+            last = combined_pages[-1]
+            combined_pages[-1] = ParsedPage(
+                number=last.number,
+                text=last.text,
+                start=last.start,
+                end=last.start + len(last.text),
+            )
+        return ParsedDocument(text=combined_text, pages=combined_pages, file_path=str(file_path))
+
+    @staticmethod
+    def _source_pdf_page_link(document_id: str, page_number: int) -> str:
+        return f"contract:{document_id}#page={page_number}"
+
+    @staticmethod
+    def _summarize_ocr_records(page_records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        failed = [
+            int(record.get("page_number") or 0)
+            for record in page_records
+            if str(record.get("status") or "").endswith("failed")
+        ]
+        batch_ids = {record.get("batch_id") for record in page_records if record.get("batch_id")}
+        statuses = Counter(str(record.get("status") or "unknown") for record in page_records)
+        return {
+            "ocr_pages_total": len(page_records),
+            "ocr_failed_pages": [page for page in failed if page > 0],
+            "ocr_batches_total": len(batch_ids),
+            "ocr_page_status_counts": dict(statuses),
+        }
+
     async def ingest_file(
         self,
         organization_id: str,
@@ -956,6 +1608,7 @@ class ContractIngestor:
         tags: Optional[List[str]] = None,
         upload_id: Optional[str] = None,
         document_id: Optional[str] = None,
+        retry_ocr_pages: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
         """
         Ingest a contract file with proper error handling and logging.
@@ -1005,10 +1658,26 @@ class ContractIngestor:
                 },
             )
 
-            # Extract text from document
-            parsed_doc = await self.parser.extract_text(file_path_obj)
+            # Extract text from document. For PDFs, this is page/batch aware:
+            # raw page text is kept in contract_ocr_pages, while the cleaned
+            # ParsedDocument drives clause chunking and embeddings.
+            parsed_doc, ocr_summary = await self._extract_and_prepare_document(
+                file_path_obj,
+                upload_id=upload_id,
+                document_id=document_id,
+                organization_id=organization_id,
+                project_id=project_id,
+                filename=filename,
+                final_tags=final_tags,
+                file_size=file_size,
+                retry_ocr_pages=retry_ocr_pages,
+            )
             text = parsed_doc.text
             logger.info(f"Extracted {len(text)} characters from {filename}")
+            if not text or not text.strip():
+                failed_pages = ocr_summary.get("ocr_failed_pages") or []
+                hint = f"; failed OCR pages: {failed_pages}" if failed_pages else ""
+                raise DocumentParsingError(f"No usable cleaned text extracted from document{hint}")
 
             # Get organization and project names for categorization
             org_name = await self.db_service.get_organization_name(organization_id)
@@ -1046,8 +1715,8 @@ class ContractIngestor:
                 marker_result = None
 
             if marker_result and marker_result.markdown_text:
-                markdown_text = marker_result.markdown_text
-                map_pages = False
+                # Marker remains useful for headings/TOC, but chunking uses
+                # cleaned text to keep embeddings free of repeated OCR noise.
                 await self.db_service.upsert_job_status(
                     upload_id,
                     str(file_path_obj),
@@ -1066,13 +1735,23 @@ class ContractIngestor:
                 )
 
             clause_spans: List[ClauseSpan] = []
-            if marker_result and self.clause_worker.enabled:
+            ai_confidence: Optional[float] = None
+            if (
+                self.processing_config.contract_ai_chunking_enabled
+                and self.clause_worker.enabled
+            ):
                 clause_spans = await self.clause_worker.extract_spans(markdown_text)
+                clause_spans, ai_confidence = self._validate_ai_clause_spans(clause_spans, markdown_text)
 
             if clause_spans:
-                clauses = self._spans_to_clauses(clause_spans, markdown_text)
-                clause_source = "contracts_ingest_marker_llm"
-                map_pages = False
+                clauses = self._spans_to_clauses(
+                    clause_spans,
+                    markdown_text,
+                    ai_chunked=True,
+                    ai_confidence=ai_confidence,
+                )
+                clause_source = "contracts_ingest_ai_clause_chunks"
+                map_pages = True
             else:
                 clauses = self.clause_extractor.extract_clauses(text)
                 clause_source = "contracts_ingest_regex"
@@ -1178,6 +1857,21 @@ class ContractIngestor:
 
             # Insert into database
             await self.db_service.insert_document_vectors(records)
+
+            # Guard against silently completing a contract whose semantic
+            # vectors never persisted. When Qdrant dual-write is enabled and we
+            # produced clause payloads, writing zero vectors means the vector
+            # backend was unreachable (e.g. the 401 auth failure): the document
+            # would be invisible to contract QA / vector search. Fail loudly so
+            # the job is marked "failed" and can be re-indexed, instead of
+            # reporting "completed" for an unsearchable document.
+            if self.processing_config.qdrant_enabled and payloads and not qdrant_chunks:
+                raise IngestionError(
+                    f"Vector indexing wrote 0 of {len(payloads)} clause chunks for "
+                    f"{filename} (document_id={document_id}). Qdrant dual-write is "
+                    "enabled but the vector store was unreachable, so the contract "
+                    "would not be searchable. Refusing to mark it completed."
+                )
 
             # Update job status to completed
             await self.db_service.upsert_job_status(
@@ -1387,7 +2081,59 @@ class ContractIngestor:
             return "clause"
         return "clause"
 
-    def _spans_to_clauses(self, spans: List[ClauseSpan], markdown_text: str) -> List[ClauseInfo]:
+    def _validate_ai_clause_spans(
+        self,
+        spans: List[ClauseSpan],
+        source_text: str,
+    ) -> Tuple[List[ClauseSpan], Optional[float]]:
+        if not spans or not source_text:
+            return [], None
+
+        ordered = sorted(spans, key=lambda span: (span.start_offset, span.end_offset))
+        valid: List[ClauseSpan] = []
+        cursor = 0
+        covered = 0
+        for span in ordered:
+            start = int(span.start_offset)
+            end = int(span.end_offset)
+            if start < 0 or end > len(source_text) or end <= start:
+                continue
+            if start < cursor:
+                logger.info("AI clause chunking rejected overlapping span: %s", span.heading)
+                return [], None
+            clause_text = source_text[start:end].strip()
+            if not clause_text:
+                continue
+            valid.append(span)
+            covered += len(re.sub(r"\s+", "", clause_text))
+            cursor = end
+
+        if not valid:
+            return [], None
+
+        source_chars = len(re.sub(r"\s+", "", source_text))
+        if source_chars <= 0:
+            return [], None
+        coverage = min(1.0, covered / source_chars)
+        confidence = round(coverage, 3)
+        min_confidence = float(self.processing_config.contract_ai_chunking_min_confidence)
+        if confidence < min_confidence:
+            logger.info(
+                "AI clause chunking coverage %.3f below threshold %.3f; using deterministic fallback",
+                confidence,
+                min_confidence,
+            )
+            return [], confidence
+        return valid, confidence
+
+    def _spans_to_clauses(
+        self,
+        spans: List[ClauseSpan],
+        markdown_text: str,
+        *,
+        ai_chunked: bool = False,
+        ai_confidence: Optional[float] = None,
+    ) -> List[ClauseInfo]:
         clauses: List[ClauseInfo] = []
         for idx, span in enumerate(spans, start=1):
             start = max(0, min(span.start_offset, len(markdown_text)))
@@ -1417,6 +2163,9 @@ class ContractIngestor:
                     parent_number=parent_number,
                     clause_id=span.clause_id,
                     toc_path=span.path,
+                    chunk_type=clause_type,
+                    ai_chunked=ai_chunked,
+                    ai_confidence=ai_confidence,
                 )
             )
         return clauses
@@ -1446,6 +2195,10 @@ class ContractIngestor:
             page_numbers = self._map_pages_for_clause(clause, parsed_doc) if map_pages else []
             clause_tags = self._extract_clause_tags(clause.clause_text)
             section_heading = clause.clause_title or f"{clause.clause_type.title()} {clause.clause_number}"
+            page_start = min(page_numbers) if page_numbers else None
+            page_end = max(page_numbers) if page_numbers else None
+            source_pdf_page_link = self._source_pdf_page_link(document_id, page_start) if page_start else None
+            chunk_type = clause.chunk_type or clause.clause_type or "clause"
             # Split long clauses intelligently
             clause_chunks = self.clause_extractor.split_long_clause(
                 clause, 
@@ -1476,6 +2229,7 @@ class ContractIngestor:
                 metadata = normalize_source_payload({
                     "upload_id": upload_id,
                     "document_id": document_id,
+                    "contract_id": document_id,
                     "organization_id": str(organization_id),
                     "project_id": str(project_id) if project_id else None,
                     "uploadType": "contract",
@@ -1488,11 +2242,14 @@ class ContractIngestor:
                     "filename": filename,
                     "section": section_heading,
                     "section_heading": section_heading,
+                    "section_title": section_heading,
                     
                     # NEW CLAUSE METADATA FIELDS (per markdown guide)
                     "clause_number": chunk_data['clause_number'],
+                    "clause_no": chunk_data['clause_number'],
                     "clause_title": chunk_data['clause_title'],
                     "clause_type": clause.clause_type,
+                    "chunk_type": chunk_type,
                     "clause_level": clause.level,
                     "parent_clause_number": clause.parent_number,
                     "chunk_index": chunk_data['chunk_index'],
@@ -1502,15 +2259,21 @@ class ContractIngestor:
                     "clause_tags": clause_tags,
                     "clause_id": clause.clause_id,
                     "toc_path": clause.toc_path or [],
+                    "ai_chunked": bool(clause.ai_chunked),
+                    "ai_confidence": clause.ai_confidence,
 
                     # Page grounding
                     "page_number": page_numbers[0] if page_numbers else None,
                     "page": page_numbers[0] if page_numbers else None,
                     "page_numbers": page_numbers,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "source_pdf_page_link": source_pdf_page_link,
                     
                     "tags": final_tags,
                     "checksum_sha256": chunk_checksum,
                     "source": clause_source,
+                    "text_source": "cleaned_contract_text",
                     "text_enriched": text_enriched,
                 })
 
@@ -1543,10 +2306,13 @@ class ContractIngestor:
             "upload_id": metadata.get("upload_id"),
             "uploadType": metadata.get("uploadType"),
             "document_type": "contract",
+            "contract_id": metadata.get("contract_id"),
             "clause_id": metadata.get("clause_id"),
             "clause_number": clause_number,
+            "clause_no": metadata.get("clause_no") or clause_number,
             "clause_title": metadata.get("clause_title"),
             "clause_type": metadata.get("clause_type"),
+            "chunk_type": metadata.get("chunk_type"),
             "clause_level": metadata.get("clause_level"),
             "parent_clause_number": metadata.get("parent_clause_number"),
             "chunk_index": chunk_index,
@@ -1561,8 +2327,15 @@ class ContractIngestor:
             "source_file": metadata.get("source_file"),
             "section": metadata.get("section"),
             "section_heading": metadata.get("section_heading"),
+            "section_title": metadata.get("section_title") or metadata.get("section_heading"),
             "page_number": metadata.get("page_number"),
             "page_numbers": metadata.get("page_numbers") or [],
+            "page_start": metadata.get("page_start"),
+            "page_end": metadata.get("page_end"),
+            "source_pdf_page_link": metadata.get("source_pdf_page_link"),
+            "ai_chunked": bool(metadata.get("ai_chunked")),
+            "ai_confidence": metadata.get("ai_confidence"),
+            "text_source": metadata.get("text_source"),
             "organization_id": metadata.get("organization_id"),
             "project_id": metadata.get("project_id"),
             "checksum_sha256": checksum,
@@ -1573,7 +2346,8 @@ class ContractIngestor:
             "document_id": metadata.get("document_id") or upload_id,
             "org_id": metadata.get("organization_id"),
             "project_id": metadata.get("project_id"),
-            "page_start": metadata.get("page_number") or metadata.get("page"),
+            "page_start": metadata.get("page_start") or metadata.get("page_number") or metadata.get("page"),
+            "page_end": metadata.get("page_end") or metadata.get("page_number") or metadata.get("page"),
             "text": text,
             "text_enriched": metadata.get("text_enriched"),
             "tags": metadata.get("tags", []),
@@ -1773,11 +2547,12 @@ async def ingest_file(
     tags: Optional[List[str]] = None,
     upload_id: Optional[str] = None,
     document_id: Optional[str] = None,
+    retry_ocr_pages: Optional[List[int]] = None,
 ) -> Dict[str, Any]:
     """Convenience function for file ingestion"""
     ingestor = create_contract_ingestor(db)
     return await ingestor.ingest_file(
-        organization_id, project_id, file_path, filename, tags, upload_id, document_id
+        organization_id, project_id, file_path, filename, tags, upload_id, document_id, retry_ocr_pages
     )
 
 

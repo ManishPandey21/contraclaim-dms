@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 import tempfile
 import uuid
-import asyncio
 import hashlib
 import logging
 from datetime import datetime
@@ -24,6 +23,7 @@ from ..models.contract_models import (
     ContractListResponse,
     ContractSearchRequest,
     ContractSearchResponse,
+    OCRRetryRequest,
     ContractUploadSessionRequest,
     ContractUploadSessionResponse,
     StatusResponse,
@@ -31,7 +31,7 @@ from ..models.contract_models import (
     UploadResult,
 )
 from ..models.storage_settings import StorageProviderConfig
-from ..services.contract_ingest_queue import get_contract_ingest_queue
+from ..services.contract_ingest_queue import ContractQueueEnqueueResult, get_contract_ingest_queue
 from ..services.contract_service import ContractService
 from ..services.document_audit_service import DocumentAuditService
 from ..services.file_object_service import FileObjectService
@@ -109,15 +109,19 @@ def _write_processing_copy(upload_id: str, safe_filename: str, content: bytes) -
     return path
 
 
-async def _enqueue_or_start_contract_ingest(payload: Dict[str, Any]) -> str:
+async def _enqueue_or_start_contract_ingest(payload: Dict[str, Any]) -> ContractQueueEnqueueResult:
     try:
-        return await get_contract_ingest_queue().enqueue(payload)
+        job_id = await get_contract_ingest_queue().enqueue(payload)
+        return ContractQueueEnqueueResult(job_id=job_id)
     except Exception as exc:
-        logger.warning("Contract queue unavailable; starting inline background ingest: %s", exc)
-        from ..services.contract_service import process_contract_ingest_job
-
-        asyncio.create_task(process_contract_ingest_job(payload))
-        return f"inline:{payload.get('upload_id')}"
+        logger.warning("Contract queue unavailable; marking ingest degraded: %s", exc)
+        upload_id = str(payload.get("upload_id") or "unknown")
+        return ContractQueueEnqueueResult(
+            job_id=f"queue-unavailable:{upload_id}",
+            status="failed",
+            degraded=True,
+            error=f"Contract ingestion queue unavailable: {exc}",
+        )
 
 
 async def _write_to_providers(
@@ -418,10 +422,19 @@ async def upload_contracts_multipart(
                     "tags": tags or [],
                     "file_object_id": store_result.get("file_object_id"),
                 }
-                queue_job_id = await _enqueue_or_start_contract_ingest(ingest_payload)
+                queue_result = await _enqueue_or_start_contract_ingest(ingest_payload)
+                job_status = queue_result.status
+                if queue_result.degraded:
+                    await contract_service.update_contract_document(
+                        document_id,
+                        status_value="failed",
+                        error=queue_result.error,
+                        tags=tags or [],
+                    )
                 await contract_service.update_job_status(
                     upload_id,
-                    "queued",
+                    job_status,
+                    error=queue_result.error,
                     metadata={
                         "document_id": document_id,
                         "filename": file.filename,
@@ -429,14 +442,18 @@ async def upload_contracts_multipart(
                         "project_id": effective_project,
                         "tags": tags or [],
                         "size": spooled.size,
-                        "queue_job_id": queue_job_id,
+                        "queue_job_id": queue_result.job_id,
+                        "queue_degraded": queue_result.degraded,
+                        "processing_stage": "queue_failed" if queue_result.degraded else "queued",
+                        "stage_label": "Contract ingestion queue unavailable" if queue_result.degraded else "Queued for contract ingestion",
+                        "progress": 0 if queue_result.degraded else 10,
                         "file_object_id": store_result.get("file_object_id"),
                         "storage_key": store_result.get("storage_key"),
                         "sha256": store_result.get("sha256"),
                         "upload_streamed": True,
                     },
                 )
-                results.append(UploadResult(upload_id=upload_id, document_id=document_id, filename=file.filename, status="queued"))
+                results.append(UploadResult(upload_id=upload_id, document_id=document_id, filename=file.filename, status=job_status))
             finally:
                 await spooled.cleanup()
 
@@ -618,10 +635,19 @@ async def upload_contract_chunk(
                 "tags": tags or [],
                 "file_object_id": store_result.get("file_object_id"),
             }
-            queue_job_id = await _enqueue_or_start_contract_ingest(ingest_payload)
+            queue_result = await _enqueue_or_start_contract_ingest(ingest_payload)
+            job_status = queue_result.status
+            if queue_result.degraded:
+                await contract_service.update_contract_document(
+                    document_id,
+                    status_value="failed",
+                    error=queue_result.error,
+                    tags=tags or [],
+                )
             await contract_service.update_job_status(
                 upload_id,
-                "queued",
+                job_status,
+                error=queue_result.error,
                 metadata={
                     "document_id": document_id,
                     "filename": filename,
@@ -629,7 +655,11 @@ async def upload_contract_chunk(
                     "project_id": effective_project,
                     "tags": tags or [],
                     "size": spooled.size,
-                    "queue_job_id": queue_job_id,
+                    "queue_job_id": queue_result.job_id,
+                    "queue_degraded": queue_result.degraded,
+                    "processing_stage": "queue_failed" if queue_result.degraded else "queued",
+                    "stage_label": "Contract ingestion queue unavailable" if queue_result.degraded else "Queued for contract ingestion",
+                    "progress": 0 if queue_result.degraded else 10,
                     "file_object_id": store_result.get("file_object_id"),
                     "storage_key": store_result.get("storage_key"),
                     "sha256": store_result.get("sha256"),
@@ -679,6 +709,155 @@ async def get_contract_status(
         audit=False,
     )
     return status_response
+
+
+@router.post("/contracts/{document_id}/ocr/retry", response_model=StatusResponse)
+@handle_exceptions
+async def retry_contract_ocr_pages(
+    document_id: str,
+    request: OCRRetryRequest,
+    contract_service: ContractService = Depends(get_contract_service),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
+):
+    document = await contract_service.get_contract_document(document_id, current_user)
+    organization_id = str(document.get("organization_id") or "")
+    project_id = str(document.get("project_id") or "") or None
+    await _authorize_contract_scope(
+        policy,
+        current_user,
+        Permissions.DOCUMENT_EDIT_METADATA,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type="contract_ocr",
+        audit=True,
+    )
+    page_numbers = sorted({int(page) for page in request.page_numbers if int(page) > 0})
+    if not page_numbers:
+        page_numbers = await contract_service.get_failed_ocr_pages(document_id)
+    if not page_numbers:
+        raise ContractError("No failed OCR pages found for this contract", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    upload_id = str(document.get("contract_upload_id") or document.get("upload_id") or document_id)
+    local_path = document.get("filepath_local") or document.get("file_path")
+    if not local_path and not document.get("file_object_id"):
+        raise ContractError("Original contract file is not available for OCR retry", status.HTTP_404_NOT_FOUND)
+
+    payload = {
+        "upload_id": upload_id,
+        "document_id": document_id,
+        "organization_id": organization_id,
+        "project_id": project_id,
+        "filename": document.get("filename") or "contract.pdf",
+        "tags": document.get("tags") or [],
+        "file_object_id": document.get("file_object_id"),
+        "processing_path": local_path,
+        "retry_ocr_pages": page_numbers,
+    }
+    queue_result = await _enqueue_or_start_contract_ingest(payload)
+    job_status = queue_result.status
+    if queue_result.degraded:
+        await contract_service.update_contract_document(
+            document_id,
+            status_value="failed",
+            error=queue_result.error,
+            tags=document.get("tags") or [],
+        )
+    await contract_service.update_job_status(
+        upload_id,
+        job_status,
+        error=queue_result.error,
+        metadata={
+            "document_id": document_id,
+            "filename": payload["filename"],
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "queue_job_id": queue_result.job_id,
+            "queue_degraded": queue_result.degraded,
+            "retry_ocr_pages": page_numbers,
+            "processing_stage": "queue_failed" if queue_result.degraded else "ocr_retry_queued",
+            "stage_label": "Contract ingestion queue unavailable" if queue_result.degraded else f"Queued OCR retry for {len(page_numbers)} page(s)",
+            "progress": 0 if queue_result.degraded else 10,
+        },
+    )
+    return await contract_service.get_job_status(upload_id, current_user)
+
+
+@router.post("/contracts/{document_id}/reindex", response_model=StatusResponse)
+@handle_exceptions
+async def reindex_contract(
+    document_id: str,
+    contract_service: ContractService = Depends(get_contract_service),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(PolicyService),
+):
+    """Re-run ingestion for an existing contract to rebuild its vector index
+    without re-uploading. Intended for documents whose vectors were never
+    written (e.g. a Qdrant outage during the original ingest left the contract
+    "completed" but unsearchable). The stored source file is re-processed
+    through the normal ingest queue, so it runs on the backend's own OpenAI
+    connection and produces production-identical chunks."""
+    document = await contract_service.get_contract_document(document_id, current_user)
+    organization_id = str(document.get("organization_id") or "")
+    project_id = str(document.get("project_id") or "") or None
+    await _authorize_contract_scope(
+        policy,
+        current_user,
+        Permissions.DOCUMENT_EDIT_METADATA,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type="contract_reindex",
+        audit=True,
+    )
+
+    upload_id = str(document.get("contract_upload_id") or document.get("upload_id") or document_id)
+    local_path = document.get("filepath_local") or document.get("file_path")
+    if not local_path and not document.get("file_object_id"):
+        raise ContractError(
+            "Original contract file is not available for reindex",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    payload = {
+        "upload_id": upload_id,
+        "document_id": document_id,
+        "organization_id": organization_id,
+        "project_id": project_id,
+        "filename": document.get("filename") or "contract.pdf",
+        "tags": document.get("tags") or [],
+        "file_object_id": document.get("file_object_id"),
+        "processing_path": local_path,
+    }
+    queue_result = await _enqueue_or_start_contract_ingest(payload)
+    job_status = queue_result.status
+    if queue_result.degraded:
+        await contract_service.update_contract_document(
+            document_id,
+            status_value="failed",
+            error=queue_result.error,
+            tags=document.get("tags") or [],
+        )
+    await contract_service.update_job_status(
+        upload_id,
+        job_status,
+        error=queue_result.error,
+        metadata={
+            "document_id": document_id,
+            "filename": payload["filename"],
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "queue_job_id": queue_result.job_id,
+            "queue_degraded": queue_result.degraded,
+            "processing_stage": "queue_failed" if queue_result.degraded else "reindex_queued",
+            "stage_label": (
+                "Contract ingestion queue unavailable"
+                if queue_result.degraded
+                else "Queued reindex (rebuild vector index)"
+            ),
+            "progress": 0 if queue_result.degraded else 10,
+        },
+    )
+    return await contract_service.get_job_status(upload_id, current_user)
 
 
 @router.get("/contracts/list", response_model=ContractListResponse)

@@ -103,7 +103,7 @@ async def test_reaper_resolves_expires_and_orphans(monkeypatch):
     async def fake_sync(*_a, **_k):
         return {"resolved": 0, "missing": [], "updated_targets": 0, "removed_targets": 0}
 
-    async def fake_resolve(*, db, reference, skip_ids):  # noqa: ARG001
+    async def fake_resolve(*, db, reference, skip_ids, scope_filter=None):  # noqa: ARG001
         # Only L-1 has been ingested by the time the reaper runs.
         return {"_id": "tgt1"} if reference.get("letterNo") == "L-1" else None
 

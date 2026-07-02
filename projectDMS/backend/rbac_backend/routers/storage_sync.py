@@ -60,9 +60,11 @@ def _should_emit_warning(
 def _qdrant_hint(config: DocumentProcessingConfig, reason: Optional[str]) -> Optional[str]:
     """Actionable hint for the common Qdrant misconfigurations."""
     url = (config.qdrant_url or "")
+    if reason == "qdrant_config_error":
+        return config.qdrant_auth_configuration_error
     if reason == "client_init_failed" and config.qdrant_api_key and url.startswith("http://"):
         return (
-            "QDRANT_URL is http:// but QDRANT_API_KEY is set — use an https:// URL "
+            "QDRANT_URL is http:// but QDRANT_API_KEY is set - use an https:// URL "
             "or unset QDRANT_API_KEY"
         )
     if reason == "qdrant_client_missing":
@@ -96,6 +98,14 @@ async def _fetch_qdrant_total(
     config: DocumentProcessingConfig,
     method: str = "approx",
 ) -> Tuple[bool, Optional[int], Optional[str], Dict[str, Any]]:
+    auth_error = config.qdrant_auth_configuration_error
+    if auth_error:
+        return False, None, "qdrant_config_error", {
+            "attempts": 0,
+            "exact": False,
+            "method": method,
+            "last_error": auth_error,
+        }
     if not config.qdrant_enabled:
         return False, None, "disabled", {"attempts": 0, "exact": False, "method": method}
     if QdrantClient is None:
@@ -108,11 +118,7 @@ async def _fetch_qdrant_total(
         last_error: Optional[str] = None
         latency_ms: Optional[float] = None
         try:
-            client = QdrantClient(
-                url=config.qdrant_url,
-                api_key=config.qdrant_api_key,
-                timeout=config.qdrant_timeout,
-            )
+            client = QdrantClient(**config.qdrant_client_kwargs())
         except Exception as exc:
             return {
                 "available": False,

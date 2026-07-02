@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import PageHeader from "@/components/ui/PageHeader";
 import {
   Card,
@@ -20,6 +21,7 @@ import {
 import { extractErrorMessage } from "@/lib/error-logger";
 import {
   Building2,
+  Eye,
   FileText,
   Loader2,
   MessageSquare,
@@ -65,6 +67,7 @@ function buildProbingQuestions(answer: string, question: string): string[] {
 }
 
 const ContractQAPage: React.FC = () => {
+  const navigate = useNavigate();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [orgId, setOrgId] = useState<string>(() => window.localStorage.getItem("org_id") || "");
@@ -370,6 +373,17 @@ const ContractQAPage: React.FC = () => {
             <p className="text-xs text-gray-500">
               Only completed contracts are available for QA.
             </p>
+            {selectedUpload && selectedUpload !== ALL_FILES_ID && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2"
+                onClick={() => navigate(`/contracts/viewer/${selectedUpload}`)}
+              >
+                <Eye className="h-4 w-4" />
+                View document
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -447,12 +461,24 @@ const ContractQAPage: React.FC = () => {
               <h4 className="text-sm font-semibold">Sources</h4>
               <ul className="space-y-1">
                 {citations.map((c, idx) => (
-                  <li key={c.chunk_id || idx} className="text-sm text-gray-700 flex items-center gap-2">
+                  <li key={c.chunk_id || idx} className="text-sm text-gray-700 flex items-start gap-2">
                     <Badge variant="outline">#{idx + 1}</Badge>
-                      <div>
+                      <div className="flex-1">
+                      <div className="flex items-center justify-between gap-2">
                       <div className="font-medium">
                         {c.clause_number ? `Clause ${c.clause_number}` : c.document_title || selectedUploadName || "Contract"}
                         {c.clause_title ? ` - ${c.clause_title}` : ""}
+                      </div>
+                      {c.document_id && (
+                        <button
+                          type="button"
+                          onClick={() => navigate(`/contracts/viewer/${c.document_id}`)}
+                          className="shrink-0 inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                          View
+                        </button>
+                      )}
                       </div>
                       <div className="text-xs text-gray-500">
                         {c.letter_no ? `${c.letter_no} - ` : ""}

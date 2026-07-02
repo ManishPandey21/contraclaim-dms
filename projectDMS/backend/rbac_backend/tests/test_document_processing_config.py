@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import logging
 import os
 import sys
 from pathlib import Path
@@ -106,6 +107,40 @@ def test_invalid_qdrant_timeout_logs_warning(monkeypatch):
     )
 
 
+def test_local_http_qdrant_uses_configured_api_key():
+    config = DocumentProcessingConfig(
+        qdrant_url="http://localhost:6333",
+        qdrant_api_key="local-dev-key",
+    )
+
+    assert config.qdrant_is_local_http is True
+    assert config.qdrant_auth_configuration_error is None
+    assert config.effective_qdrant_api_key == "local-dev-key"
+    assert config.qdrant_client_kwargs()["api_key"] == "local-dev-key"
+    assert config.qdrant_enabled is True
+
+
+def test_remote_http_qdrant_api_key_disables_qdrant():
+    config = DocumentProcessingConfig(
+        qdrant_url="http://qdrant.example.com:6333",
+        qdrant_api_key="remote-key",
+    )
+
+    assert config.qdrant_is_local_http is False
+    assert config.qdrant_auth_configuration_error
+    assert config.qdrant_enabled is False
+
+
+def test_qdrant_placeholder_api_key_is_treated_as_absent():
+    config = DocumentProcessingConfig(
+        qdrant_url="https://qdrant.example.com",
+        qdrant_api_key="your-qdrant-api-key",
+    )
+
+    assert config.qdrant_api_key is None
+    assert config.effective_qdrant_api_key is None
+
+
 def test_top_level_import_uses_absolute_settings_fallback(monkeypatch):
     module_path = Path(__file__).resolve().parents[1] / "config" / "document_processing_config.py"
     monkeypatch.syspath_prepend(str(module_path.parents[1]))
@@ -143,6 +178,43 @@ def test_top_level_import_uses_absolute_settings_fallback(monkeypatch):
 def test_document_processing_config_reexports_shared_models():
     assert ParsedDocumentMetadata is SharedParsedDocumentMetadata
     assert ProcessingResult is SharedProcessingResult
+
+
+def test_pydantic_ai_is_disabled_by_default_even_with_openai_key(monkeypatch):
+    monkeypatch.delenv("PYDANTIC_AI_ENABLED", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    config = DocumentProcessingConfig()
+
+    assert config.openai_api_key == "test-key"
+    assert config.use_pydantic_ai is False
+
+
+def test_pydantic_ai_env_flag_enables_agent_config(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("PYDANTIC_AI_ENABLED", "true")
+    monkeypatch.setenv("PYDANTIC_AI_MODEL", "gpt-4o-mini")
+
+    config = DocumentProcessingConfig()
+
+    assert config.use_pydantic_ai is True
+    assert config.pydantic_ai_model == "gpt-4o-mini"
+
+
+def test_disabled_pydantic_ai_service_does_not_warn_about_missing_library(monkeypatch, caplog):
+    from rbac_backend.services.pydantic_ai_service import PydanticAIService
+
+    monkeypatch.delenv("PYDANTIC_AI_ENABLED", raising=False)
+    config = DocumentProcessingConfig(
+        openai_api_key="test-key",
+        use_pydantic_ai=False,
+    )
+
+    caplog.set_level(logging.WARNING, logger="rbac_backend.services.pydantic_ai_service")
+    service = PydanticAIService(config)
+
+    assert service.is_enabled is False
+    assert "PydanticAI library not available" not in caplog.text
 
 
 def test_shared_metadata_model_accepts_structured_references():

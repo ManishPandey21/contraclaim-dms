@@ -688,9 +688,9 @@ const ContractAppraisalPage: React.FC = () => {
                           <li key={i}>
                             {c.document_id ? (
                               <Link
-                                to={`/documentviewer/${c.document_id}`}
+                                to={`/contracts/viewer/${c.document_id}`}
                                 className="text-blue-600 hover:underline"
-                                title="Open source document"
+                                title="Open source contract in the Contract Viewer"
                               >
                                 {label}
                               </Link>

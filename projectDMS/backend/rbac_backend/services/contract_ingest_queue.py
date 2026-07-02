@@ -4,19 +4,34 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import RedisError, TimeoutError as RedisTimeoutError
 
 from ..core.config import settings
 
 logger = logging.getLogger(__name__)
 REDIS_CONNECT_TIMEOUT_SECONDS = 2.0
 REDIS_PING_TIMEOUT_SECONDS = 3.0
+REDIS_BLOCKING_READ_TIMEOUT_SECONDS = 5
+REDIS_TIMEOUT_BACKOFF_INITIAL_SECONDS = 0.5
+REDIS_TIMEOUT_BACKOFF_MAX_SECONDS = 15.0
 
 
 def _utc_now() -> str:
     return datetime.utcnow().isoformat()
+
+
+@dataclass(frozen=True)
+class ContractQueueEnqueueResult:
+    job_id: str
+    status: str = "queued"
+    degraded: bool = False
+    error: Optional[str] = None
 
 
 class ContractIngestQueue:
@@ -24,6 +39,7 @@ class ContractIngestQueue:
         self._redis: Optional[Redis] = None
         self._worker_tasks: list[asyncio.Task] = []
         self._running = False
+        self._logged_connection = False
 
     @property
     def enabled(self) -> bool:
@@ -52,7 +68,11 @@ class ContractIngestQueue:
                 self.redis_url,
                 decode_responses=True,
                 socket_connect_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
-                socket_timeout=REDIS_CONNECT_TIMEOUT_SECONDS,
+                # This connection performs blocking queue reads. The Redis
+                # command timeout controls how long BRPOPLPUSH blocks, so the
+                # socket read timeout must not be shorter than that blocking
+                # timeout.
+                socket_timeout=None,
                 retry_on_timeout=False,
             )
             try:
@@ -61,7 +81,53 @@ class ContractIngestQueue:
                 await self._redis.aclose()
                 self._redis = None
                 raise
+            if not self._logged_connection:
+                logger.info(
+                    "Contract ingest Redis broker connected url=%s db=%s queue=%s processing_queue=%s",
+                    self.safe_redis_url,
+                    self.redis_db_number,
+                    settings.CONTRACT_QUEUE_NAME,
+                    settings.CONTRACT_QUEUE_PROCESSING_NAME,
+                )
+                self._logged_connection = True
         return self._redis
+
+    @property
+    def safe_redis_url(self) -> str:
+        return self._redact_url(self.redis_url)
+
+    @property
+    def redis_db_number(self) -> int:
+        return self._redis_db_number(self.redis_url)
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        try:
+            parsed = urlsplit(url)
+            netloc = parsed.netloc
+            if "@" in netloc:
+                userinfo, host = netloc.rsplit("@", 1)
+                if ":" in userinfo:
+                    username, _password = userinfo.split(":", 1)
+                    userinfo = f"{username}:***"
+                else:
+                    userinfo = "***"
+                netloc = f"{userinfo}@{host}"
+            return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+        except Exception:
+            return "redis://***"
+
+    @staticmethod
+    def _redis_db_number(url: str) -> int:
+        try:
+            parsed = urlsplit(url)
+            query_db = parse_qs(parsed.query).get("db")
+            if query_db and query_db[0].isdigit():
+                return int(query_db[0])
+            path_value = (parsed.path or "").strip("/")
+            return int(path_value) if path_value.isdigit() else 0
+        except Exception:
+            return 0
 
     async def close(self) -> None:
         self._running = False
@@ -84,6 +150,13 @@ class ContractIngestQueue:
         for idx in range(worker_count):
             task = asyncio.create_task(self._worker_loop(f"contract-worker-{idx}"))
             self._worker_tasks.append(task)
+        logger.info(
+            "Contract ingest workers started workers=%s queue=%s redis=%s db=%s",
+            worker_count,
+            settings.CONTRACT_QUEUE_NAME,
+            self.safe_redis_url,
+            self.redis_db_number,
+        )
 
     async def enqueue(self, payload: Dict[str, Any]) -> str:
         redis = await self.connect()
@@ -138,20 +211,66 @@ class ContractIngestQueue:
         redis = await self.connect()
         if redis is None:
             return
+        backoff = REDIS_TIMEOUT_BACKOFF_INITIAL_SECONDS
         while self._running:
             try:
                 job_id = await redis.brpoplpush(
                     settings.CONTRACT_QUEUE_NAME,
                     settings.CONTRACT_QUEUE_PROCESSING_NAME,
-                    timeout=1,
+                    timeout=REDIS_BLOCKING_READ_TIMEOUT_SECONDS,
                 )
+                backoff = REDIS_TIMEOUT_BACKOFF_INITIAL_SECONDS
                 if not job_id:
                     continue
                 await self._process_job(job_id, worker_name)
             except asyncio.CancelledError:
                 break
+            except (RedisTimeoutError, RedisConnectionError) as exc:
+                logger.warning(
+                    "Contract ingest worker Redis timeout/connection issue worker=%s queue=%s redis=%s db=%s backoff=%.1fs error=%s",
+                    worker_name,
+                    settings.CONTRACT_QUEUE_NAME,
+                    self.safe_redis_url,
+                    self.redis_db_number,
+                    backoff,
+                    exc,
+                )
+                await self._reset_redis_connection()
+                await asyncio.sleep(backoff)
+                redis = await self._connect_with_backoff(worker_name, backoff)
+                backoff = min(backoff * 2, REDIS_TIMEOUT_BACKOFF_MAX_SECONDS)
+                if redis is None:
+                    break
             except Exception as exc:
                 logger.error("Contract ingest worker failure: %s", exc)
+
+    async def _connect_with_backoff(self, worker_name: str, backoff: float) -> Optional[Redis]:
+        while self._running:
+            try:
+                redis = await self.connect()
+                if redis is not None:
+                    return redis
+            except (RedisTimeoutError, RedisConnectionError, RedisError) as exc:
+                logger.warning(
+                    "Contract ingest worker Redis reconnect failed worker=%s queue=%s backoff=%.1fs error=%s",
+                    worker_name,
+                    settings.CONTRACT_QUEUE_NAME,
+                    backoff,
+                    exc,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, REDIS_TIMEOUT_BACKOFF_MAX_SECONDS)
+        return None
+
+    async def _reset_redis_connection(self) -> None:
+        if self._redis is None:
+            return
+        try:
+            await self._redis.aclose()
+        except Exception:
+            pass
+        finally:
+            self._redis = None
 
     async def _process_job(self, job_id: str, worker_name: str) -> None:
         redis = await self.connect()

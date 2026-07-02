@@ -31,6 +31,7 @@ from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
+from .reference_parser import parse_legacy_reference_text
 
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
@@ -76,6 +77,28 @@ class DocumentService:
         # Lazy import to avoid circulars
         from ..core.database import get_database
         return await get_database()
+
+    async def _sync_current_document_to_falkor(
+        self,
+        document_id: str,
+        *,
+        metadata: Any = None,
+        upload_type: Optional[str] = None,
+    ) -> None:
+        """Refresh the derived FalkorDB graph from the latest Mongo document."""
+        try:
+            current = await self.get_document(document_id)
+            if not current:
+                return
+            payload = current.model_dump(by_alias=True)
+            self.graph_ingestion.sync_document_to_falkor(
+                document_id=current.id,
+                document=payload,
+                metadata=metadata,
+                upload_type=upload_type or current.uploadType,
+            )
+        except Exception:
+            logger.debug("FalkorDB refresh failed for %s", document_id, exc_info=True)
     
     def _validate_document_id(self, document_id: str) -> ObjectId:
         """
@@ -105,7 +128,12 @@ class DocumentService:
 
         if isinstance(value, str):
             raw = value.strip()
-            return {"raw": raw} if raw else None
+            if not raw:
+                return None
+            parsed = parse_legacy_reference_text(raw)
+            if parsed:
+                return parsed
+            return {"raw": raw, "text": raw}
 
         if hasattr(value, "model_dump"):
             try:
@@ -132,14 +160,24 @@ class DocumentService:
         text_value = _clean(data.get("text"))
         raw = _clean(data.get("raw") or letter or text_value)
 
+        parsed_from_text = None
+        if not letter and not date:
+            parsed_from_text = parse_legacy_reference_text(raw or text_value)
+        if parsed_from_text:
+            letter = parsed_from_text["letterNo"]
+            date = parsed_from_text["date"]
+            raw = parsed_from_text["raw"]
+
         entry: Dict[str, Any] = {}
         if raw:
             entry["raw"] = raw
         if letter:
             entry["letterNo"] = letter
+            if data.get("letter_no") or data.get("raw") or parsed_from_text:
+                entry["letter_no"] = letter
         if date:
             entry["date"] = date
-        if text_value and text_value != letter:
+        if text_value and text_value != letter and not parsed_from_text:
             entry["text"] = text_value
 
         return entry if entry else None
@@ -175,7 +213,10 @@ class DocumentService:
                 continue
             seen.add(key)
 
-            if "raw" in entry:
+            has_structured_fields = any(
+                entry.get(field) for field in ("letterNo", "letter_no", "date", "text")
+            )
+            if "raw" in entry and not has_structured_fields:
                 entry = dict(entry)
                 entry.pop("raw", None)
                 if not entry:
@@ -1184,7 +1225,7 @@ class DocumentService:
                     },
                 )
 
-            if metadata_references:
+            if metadata is not None:
                 try:
                     if job_id:
                         await db.document_processing_jobs.update_one(
@@ -1196,6 +1237,7 @@ class DocumentService:
                         references=metadata_references,
                         source="parser",
                         default_link_type="indirect",
+                        clear_existing=True,
                     )
                 except ReferenceSyncError as exc:
                     logger.warning(
@@ -1207,6 +1249,17 @@ class DocumentService:
                     logger.exception(
                         "Unexpected error while synchronising references for %s",
                         document_id,
+                    )
+                finally:
+                    if job_id:
+                        await db.document_processing_jobs.update_one(
+                            {"_id": job_id},
+                            {"$set": {"stage": "syncing_falkor", "updated_at": datetime.utcnow()}},
+                        )
+                    await self._sync_current_document_to_falkor(
+                        document_id,
+                        metadata=metadata,
+                        upload_type=upload,
                     )
             return bool(result and getattr(result, "success", False) and metadata)
         except Exception:
@@ -1353,10 +1406,20 @@ class DocumentService:
             "source": "manual",
         }
 
+        manual_payloads: List[Dict[str, Any]] = []
+        for ref in document.references or []:
+            source_label = (ref.source or "").lower()
+            if source_label not in ("", "manual"):
+                continue
+            if ref.documentId == target.id:
+                continue
+            manual_payloads.append(ref.model_dump(by_alias=True, exclude_none=True))
+        manual_payloads.append(reference_payload)
+
         try:
-            result = await self.reference_sync_service.sync_bidirectional(
+            await self.reference_sync_service.sync_bidirectional(
                 document_id=document_id,
-                references=[reference_payload],
+                references=manual_payloads,
                 source="manual",
                 default_link_type=payload.link_type or "direct",
             )
@@ -1378,10 +1441,12 @@ class DocumentService:
                 f"Manual reference addition failed: {exc}"
             ) from exc
 
-        if result.get("resolved", 0) == 0:
+        updated = await self.get_document(document_id)
+        if not updated or not any(ref.documentId == target.id for ref in updated.references or []):
             raise DocumentServiceError("Unable to resolve referenced document")
 
-        return await self.get_document(document_id)
+        await self._sync_current_document_to_falkor(document_id)
+        return updated
 
     async def remove_reference(
         self,
@@ -1436,7 +1501,9 @@ class DocumentService:
                 },
             )
 
-        return await self.get_document(document_id)
+        updated = await self.get_document(document_id)
+        await self._sync_current_document_to_falkor(document_id)
+        return updated
 
     async def list_linked_documents(self, document_id: str) -> List[Dict[str, Any]]:
         references = await self.list_references(document_id)
@@ -1856,7 +1923,10 @@ class DocumentService:
                 continue
             seen.add(key)
 
-            if "raw" in entry:
+            has_structured_fields = any(
+                entry.get(field) for field in ("letterNo", "letter_no", "date", "text")
+            )
+            if "raw" in entry and not has_structured_fields:
                 entry = dict(entry)
                 entry.pop("raw", None)
                 if not entry:

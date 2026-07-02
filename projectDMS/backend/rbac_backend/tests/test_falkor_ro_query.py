@@ -55,3 +55,19 @@ def test_execute_explicit_read_only_override(monkeypatch):
     svc._execute("MATCH (n) RETURN n", read_only=False)
 
     assert captured == ["GRAPH.RO_QUERY", "GRAPH.QUERY"]
+
+
+def test_falkor_param_serialization_preserves_lists_for_cypher_in():
+    svc = _svc()
+
+    params = svc._serialize_params(
+        {
+            "seed_clause_numbers": ["8.4", "20.1"],
+            "nested": {"ids": [1, 2]},
+        }
+    )
+    header = svc._prepend_params_header("MATCH (n) RETURN n", params)
+
+    assert params["seed_clause_numbers"] == ["8.4", "20.1"]
+    assert "seed_clause_numbers=[\"8.4\",\"20.1\"]" in header
+    assert "nested={ids:[1,2]}" in header

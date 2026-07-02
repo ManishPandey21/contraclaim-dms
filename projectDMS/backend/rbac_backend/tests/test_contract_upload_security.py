@@ -9,6 +9,7 @@ from rbac_backend.models.contract_models import ContractSearchRequest, StatusRes
 from rbac_backend.routers.contracts import (
     get_contract_status,
     list_contract_uploads,
+    reindex_contract,
     search_contracts,
     upload_contract_chunk,
     upload_contracts_multipart,
@@ -204,5 +205,44 @@ async def test_contract_search_requires_policy_before_service_query():
 
     assert exc.value.status_code == 403
     assert policy.calls[0]["permission"] == "dms.document.view"
+    assert policy.calls[0]["organization_id"] == "org-A"
+    assert policy.calls[0]["project_id"] == "proj-A"
+
+
+class _FakeReindexService:
+    """Resolves the document scope, then fails loudly if anything tries to
+    kick off ingestion before authorization has passed."""
+
+    async def get_contract_document(self, _document_id, _current_user):
+        return {
+            "organization_id": "org-A",
+            "project_id": "proj-A",
+            "filename": "contract.pdf",
+            "contract_upload_id": "upload-1",
+            "filepath_local": "/tmp/contract.pdf",
+            "tags": [],
+        }
+
+    async def update_job_status(self, *_args, **_kwargs):
+        raise AssertionError("reindex was queued before authorization")
+
+    async def update_contract_document(self, *_args, **_kwargs):
+        raise AssertionError("contract status was mutated before authorization")
+
+
+@pytest.mark.asyncio
+async def test_reindex_requires_policy_on_resolved_document_scope():
+    policy = _DenyPolicy()
+
+    with pytest.raises(HTTPException) as exc:
+        await reindex_contract(
+            document_id="doc-1",
+            contract_service=_FakeReindexService(),
+            current_user=_user(),
+            policy=policy,
+        )
+
+    assert exc.value.status_code == 403
+    assert policy.calls[0]["permission"] == "dms.document.edit_metadata"
     assert policy.calls[0]["organization_id"] == "org-A"
     assert policy.calls[0]["project_id"] == "proj-A"

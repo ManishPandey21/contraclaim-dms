@@ -81,6 +81,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/letter-quality": ["drafting.request.view"],
   "/letter-templates": ["letter_templates:read"],
   "/contracts": ["dms.document.view"],
+  "/contracts/viewer": ["dms.document.view"],
   // Must be listed explicitly so it wins over the `/contracts` prefix match.
   "/contracts/appraisal": ["dms.contract.appraisal.view", "dms.document.view"],
   "/contracts/timeline": ["dms.contract.timeline.view", "dms.evidence_graph.view", "dms.document.view"],
