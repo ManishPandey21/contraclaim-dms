@@ -39,7 +39,7 @@ CHECK_INTERVAL_SECONDS = 300
 STALE_THRESHOLD_MINUTES = 15
 QDRANT_HEALTH_MAX_ATTEMPTS = 3
 QDRANT_HEALTH_BACKOFF_SECONDS = 0.5
-QDRANT_SLOW_THRESHOLD_MS = 2000.0
+QDRANT_SLOW_THRESHOLD_MS = 7000.0
 # A persistent degraded state is re-logged at WARNING at most this often; in
 # between, unchanged issues drop to DEBUG so the monitor doesn't spam an
 # identical warning every CHECK_INTERVAL_SECONDS (alarm fatigue).

@@ -329,7 +329,7 @@ class Settings(BaseSettings):
     OBSERVABILITY_STORE_RAW_QUERIES: bool = Field(default=False, validation_alias="OBSERVABILITY_STORE_RAW_QUERIES")
     METRICS_ENABLED: bool = Field(default=True, validation_alias="METRICS_ENABLED")
     METRICS_TOKEN: Optional[str] = Field(default=None, validation_alias="METRICS_TOKEN")
-    SLOW_REQUEST_THRESHOLD_MS: int = Field(default=2000, validation_alias="SLOW_REQUEST_THRESHOLD_MS")
+    SLOW_REQUEST_THRESHOLD_MS: int = Field(default=7000, validation_alias="SLOW_REQUEST_THRESHOLD_MS")
     BACKUP_ROOT: str = Field(default="/var/backups/contractdms", validation_alias="BACKUP_ROOT")
     BACKUP_MAX_AGE_HOURS: int = Field(default=26, ge=1, validation_alias="BACKUP_MAX_AGE_HOURS")
     BACKUP_REQUIRED_IN_PRODUCTION: bool = Field(default=True, validation_alias="BACKUP_REQUIRED_IN_PRODUCTION")

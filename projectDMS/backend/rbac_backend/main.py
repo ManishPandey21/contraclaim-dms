@@ -84,9 +84,9 @@ logger = logging.getLogger(__name__)
 # the same 2s slow-request threshold as a plain CRUD call just produces noise, so
 # give those paths a higher threshold while everything else stays tight.
 SLOW_REQUEST_PATH_OVERRIDES_MS: dict[str, int] = {
-    "/api/v1/retrieval/contract-qa": 12000,
-    "/api/v1/retrieval/agent": 12000,
-    "/api/v1/retrieval/rag": 8000,
+    "/api/v1/retrieval/contract-qa": 17000,
+    "/api/v1/retrieval/agent": 17000,
+    "/api/v1/retrieval/rag": 13000,
 }
 
 

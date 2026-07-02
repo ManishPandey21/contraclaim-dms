@@ -29,7 +29,7 @@ class PerformanceConfig:
     """Configuration for performance monitoring"""
     max_metrics: int = 10000
     max_slow_queries: int = 1000
-    slow_query_threshold: float = 2.0
+    slow_query_threshold: float = 7.0
     cleanup_interval: int = 300  # 5 minutes
     monitoring_interval: int = 30  # 30 seconds
     memory_warning_threshold: float = 80.0
