@@ -250,6 +250,8 @@ class DatabaseService:
                 updates["keywords"] = parsed_metadata.keywords
             if hasattr(parsed_metadata, "contractual_clauses") and parsed_metadata.contractual_clauses:
                 updates["contractual_clauses"] = parsed_metadata.contractual_clauses
+            if hasattr(parsed_metadata, "key_reply_points") and parsed_metadata.key_reply_points:
+                updates["key_reply_points"] = parsed_metadata.key_reply_points
 
             # Parse date if available
             if hasattr(parsed_metadata, "date") and parsed_metadata.date:

@@ -86,6 +86,7 @@ class PydanticAIService:
             summary_text: Optional[str] = Field(default=None, alias="summary")
             keywords: List[str] = Field(default_factory=list)
             contractual_clauses: List[str] = Field(default_factory=list, alias="clauses")
+            key_reply_points: List[str] = Field(default_factory=list, alias="keyReplyPoints")
             full_content: Optional[str] = None
 
             model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -194,6 +195,7 @@ class PydanticAIService:
             "- summary - Write a 4-6 line Contractual/legal summary/Fact of the matter suitable for vector search/RAG.",
             "- keywords - keywords, Tags,Topic,Claim Type",
             "- contractual clauses - What clauses, Employer’s Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records are relied upon",
+            "- key reply points - concise contractual/legal points that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response",
             "- cleaned full content if feasible",
             "Return null for any field that is absent.",
             "Format all dates as DD-MM-YYYY (example: 07-03-2025).",
@@ -248,6 +250,7 @@ class PydanticAIService:
                         continue
         
         clauses = getattr(data, "contractual_clauses", None) or []
+        key_reply_points = getattr(data, "key_reply_points", None) or []
         full_content = getattr(data, "full_content", None) or fallback_text
 
         formatted_date = format_date_ddmmyyyy(getattr(data, "date", None))
@@ -262,5 +265,6 @@ class PydanticAIService:
             summary=summary,
             keywords=keywords,
             contractual_clauses=clauses,
+            key_reply_points=key_reply_points,
             full_content=full_content,
         )

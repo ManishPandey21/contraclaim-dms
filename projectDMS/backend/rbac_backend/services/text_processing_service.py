@@ -129,18 +129,30 @@ class TextProcessingService:
             ])
             
             contractual_clauses = self._extract_list_field(text, [
-                r"(?ims)^.*?Contractual Clauses[:\-]?\s*(.+?)(?=\n\s*(?:\d+\)|Key Words|Full content|$))"
+                r"(?ims)^.*?Contractual Clauses[:\-]?\s*(.+?)(?=\n\s*(?:\d+\)|Key Words|Key\s*Reply\s*Points|Full content|$))"
             ])
-            
+
             # Filter out "Not found" entries
             if contractual_clauses and len(contractual_clauses) == 1:
                 if re.search(r"^\s*not\s*found\s*$", contractual_clauses[0], re.IGNORECASE):
                     contractual_clauses = []
-            
-            full_content = self._extract_field(text, [
-                r"(?is)^\s*(?:10\)|-)?.*?Full\s*content\s*[:\-]?\s*(.+)$"
+
+            # Key Reply Points: points to address while responding. The prompt
+            # labels this "Key Reply Points — Points to be Addressed While
+            # Responding:", so tolerate any descriptive text before the
+            # delimiting colon via [^:\n]* so the subtitle is not captured.
+            key_reply_points = self._extract_list_field(text, [
+                r"(?ims)^.*?Key\s*Reply\s*Points[^:\n]*[:\-]\s*(.+?)(?=\n\s*(?:\d+\)|Full content|$))"
             ])
-            
+
+            if key_reply_points and len(key_reply_points) == 1:
+                if re.search(r"^\s*not\s*found\s*$", key_reply_points[0], re.IGNORECASE):
+                    key_reply_points = []
+
+            full_content = self._extract_field(text, [
+                r"(?is)^\s*(?:11\)|10\)|-)?.*?Full\s*content\s*[:\-]?\s*(.+)$"
+            ])
+
             metadata = ParsedDocumentMetadata(
                 date=date_str,
                 subject=subject,
@@ -151,6 +163,7 @@ class TextProcessingService:
                 summary=summary,
                 keywords=keywords or [],
                 contractual_clauses=contractual_clauses or [],
+                key_reply_points=key_reply_points or [],
                 full_content=full_content
             )
             

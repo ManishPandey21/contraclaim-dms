@@ -45,6 +45,7 @@ def _metadata_to_legacy_dict(metadata: Any) -> Dict[str, Any]:
         "full_content": data.get("full_content"),
         "keywords": data.get("keywords") or [],
         "contractual_clauses": data.get("contractual_clauses") or [],
+        "key_reply_points": data.get("key_reply_points") or [],
     }
 
 
@@ -109,6 +110,7 @@ def upsert_document_metadata_db_fixed(
         "reference": "reference",
         "keywords": "keywords",
         "contractual_clauses": "contractual_clauses",
+        "key_reply_points": "key_reply_points",
         "full_content": "full_content",
     }
     for source_key, target_key in field_map.items():

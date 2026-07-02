@@ -87,6 +87,7 @@ class Document(BaseModel):
     full_text: Optional[str] = Field(default=None)
     keywords: Optional[List[str]] = Field(default=None)
     contractual_clauses: Optional[List[str]] = Field(default=None)
+    key_reply_points: Optional[List[str]] = Field(default=None)
     reference: Optional[List[MetadataReference]] = Field(default=None)
     summary: Optional[str] = Field(default=None)
     processing_status: Optional[str] = Field(default=None)

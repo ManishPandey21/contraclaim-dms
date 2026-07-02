@@ -205,7 +205,8 @@ class OpenAIService:
             "7) Summary: [Write a 4-6 line Contractual/legal summary/Fact of the matter suitable for vector search/RAG.]\n"
             "8) Key Words: [comma-separated list of key contractual words mentioned,Tags,Topic,Claim Type]\n"
             "9) Contractual Clauses: [comma-separated list of clauses, Employer’s Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records are relied upon]\n"
-            "10) Full content: [cleaned text of the full letter]\n"
+            "10) Key Reply Points — Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response — one point per line with a - prefix, or 'Not found']\n"
+            "11) Full content: [cleaned text of the full letter]\n"
         )
     
     def _get_model_name(self) -> str:

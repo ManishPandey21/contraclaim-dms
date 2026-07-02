@@ -20,6 +20,7 @@ class ParsedDocumentMetadata(BaseModel):
     summary: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
     contractual_clauses: List[str] = Field(default_factory=list)
+    key_reply_points: List[str] = Field(default_factory=list)
     full_content: Optional[str] = None
 
 

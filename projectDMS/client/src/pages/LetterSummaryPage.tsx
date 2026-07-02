@@ -37,6 +37,7 @@ interface LetterOut {
   keywords?: string[];
   Key_words?: string[];
   contractual_clauses?: string[];
+  key_reply_points?: string[];
   [key: string]: any;
 }
 
@@ -154,16 +155,16 @@ const LetterSummaryPage: React.FC = () => {
     [doc?.summary]
   );
 
-  const referenceLines = useMemo(() => {
-    const r = (doc as any)?.reference;
-    if (!r) return [];
-    if (Array.isArray(r)) {
-      return r
+  const keyReplyPoints = useMemo(() => {
+    const k = (doc as any)?.key_reply_points;
+    if (!k) return [];
+    if (Array.isArray(k)) {
+      return k
         .filter((x: any) => typeof x === "string" && x.trim())
         .map((s: string) => s.trim());
     }
-    if (typeof r === "string") {
-      return parseBulletString(r);
+    if (typeof k === "string") {
+      return parseBulletString(k);
     }
     return [];
   }, [doc]);
@@ -263,7 +264,7 @@ const LetterSummaryPage: React.FC = () => {
         <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="keypoints">Summary</TabsTrigger>
           <TabsTrigger value="clauses">Contractual Clauses</TabsTrigger>
-          <TabsTrigger value="reference">References</TabsTrigger>
+          <TabsTrigger value="keyreply">Key Reply Points</TabsTrigger>
         </TabsList>
 
         <TabsContent value="keypoints">
@@ -338,33 +339,33 @@ const LetterSummaryPage: React.FC = () => {
           </Card>
         </TabsContent>
 
-        <TabsContent value="reference">
+        <TabsContent value="keyreply">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between">
               <div>
-                <CardTitle>References</CardTitle>
-                <CardDescription>Auto-extracted references</CardDescription>
+                <CardTitle>Key Reply Points</CardTitle>
+                <CardDescription>Points to be addressed while responding</CardDescription>
               </div>
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => copyText(referenceLines.join("\n"))}
+                onClick={() => copyText(keyReplyPoints.map((s) => `• ${s}`).join("\n"))}
               >
                 <Copy className="h-4 w-4 mr-2" /> Copy
               </Button>
             </CardHeader>
             <CardContent>
-              {referenceLines.length ? (
+              {keyReplyPoints.length ? (
                 <ul className="list-disc pl-5 space-y-1">
-                  {referenceLines.map((ref: string, i: number) => (
+                  {keyReplyPoints.map((point: string, i: number) => (
                     <li key={i} className="text-sm break-words">
-                      {ref}
+                      {point}
                     </li>
                   ))}
                 </ul>
               ) : (
                 <div className="text-sm text-muted-foreground">
-                  No reference available.
+                  No key reply points available.
                 </div>
               )}
             </CardContent>
