@@ -1,0 +1,430 @@
+"""Contract Clause Chunking Agent orchestrator (Phase 2).
+
+Ties the pipeline together for one contract document:
+scope+authorize -> page-wise text (reused OCR) -> clean -> detect clause
+boundaries + hierarchy (reused ClauseExtractor) -> long-clause splitting ->
+table linking -> validate -> idempotent save -> processing-run audit log.
+
+The pure building/linking logic is decoupled from IO so it is unit-testable
+without a database; ``process_document`` wires it to the real stores.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from ...models.contract_clause import ClauseProcessingRun, ContractClause
+from .storage_service import ClauseStorageService
+
+logger = logging.getLogger(__name__)
+
+_TABLE_CAPTION_RE = re.compile(
+    r"^[ \t]*(table|schedule|annexure|appendix)\b[^\n]{0,120}",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+@dataclass
+class DetectedClause:
+    """Normalised clause detected from the document (extractor-agnostic)."""
+
+    clause_no: Optional[str]
+    clause_title: Optional[str] = None
+    clause_type: str = "clause"
+    text: str = ""
+    cleaned_text: Optional[str] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    confidence: str = "high"
+    extraction_method: str = "text"
+
+    @property
+    def is_section(self) -> bool:
+        return not (self.clause_no and str(self.clause_no).strip())
+
+
+@dataclass
+class DetectedTable:
+    """A table block to be stored separately and linked to a clause (req 15)."""
+
+    page_no: int
+    table_title: Optional[str] = None
+    text: str = ""
+
+
+@dataclass
+class DocumentScope:
+    org_id: str
+    project_id: str
+    contract_id: str
+    document_id: str
+    document_title: Optional[str] = None
+    document_type: Optional[str] = None
+    volume: Optional[str] = None
+    revision: Optional[str] = None
+    source_file_path: Optional[str] = None
+    source_pdf_url: Optional[str] = None
+
+
+@dataclass
+class ClauseProcessingSummary:
+    document_id: str
+    total_pages: int = 0
+    clauses_detected: int = 0
+    section_chunks: int = 0
+    tables_detected: int = 0
+    low_confidence_chunks: int = 0
+    duplicates_detected: int = 0
+    modifications_detected: int = 0
+    human_review_required: bool = False
+    records_written: Dict[str, int] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+
+
+class ClauseChunkingAgent:
+    RUN_COLLECTION = "clause_processing_runs"
+
+    def __init__(
+        self,
+        db: Any,
+        storage_service: Optional[ClauseStorageService] = None,
+        policy_service: Any = None,
+        max_clause_chars: int = 4000,
+    ) -> None:
+        self.db = db
+        self.storage = storage_service or ClauseStorageService(db, policy_service)
+        self.policy_service = policy_service
+        self.max_clause_chars = max_clause_chars
+
+    # ------------------------------------------------------------------ #
+    # Pure helpers (unit-testable)
+    # ------------------------------------------------------------------ #
+    def split_text(self, text: str, max_len: Optional[int] = None) -> List[str]:
+        """Paragraph-aware split of a long clause into parts <= max_len."""
+        max_len = max_len or self.max_clause_chars
+        body = (text or "").strip()
+        if not body:
+            return [""]
+        if len(body) <= max_len:
+            return [body]
+        parts: List[str] = []
+        current: List[str] = []
+        length = 0
+        for para in re.split(r"\n\n+", body):
+            para = para.strip()
+            if not para:
+                continue
+            if length + len(para) > max_len and current:
+                parts.append("\n\n".join(current))
+                current, length = [], 0
+            if len(para) > max_len:
+                for i in range(0, len(para), max_len):
+                    parts.append(para[i : i + max_len])
+            else:
+                current.append(para)
+                length += len(para)
+        if current:
+            parts.append("\n\n".join(current))
+        return parts or [body]
+
+    @staticmethod
+    def link_table_to_clause(
+        table: DetectedTable, clauses: List[DetectedClause]
+    ) -> Optional[str]:
+        """Nearest clause for a table: the clause on/just before the table's page (req 15)."""
+        candidates = [c for c in clauses if c.clause_no and c.page_start is not None]
+        if not candidates:
+            return None
+        preceding = [c for c in candidates if (c.page_start or 0) <= table.page_no]
+        if preceding:
+            return max(preceding, key=lambda c: c.page_start or 0).clause_no
+        # No clause starts before the table -> nearest by page distance.
+        return min(candidates, key=lambda c: abs((c.page_start or 0) - table.page_no)).clause_no
+
+    @staticmethod
+    def detect_tables(pages: List[Dict[str, Any]]) -> List[DetectedTable]:
+        """Caption-based table detection from cleaned page text (heuristic, req 15).
+
+        Each page dict has ``page_no`` and ``cleaned_text``/``text``. A line that
+        starts with Table/Schedule/Annexure/Appendix begins a table block.
+        """
+        tables: List[DetectedTable] = []
+        for page in pages:
+            page_no = int(page.get("page_no") or page.get("page_number") or 0)
+            text = page.get("cleaned_text") or page.get("text") or ""
+            for match in _TABLE_CAPTION_RE.finditer(text):
+                caption = match.group(0).strip()
+                start = match.end()
+                block = text[start : start + 1500].strip()
+                tables.append(
+                    DetectedTable(page_no=page_no, table_title=caption[:200], text=block)
+                )
+        return tables
+
+    def build_records(
+        self,
+        scope: DocumentScope,
+        clauses: List[DetectedClause],
+        tables: Optional[List[DetectedTable]] = None,
+    ) -> Tuple[List[ContractClause], ClauseProcessingSummary]:
+        """Map detected clauses/tables into ContractClause records (pure)."""
+        tables = tables or []
+        summary = ClauseProcessingSummary(document_id=scope.document_id)
+        records: List[ContractClause] = []
+        chunk_index = 0
+
+        seen_clause_nos: Dict[str, int] = {}
+        for clause in clauses:
+            if clause.clause_no:
+                key = ClauseStorageService.normalize_clause_no(clause.clause_no) or clause.clause_no
+                seen_clause_nos[key] = seen_clause_nos.get(key, 0) + 1
+
+            source_text = clause.cleaned_text if clause.cleaned_text is not None else clause.text
+            parts = self.split_text(source_text)
+            total = len(parts)
+            for part_no, part in enumerate(parts, start=1):
+                if clause.is_section:
+                    chunk_type = "section_chunk"
+                elif total > 1:
+                    chunk_type = "clause_part"
+                else:
+                    chunk_type = "clause"
+                record = self.storage.build_record(
+                    org_id=scope.org_id,
+                    project_id=scope.project_id,
+                    contract_id=scope.contract_id,
+                    document_id=scope.document_id,
+                    clause_no=clause.clause_no,
+                    clause_title=clause.clause_title,
+                    text=part,
+                    cleaned_text=part,
+                    chunk_type=chunk_type,
+                    chunk_index=chunk_index,
+                    chunk_part=part_no,
+                    chunk_total=total,
+                    page_start=clause.page_start,
+                    page_end=clause.page_end,
+                    document_title=scope.document_title,
+                    document_type=scope.document_type,
+                    volume=scope.volume,
+                    revision=scope.revision,
+                    confidence=clause.confidence,  # type: ignore[arg-type]
+                    extraction_method=clause.extraction_method,  # type: ignore[arg-type]
+                    source_file_path=scope.source_file_path,
+                    source_pdf_url=scope.source_pdf_url,
+                )
+                records.append(record)
+                chunk_index += 1
+                if record.quality_status != "validated":
+                    summary.low_confidence_chunks += 1
+                if record.human_review_required:
+                    summary.human_review_required = True
+
+            if clause.is_section:
+                summary.section_chunks += 1
+            else:
+                summary.clauses_detected += 1
+
+        # Tables: separate chunks linked to the nearest clause.
+        for table in tables:
+            linked_no = self.link_table_to_clause(table, clauses)
+            record = self.storage.build_record(
+                org_id=scope.org_id,
+                project_id=scope.project_id,
+                contract_id=scope.contract_id,
+                document_id=scope.document_id,
+                clause_no=None,
+                clause_title=table.table_title,
+                text=table.text,
+                cleaned_text=table.text,
+                chunk_type="table",
+                chunk_index=chunk_index,
+                chunk_part=1,
+                chunk_total=1,
+                page_start=table.page_no,
+                page_end=table.page_no,
+                document_title=scope.document_title,
+                document_type=scope.document_type,
+                volume=scope.volume,
+                revision=scope.revision,
+                linked_clause_no=linked_no,
+                table_title=table.table_title,
+                source_file_path=scope.source_file_path,
+                source_pdf_url=scope.source_pdf_url,
+            )
+            records.append(record)
+            chunk_index += 1
+            summary.tables_detected += 1
+
+        summary.duplicates_detected = sum(1 for count in seen_clause_nos.values() if count > 1)
+        return records, summary
+
+    # ------------------------------------------------------------------ #
+    # Orchestration (IO)
+    # ------------------------------------------------------------------ #
+    async def process(
+        self,
+        current_user: Any,
+        scope: DocumentScope,
+        clauses: List[DetectedClause],
+        tables: Optional[List[DetectedTable]] = None,
+        total_pages: int = 0,
+    ) -> ClauseProcessingSummary:
+        """Authorize, build, save idempotently, and write the audit run."""
+        await self.storage.authorize_processing_run(
+            current_user,
+            org_id=scope.org_id,
+            project_id=scope.project_id,
+            contract_id=scope.contract_id,
+            document_id=scope.document_id,
+        )
+        records, summary = self.build_records(scope, clauses, tables)
+        summary.total_pages = total_pages
+
+        try:
+            await self.storage.ensure_indexes()
+        except Exception as exc:  # pragma: no cover - index creation is best-effort
+            logger.warning("clause index creation skipped: %s", exc)
+
+        summary.records_written = await self.storage.save_clauses(records)
+        await self._write_run(current_user, scope, summary)
+        return summary
+
+    async def _write_run(
+        self, current_user: Any, scope: DocumentScope, summary: ClauseProcessingSummary
+    ) -> None:
+        run = ClauseProcessingRun(
+            document_id=scope.document_id,
+            user_id=getattr(current_user, "id", None),
+            org_id=scope.org_id,
+            project_id=scope.project_id,
+            contract_id=scope.contract_id,
+            clauses_detected=summary.clauses_detected,
+            section_chunks=summary.section_chunks,
+            tables_detected=summary.tables_detected,
+            low_confidence_chunks=summary.low_confidence_chunks,
+            duplicates_detected=summary.duplicates_detected,
+            modifications_detected=summary.modifications_detected,
+            human_review_required=summary.human_review_required,
+            errors=summary.errors,
+            created_at=datetime.utcnow(),
+        )
+        doc = run.model_dump(by_alias=True)
+        doc.pop("_id", None)
+        await self.db[self.RUN_COLLECTION].insert_one(doc)
+
+    async def process_document(self, current_user: Any, document_id: str) -> ClauseProcessingSummary:
+        """Integration entry: load the document + stored OCR pages, run the
+        existing ClauseExtractor, then process clause-wise."""
+        from bson import ObjectId
+
+        lookups: List[Any] = [document_id]
+        try:
+            lookups.append(ObjectId(document_id))
+        except Exception:
+            pass
+        document = None
+        for key in lookups:
+            document = await self.db.documents.find_one({"_id": key})
+            if document:
+                break
+        if not document:
+            raise ValueError(f"Contract document {document_id} not found")
+
+        scope = DocumentScope(
+            org_id=str(document.get("organization_id") or ""),
+            project_id=str(document.get("project_id") or ""),
+            contract_id=str(document.get("contract_id") or document.get("_id") or document_id),
+            document_id=str(document.get("_id") or document_id),
+            document_title=document.get("filename") or document.get("title"),
+            document_type=(document.get("contract_categories") or [None])[0] or document.get("document_type"),
+            volume=document.get("volume"),
+            revision=document.get("revision"),
+            source_file_path=document.get("filepath_local") or document.get("file_path"),
+        )
+
+        pages = await self._load_ocr_pages(scope.document_id)
+        cleaned_text, page_index = self._assemble_pages(pages)
+        clauses = self._detect_clauses(cleaned_text, page_index)
+        tables = self.detect_tables(pages)
+        return await self.process(current_user, scope, clauses, tables, total_pages=len(pages))
+
+    async def _load_ocr_pages(self, document_id: str) -> List[Dict[str, Any]]:
+        cursor = self.db.contract_ocr_pages.find({"document_id": document_id})
+        pages = [page async for page in cursor]
+        pages.sort(key=lambda p: int(p.get("page_number") or p.get("page_no") or 0))
+        return [
+            {
+                "page_no": int(p.get("page_number") or p.get("page_no") or 0),
+                "cleaned_text": p.get("cleaned_text") or "",
+                "text": p.get("raw_text") or "",
+                "ocr_used": (p.get("status") or "").startswith("ocr"),
+            }
+            for p in pages
+        ]
+
+    @staticmethod
+    def _assemble_pages(pages: List[Dict[str, Any]]) -> Tuple[str, List[Tuple[int, int, int]]]:
+        """Concatenate cleaned page text; return (text, [(start, end, page_no)])."""
+        chunks: List[str] = []
+        index: List[Tuple[int, int, int]] = []
+        offset = 0
+        for page in pages:
+            text = page.get("cleaned_text") or page.get("text") or ""
+            start = offset
+            chunks.append(text)
+            offset += len(text) + 2  # account for the "\n\n" join
+            index.append((start, offset, page["page_no"]))
+        return "\n\n".join(chunks), index
+
+    def _detect_clauses(
+        self, cleaned_text: str, page_index: List[Tuple[int, int, int]]
+    ) -> List[DetectedClause]:
+        from ..contracts_ingest import ClauseExtractor
+
+        extractor = ClauseExtractor()
+        detected: List[DetectedClause] = []
+        for clause in extractor.extract_clauses(cleaned_text):
+            page_start = self._page_for_offset(clause.start_position, page_index)
+            page_end = self._page_for_offset(clause.end_position, page_index) or page_start
+            confidence = "high"
+            if getattr(clause, "ai_confidence", None) is not None and clause.ai_confidence < 0.7:
+                confidence = "medium"
+            detected.append(
+                DetectedClause(
+                    clause_no=clause.clause_number or None,
+                    clause_title=clause.clause_title or None,
+                    clause_type=clause.clause_type or "clause",
+                    text=clause.clause_text,
+                    cleaned_text=clause.clause_text,
+                    page_start=page_start,
+                    page_end=page_end,
+                    confidence=confidence,
+                    extraction_method="text",
+                )
+            )
+        return detected
+
+    @staticmethod
+    def _page_for_offset(
+        offset: Optional[int], page_index: List[Tuple[int, int, int]]
+    ) -> Optional[int]:
+        if offset is None:
+            return None
+        for start, end, page_no in page_index:
+            if start <= offset < end:
+                return page_no
+        return page_index[-1][2] if page_index else None
+
+
+__all__ = [
+    "ClauseChunkingAgent",
+    "DetectedClause",
+    "DetectedTable",
+    "DocumentScope",
+    "ClauseProcessingSummary",
+]
