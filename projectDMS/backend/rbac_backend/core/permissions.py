@@ -69,6 +69,11 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.insurance.manage_types",
     "dms.contract.master.view",
     "dms.contract.master.manage",
+    "dms.contract.read",
+    "dms.contract.update",
+    "dms.contract.clause.create",
+    "dms.contract.clause.read",
+    "dms.ai.contract_processing.run",
     "dms.ipc.view",
     "dms.ipc.create",
     "dms.ipc.edit",
@@ -167,6 +172,12 @@ class Permissions:
     CONTRACT_APPRAISAL_REJECT = "dms.contract.appraisal.reject"
     CONTRACT_APPRAISAL_EXPORT = "dms.contract.appraisal.export"
     CONTRACT_APPRAISAL_CREATE_REGISTERS = "dms.contract.appraisal.create_registers"
+    # Contract clause chunking agent (clause-wise processing pipeline)
+    CONTRACT_READ = "dms.contract.read"
+    CONTRACT_UPDATE = "dms.contract.update"
+    CONTRACT_CLAUSE_CREATE = "dms.contract.clause.create"
+    CONTRACT_CLAUSE_READ = "dms.contract.clause.read"
+    AI_CONTRACT_PROCESSING_RUN = "dms.ai.contract_processing.run"
     TASK_VIEW = "dms.task.view"
     TASK_CREATE = "dms.task.create"
     TASK_EDIT = "dms.task.edit"
