@@ -299,6 +299,7 @@ const AppRoutes = () => (
         <Route path="contracts/qa" element={<ContractQAPage />} />
         <Route path="contracts/viewer" element={<ContractViewerPage />} />
         <Route path="contracts/viewer/:id" element={<ContractViewerPage />} />
+        <Route path="contracts/clauses" element={<ContractViewerPage />} />
         <Route
           path="contracts/timeline"
           element={

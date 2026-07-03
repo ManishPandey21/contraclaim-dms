@@ -49,6 +49,7 @@ class ClauseEmbeddingService:
             "clause_title": clause.clause_title,
             "parent_clause_no": clause.parent_clause_no,
             "clause_path": clause.clause_path,
+            "page": clause.page_start,
             "page_start": clause.page_start,
             "page_end": clause.page_end,
             "chunk_type": clause.chunk_type,
@@ -82,6 +83,9 @@ class ClauseEmbeddingService:
                 "org_id": c.org_id,
                 "project_id": c.project_id,
                 "document_id": c.document_id,
+                # vector_client maps chunk["page_start"] -> payload["page"];
+                # without it citations lose their source-page grounding.
+                "page_start": c.page_start,
                 "text": c.cleaned_text,
                 "metadata": self.build_payload(c),
             }

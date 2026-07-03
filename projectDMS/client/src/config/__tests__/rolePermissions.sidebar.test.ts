@@ -28,6 +28,7 @@ const SIDEBAR_PATHS = [
   "/letter-templates",
   "/letter-templates/new/edit",
   "/contracts/upload",
+  "/contracts/clauses",
   "/contracts/search",
   "/contracts/qa",
   "/contracts/viewer",

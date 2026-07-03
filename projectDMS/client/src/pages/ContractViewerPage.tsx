@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import PageHeader from "@/components/ui/PageHeader";
 import {
   Card,
@@ -42,7 +42,10 @@ type UploadOption = {
 
 const ContractViewerPage: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const { id: routeDocId } = useParams<{ id: string }>();
+  // /contracts/clauses (sidebar "Clause Index") lands on the Clause Index tab.
+  const startOnClauses = location.pathname.startsWith("/contracts/clauses");
 
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -233,7 +236,9 @@ const ContractViewerPage: React.FC = () => {
   // Revoke any outstanding object URL on unmount.
   useEffect(() => () => revokeBlobUrl(), [revokeBlobUrl]);
 
-  const [viewTab, setViewTab] = useState<"document" | "clauses">("document");
+  const [viewTab, setViewTab] = useState<"document" | "clauses">(
+    startOnClauses ? "clauses" : "document",
+  );
   const [pageAnchor, setPageAnchor] = useState<number | null>(null);
 
   const iframeUrl = useMemo(() => {

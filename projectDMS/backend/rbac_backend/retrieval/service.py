@@ -83,23 +83,31 @@ class RetrievalService:
 
         if backend_used == SearchBackend.MONGO:
             if self._is_contract_request(request):
-                retrievals = [(queries[0], await self._search_contract_mongo(request))]
+                retrievals = [(queries[0], await self._search_contract_records(request))]
             else:
                 retrievals = [(queries[0], await self._search_mongo(request))]
         else:
             try:
+                is_contract = self._is_contract_request(request)
                 for q_vector, q in zip(query_vectors, queries):
-                    results = await self.vector_client.search(
-                        q_vector,
-                        filters={
-                            "org_id": request.filters.org_id,
-                            "project_id": request.filters.project_id,
-                            "document_id": request.filters.document_id,
-                            "tags": request.filters.tags,
-                            **(request.filters.metadata or {}),
-                        },
-                        limit=request.limit,
-                    )
+                    results: List[Dict[str, Any]] = []
+                    if is_contract:
+                        # Structured clause records are the primary retrieval
+                        # source for contract/legal workflows; the token-chunk
+                        # collection below stays as compatibility fallback.
+                        results = await self._search_contract_clauses(q_vector, request)
+                    if not results:
+                        results = await self.vector_client.search(
+                            q_vector,
+                            filters={
+                                "org_id": request.filters.org_id,
+                                "project_id": request.filters.project_id,
+                                "document_id": request.filters.document_id,
+                                "tags": request.filters.tags,
+                                **(request.filters.metadata or {}),
+                            },
+                            limit=request.limit,
+                        )
                     retrievals.append((q, results))
             except Exception as exc:
                 # Qdrant passed the upfront health check but failed mid-query
@@ -111,7 +119,7 @@ class RetrievalService:
                 )
                 backend_used = SearchBackend.MONGO
                 if self._is_contract_request(request):
-                    retrievals = [(queries[0], await self._search_contract_mongo(request))]
+                    retrievals = [(queries[0], await self._search_contract_records(request))]
                 else:
                     retrievals = [(queries[0], await self._search_mongo(request))]
         timings["vector_search_ms"] = (time.perf_counter() - search_start) * 1000
@@ -370,6 +378,36 @@ class RetrievalService:
             or str(request.filters.doc_type or "").lower() == "contract"
         )
 
+    async def _search_contract_clauses(
+        self, query_vector: List[float], request: SearchRequest
+    ) -> List[Dict[str, Any]]:
+        """Search the structured clause vectors (contract_clauses namespace).
+
+        Filters are clause-payload shaped: scope ids plus lifecycle flags. The
+        request's ``uploadType``/``document_type: "contract"`` pseudo-metadata is
+        intentionally dropped — clause payloads carry the real document_type
+        (GCC/SCC/...) and would never match the literal string "contract".
+        Superseded or AI-unauthorised clauses are excluded at the filter level.
+        """
+        try:
+            return await self.vector_client.search(
+                query_vector,
+                filters={
+                    "org_id": request.filters.org_id,
+                    "project_id": request.filters.project_id,
+                    "document_id": request.filters.document_id,
+                    "is_current": True,
+                    "is_authorised_for_ai": True,
+                },
+                limit=request.limit,
+                namespace="contract_clauses",
+            )
+        except Exception as exc:
+            # Clause search is the preferred path, not a hard dependency: any
+            # failure falls back to the legacy token-chunk collection.
+            logger.warning("contract_clauses search failed (%s); using fallback", exc)
+            return []
+
     async def _search_contract_mongo(self, request: SearchRequest) -> List[Dict[str, Any]]:
         query: Dict[str, Any] = {
             "uploadType": "contract",
@@ -450,6 +488,75 @@ class RetrievalService:
             )
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[: request.limit]
+
+    async def _search_contract_clauses_mongo(self, request: SearchRequest) -> List[Dict[str, Any]]:
+        """Keyword-score structured clause records (contract_clauses collection).
+
+        Primary Mongo-side source for contract retrieval; document_vectors stays
+        as the compatibility fallback when no clause records exist.
+        """
+        query: Dict[str, Any] = {
+            "org_id": request.filters.org_id,
+            "project_id": request.filters.project_id,
+            "is_current": True,
+            "is_authorised_for_ai": True,
+        }
+        if request.filters.document_id:
+            query["document_id"] = request.filters.document_id
+        try:
+            cursor = self.db.contract_clauses.find(query).limit(max(request.limit * 8, 20))
+            docs = [doc async for doc in cursor]
+        except Exception as exc:
+            logger.warning("contract_clauses mongo search failed (%s); using fallback", exc)
+            return []
+
+        terms = [
+            term.lower()
+            for term in re.findall(r"[A-Za-z0-9][A-Za-z0-9._-]{2,}", request.query or "")
+        ]
+        unique_terms = set(terms)
+        scored: List[Dict[str, Any]] = []
+        for doc in docs:
+            text = str(doc.get("cleaned_text") or doc.get("text") or "")
+            haystack = " ".join(
+                str(part or "")
+                for part in (text, doc.get("clause_title"), doc.get("clause_no"))
+            ).lower()
+            exact = 1.0 if request.query.lower() in haystack else 0.0
+            term_hits = sum(1 for term in unique_terms if term in haystack)
+            score = exact + (term_hits / max(len(unique_terms), 1) if unique_terms else 0.2)
+            scored.append(
+                {
+                    "score": float(score),
+                    "payload": normalize_source_payload({
+                        "document_id": str(doc.get("document_id") or ""),
+                        "chunk_id": str(doc.get("clause_uid") or ""),
+                        "clause_id": doc.get("clause_uid"),
+                        "page": doc.get("page_start"),
+                        "page_number": doc.get("page_start"),
+                        "text": text,
+                        "uploadType": "contract",
+                        "document_type": doc.get("document_type") or "contract",
+                        "clause_no": doc.get("clause_no"),
+                        "clause_title": doc.get("clause_title"),
+                        "parent_clause_number": doc.get("parent_clause_no"),
+                        "clause_level": doc.get("level"),
+                        "page_start": doc.get("page_start"),
+                        "page_end": doc.get("page_end"),
+                        "file_name": doc.get("document_title"),
+                        "source_filename": doc.get("document_title"),
+                    }),
+                }
+            )
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[: request.limit]
+
+    async def _search_contract_records(self, request: SearchRequest) -> List[Dict[str, Any]]:
+        """Mongo contract retrieval: clause records first, document_vectors fallback."""
+        results = await self._search_contract_clauses_mongo(request)
+        if results:
+            return results
+        return await self._search_contract_mongo(request)
 
     async def _generate_hypothetical(self, query: str) -> str:
         template = (

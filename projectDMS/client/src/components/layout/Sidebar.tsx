@@ -37,6 +37,7 @@ import {
   Network,
   ShieldCheck,
   Eye,
+  ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
@@ -195,6 +196,11 @@ const Sidebar = () => {
       path: "/contracts/upload",
       icon: <Upload size={20} />,
       label: "Upload Contract",
+    },
+    {
+      path: "/contracts/clauses",
+      icon: <ListTree size={20} />,
+      label: "Clause Index",
     },
     {
       path: "/contracts/search",
