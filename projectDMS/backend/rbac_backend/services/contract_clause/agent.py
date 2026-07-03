@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...models.contract_clause import ClauseProcessingRun, ContractClause
+from .modification_detector import ModificationDetector
 from .storage_service import ClauseStorageService
 
 logger = logging.getLogger(__name__)
@@ -94,11 +95,16 @@ class ClauseChunkingAgent:
         storage_service: Optional[ClauseStorageService] = None,
         policy_service: Any = None,
         max_clause_chars: int = 4000,
+        embedding_service: Any = None,
+        graph_service: Any = None,
     ) -> None:
         self.db = db
         self.storage = storage_service or ClauseStorageService(db, policy_service)
         self.policy_service = policy_service
         self.max_clause_chars = max_clause_chars
+        # Phase 3 sinks (optional; best-effort when configured).
+        self.embedding_service = embedding_service
+        self.graph_service = graph_service
 
     # ------------------------------------------------------------------ #
     # Pure helpers (unit-testable)
@@ -291,8 +297,61 @@ class ClauseChunkingAgent:
             logger.warning("clause index creation skipped: %s", exc)
 
         summary.records_written = await self.storage.save_clauses(records)
+
+        # Phase 3: detect SCC/addendum modifications to base (GCC) clauses.
+        modification_links = self._detect_modifications(records)
+        summary.modifications_detected = len(modification_links)
+        if modification_links:
+            summary.human_review_required = True
+
+        # Phase 3: embed authorised clauses (cleaned text) into Qdrant (best-effort).
+        if self.embedding_service is not None:
+            try:
+                emb = await self.embedding_service.index_clauses(records)
+                summary.records_written["embedded"] = emb.get("embedded", 0)
+            except Exception as exc:  # pragma: no cover - external service
+                logger.warning("clause embedding failed: %s", exc)
+                summary.errors.append(f"embedding_failed: {exc}")
+
+        # Phase 3: sync the clause graph to FalkorDB (best-effort).
+        if self.graph_service is not None:
+            try:
+                await self.graph_service.sync(records, modification_links)
+            except Exception as exc:  # pragma: no cover - external service
+                logger.warning("clause graph sync failed: %s", exc)
+                summary.errors.append(f"graph_sync_failed: {exc}")
+
         await self._write_run(current_user, scope, summary)
         return summary
+
+    def _detect_modifications(self, records: List[ContractClause]) -> List[Dict[str, Any]]:
+        """Modification links from SCC/addendum clauses to base GCC clauses (req 19).
+
+        GCC is the base document type, so its own clauses are not treated as
+        modifiers. Deduplicated per (modifier clause, base clause, type).
+        """
+        links: List[Dict[str, Any]] = []
+        seen: set = set()
+        for record in records:
+            if record.chunk_type == "table":
+                continue
+            if (record.document_type or "").upper() == "GCC":
+                continue
+            text = record.cleaned_text or record.text or ""
+            for signal in ModificationDetector.detect(text):
+                dedupe = (record.clause_uid, signal.base_clause_no, signal.modification_type)
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                links.append(
+                    ModificationDetector.build_modification_link(
+                        signal=signal,
+                        applicable_clause_id=record.clause_uid,
+                        modifier_document_type=record.document_type,
+                        base_document_type="GCC",
+                    )
+                )
+        return links
 
     async def _write_run(
         self, current_user: Any, scope: DocumentScope, summary: ClauseProcessingSummary
@@ -347,11 +406,35 @@ class ClauseChunkingAgent:
             source_file_path=document.get("filepath_local") or document.get("file_path"),
         )
 
+        self._ensure_phase3_services()
         pages = await self._load_ocr_pages(scope.document_id)
         cleaned_text, page_index = self._assemble_pages(pages)
         clauses = self._detect_clauses(cleaned_text, page_index)
         tables = self.detect_tables(pages)
         return await self.process(current_user, scope, clauses, tables, total_pages=len(pages))
+
+    def _ensure_phase3_services(self) -> None:
+        """Lazily wire real Qdrant + FalkorDB sinks for the live pipeline."""
+        if self.embedding_service is None:
+            try:
+                from ...retrieval.dependencies import get_embedding_client, get_vector_client
+                from .embedding_service import ClauseEmbeddingService
+
+                self.embedding_service = ClauseEmbeddingService(
+                    self.db, get_embedding_client(), get_vector_client()
+                )
+            except Exception as exc:  # pragma: no cover - optional deps
+                logger.warning("clause embedding service unavailable: %s", exc)
+        if self.graph_service is None:
+            try:
+                from ..falkor_graph_service import FalkorGraphService
+                from .graph_service import ClauseGraphService
+
+                falkor = FalkorGraphService()
+                if getattr(falkor, "enabled", False):
+                    self.graph_service = ClauseGraphService(falkor=falkor)
+            except Exception as exc:  # pragma: no cover - optional deps
+                logger.warning("clause graph service unavailable: %s", exc)
 
     async def _load_ocr_pages(self, document_id: str) -> List[Dict[str, Any]]:
         cursor = self.db.contract_ocr_pages.find({"document_id": document_id})

@@ -240,3 +240,90 @@ async def test_process_blocks_missing_scope():
     bad_scope = DocumentScope(org_id="org-A", project_id="proj-A", contract_id="", document_id="doc-1")
     with pytest.raises(ClauseScopeError):
         await agent.process(_User(), bad_scope, [DetectedClause(clause_no="1", text="x")], [])
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 wiring: modification detection + embedding + graph
+# --------------------------------------------------------------------------- #
+class FakeEmbeddingService:
+    def __init__(self):
+        self.records = None
+
+    async def index_clauses(self, records):
+        self.records = records
+        return {"embedded": len(records), "skipped": 0}
+
+
+class FakeGraphService:
+    def __init__(self):
+        self.calls = []
+
+    async def sync(self, records, modification_links=None):
+        self.calls.append((records, modification_links or []))
+        return len(records)
+
+
+SCC_SCOPE = DocumentScope(
+    org_id="org-A", project_id="proj-A", contract_id="ct-1", document_id="doc-scc",
+    document_type="SCC",
+)
+
+
+@pytest.mark.asyncio
+async def test_process_wires_embedding_and_graph():
+    db = FakeDB()
+    embed, graph = FakeEmbeddingService(), FakeGraphService()
+    agent = ClauseChunkingAgent(db, policy_service=AllowPolicy(), embedding_service=embed, graph_service=graph)
+    clauses = [DetectedClause(clause_no="8.4", clause_title="EOT", text="clause body")]
+
+    await agent.process(_User(), SCOPE, clauses, [])
+
+    assert embed.records is not None and len(embed.records) == 1  # embedding invoked
+    assert len(graph.calls) == 1                                   # graph invoked
+    assert graph.calls[0][0] == embed.records                      # same records
+
+
+@pytest.mark.asyncio
+async def test_process_detects_scc_modification():
+    db = FakeDB()
+    graph = FakeGraphService()
+    agent = ClauseChunkingAgent(db, policy_service=AllowPolicy(), graph_service=graph)
+    clauses = [
+        DetectedClause(
+            clause_no="8.4", clause_title="EOT",
+            text="Sub-Clause 8.4 is deleted and replaced by the following.",
+        )
+    ]
+    summary = await agent.process(_User(), SCC_SCOPE, clauses, [])
+
+    assert summary.modifications_detected == 1
+    assert summary.human_review_required is True
+    # The modification link is passed through to the graph sync.
+    _, links = graph.calls[0]
+    assert links and links[0]["base_clause_no"] == "8.4"
+    assert links[0]["modification_type"] == "replace"
+
+
+@pytest.mark.asyncio
+async def test_gcc_clause_not_treated_as_modifier():
+    agent = ClauseChunkingAgent(FakeDB(), policy_service=AllowPolicy())
+    clauses = [DetectedClause(clause_no="8.4", text="Clause 8.4 is amended by agreement.")]
+    # document_type GCC -> its own clauses are the base, not modifiers.
+    summary = await agent.process(_User(), SCOPE, clauses, [])  # SCOPE is GCC
+    assert summary.modifications_detected == 0
+
+
+@pytest.mark.asyncio
+async def test_embedding_failure_is_non_fatal():
+    class Boom:
+        async def index_clauses(self, records):
+            raise RuntimeError("qdrant down")
+
+    db = FakeDB()
+    agent = ClauseChunkingAgent(db, policy_service=AllowPolicy(), embedding_service=Boom())
+    summary = await agent.process(_User(), SCOPE, [DetectedClause(clause_no="8.4", text="x")], [])
+
+    # Clauses still saved and audit written despite the embedding failure.
+    assert summary.records_written["inserted"] == 1
+    assert any("embedding_failed" in e for e in summary.errors)
+    assert len(db[ClauseChunkingAgent.RUN_COLLECTION].inserted) == 1
