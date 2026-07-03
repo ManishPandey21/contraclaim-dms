@@ -218,6 +218,14 @@ class ClauseChunkingAgent:
             cleaned_source = clause.cleaned_text if clause.cleaned_text is not None else clause.text
             parts = self.split_text(cleaned_source)
             total = len(parts)
+            # Preserve exact raw wording per part: when a distinct raw text is
+            # provided, split it in parallel and pair 1:1 with the cleaned parts
+            # if the split aligns; otherwise fall back to the cleaned slice.
+            raw_parts: List[str] = []
+            if raw_text and raw_text != cleaned_source:
+                candidate = self.split_text(raw_text)
+                if len(candidate) == total:
+                    raw_parts = candidate
             for part_no, part in enumerate(parts, start=1):
                 if clause.is_section:
                     chunk_type = "section_chunk"
@@ -225,10 +233,12 @@ class ClauseChunkingAgent:
                     chunk_type = "clause_part"
                 else:
                     chunk_type = "clause"
-                # Preserve exact raw wording in `text` for un-split clauses; a
-                # split clause's raw span cannot be re-sliced reliably, so parts
-                # store their cleaned slice.
-                text_value = raw_text if (total == 1 and raw_text) else part
+                if raw_parts:
+                    text_value = raw_parts[part_no - 1]   # exact raw slice per part
+                elif total == 1 and raw_text:
+                    text_value = raw_text                 # exact raw for un-split clause
+                else:
+                    text_value = part                     # safe fallback (raw==cleaned or misaligned)
                 record = self.storage.build_record(
                     org_id=scope.org_id,
                     project_id=scope.project_id,

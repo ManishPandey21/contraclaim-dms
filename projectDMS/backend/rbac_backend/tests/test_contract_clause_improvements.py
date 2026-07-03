@@ -154,6 +154,22 @@ def test_raw_and_cleaned_text_are_distinct_with_char_spans():
     assert rec.checksum == ClauseStorageService.checksum("Extension of Time")  # checksum on cleaned
 
 
+def test_split_clause_preserves_raw_slice_per_part():
+    # Three aligned paragraphs; a small max forces one part per paragraph.
+    agent = ClauseChunkingAgent(FakeDB(), max_clause_chars=45)
+    cleaned = "\n\n".join(f"clean paragraph number {i} aaaaaaaaaa" for i in range(3))
+    raw = "\n\n".join(f"RAW paragraph number {i} bbbbbbbbbbbb" for i in range(3))
+    clause = DetectedClause(clause_no="8.4", text=raw, cleaned_text=cleaned)
+
+    records, _ = agent.build_records(SCOPE, [clause])
+    parts = [r for r in records if r.clause_no == "8.4"]
+    assert len(parts) == 3 and all(r.chunk_type == "clause_part" for r in parts)
+    # Each part now carries its exact RAW slice in `text` and cleaned in cleaned_text.
+    for i, rec in enumerate(parts):
+        assert rec.text == f"RAW paragraph number {i} bbbbbbbbbbbb"
+        assert rec.cleaned_text == f"clean paragraph number {i} aaaaaaaaaa"
+
+
 # --------------------------------------------------------------------------- #
 # #5 processing authorization includes CONTRACT_UPDATE
 # --------------------------------------------------------------------------- #
