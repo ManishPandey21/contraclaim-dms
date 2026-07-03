@@ -7,6 +7,9 @@ from .agent import (
     DetectedTable,
     DocumentScope,
 )
+from .embedding_service import ClauseEmbeddingService
+from .graph_service import ClauseGraphService, GraphModel, clause_node_id
+from .modification_detector import ModificationDetector, ModificationSignal
 from .storage_service import ClauseScopeError, ClauseStorageService
 
 __all__ = [
@@ -17,4 +20,10 @@ __all__ = [
     "DetectedTable",
     "DocumentScope",
     "ClauseProcessingSummary",
+    "ClauseEmbeddingService",
+    "ClauseGraphService",
+    "GraphModel",
+    "clause_node_id",
+    "ModificationDetector",
+    "ModificationSignal",
 ]
