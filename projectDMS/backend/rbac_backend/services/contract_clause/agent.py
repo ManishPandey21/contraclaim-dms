@@ -495,6 +495,7 @@ class ClauseChunkingAgent:
         self, cleaned_text: str, page_index: List[Tuple[int, int, int]]
     ) -> List[DetectedClause]:
         from ..contracts_ingest import ClauseExtractor
+        from .subitem_detector import detect_subitems
 
         extractor = ClauseExtractor()
         detected: List[DetectedClause] = []
@@ -504,21 +505,64 @@ class ClauseChunkingAgent:
             confidence = "high"
             if getattr(clause, "ai_confidence", None) is not None and clause.ai_confidence < 0.7:
                 confidence = "medium"
-            detected.append(
-                DetectedClause(
-                    clause_no=clause.clause_number or None,
-                    clause_title=clause.clause_title or None,
-                    clause_type=clause.clause_type or "clause",
-                    text=clause.clause_text,
-                    cleaned_text=clause.clause_text,
-                    page_start=page_start,
-                    page_end=page_end,
-                    char_start=clause.start_position,
-                    char_end=clause.end_position,
-                    confidence=confidence,
-                    extraction_method="text",
+
+            base_no = clause.clause_number or None
+            subitems = detect_subitems(clause.clause_text, base_no) if base_no else []
+
+            if subitems:
+                # Parent keeps the lead-in text (before the first sub-item); each
+                # (a)/(i) item becomes a child record for granular grounding.
+                lead_in = clause.clause_text[: subitems[0].char_start].strip()
+                parent_text = lead_in or (clause.clause_title or clause.clause_text[:200])
+                detected.append(
+                    DetectedClause(
+                        clause_no=base_no,
+                        clause_title=clause.clause_title or None,
+                        clause_type=clause.clause_type or "clause",
+                        text=parent_text,
+                        cleaned_text=parent_text,
+                        page_start=page_start,
+                        page_end=page_end,
+                        char_start=clause.start_position,
+                        char_end=clause.start_position + len(parent_text),
+                        confidence=confidence,
+                        extraction_method="text",
+                    )
                 )
-            )
+                for item in subitems:
+                    s_start = clause.start_position + item.char_start
+                    s_end = clause.start_position + item.char_end
+                    detected.append(
+                        DetectedClause(
+                            clause_no=item.clause_no,
+                            clause_title=None,
+                            clause_type="sub_item",
+                            text=item.text,
+                            cleaned_text=item.text,
+                            page_start=self._page_for_offset(s_start, page_index),
+                            page_end=self._page_for_offset(s_end, page_index),
+                            char_start=s_start,
+                            char_end=s_end,
+                            confidence=confidence,
+                            extraction_method="text",
+                        )
+                    )
+            else:
+                detected.append(
+                    DetectedClause(
+                        clause_no=base_no,
+                        clause_title=clause.clause_title or None,
+                        clause_type=clause.clause_type or "clause",
+                        text=clause.clause_text,
+                        cleaned_text=clause.clause_text,
+                        page_start=page_start,
+                        page_end=page_end,
+                        char_start=clause.start_position,
+                        char_end=clause.end_position,
+                        confidence=confidence,
+                        extraction_method="text",
+                    )
+                )
         return detected
 
     @staticmethod

@@ -12,6 +12,7 @@ from .graph_service import ClauseGraphService, GraphModel, clause_node_id
 from .index_service import ClauseIndexService, ClauseMergeError, ClauseNotFoundError
 from .modification_detector import ModificationDetector, ModificationSignal
 from .storage_service import ClauseScopeError, ClauseStorageService
+from .subitem_detector import SubItem, detect_subitems
 
 __all__ = [
     "ClauseStorageService",
@@ -30,4 +31,6 @@ __all__ = [
     "ClauseIndexService",
     "ClauseNotFoundError",
     "ClauseMergeError",
+    "SubItem",
+    "detect_subitems",
 ]

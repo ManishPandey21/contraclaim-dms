@@ -29,6 +29,10 @@ from ...models.contract_clause import (
 
 _CLAUSE_PREFIX_RE = re.compile(r"^(?:sub[-\s]?clause|clause)\s+", re.IGNORECASE)
 _DOTTED_NUMERIC_RE = re.compile(r"^\d+(?:\.\d+)*$")
+# A dotted-numeric base followed by one or more (a)/(i)-style sub-item suffixes,
+# e.g. "8.4(a)" or "8.4(a)(i)".
+_SUBITEM_RE = re.compile(r"^(\d+(?:\.\d+)*)((?:\([^)]+\))+)$")
+_SUFFIX_RE = re.compile(r"\([^)]+\)")
 
 
 class ClauseScopeError(ValueError):
@@ -123,13 +127,28 @@ class ClauseStorageService:
 
     @classmethod
     def clause_path(cls, clause_no: Optional[str]) -> List[str]:
-        """["8","8.4"] for "8.4"; ["Appendix 1"] for non-dotted; [] for none."""
+        """Ancestor path from root to this clause.
+
+        - "8.4"        -> ["8", "8.4"]
+        - "8.4(a)"     -> ["8", "8.4", "8.4(a)"]
+        - "8.4(a)(i)"  -> ["8", "8.4", "8.4(a)", "8.4(a)(i)"]
+        - "Appendix 1" -> ["Appendix 1"]; "" -> []
+        """
         normalized = cls.normalize_clause_no(clause_no)
         if not normalized:
             return []
         if _DOTTED_NUMERIC_RE.match(normalized):
             parts = normalized.split(".")
             return [".".join(parts[: i + 1]) for i in range(len(parts))]
+        match = _SUBITEM_RE.match(normalized)
+        if match:
+            base = match.group(1)
+            path = [".".join(base.split(".")[: i + 1]) for i in range(len(base.split(".")))]
+            acc = base
+            for suffix in _SUFFIX_RE.findall(match.group(2)):
+                acc += suffix
+                path.append(acc)
+            return path
         return [normalized]
 
     @classmethod
