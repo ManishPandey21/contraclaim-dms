@@ -9,6 +9,7 @@ from .agent import (
 )
 from .embedding_service import ClauseEmbeddingService
 from .graph_service import ClauseGraphService, GraphModel, clause_node_id
+from .index_service import ClauseIndexService, ClauseMergeError, ClauseNotFoundError
 from .modification_detector import ModificationDetector, ModificationSignal
 from .storage_service import ClauseScopeError, ClauseStorageService
 
@@ -26,4 +27,7 @@ __all__ = [
     "clause_node_id",
     "ModificationDetector",
     "ModificationSignal",
+    "ClauseIndexService",
+    "ClauseNotFoundError",
+    "ClauseMergeError",
 ]

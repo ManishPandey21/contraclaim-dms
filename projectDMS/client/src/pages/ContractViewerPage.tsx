@@ -10,12 +10,14 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import Badge from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import {
   Building2,
   Download,
   ExternalLink,
   FileText,
+  ListTree,
   Loader2,
   MessageSquare,
   RefreshCw,
@@ -25,6 +27,7 @@ import { api } from "@/services/api";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 import { reindexContract } from "@/services/contracts-api";
+import ClauseIndexTab from "@/components/contracts/ClauseIndexTab";
 import { enhancedApi } from "@/services/enhanced-api";
 import { extractErrorMessage } from "@/lib/error-logger";
 
@@ -230,10 +233,19 @@ const ContractViewerPage: React.FC = () => {
   // Revoke any outstanding object URL on unmount.
   useEffect(() => () => revokeBlobUrl(), [revokeBlobUrl]);
 
-  const iframeUrl = useMemo(
-    () => (pdfUrl ? `${pdfUrl}#toolbar=1&navpanes=0&view=FitH` : null),
-    [pdfUrl],
-  );
+  const [viewTab, setViewTab] = useState<"document" | "clauses">("document");
+  const [pageAnchor, setPageAnchor] = useState<number | null>(null);
+
+  const iframeUrl = useMemo(() => {
+    if (!pdfUrl) return null;
+    const pageHash = pageAnchor ? `page=${pageAnchor}&` : "";
+    return `${pdfUrl}#${pageHash}toolbar=1&navpanes=0&view=FitH`;
+  }, [pdfUrl, pageAnchor]);
+
+  const openSourcePage = useCallback((page: number) => {
+    setPageAnchor(page);
+    setViewTab("document");
+  }, []);
 
   const selectedName = useMemo(() => {
     if (docMeta?.filename) return String(docMeta.filename);
@@ -435,31 +447,50 @@ const ContractViewerPage: React.FC = () => {
             </div>
           </CardHeader>
           <CardContent className="p-0">
-            <div className="h-[calc(100vh-320px)] min-h-[480px] w-full bg-gray-100">
-              {pdfLoading ? (
-                <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
-                  <Loader2 className="mb-3 h-8 w-8 animate-spin" />
-                  <p className="text-sm">Loading contract preview…</p>
+            <Tabs value={viewTab} onValueChange={(v) => setViewTab(v as "document" | "clauses")}>
+              <div className="border-b px-3 pt-3">
+                <TabsList>
+                  <TabsTrigger value="document" className="gap-2">
+                    <FileText className="h-4 w-4" /> Document
+                  </TabsTrigger>
+                  <TabsTrigger value="clauses" className="gap-2">
+                    <ListTree className="h-4 w-4" /> Clause Index
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+
+              <TabsContent value="document" className="m-0">
+                <div className="h-[calc(100vh-360px)] min-h-[480px] w-full bg-gray-100">
+                  {pdfLoading ? (
+                    <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
+                      <Loader2 className="mb-3 h-8 w-8 animate-spin" />
+                      <p className="text-sm">Loading contract preview…</p>
+                    </div>
+                  ) : pdfError ? (
+                    <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+                      <FileText className="mb-3 h-8 w-8 text-gray-400" />
+                      <p className="text-sm font-medium text-red-600">Unable to preview this contract</p>
+                      <p className="mt-1 max-w-md text-xs text-muted-foreground">{pdfError}</p>
+                    </div>
+                  ) : iframeUrl ? (
+                    <iframe
+                      title={selectedName || "Contract document"}
+                      src={iframeUrl}
+                      className="h-full w-full border-0 bg-white"
+                    />
+                  ) : (
+                    <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
+                      <FileText className="mb-3 h-8 w-8" />
+                      <p className="text-sm">Preview unavailable.</p>
+                    </div>
+                  )}
                 </div>
-              ) : pdfError ? (
-                <div className="flex h-full flex-col items-center justify-center px-6 text-center">
-                  <FileText className="mb-3 h-8 w-8 text-gray-400" />
-                  <p className="text-sm font-medium text-red-600">Unable to preview this contract</p>
-                  <p className="mt-1 max-w-md text-xs text-muted-foreground">{pdfError}</p>
-                </div>
-              ) : iframeUrl ? (
-                <iframe
-                  title={selectedName || "Contract document"}
-                  src={iframeUrl}
-                  className="h-full w-full border-0 bg-white"
-                />
-              ) : (
-                <div className="flex h-full flex-col items-center justify-center text-muted-foreground">
-                  <FileText className="mb-3 h-8 w-8" />
-                  <p className="text-sm">Preview unavailable.</p>
-                </div>
-              )}
-            </div>
+              </TabsContent>
+
+              <TabsContent value="clauses" className="m-0 p-4">
+                <ClauseIndexTab documentId={selectedDocId} onOpenPage={openSourcePage} />
+              </TabsContent>
+            </Tabs>
           </CardContent>
         </Card>
       )}

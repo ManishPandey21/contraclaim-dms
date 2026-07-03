@@ -90,6 +90,11 @@ class ContractClause(BaseModel):
     is_authorised_for_ai: bool = True
     human_review_required: bool = False
 
+    # --- Manual editorial state (Clause Index UI, req 25) ---
+    manually_edited: bool = False
+    verified_by: Optional[str] = None
+    verified_at: Optional[datetime] = None
+
     # --- Embedding / graph bookkeeping ---
     embedding_status: EmbeddingStatus = "pending"
     qdrant_point_id: Optional[str] = None

@@ -273,6 +273,71 @@ export async function reindexContract(documentId: string): Promise<StatusRespons
   return data as StatusResponse;
 }
 
+// --- Clause Index (clause-wise contract records) --------------------------
+
+export interface ClauseRow {
+  clause_uid: string;
+  clause_no?: string | null;
+  clause_title?: string | null;
+  parent_clause_no?: string | null;
+  clause_path?: string[] | null;
+  level?: number | null;
+  document_type?: string | null;
+  volume?: string | null;
+  page_start?: number | null;
+  page_end?: number | null;
+  chunk_type?: string | null;
+  chunk_part?: number | null;
+  chunk_total?: number | null;
+  confidence?: string | null;
+  quality_status?: string | null;
+  is_current?: boolean;
+  is_superseded?: boolean;
+  superseded_by_clause_id?: string | null;
+  is_authorised_for_ai?: boolean;
+  embedding_status?: string | null;
+  human_review_required?: boolean;
+  manually_edited?: boolean;
+  verified_by?: string | null;
+  linked_clause_no?: string | null;
+  table_title?: string | null;
+}
+
+export async function listDocumentClauses(
+  documentId: string,
+): Promise<{ document_id: string; count: number; clauses: ClauseRow[] }> {
+  const { data } = await api.get(`/contracts/${documentId}/clauses`);
+  return data;
+}
+
+export async function updateClause(
+  clauseUid: string,
+  patch: {
+    clause_title?: string;
+    mark_verified?: boolean;
+    is_superseded?: boolean;
+    superseded_by_clause_id?: string;
+  },
+): Promise<ClauseRow> {
+  const { data } = await api.patch(`/contracts/clauses/${clauseUid}`, patch);
+  return data as ClauseRow;
+}
+
+export async function regenerateClauseEmbedding(clauseUid: string): Promise<ClauseRow> {
+  const { data } = await api.post(`/contracts/clauses/${clauseUid}/regenerate-embedding`, {});
+  return data as ClauseRow;
+}
+
+export async function splitClause(clauseUid: string, splitAt: number): Promise<{ parts: ClauseRow[] }> {
+  const { data } = await api.post(`/contracts/clauses/${clauseUid}/split`, { split_at: splitAt });
+  return data;
+}
+
+export async function mergeClauses(clauseUids: string[]): Promise<ClauseRow> {
+  const { data } = await api.post(`/contracts/clauses/merge`, { clause_uids: clauseUids });
+  return data as ClauseRow;
+}
+
 export type ContractRagRequest = {
   query: string;
   filters: {
