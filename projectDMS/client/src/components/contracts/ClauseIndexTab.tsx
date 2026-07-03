@@ -233,11 +233,19 @@ const ClauseIndexTab: React.FC<Props> = ({ documentId, onOpenPage }) => {
                   />
                 </TableCell>
                 <TableCell className="font-mono text-xs">
-                  {row.clause_no || (row.chunk_type === "table" ? "TABLE" : "—")}
+                  {row.clause_no ||
+                    (row.chunk_type === "table"
+                      ? row.table_type === "boq"
+                        ? "BOQ"
+                        : "TABLE"
+                      : "—")}
                   {row.chunk_total && row.chunk_total > 1 ? ` (${row.chunk_part}/${row.chunk_total})` : ""}
                 </TableCell>
-                <TableCell className="max-w-[220px] truncate" title={row.clause_title || ""}>
+                <TableCell className="max-w-[220px] truncate" title={row.clause_title || row.table_title || ""}>
                   {row.clause_title || row.table_title || "—"}
+                  {row.table_type === "boq" && Array.isArray(row.table_rows)
+                    ? ` (${row.table_rows.length} items)`
+                    : ""}
                 </TableCell>
                 <TableCell className="text-xs">{row.document_type || "—"}</TableCell>
                 <TableCell className="text-xs">

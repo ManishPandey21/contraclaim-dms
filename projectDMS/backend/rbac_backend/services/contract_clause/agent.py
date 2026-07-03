@@ -57,11 +57,18 @@ class DetectedClause:
 
 @dataclass
 class DetectedTable:
-    """A table block to be stored separately and linked to a clause (req 15)."""
+    """A table block to be stored separately and linked to a clause (req 15).
+
+    For structured tables (e.g. BOQ) ``table_type``/``columns``/``rows`` carry
+    the parsed data so the table is not stored as a blind blob.
+    """
 
     page_no: int
     table_title: Optional[str] = None
     text: str = ""
+    table_type: Optional[str] = None
+    columns: List[str] = field(default_factory=list)
+    rows: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -286,6 +293,9 @@ class ClauseChunkingAgent:
                 revision=scope.revision,
                 linked_clause_no=linked_no,
                 table_title=table.table_title,
+                table_type=table.table_type,
+                table_columns=table.columns,
+                table_rows=table.rows,
                 source_file_path=scope.source_file_path,
                 source_pdf_url=scope.source_pdf_url,
             )
@@ -437,8 +447,38 @@ class ClauseChunkingAgent:
         pages = await self._load_ocr_pages(scope.document_id)
         cleaned_text, page_index = self._assemble_pages(pages)
         clauses = self._detect_clauses(cleaned_text, page_index)
-        tables = self.detect_tables(pages)
+        tables = self.detect_tables(pages) + self.detect_boq_tables(pages)
         return await self.process(current_user, scope, clauses, tables, total_pages=len(pages))
+
+    @staticmethod
+    def detect_boq_tables(pages: List[Dict[str, Any]]) -> List[DetectedTable]:
+        """Detect + structure Bill of Quantities tables (req 15)."""
+        from .boq_detector import detect_boq_tables as _detect_boq
+
+        detected: List[DetectedTable] = []
+        for boq in _detect_boq(pages):
+            rows = [
+                {
+                    "item_no": r.item_no,
+                    "description": r.description,
+                    "unit": r.unit,
+                    "quantity": r.quantity,
+                    "rate": r.rate,
+                    "amount": r.amount,
+                }
+                for r in boq.rows
+            ]
+            detected.append(
+                DetectedTable(
+                    page_no=boq.page_no,
+                    table_title=boq.header or f"Bill of Quantities (page {boq.page_no})",
+                    text=boq.text,
+                    table_type="boq",
+                    columns=boq.columns,
+                    rows=rows,
+                )
+            )
+        return detected
 
     def _ensure_phase3_services(self) -> None:
         """Lazily wire real Qdrant + FalkorDB sinks for the live pipeline."""

@@ -9,7 +9,7 @@ Relevant Clause / drafting / claim (SoC/SoD/rejoinder) agents can ground on it.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -86,6 +86,11 @@ class ContractClause(BaseModel):
     # For table chunks: the clause they are linked to.
     linked_clause_no: Optional[str] = None
     table_title: Optional[str] = None
+    # Structured tables (e.g. BOQ): parsed columns + rows so a table is not
+    # stored as a blind blob (req 15).
+    table_type: Optional[str] = None            # e.g. "boq"
+    table_columns: List[str] = Field(default_factory=list)
+    table_rows: List[Dict[str, Any]] = Field(default_factory=list)
 
     # --- Quality / lifecycle ---
     confidence: Confidence = "high"

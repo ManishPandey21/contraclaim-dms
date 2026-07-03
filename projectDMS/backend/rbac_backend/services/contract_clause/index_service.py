@@ -28,7 +28,7 @@ _ROW_FIELDS = (
     "chunk_part", "chunk_total", "confidence", "quality_status", "is_current",
     "is_superseded", "superseded_by_clause_id", "is_authorised_for_ai",
     "embedding_status", "human_review_required", "manually_edited",
-    "verified_by", "linked_clause_no", "table_title",
+    "verified_by", "linked_clause_no", "table_title", "table_type", "table_rows",
 )
 
 

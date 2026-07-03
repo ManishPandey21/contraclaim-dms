@@ -301,6 +301,8 @@ export interface ClauseRow {
   verified_by?: string | null;
   linked_clause_no?: string | null;
   table_title?: string | null;
+  table_type?: string | null;
+  table_rows?: Array<Record<string, unknown>> | null;
 }
 
 export async function listDocumentClauses(
