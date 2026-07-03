@@ -471,6 +471,26 @@ class ContractService:
             retry_ocr_pages=retry_ocr_pages,
         )
 
+    async def _run_clause_indexing_safe(self, document_id: str) -> None:
+        """Populate contract_clauses from a completed contract (system context).
+
+        The upload was already authorized at the API layer, so the agent runs
+        without a per-request user/PolicyService. Best-effort: never raises.
+        """
+        try:
+            from .contract_clause.agent import ClauseChunkingAgent
+
+            db = await self._get_db()
+            agent = ClauseChunkingAgent(db=db)
+            summary = await agent.process_document(current_user=None, document_id=document_id)
+            logger.info(
+                "contract_clauses populated for %s: clauses=%s tables=%s low_conf=%s",
+                document_id, summary.clauses_detected, summary.tables_detected,
+                summary.low_confidence_chunks,
+            )
+        except Exception as exc:  # pragma: no cover - best-effort during ingest
+            logger.warning("clause indexing during ingest failed for %s: %s", document_id, exc)
+
     async def process_ingest_job(self, payload: Dict[str, Any]) -> None:
         upload_id = str(payload.get("upload_id") or "")
         document_id = str(payload.get("document_id") or "")
@@ -542,6 +562,13 @@ class ContractService:
                     status.HTTP_500_INTERNAL_SERVER_ERROR,
                 )
             categories = result.get("categories") or []
+
+            # Clause-wise indexing: a completed contract must also be saved
+            # clause-by-clause into contract_clauses (+ Qdrant/FalkorDB). Runs
+            # best-effort so an embedding/graph outage cannot fail the upload;
+            # the Clause Index tab can re-run it via the trigger.
+            await self._run_clause_indexing_safe(document_id)
+
             await self.update_job_status(
                 upload_id,
                 "completed",

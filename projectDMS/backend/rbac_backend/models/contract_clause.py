@@ -65,11 +65,18 @@ class ContractClause(BaseModel):
     summary: str = ""
     keywords: List[str] = Field(default_factory=list)
 
-    # --- Source grounding ---
+    # --- Source grounding (page + char span for source-viewer jumps, req 3) ---
     page_start: Optional[int] = None
     page_end: Optional[int] = None
+    char_start: Optional[int] = None
+    char_end: Optional[int] = None
     source_file_path: Optional[str] = None
     source_pdf_url: Optional[str] = None
+
+    # --- Duplicate handling for repeated clause numbers (req 2/#2) ---
+    duplicate_group_key: Optional[str] = None
+    duplicate_ordinal: int = 1
+    duplicate_status: Literal["unique", "duplicate"] = "unique"
 
     # --- Chunking ---
     chunk_type: ChunkType = "clause"

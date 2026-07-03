@@ -31,7 +31,12 @@ _TABLE_CAPTION_RE = re.compile(
 
 @dataclass
 class DetectedClause:
-    """Normalised clause detected from the document (extractor-agnostic)."""
+    """Normalised clause detected from the document (extractor-agnostic).
+
+    ``text`` holds the exact raw wording; ``cleaned_text`` the noise-stripped
+    text used for embeddings. ``char_start``/``char_end`` are offsets in the
+    assembled document text for source-viewer jumps (req 3).
+    """
 
     clause_no: Optional[str]
     clause_title: Optional[str] = None
@@ -40,6 +45,8 @@ class DetectedClause:
     cleaned_text: Optional[str] = None
     page_start: Optional[int] = None
     page_end: Optional[int] = None
+    char_start: Optional[int] = None
+    char_end: Optional[int] = None
     confidence: str = "high"
     extraction_method: str = "text"
 
@@ -183,14 +190,26 @@ class ClauseChunkingAgent:
         records: List[ContractClause] = []
         chunk_index = 0
 
-        seen_clause_nos: Dict[str, int] = {}
+        # Pre-count occurrences per clause number so repeated numbers get a
+        # stable duplicate ordinal + status (req #2).
+        group_counts: Dict[str, int] = {}
         for clause in clauses:
             if clause.clause_no:
                 key = ClauseStorageService.normalize_clause_no(clause.clause_no) or clause.clause_no
-                seen_clause_nos[key] = seen_clause_nos.get(key, 0) + 1
+                group_counts[key] = group_counts.get(key, 0) + 1
+        running: Dict[str, int] = {}
 
-            source_text = clause.cleaned_text if clause.cleaned_text is not None else clause.text
-            parts = self.split_text(source_text)
+        for clause in clauses:
+            ordinal, dup_status = 1, "unique"
+            if clause.clause_no:
+                key = ClauseStorageService.normalize_clause_no(clause.clause_no) or clause.clause_no
+                running[key] = running.get(key, 0) + 1
+                ordinal = running[key]
+                dup_status = "duplicate" if group_counts.get(key, 0) > 1 else "unique"
+
+            raw_text = clause.text or ""
+            cleaned_source = clause.cleaned_text if clause.cleaned_text is not None else clause.text
+            parts = self.split_text(cleaned_source)
             total = len(parts)
             for part_no, part in enumerate(parts, start=1):
                 if clause.is_section:
@@ -199,6 +218,10 @@ class ClauseChunkingAgent:
                     chunk_type = "clause_part"
                 else:
                     chunk_type = "clause"
+                # Preserve exact raw wording in `text` for un-split clauses; a
+                # split clause's raw span cannot be re-sliced reliably, so parts
+                # store their cleaned slice.
+                text_value = raw_text if (total == 1 and raw_text) else part
                 record = self.storage.build_record(
                     org_id=scope.org_id,
                     project_id=scope.project_id,
@@ -206,7 +229,7 @@ class ClauseChunkingAgent:
                     document_id=scope.document_id,
                     clause_no=clause.clause_no,
                     clause_title=clause.clause_title,
-                    text=part,
+                    text=text_value,
                     cleaned_text=part,
                     chunk_type=chunk_type,
                     chunk_index=chunk_index,
@@ -214,6 +237,10 @@ class ClauseChunkingAgent:
                     chunk_total=total,
                     page_start=clause.page_start,
                     page_end=clause.page_end,
+                    char_start=clause.char_start,
+                    char_end=clause.char_end,
+                    duplicate_ordinal=ordinal,
+                    duplicate_status=dup_status,
                     document_title=scope.document_title,
                     document_type=scope.document_type,
                     volume=scope.volume,
@@ -266,7 +293,7 @@ class ClauseChunkingAgent:
             chunk_index += 1
             summary.tables_detected += 1
 
-        summary.duplicates_detected = sum(1 for count in seen_clause_nos.values() if count > 1)
+        summary.duplicates_detected = sum(1 for count in group_counts.values() if count > 1)
         return records, summary
 
     # ------------------------------------------------------------------ #
@@ -486,6 +513,8 @@ class ClauseChunkingAgent:
                     cleaned_text=clause.clause_text,
                     page_start=page_start,
                     page_end=page_end,
+                    char_start=clause.start_position,
+                    char_end=clause.end_position,
                     confidence=confidence,
                     extraction_method="text",
                 )

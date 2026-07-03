@@ -102,6 +102,7 @@ class ClauseStorageService:
         self.validate_scope(org_id, project_id, contract_id, document_id)
         for permission in (
             Permissions.CONTRACT_READ,
+            Permissions.CONTRACT_UPDATE,
             Permissions.CONTRACT_CLAUSE_CREATE,
             Permissions.AI_CONTRACT_PROCESSING_RUN,
         ):
@@ -155,13 +156,19 @@ class ClauseStorageService:
         clause_no: Optional[str],
         chunk_part: int,
         chunk_index: int = 0,
+        duplicate_ordinal: int = 1,
     ) -> str:
         """Deterministic per-clause-part identity for idempotent upserts.
 
         Section chunks (no clause number) fall back to their chunk index so they
-        remain stable across reprocessing.
+        remain stable across reprocessing. Repeated clause numbers (the same
+        ``clause_no`` appearing more than once in a document) are disambiguated
+        by ``duplicate_ordinal`` so they do not collide onto one record (req #2).
+        The first occurrence keeps the legacy key for backward compatibility.
         """
         key = cls.normalize_clause_no(clause_no) or f"__section_{chunk_index}"
+        if duplicate_ordinal and duplicate_ordinal > 1:
+            key = f"{key}#dup{duplicate_ordinal}"
         raw = "|".join(
             [str(org_id), str(project_id), str(contract_id), str(document_id), key, str(chunk_part)]
         )
@@ -225,6 +232,10 @@ class ClauseStorageService:
         linked_clause_no: Optional[str] = None,
         table_title: Optional[str] = None,
         is_current: bool = True,
+        char_start: Optional[int] = None,
+        char_end: Optional[int] = None,
+        duplicate_ordinal: int = 1,
+        duplicate_status: str = "unique",
     ) -> ContractClause:
         """Build one fully-scoped, hierarchy-aware clause record."""
         self.validate_scope(org_id, project_id, contract_id, document_id)
@@ -239,8 +250,13 @@ class ClauseStorageService:
         return ContractClause(
             clause_uid=self.clause_uid(
                 org_id, project_id, contract_id, document_id,
-                normalized_no, chunk_part, chunk_index,
+                normalized_no, chunk_part, chunk_index, duplicate_ordinal,
             ),
+            duplicate_group_key=normalized_no,
+            duplicate_ordinal=duplicate_ordinal,
+            duplicate_status=duplicate_status,  # type: ignore[arg-type]
+            char_start=char_start,
+            char_end=char_end,
             org_id=str(org_id),
             project_id=str(project_id),
             contract_id=str(contract_id),
@@ -287,13 +303,23 @@ class ClauseStorageService:
         await collection.create_index([("document_id", 1), ("clause_no", 1)])
         await collection.create_index([("document_id", 1), ("is_current", 1)])
 
-    async def save_clause(self, record: ContractClause) -> str:
+    # Fields carrying human editorial decisions — preserved across reprocessing
+    # unless the caller explicitly resets (req #6).
+    _HUMAN_EDIT_FIELDS = (
+        "clause_title", "quality_status", "is_authorised_for_ai", "human_review_required",
+        "is_current", "is_superseded", "superseded_by_clause_id",
+        "manually_edited", "verified_by", "verified_at",
+    )
+
+    async def save_clause(self, record: ContractClause, *, force_reset: bool = False) -> str:
         """Idempotently upsert one clause by ``clause_uid``.
 
         Reprocessing updates the existing record (bumping ``updated_at`` and,
         when the checksum changed, resetting ``embedding_status`` so the clause
-        is re-embedded) instead of inserting a duplicate. Returns "inserted",
-        "updated" or "unchanged".
+        is re-embedded) instead of inserting a duplicate. Human edits on an
+        existing record (``manually_edited``) are preserved unless
+        ``force_reset`` is set (req #6). Returns "inserted", "updated",
+        "unchanged" or "preserved".
         """
         collection = self.db[self.COLLECTION]
         now = datetime.utcnow()
@@ -303,6 +329,7 @@ class ClauseStorageService:
         doc.pop("created_at", None)  # created_at is set once, on insert
         doc["updated_at"] = now
 
+        human_edited = bool(existing and existing.get("manually_edited") and not force_reset)
         if existing is not None:
             content_changed = existing.get("checksum") != record.checksum
             if content_changed:
@@ -312,6 +339,11 @@ class ClauseStorageService:
                 # Preserve prior embedding progress when text is unchanged.
                 doc["embedding_status"] = existing.get("embedding_status", record.embedding_status)
                 doc["qdrant_point_id"] = existing.get("qdrant_point_id")
+            if human_edited:
+                # Keep the reviewer's editorial decisions; still refresh content.
+                for field in self._HUMAN_EDIT_FIELDS:
+                    if field in existing:
+                        doc[field] = existing[field]
 
         await collection.update_one(
             {"clause_uid": record.clause_uid},
@@ -320,13 +352,17 @@ class ClauseStorageService:
         )
         if existing is None:
             return "inserted"
+        if human_edited:
+            return "preserved"
         return "updated" if existing.get("checksum") != record.checksum else "unchanged"
 
-    async def save_clauses(self, records: List[ContractClause]) -> Dict[str, int]:
+    async def save_clauses(
+        self, records: List[ContractClause], *, force_reset: bool = False
+    ) -> Dict[str, int]:
         """Persist many clause records idempotently; returns per-outcome counts."""
-        counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+        counts = {"inserted": 0, "updated": 0, "unchanged": 0, "preserved": 0}
         for record in records:
-            outcome = await self.save_clause(record)
+            outcome = await self.save_clause(record, force_reset=force_reset)
             counts[outcome] = counts.get(outcome, 0) + 1
         return counts
 

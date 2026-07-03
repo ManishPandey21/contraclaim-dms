@@ -557,6 +557,9 @@ class ClauseExtractor:
         r'^\s*(CLAUSE|SECTION|ARTICLE)\s+([\d\.]+)\s*[-:]?\s*(.*)$',
         # "GCC 8.4 - Extension of Time" or "SCC 20.1: Loss and Expense"
         r'^\s*((?:GCC|SCC|PCC|Sub-Clause))\s+(\d+(?:\.\d+){0,5})\s*[-:]?\s*(.*)$',
+        # Structural divisions: "SCHEDULE 1 - Title", "APPENDIX A: Title",
+        # "ANNEXURE II", "PART 2 - Title" (kept as top-level structural headings).
+        r'^\s*(SCHEDULE|APPENDIX|ANNEXURE|ANNEX|PART)\s+([0-9]+(?:\.[0-9]+)*|[A-Z]{1,3}|[IVXLC]+)\b\s*[-:.]?\s*(.*)$',
         # "1.2.3 Title" (numbered with title)
         r'^\s*(\d+(?:\.\d+){0,5})\s+([A-Z][\w\s,()/&\'"-]{2,})\s*$',
         # "1.2.3. Title" (with period)
@@ -565,6 +568,10 @@ class ClauseExtractor:
         # so require at least one dot when there is no title on the line.
         r'^\s*(\d+(?:\.\d+){1,5})\s*$',
     ]
+
+    # Structural divisions carry their keyword in the clause number ("Schedule 1")
+    # so they never collide with a numeric clause "1".
+    _STRUCTURAL_TYPES = {"SCHEDULE", "APPENDIX", "ANNEXURE", "ANNEX", "PART"}
     
     def __init__(self):
         self.patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE) for p in self.CLAUSE_PATTERNS]
@@ -576,7 +583,12 @@ class ClauseExtractor:
             return "clause", "", ""
 
         first = groups[0].upper()
-        if first in {"CLAUSE", "SECTION", "ARTICLE", "GCC", "SCC", "PCC", "SUB-CLAUSE"}:
+        if first in ClauseExtractor._STRUCTURAL_TYPES:
+            clause_type = first.lower()
+            number = groups[1] if len(groups) > 1 else ""
+            clause_number = f"{first.title()} {number}".strip()
+            clause_title = groups[2] if len(groups) > 2 else ""
+        elif first in {"CLAUSE", "SECTION", "ARTICLE", "GCC", "SCC", "PCC", "SUB-CLAUSE"}:
             clause_type = first.lower()
             clause_number = groups[1] if len(groups) > 1 else ""
             clause_title = groups[2] if len(groups) > 2 else ""
