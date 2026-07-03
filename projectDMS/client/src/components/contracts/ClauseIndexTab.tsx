@@ -17,8 +17,10 @@ import {
   CheckCircle2,
   Ban,
   RefreshCw,
+  RotateCw,
   Scissors,
   GitMerge,
+  Play,
 } from "lucide-react";
 import {
   listDocumentClauses,
@@ -26,6 +28,7 @@ import {
   regenerateClauseEmbedding,
   splitClause,
   mergeClauses,
+  runClauseIndexing,
   type ClauseRow,
 } from "@/services/contracts-api";
 import { extractErrorMessage } from "@/lib/error-logger";
@@ -41,6 +44,7 @@ const ClauseIndexTab: React.FC<Props> = ({ documentId, onOpenPage }) => {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
+  const [indexing, setIndexing] = useState(false);
 
   const load = useCallback(async () => {
     if (!documentId) return;
@@ -122,6 +126,22 @@ const ClauseIndexTab: React.FC<Props> = ({ documentId, onOpenPage }) => {
     });
   };
 
+  const onRunIndexing = useCallback(() => {
+    if (!documentId) return;
+    setIndexing(true);
+    runClauseIndexing(documentId)
+      .then(() => {
+        toast.success("Clause indexing started", {
+          description: "Running in the background — refresh in a moment to see clauses.",
+        });
+        window.setTimeout(() => void load(), 5000);
+      })
+      .catch((err) =>
+        toast.error("Failed to start clause indexing", { description: extractErrorMessage(err) }),
+      )
+      .finally(() => setIndexing(false));
+  }, [documentId, load]);
+
   const toggle = (uid: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -151,19 +171,39 @@ const ClauseIndexTab: React.FC<Props> = ({ documentId, onOpenPage }) => {
   }
   if (!clauses.length) {
     return (
-      <div className="p-8 text-center text-sm text-muted-foreground">
-        No clause records yet. Run clause indexing on this contract to populate the Clause Index.
+      <div className="flex flex-col items-center gap-3 p-8 text-center">
+        <p className="text-sm text-muted-foreground">
+          No clause records yet. Run clause indexing to populate the Clause Index.
+        </p>
+        <div className="flex items-center gap-2">
+          <Button size="sm" className="gap-2" onClick={onRunIndexing} disabled={indexing}>
+            {indexing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Run clause indexing
+          </Button>
+          <Button size="sm" variant="outline" className="gap-2" onClick={() => void load()}>
+            <RotateCw className="h-4 w-4" /> Refresh
+          </Button>
+        </div>
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between px-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
         <p className="text-sm text-muted-foreground">{clauses.length} clause records</p>
-        <Button size="sm" variant="outline" className="gap-2" disabled={selected.size < 2} onClick={onMerge}>
-          <GitMerge className="h-4 w-4" /> Merge selected ({selected.size})
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" className="gap-2" disabled={selected.size < 2} onClick={onMerge}>
+            <GitMerge className="h-4 w-4" /> Merge selected ({selected.size})
+          </Button>
+          <Button size="sm" variant="outline" className="gap-2" onClick={() => void load()}>
+            <RotateCw className="h-4 w-4" /> Refresh
+          </Button>
+          <Button size="sm" className="gap-2" onClick={onRunIndexing} disabled={indexing}>
+            {indexing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            Run indexing
+          </Button>
+        </div>
       </div>
       <div className="overflow-auto rounded-md border">
         <Table>

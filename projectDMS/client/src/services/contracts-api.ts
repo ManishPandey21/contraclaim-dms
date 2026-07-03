@@ -310,6 +310,14 @@ export async function listDocumentClauses(
   return data;
 }
 
+/** Kick off clause-wise indexing for a contract document (runs in background). */
+export async function runClauseIndexing(
+  documentId: string,
+): Promise<{ status: string; document_id: string }> {
+  const { data } = await api.post(`/contracts/${documentId}/clauses/index`, {});
+  return data;
+}
+
 export async function updateClause(
   clauseUid: string,
   patch: {
