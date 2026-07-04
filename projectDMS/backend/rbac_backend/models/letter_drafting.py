@@ -59,6 +59,8 @@ DraftLifecycleEventType = Literal[
     "comment_added",
     "analysis_confirmed",
     "user_direction_provided",
+    "legal_risk_reviewed",
+    "paragraphs_locked",
     "plan_confirmed",
     "plan_accepted",
     "draft_accepted",
@@ -96,6 +98,36 @@ SourceType = Literal[
 SourceUse = Literal["fact", "style_continuity", "history_only", "clause", "comment"]
 ValidationLevel = Literal["warning", "error"]
 AssertionSupportStatus = Literal["supported", "user_provided", "unsupported", "needs_confirmation"]
+
+
+LegalRiskCategory = Literal["admission", "waiver", "contradiction", "entitlement"]
+LegalRiskSeverity = Literal["info", "caution", "high"]
+
+
+class LegalRiskFlag(BaseModel):
+    """One potential admission/waiver/contradiction/entitlement in a draft.
+
+    Flags never block a run — the human decides the contractual position;
+    the system records the evidence.
+    """
+
+    flag_id: str
+    category: LegalRiskCategory
+    severity: LegalRiskSeverity = "caution"
+    excerpt: str
+    explanation: str
+
+
+class LegalRiskReport(BaseModel):
+    flags: List[LegalRiskFlag] = Field(default_factory=list)
+    human_review_required: bool = False
+    reviewed_at: Optional[datetime] = None
+
+
+class LockParagraphsRequest(BaseModel):
+    """Human-approved paragraphs the AI must not change on redraft."""
+
+    locked_paragraphs: List[str] = Field(default_factory=list)
 
 
 class ProbingQuestion(BaseModel):
@@ -291,6 +323,8 @@ class ReviseDraftRequest(BaseModel):
     revision_action: RevisionAction
     custom_instruction: Optional[str] = Field(default=None, max_length=2000)
     additional_requirements: Optional[str] = Field(default=None, max_length=4000)
+    # None = inherit the source run's locks; [] = clear all locks.
+    locked_paragraphs: Optional[List[str]] = None
 
 
 class AssignReviewerRequest(BaseModel):
@@ -607,6 +641,8 @@ class DraftRun(BaseModel):
     draft_artifact: Optional[DraftArtifact] = None
     source_integrity_summary: Optional[SourceIntegritySummary] = None
     validation_report: ValidationReport = Field(default_factory=ValidationReport)
+    legal_risk_report: Optional[LegalRiskReport] = None
+    locked_paragraphs: List[str] = Field(default_factory=list)
     cyclic_trace: List[CyclicIterationTrace] = Field(default_factory=list)
     assertion_support: List[DraftAssertionSupport] = Field(default_factory=list)
     confidence_scores: Optional[DraftConfidenceScores] = None

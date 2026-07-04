@@ -40,6 +40,8 @@ from ...models.letter_drafting import (
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
     IncomingLetterAnalysis,
+    LegalRiskReport,
+    LockParagraphsRequest,
     ProbingQuestion,
     ReviseDraftRequest,
     ReturnForCorrectionRequest,
@@ -66,6 +68,8 @@ from .context import DraftContextBuilder
 from .generator import DraftGenerator, StrategyPlanner
 from .incoming_analyzer import IncomingLetterAnalyzer
 from .input_validator import DraftInputValidator
+from .legal_risk_reviewer import LegalRiskReviewer
+from .locked_text import locked_instruction, verify_locked_paragraphs
 from .planning import PlanningSheetBuilder
 from .prompts import PromptRegistry
 from .repository import DraftRunRepository
@@ -87,6 +91,7 @@ class DraftRunService:
         self.input_validator = DraftInputValidator()
         self.incoming_analyzer = IncomingLetterAnalyzer()
         self.clause_checker = ClauseCheckingAgent(db)
+        self.legal_risk_reviewer = LegalRiskReviewer()
         self.planning_builder = PlanningSheetBuilder()
 
     async def create_run(
@@ -148,6 +153,7 @@ class DraftRunService:
 
             incoming_analysis: Optional[IncomingLetterAnalysis] = None
             probing_questions: list[ProbingQuestion] = []
+            legal_risk_report: Optional[LegalRiskReport] = None
             if request.draft_type == "reply":
                 incoming_analysis = await self.incoming_analyzer.analyze(
                     letter, request, document_service
@@ -356,6 +362,26 @@ class DraftRunService:
                         "iteration_count": len(cyclic_trace),
                     }
                 )
+                # Legal / Contractual Risk Review Agent: flags admissions,
+                # waivers, entitlement creation and stance reversals vs the
+                # previous position. Flags only — never blocks the run.
+                if artifact and artifact.draft_letter:
+                    previous_positions = [
+                        source.text
+                        for source in sources
+                        if source.text and (source.metadata or {}).get("previous_position")
+                    ]
+                    legal_risk_report = self.legal_risk_reviewer.review(
+                        artifact.draft_letter, previous_positions
+                    )
+                    trace.append(
+                        {
+                            "stage": "legal_risk_review",
+                            "status": "success",
+                            "flag_count": len(legal_risk_report.flags),
+                            "human_review_required": legal_risk_report.human_review_required,
+                        }
+                    )
             elif request.mode == "background":
                 artifact = DraftArtifact(
                     draft_letter="",
@@ -394,6 +420,7 @@ class DraftRunService:
                 draft_artifact=artifact,
                 source_integrity_summary=source_summary,
                 validation_report=validation,
+                legal_risk_report=legal_risk_report,
                 cyclic_trace=cyclic_trace,
                 assertion_support=assertion_support,
                 confidence_scores=confidence_scores,
@@ -1239,6 +1266,43 @@ class DraftRunService:
         )
         return run
 
+    async def lock_paragraphs(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: LockParagraphsRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        """Lock human-approved paragraphs so redrafts cannot change them."""
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.edit",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        locked = [p.strip() for p in request.locked_paragraphs if p and p.strip()]
+        # Warn (without rejecting) when a lock does not match the current
+        # draft — the human may have lightly edited the paragraph first.
+        draft_text = existing.draft_artifact.draft_letter if existing.draft_artifact else ""
+        unmatched = verify_locked_paragraphs(draft_text, locked) if draft_text else []
+        run = await self.repository.update_fields(
+            letter_id, run_id, {"locked_paragraphs": locked}
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "paragraphs_locked",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"locked_count": len(locked), "unmatched_in_draft": len(unmatched)},
+        )
+        return run
+
     async def _latest_user_directions(self, letter_id: str) -> Optional[str]:
         """Most recent run's user directions, formatted for drafting inputs."""
         try:
@@ -1343,7 +1407,17 @@ class DraftRunService:
         current_user: Any,
     ) -> DraftRun:
         source = await self.get_run(letter_id, run_id, current_user)
+        # Locked text: explicit list on the request wins ([] clears), otherwise
+        # locks carry forward from the run being revised.
+        locked_paragraphs = (
+            request.locked_paragraphs
+            if request.locked_paragraphs is not None
+            else list(source.locked_paragraphs or [])
+        )
         revision_text = self._revision_instruction(request)
+        locks_block = locked_instruction(locked_paragraphs)
+        if locks_block:
+            revision_text = f"{revision_text}\n\n{locks_block}"
         original_inputs = source.inputs or {}
         payload = DraftRunCreateRequest(
             mode="draft",
@@ -1373,14 +1447,42 @@ class DraftRunService:
             plan_override=source.plan,
         )
         revised = await self.create_run(letter_id, payload, current_user)
-        updated = await self.repository.update_fields(
-            letter_id,
-            revised.run_id,
-            {
-                "revision_of_run_id": run_id,
-                "revision_action": request.revision_action,
-            },
-        )
+
+        # Verify human-locked paragraphs survived verbatim; retry once with a
+        # stronger instruction, then surface (never silently repair).
+        locked_violations: list[str] = []
+        if locked_paragraphs:
+            draft_text = revised.draft_artifact.draft_letter if revised.draft_artifact else ""
+            locked_violations = verify_locked_paragraphs(draft_text, locked_paragraphs)
+            if locked_violations:
+                retry_payload = payload.model_copy(
+                    update={
+                        "requirements": (
+                            f"{revision_text}\n\nIMPORTANT: the previous attempt modified "
+                            "locked paragraphs. Reproduce every LOCKED paragraph exactly as "
+                            "provided, character for character."
+                        )
+                    }
+                )
+                retry = await self.create_run(letter_id, retry_payload, current_user)
+                retry_text = retry.draft_artifact.draft_letter if retry.draft_artifact else ""
+                retry_violations = verify_locked_paragraphs(retry_text, locked_paragraphs)
+                if len(retry_violations) < len(locked_violations):
+                    revised = retry
+                    locked_violations = retry_violations
+
+        update_fields: Dict[str, Any] = {
+            "revision_of_run_id": run_id,
+            "revision_action": request.revision_action,
+            "locked_paragraphs": locked_paragraphs,
+        }
+        if locked_violations:
+            update_fields["warnings"] = list(revised.warnings or []) + [
+                "Locked paragraph(s) were modified by the AI and could not be preserved "
+                f"after retry ({len(locked_violations)} affected). Restore the locked text "
+                "before approval."
+            ]
+        updated = await self.repository.update_fields(letter_id, revised.run_id, update_fields)
         result = updated or revised
         await self.repository.append_event(
             letter_id,
@@ -1388,7 +1490,12 @@ class DraftRunService:
             "revised",
             actor_user_id=self._user_id(current_user),
             status=result.status,
-            payload={"revision_of_run_id": run_id, "revision_action": request.revision_action},
+            payload={
+                "revision_of_run_id": run_id,
+                "revision_action": request.revision_action,
+                "locked_paragraph_count": len(locked_paragraphs),
+                "locked_violations": len(locked_violations),
+            },
         )
         return result
 

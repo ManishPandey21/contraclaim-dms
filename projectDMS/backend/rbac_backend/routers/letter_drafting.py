@@ -23,6 +23,7 @@ from ..models.letter_drafting import (
     DraftRunResponse,
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
+    LockParagraphsRequest,
     ReturnForCorrectionRequest,
     ReviseDraftRequest,
     SourceLedgerResponse,
@@ -191,6 +192,19 @@ async def provide_user_direction(
     Directions are stored on the run and merged into the inputs of subsequent
     strategy/draft runs for this letter."""
     return await service.provide_user_direction(letter_id, run_id, payload, current_user)
+
+
+@router.post("/runs/{run_id}/lock-paragraphs", response_model=DraftRunResponse)
+@handle_exceptions
+async def lock_paragraphs(
+    letter_id: str,
+    run_id: str,
+    payload: LockParagraphsRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Lock human-approved paragraphs so AI redrafts cannot change them."""
+    return await service.lock_paragraphs(letter_id, run_id, payload, current_user)
 
 
 @router.post("/prepare-plan", response_model=DraftRunResponse)
