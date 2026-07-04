@@ -23,6 +23,10 @@ from .v20260630_0002_insurance_indexes import DESCRIPTION as INSURANCE_IDX_DESCR
 from .v20260630_0002_insurance_indexes import NAME as INSURANCE_IDX_NAME
 from .v20260630_0002_insurance_indexes import VERSION as INSURANCE_IDX_VERSION
 from .v20260630_0002_insurance_indexes import upgrade as upgrade_insurance_indexes
+from .v20260705_0001_arbitration_hardening_indexes import DESCRIPTION as ARB_HARDENING_DESCRIPTION
+from .v20260705_0001_arbitration_hardening_indexes import NAME as ARB_HARDENING_NAME
+from .v20260705_0001_arbitration_hardening_indexes import VERSION as ARB_HARDENING_VERSION
+from .v20260705_0001_arbitration_hardening_indexes import upgrade as upgrade_arbitration_hardening
 
 
 MIGRATIONS = [
@@ -49,5 +53,11 @@ MIGRATIONS = [
         name=INSURANCE_IDX_NAME,
         description=INSURANCE_IDX_DESCRIPTION,
         upgrade=upgrade_insurance_indexes,
+    ),
+    Migration(
+        version=ARB_HARDENING_VERSION,
+        name=ARB_HARDENING_NAME,
+        description=ARB_HARDENING_DESCRIPTION,
+        upgrade=upgrade_arbitration_hardening,
     ),
 ]

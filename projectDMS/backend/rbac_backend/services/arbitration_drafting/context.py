@@ -2,12 +2,38 @@ from __future__ import annotations
 
 import hashlib
 from textwrap import shorten
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 
 from ...models.arbitration_drafting import ArbitrationSelectedReferenceCreate
 from ...models.contract_models import ContractSearchRequest
 from ..contract_service import ContractService
 from ..evidence_graph_service import EvidenceGraphService
+
+
+VERIFIED_SOURCE_STATUSES = {
+    "approved",
+    "edited_verified",
+    "ready",
+    "selected",
+    "supported",
+    "user_verified",
+    "valid",
+    "verified",
+}
+
+REVIEW_ONLY_SOURCE_STATUSES = {
+    "ai_suggested",
+    "draft",
+    "needs_review",
+    "pending",
+    "under_review",
+}
+
+
+async def _collect(cursor: Any) -> List[Dict[str, Any]]:
+    if hasattr(cursor, "to_list"):
+        return [dict(item) for item in await cursor.to_list(length=None)]
+    return [dict(item) async for item in cursor]
 
 
 def condense(value: Any, width: int = 700) -> str:
@@ -31,6 +57,73 @@ def source_hash(source: Dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _first_present(row: Dict[str, Any], keys: Iterable[str]) -> Any:
+    for key in keys:
+        value = row.get(key)
+        if value not in (None, "", []):
+            return value
+    return None
+
+
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _string_list(value: Any) -> List[str]:
+    return [str(item) for item in _as_list(value) if item not in (None, "")]
+
+
+def _status_values(row: Dict[str, Any]) -> set[str]:
+    return {
+        str(row.get(key) or "").strip().lower()
+        for key in ["verification_status", "approval_status", "human_approval_status", "readiness_status", "status"]
+        if row.get(key) is not None
+    }
+
+
+def _is_rejected(row: Dict[str, Any]) -> bool:
+    return bool(_status_values(row) & {"duplicate", "rejected", "superseded"})
+
+
+def _is_verified_source(row: Dict[str, Any], *, include_review_sources: bool = False) -> bool:
+    statuses = _status_values(row)
+    if _is_rejected(row):
+        return False
+    if statuses & VERIFIED_SOURCE_STATUSES:
+        return True
+    if include_review_sources and (not statuses or statuses & REVIEW_ONLY_SOURCE_STATUSES):
+        return True
+    return False
+
+
+def _allowed_use(value: Any, fallback: str = "fact") -> str:
+    raw = str(value or fallback).strip().lower()
+    if raw in {
+        "annexure",
+        "background",
+        "chronology",
+        "clause",
+        "expert",
+        "fact",
+        "notice",
+        "quantum",
+    }:
+        return raw
+    if raw.startswith("soc_") or raw.startswith("sod_") or raw.startswith("rejoinder_") or raw == "counterclaim":
+        return "chronology"
+    return fallback
+
+
+def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    return f"{currency or ''} {value}".strip()
+
+
 class ArbitrationContextBuilder:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -47,6 +140,14 @@ class ArbitrationContextBuilder:
     ) -> Dict[str, Any]:
         context_warnings: List[str] = []
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
+        source_ledger.extend(
+            await self._case_workspace_sources(
+                draft,
+                len(source_ledger),
+                include_review_sources=include_unverified_graph_links,
+                context_warnings=context_warnings,
+            )
+        )
         source_ledger.extend(await self._contract_search_sources(draft, current_user, len(source_ledger)))
         source_ledger.extend(
             await self._verified_graph_sources(
@@ -58,10 +159,12 @@ class ArbitrationContextBuilder:
         )
         source_ledger = self._dedupe(source_ledger)
         self._annotate_source_quality(source_ledger, context_warnings)
+        matrix_context = self._matrix_context(source_ledger)
         missing = self._missing_evidence(draft, source_ledger, claim_heads, paragraph_responses)
         return {
             "draft": draft,
             "source_ledger": source_ledger,
+            "matrix_context": matrix_context,
             "claim_heads": claim_heads,
             "paragraph_responses": paragraph_responses,
             "missing_evidence": missing,
@@ -75,6 +178,7 @@ class ArbitrationContextBuilder:
             "source_id": str(ref.get("source_id") or ref.get("_id") or idx),
             "source_type": ref.get("source_type"),
             "allowed_use": ref.get("allowed_use") or "fact",
+            "permitted_uses": _string_list(ref.get("permitted_uses") or ref.get("allowed_use") or "fact"),
             "label": ref.get("label") or ref.get("citation") or f"Source {idx}",
             "citation": citation,
             "snippet": condense(ref.get("snippet") or ref.get("metadata", {}).get("text"), 650),
@@ -83,11 +187,636 @@ class ArbitrationContextBuilder:
             "letter_no": ref.get("letter_no"),
             "verification_status": ref.get("metadata", {}).get("verification_status") or ref.get("verification_status") or "selected",
             "is_user_supplied": ref.get("source_type") == "manual_fact",
+            "source_origin": ref.get("metadata", {}).get("source_origin") or "selected_reference",
             "quality_flags": [],
+            "metadata": ref.get("metadata") or {},
             "source_hash": "",
         }
         row["source_hash"] = source_hash(row)
         return row
+
+    async def _case_workspace_sources(
+        self,
+        draft: Dict[str, Any],
+        offset: int,
+        *,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        case_id = draft.get("case_id")
+        if not case_id:
+            return []
+        rows: List[Dict[str, Any]] = []
+        rows.extend(await self._document_index_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._chronology_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._clause_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._issue_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._claim_defence_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._quantum_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._notice_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._register_sources(draft, offset + len(rows), include_review_sources, context_warnings))
+        return rows
+
+    async def _document_index_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_document_index.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            if not row.get("source_id"):
+                context_warnings.append(f"Document index row has no source id and was skipped: {row.get('title') or row.get('_id')}")
+                continue
+            if include_review_sources and not (_status_values(row) & VERIFIED_SOURCE_STATUSES):
+                context_warnings.append(f"Review-only document index source included: {row.get('title') or row.get('exhibit_id')}")
+            allowed = _allowed_use(row.get("allowed_use"), "fact")
+            exhibit_id = row.get("exhibit_id")
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("source_id")),
+                "source_type": row.get("source_type") or "document",
+                "allowed_use": allowed,
+                "permitted_uses": sorted(set([allowed, *[_allowed_use(item, allowed) for item in _as_list(row.get("permitted_uses"))]])),
+                "label": row.get("title") or row.get("document_type") or exhibit_id or "Case document",
+                "citation": exhibit_id or row.get("letter_no") or row.get("title"),
+                "snippet": condense(row.get("relevance_note") or row.get("summary") or row.get("document_type"), 650),
+                "page_numbers": row.get("page_numbers") or [],
+                "clause_number": None,
+                "letter_no": row.get("letter_no"),
+                "verification_status": row.get("verification_status") or row.get("human_approval_status") or "approved",
+                "is_user_supplied": False,
+                "source_origin": "case_document_index",
+                "matrix_row_id": row.get("_id"),
+                "exhibit_id": exhibit_id,
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "document-index",
+                    "matrix_row_id": row.get("_id"),
+                    "document_date": row.get("document_date"),
+                    "document_type": row.get("document_type"),
+                    "source_file_link": row.get("source_file_link"),
+                    "issue_tags": row.get("issue_tags") or [],
+                    "claim_tags": row.get("claim_tags") or [],
+                    "risk_flags": row.get("risk_flags") or [],
+                    "exhibit_id": exhibit_id,
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _chronology_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_chronology_matrix.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("date", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            event = await self._load_chronology_event(row)
+            event_data = {**row, **{f"event_{key}": value for key, value in (event or {}).items()}}
+            title = row.get("event") or (event or {}).get("title") or "Chronology event"
+            citation = row.get("document_ref") or row.get("date") or (event or {}).get("date_text") or (event or {}).get("letter_no") or title
+            snippet = row.get("impact") or row.get("evidence") or (event or {}).get("description") or (event or {}).get("manual_notes")
+            allowed = _allowed_use(row.get("pleading_use") or (event or {}).get("pleading_use"), "chronology")
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("chronology_event_id") or row.get("_id")),
+                "source_type": "chronology_event",
+                "allowed_use": allowed,
+                "permitted_uses": sorted(set([allowed, "chronology", "fact"])),
+                "label": condense(title, 180),
+                "citation": citation,
+                "snippet": condense(snippet, 650),
+                "page_numbers": [event.get("source_page")] if event and event.get("source_page") else [],
+                "clause_number": row.get("clause") or ", ".join((event or {}).get("contract_clauses") or []) or None,
+                "letter_no": (event or {}).get("letter_no"),
+                "verification_status": row.get("verification_status") or (event or {}).get("verification_status") or "verified",
+                "is_user_supplied": False,
+                "source_origin": "case_chronology_matrix",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "chronology-matrix",
+                    "matrix_row_id": row.get("_id"),
+                    "chronology_id": row.get("chronology_id") or (event or {}).get("chronology_id"),
+                    "chronology_event_id": row.get("chronology_event_id"),
+                    "party_responsible": row.get("party_responsible") or (event or {}).get("responsible_party"),
+                    "issue_link": row.get("issue_link"),
+                    "claim_link": row.get("claim_link"),
+                    "event": event_data,
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _load_chronology_event(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        event_id = row.get("chronology_event_id")
+        chronology_id = row.get("chronology_id")
+        if not event_id:
+            return None
+        query: Dict[str, Any] = {"_id": event_id}
+        if chronology_id:
+            query["chronology_id"] = chronology_id
+        try:
+            event = await self.db.matter_chronology_events.find_one(query)
+        except Exception:
+            return None
+        return dict(event) if event else None
+
+    async def _clause_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_clause_matrix.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            citation = row.get("clause_number") or row.get("topic") or row.get("_id")
+            snippet = row.get("clause_text_excerpt") or row.get("obligation_or_right")
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("clause_source_id") or row.get("_id")),
+                "source_type": "clause",
+                "allowed_use": "clause",
+                "permitted_uses": ["clause"],
+                "label": row.get("topic") or f"Clause {citation}",
+                "citation": citation,
+                "snippet": condense(snippet, 650),
+                "page_numbers": row.get("page_numbers") or [],
+                "clause_number": row.get("clause_number"),
+                "letter_no": None,
+                "verification_status": row.get("approval_status") or "approved",
+                "is_user_supplied": False,
+                "source_origin": "case_clause_matrix",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "clause-matrix",
+                    "matrix_row_id": row.get("_id"),
+                    "claimant_use": row.get("claimant_use"),
+                    "respondent_use": row.get("respondent_use"),
+                    "related_evidence_ids": row.get("related_evidence_ids") or [],
+                    "risk": row.get("risk"),
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _issue_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_issue_matrix.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            snippet = "\n".join(
+                part
+                for part in [
+                    f"Issue: {row.get('issue')}" if row.get("issue") else "",
+                    f"Claimant: {row.get('claimant_position')}" if row.get("claimant_position") else "",
+                    f"Respondent: {row.get('respondent_position')}" if row.get("respondent_position") else "",
+                    f"Required finding: {row.get('required_finding')}" if row.get("required_finding") else "",
+                ]
+                if part
+            )
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "issue_matrix",
+                "allowed_use": "fact",
+                "permitted_uses": ["background", "fact"],
+                "label": row.get("issue") or row.get("issue_no") or "Issue matrix row",
+                "citation": row.get("issue_no") or row.get("issue_type") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
+                "letter_no": None,
+                "verification_status": row.get("status") or row.get("approval_status") or "approved",
+                "is_user_supplied": True,
+                "source_origin": "case_issue_matrix",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {"case_id": case_id, "matrix": "issue-matrix", "matrix_row_id": row.get("_id"), "issue_type": row.get("issue_type")},
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _claim_defence_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        matrix_specs = [
+            ("claim-matrix", self.db.arbitration_claim_matrix, "claim_matrix", "claim_no", "claim_head", "facts", "claim"),
+            ("defence-matrix", self.db.arbitration_defence_matrix, "defence_matrix", "source_claim_no", "defence", "positive_case", "fact"),
+            ("counterclaim-matrix", self.db.arbitration_counterclaim_matrix, "counterclaim_matrix", "counterclaim_no", "breach", "facts", "claim"),
+            ("rejoinder-matrix", self.db.arbitration_rejoinder_matrix, "rejoinder_matrix", "source_sod_para", "claimant_reply", "nature_of_defence", "fact"),
+        ]
+        out: List[Dict[str, Any]] = []
+        for slug, collection, source_type, citation_key, label_key, snippet_key, use in matrix_specs:
+            try:
+                rows = await _collect(collection.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1))
+            except Exception:
+                continue
+            for row in rows:
+                if not _is_verified_source(row, include_review_sources=include_review_sources):
+                    continue
+                if slug == "claim-matrix":
+                    snippet = "\n".join(str(part) for part in [row.get("facts"), row.get("causation"), row.get("relief"), row.get("weakness")] if part)
+                elif slug == "counterclaim-matrix":
+                    snippet = "\n".join(str(part) for part in [row.get("facts"), row.get("breach"), row.get("causation"), row.get("relief")] if part)
+                elif slug == "rejoinder-matrix":
+                    snippet = "\n".join(str(part) for part in [row.get("nature_of_defence"), row.get("claimant_reply"), row.get("reply_to_counterclaim")] if part)
+                else:
+                    snippet = "\n".join(str(part) for part in [row.get("admission_denial"), row.get("defence"), row.get("positive_case")] if part)
+                allowed = "quantum" if row.get("amount_or_days") or row.get("amount") else use
+                ledger_row = {
+                    "source_key": f"S{offset + len(out) + 1}",
+                    "source_id": str(row.get("_id")),
+                    "source_type": source_type,
+                    "allowed_use": _allowed_use(allowed, "fact"),
+                    "permitted_uses": sorted(set(["fact", _allowed_use(allowed, "fact")])),
+                    "label": row.get(label_key) or row.get(snippet_key) or row.get(citation_key) or slug,
+                    "citation": row.get(citation_key) or row.get("_id"),
+                    "snippet": condense(snippet, 650),
+                    "page_numbers": [],
+                    "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
+                    "letter_no": None,
+                    "verification_status": row.get("readiness_status") or row.get("approval_status") or "approved",
+                    "is_user_supplied": True,
+                    "source_origin": f"case_{slug}",
+                    "matrix_row_id": row.get("_id"),
+                    "quality_flags": [],
+                    "metadata": {
+                        "case_id": case_id,
+                        "matrix": slug,
+                        "matrix_row_id": row.get("_id"),
+                        "evidence_ids": row.get("evidence_ids") or [],
+                        "notice_ids": row.get("notice_ids") or [],
+                        "calculation_id": row.get("calculation_id"),
+                        "amount_or_days": row.get("amount_or_days"),
+                        "new_matter": row.get("new_matter"),
+                    },
+                    "source_hash": "",
+                }
+                ledger_row["source_hash"] = source_hash(ledger_row)
+                out.append(ledger_row)
+        return out
+
+    async def _quantum_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_quantum_annexures.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            amount = _money(row.get("amount"), row.get("currency"))
+            snippet = "\n".join(str(part) for part in [row.get("formula"), row.get("assumptions"), amount] if part)
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("calculation_id") or row.get("_id")),
+                "source_type": "quantum_annexure",
+                "allowed_use": "quantum",
+                "permitted_uses": ["annexure", "quantum"],
+                "label": row.get("calculation_type") or row.get("calculation_id") or "Quantum annexure",
+                "citation": row.get("calculation_id") or row.get("calculation_type") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": None,
+                "verification_status": row.get("approval_status") or "approved",
+                "is_user_supplied": False,
+                "source_origin": "case_quantum_annexure",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "quantum-annexures",
+                    "matrix_row_id": row.get("_id"),
+                    "source_records": row.get("source_records") or [],
+                    "amount": row.get("amount"),
+                    "currency": row.get("currency"),
+                    "tax_treatment": row.get("tax_treatment"),
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _notice_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_notice_compliance.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            snippet = "\n".join(str(part) for part in [row.get("requirement"), row.get("compliance_status"), row.get("risk_note")] if part)
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "notice_compliance",
+                "allowed_use": "notice",
+                "permitted_uses": ["fact", "notice"],
+                "label": row.get("notice_ref") or "Notice compliance",
+                "citation": row.get("notice_ref") or row.get("notice_date") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": row.get("clause") or row.get("clause_number"),
+                "letter_no": row.get("notice_ref"),
+                "verification_status": row.get("approval_status") or "approved",
+                "is_user_supplied": False,
+                "source_origin": "case_notice_compliance",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {"case_id": case_id, "matrix": "notice-compliance", "matrix_row_id": row.get("_id")},
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _register_sources(
+        self,
+        draft: Dict[str, Any],
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        if not draft.get("project_id"):
+            return []
+        out: List[Dict[str, Any]] = []
+        out.extend(await self._claim_register_sources(draft, offset + len(out), include_review_sources))
+        out.extend(await self._variation_register_sources(draft, offset + len(out), include_review_sources))
+        out.extend(await self._ipc_register_sources(draft, offset + len(out), include_review_sources))
+        out.extend(await self._bank_guarantee_sources(draft, offset + len(out), include_review_sources))
+        return out
+
+    def _scope_query(self, draft: Dict[str, Any], *, require_contract: bool = False) -> Optional[Dict[str, Any]]:
+        query: Dict[str, Any] = {"project_id": draft.get("project_id")}
+        if draft.get("organization_id"):
+            query["organization_id"] = draft.get("organization_id")
+        if draft.get("contract_id"):
+            query["contract_id"] = draft.get("contract_id")
+        elif require_contract:
+            return None
+        return query
+
+    async def _claim_register_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+        query = self._scope_query(draft)
+        if not query:
+            return []
+        if not include_review_sources:
+            query["status"] = {"$in": ["notified", "submitted", "under_review", "agreed", "rejected", "disputed", "closed"]}
+        try:
+            rows = await _collect(self.db.claims.find(query).sort("updated_at", -1).limit(10))
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            amount = _money(row.get("amount_claimed"), row.get("currency"))
+            eot = f"{row.get('eot_days_claimed')} days" if row.get("eot_days_claimed") is not None else None
+            snippet = "\n".join(str(part) for part in [row.get("description"), amount, eot] if part)
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "claim",
+                "allowed_use": "quantum" if amount or eot else "fact",
+                "permitted_uses": ["fact", "quantum"],
+                "label": row.get("title") or row.get("claim_ref") or "Claim register",
+                "citation": row.get("claim_ref") or row.get("title") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": ", ".join(row.get("contract_clauses") or []) or None,
+                "letter_no": None,
+                "verification_status": row.get("status") or "register",
+                "is_user_supplied": False,
+                "source_origin": "claim_register",
+                "quality_flags": [],
+                "metadata": {
+                    "claim_type": row.get("type"),
+                    "status": row.get("status"),
+                    "linked_document_ids": row.get("linked_document_ids") or [],
+                    "linked_letter_ids": row.get("linked_letter_ids") or [],
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _variation_register_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+        query = self._scope_query(draft)
+        if not query:
+            return []
+        if not include_review_sources:
+            query["status"] = {"$in": ["submitted", "under_review", "recommended", "approved", "rejected"]}
+        try:
+            rows = await _collect(self.db.variations.find(query).sort("updated_at", -1).limit(10))
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            snippet = "\n".join(
+                str(part)
+                for part in [
+                    row.get("description"),
+                    _money(row.get("submitted_amount")),
+                    _money(row.get("approved_amount")),
+                    row.get("remarks"),
+                ]
+                if part
+            )
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "variation",
+                "allowed_use": "quantum" if row.get("submitted_amount") or row.get("approved_amount") else "fact",
+                "permitted_uses": ["fact", "quantum"],
+                "label": row.get("variation_number") or "Variation register",
+                "citation": row.get("variation_number") or row.get("letter_reference") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": row.get("letter_reference"),
+                "verification_status": row.get("status") or "register",
+                "is_user_supplied": False,
+                "source_origin": "variation_register",
+                "quality_flags": [],
+                "metadata": {"variation_type": row.get("variation_type"), "linked_document_ids": row.get("linked_document_ids") or []},
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _ipc_register_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+        query = self._scope_query(draft)
+        if not query:
+            return []
+        if not include_review_sources:
+            query["status"] = {"$in": ["submitted", "under_verification", "verified", "approved", "partially_paid", "paid", "rejected"]}
+        try:
+            rows = await _collect(self.db.ipc_bills.find(query).sort("ipc_date", -1).limit(10))
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            currency = row.get("base_currency") or "INR"
+            snippet = "\n".join(
+                str(part)
+                for part in [
+                    row.get("ipc_period"),
+                    _money(row.get("claimed_total_base"), currency),
+                    _money(row.get("approved_total_base"), currency),
+                    _money(row.get("net_payable_base"), currency),
+                    row.get("remarks"),
+                ]
+                if part
+            )
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "payment_event",
+                "allowed_use": "quantum",
+                "permitted_uses": ["fact", "quantum"],
+                "label": row.get("ipc_number") or "IPC bill",
+                "citation": row.get("ipc_number") or row.get("ipc_period") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": None,
+                "verification_status": row.get("status") or "register",
+                "is_user_supplied": False,
+                "source_origin": "ipc_register",
+                "quality_flags": [],
+                "metadata": {
+                    "ipc_date": row.get("ipc_date"),
+                    "status": row.get("status"),
+                    "letter_references": row.get("letter_references") or [],
+                    "linked_document_ids": row.get("linked_document_ids") or [],
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
+
+    async def _bank_guarantee_sources(self, draft: Dict[str, Any], offset: int, include_review_sources: bool) -> List[Dict[str, Any]]:
+        query = self._scope_query(draft)
+        if not query:
+            return []
+        if not include_review_sources:
+            query["bg_status"] = {"$in": ["submitted", "valid", "extension_required", "extended", "expired", "released", "encashment_under_process", "encashed"]}
+        try:
+            rows = await _collect(self.db.bank_guarantees.find(query).sort("updated_at", -1).limit(10))
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            snippet = "\n".join(
+                str(part)
+                for part in [
+                    row.get("issuing_bank"),
+                    _money(row.get("bg_amount"), row.get("currency")),
+                    row.get("bg_expiry_date"),
+                    row.get("remarks"),
+                ]
+                if part
+            )
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "bank_guarantee",
+                "allowed_use": "fact",
+                "permitted_uses": ["fact", "quantum"],
+                "label": row.get("bg_number") or row.get("bg_type") or "Bank guarantee",
+                "citation": row.get("bg_number") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": None,
+                "verification_status": row.get("bg_status") or "register",
+                "is_user_supplied": False,
+                "source_origin": "bank_guarantee_register",
+                "quality_flags": [],
+                "metadata": {"bg_type": row.get("bg_type"), "linked_document_ids": row.get("linked_document_ids") or []},
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
 
     async def _contract_search_sources(self, draft: Dict[str, Any], current_user: Any, offset: int) -> List[Dict[str, Any]]:
         query = " ".join(
@@ -122,6 +851,7 @@ class ArbitrationContextBuilder:
                 "source_id": str(result.document_id or result.upload_id or idx),
                 "source_type": "clause",
                 "allowed_use": "clause",
+                "permitted_uses": ["clause"],
                 "label": f"{result.clause_number or 'Clause'} {result.clause_title or ''}".strip(),
                 "citation": result.clause_number or result.clause_title or result.file_name,
                 "snippet": condense(result.text, 650),
@@ -130,7 +860,9 @@ class ArbitrationContextBuilder:
                 "letter_no": None,
                 "verification_status": "retrieved_clause",
                 "is_user_supplied": False,
+                "source_origin": "contract_search",
                 "quality_flags": [],
+                "metadata": {"file_name": result.file_name, "document_id": result.document_id, "upload_id": result.upload_id},
                 "source_hash": "",
             }
             row["source_hash"] = source_hash(row)
@@ -165,6 +897,7 @@ class ArbitrationContextBuilder:
                 "source_id": str(link.get("link_group_id") or link.get("_id")),
                 "source_type": "event_link",
                 "allowed_use": "chronology",
+                "permitted_uses": ["chronology", "fact"],
                 "label": f"{link.get('source_type')} {link.get('relation_type')} {link.get('target_type')}",
                 "citation": link.get("relation_type"),
                 "snippet": condense(link.get("evidence_text"), 650),
@@ -173,7 +906,9 @@ class ArbitrationContextBuilder:
                 "letter_no": None,
                 "verification_status": link.get("status") or "verified",
                 "is_user_supplied": False,
+                "source_origin": "evidence_graph",
                 "quality_flags": [],
+                "metadata": {"link_group_id": link.get("link_group_id"), "relation_type": link.get("relation_type")},
                 "source_hash": "",
             }
             row["source_hash"] = source_hash(row)
@@ -209,6 +944,12 @@ class ArbitrationContextBuilder:
             unknown = [str(item) for item in response.get("supporting_source_ids") or [] if str(item) not in known_ids]
             if unknown:
                 missing.append(f"Paragraph {response.get('source_paragraph_number')} references unavailable source ids: {', '.join(unknown)}")
+        for row in source_ledger:
+            if row.get("source_origin") == "case_document_index":
+                if not row.get("exhibit_id"):
+                    missing.append(f"Document index source has no exhibit id: {row.get('label')}")
+                if "missing_source_link" in row.get("quality_flags", []):
+                    missing.append(f"Document index source has no file/source link: {row.get('label')}")
         return missing
 
     def _dedupe(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -223,6 +964,37 @@ class ArbitrationContextBuilder:
             out.append(row)
         return out
 
+    def _matrix_context(self, source_ledger: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        groups = {
+            "documents": [],
+            "chronology": [],
+            "clauses": [],
+            "issues": [],
+            "claims": [],
+            "defences": [],
+            "counterclaims": [],
+            "rejoinder_replies": [],
+            "quantum": [],
+            "notices": [],
+        }
+        origin_map = {
+            "case_document_index": "documents",
+            "case_chronology_matrix": "chronology",
+            "case_clause_matrix": "clauses",
+            "case_issue_matrix": "issues",
+            "case_claim-matrix": "claims",
+            "case_defence-matrix": "defences",
+            "case_counterclaim-matrix": "counterclaims",
+            "case_rejoinder-matrix": "rejoinder_replies",
+            "case_quantum_annexure": "quantum",
+            "case_notice_compliance": "notices",
+        }
+        for row in source_ledger:
+            group = origin_map.get(str(row.get("source_origin") or ""))
+            if group:
+                groups[group].append(row)
+        return groups
+
     def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
         for row in rows:
             flags: List[str] = list(row.get("quality_flags") or [])
@@ -230,6 +1002,14 @@ class ArbitrationContextBuilder:
                 flags.append("missing_citation")
             if not row.get("snippet"):
                 flags.append("missing_snippet")
+            if row.get("source_origin") == "case_document_index":
+                metadata = row.get("metadata") or {}
+                if not row.get("exhibit_id"):
+                    flags.append("missing_exhibit_id")
+                if not row.get("source_id") and not metadata.get("source_file_link"):
+                    flags.append("missing_source_link")
+                if row.get("verification_status") not in VERIFIED_SOURCE_STATUSES:
+                    flags.append("not_verified_for_filing")
             if row.get("is_user_supplied"):
                 flags.append("user_supplied")
             if str(row.get("verification_status") or "").startswith("ai_"):

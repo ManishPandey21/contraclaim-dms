@@ -89,6 +89,8 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/chronology": ["dms.chronology.view", "dms.document.view"],
   "/chronology/new": ["dms.chronology.create", "dms.chronology.view", "dms.document.view"],
   "/arbitration": ["dms.arbitration.view", "dms.document.view"],
+  "/arbitration/cases": ["dms.arbitration.view", "dms.document.view"],
+  "/arbitration/cases/new": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/claim": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/defence": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],
   "/arbitration/rejoinder": ["dms.arbitration.create", "dms.arbitration.view", "dms.document.view"],

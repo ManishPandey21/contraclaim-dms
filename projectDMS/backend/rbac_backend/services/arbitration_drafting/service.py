@@ -32,6 +32,7 @@ from ..audit_event_service import AuditEventService
 from .context import ArbitrationContextBuilder, condense
 from .exporter import ArbitrationDraftExporter
 from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_BY_DRAFT_TYPE, SOURCE_POLICY
+from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository
 from .validator import ArbitrationDraftValidator
 
@@ -41,6 +42,7 @@ def _actor_id(user: Any) -> Optional[str]:
 
 
 _DRAFT_HASH_FIELDS = [
+    "case_id",
     "organization_id",
     "project_id",
     "contract_id",
@@ -72,6 +74,7 @@ def stable_generation_input_hash(
     payload = {
         "draft": {key: draft.get(key) for key in _DRAFT_HASH_FIELDS},
         "source_hashes": [row.get("source_hash") for row in context.get("source_ledger") or []],
+        "matrix_context": context.get("matrix_context") or {},
         "claim_heads": context.get("claim_heads") or [],
         "paragraph_responses": context.get("paragraph_responses") or [],
         "missing_evidence": context.get("missing_evidence") or [],
@@ -92,6 +95,7 @@ class ArbitrationDraftingService:
         self.repo = ArbitrationDraftingRepository(db)
         self.audit = AuditEventService(db)
         self.context_builder = ArbitrationContextBuilder(db)
+        self.case_workspace = ArbitrationCaseWorkspaceService(db)
         self.generator = ArbitrationDraftGenerator()
         self.validator = ArbitrationDraftValidator()
         self.exporter = ArbitrationDraftExporter()
@@ -220,6 +224,7 @@ class ArbitrationDraftingService:
         run_type: GenerationRunType = GenerationRunType.FULL_DRAFT,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
+        await self.case_workspace.assert_case_ready_for_draft(draft)
         self._validate_section_key(draft, payload.section_key)
         context = await self._context(
             draft_id,
@@ -369,6 +374,7 @@ class ArbitrationDraftingService:
 
     async def approve(self, draft_id: str, current_user: Any) -> Dict[str, Any]:
         draft = await self._load(draft_id)
+        await self.case_workspace.assert_case_ready_for_draft(draft)
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
         latest = await self.repo.latest_version(draft_id)

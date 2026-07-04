@@ -8,7 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Badge, type BadgeProps } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -18,9 +18,9 @@ import {
   BookOpen,
   Tag,
   Copy,
-  Calendar as CalendarIcon,
   ExternalLink,
   ArrowLeft,
+  MapPin,
 } from "lucide-react";
 import { format } from "date-fns";
 import { joinApiUrl } from "@/config/api";
@@ -38,6 +38,22 @@ interface LetterOut {
   Key_words?: string[];
   contractual_clauses?: string[];
   key_reply_points?: string[];
+  additional_keywords?: string[];
+  extracted_tags?: string[];
+  extracted_subTags?: string[];
+  asset_type?: string;
+  location?: string;
+  specific_area?: string;
+  chainage_from?: string;
+  chainage_to?: string;
+  work_type?: string;
+  issue_nature?: string;
+  claim_category?: string;
+  alleged_responsibility?: string;
+  priority?: string;
+  linked_event_suggested?: string;
+  reference_chain?: string;
+  metadata?: Record<string, any>;
   [key: string]: any;
 }
 
@@ -68,6 +84,90 @@ const prettifyDate = (iso?: string) => {
   } catch {
     return iso;
   }
+};
+
+const NULLISH_VALUES = new Set([
+  "",
+  "null",
+  "'null'",
+  '"null"',
+  "not found",
+  "none",
+  "n/a",
+  "na",
+  "not applicable",
+  "-",
+  "--",
+]);
+
+const cleanScalar = (value: any): string | undefined => {
+  if (value === null || value === undefined) return undefined;
+  const text = String(value).trim();
+  if (!text || NULLISH_VALUES.has(text.toLowerCase())) return undefined;
+  return text;
+};
+
+const normalizeStringList = (value: any): string[] => {
+  const rawItems = Array.isArray(value) ? value : value ? [value] : [];
+  const items = rawItems.flatMap((item) => {
+    if (item === null || item === undefined) return [];
+    if (typeof item === "object") {
+      const text =
+        cleanScalar(item.text) ||
+        cleanScalar(item.raw) ||
+        cleanScalar(item.letterNo) ||
+        cleanScalar(item.letter_no);
+      return text ? [text] : [];
+    }
+    return String(item)
+      .split(/\r?\n|,/)
+      .map((part) => part.trim().replace(/^[\-\*\d\.\)\s]+/, ""));
+  });
+
+  const seen = new Set<string>();
+  return items
+    .map(cleanScalar)
+    .filter((item): item is string => Boolean(item))
+    .filter((item) => {
+      const key = item.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+};
+
+const firstScalar = (source: any, ...keys: string[]): string | undefined => {
+  for (const key of keys) {
+    const value = cleanScalar(source?.[key]);
+    if (value) return value;
+  }
+  const metadata = source?.metadata;
+  for (const key of keys) {
+    const value = cleanScalar(metadata?.[key]);
+    if (value) return value;
+  }
+  return undefined;
+};
+
+const firstList = (source: any, ...keys: string[]): string[] => {
+  for (const key of keys) {
+    const values = normalizeStringList(source?.[key]);
+    if (values.length) return values;
+  }
+  const metadata = source?.metadata;
+  for (const key of keys) {
+    const values = normalizeStringList(metadata?.[key]);
+    if (values.length) return values;
+  }
+  return [];
+};
+
+const priorityVariant = (priority?: string) => {
+  const normalized = (priority || "").toLowerCase();
+  if (normalized === "critical") return "danger";
+  if (normalized === "high") return "warning";
+  if (normalized === "low") return "outline";
+  return "neutral";
 };
 
 const LetterSummaryPage: React.FC = () => {
@@ -123,22 +223,54 @@ const LetterSummaryPage: React.FC = () => {
         const res = await authenticatedFetch(joinApiUrl(`/documents/${id}`));
         if (!res.ok) throw new Error(`Failed to fetch letter: ${res.status}`);
         const d = await res.json();
+        const docId = d.id ?? d._id ?? id;
         const merged: LetterOut = {
-          id: String(id),
-          letterNo: d.letterNo ?? d.letter_no ?? undefined,
-          date: d.date,
-          subject: d.subject,
-          // Accept either 'from' (API alias) or 'from_' (legacy/local)
-          from_: d.from_ ?? d.from ?? undefined,
-          to: d.to,
-          reference: d.reference,
-          keywords: d.keywords ?? d.Key_words ?? [],
-          contractual_clauses:
-            d.contractual_clauses ??
-            d["Contractual Clauses"] ??
-            d.clauses ??
-            [],
           ...d,
+          id: String(docId),
+          letterNo: firstScalar(d, "letterNo", "letter_no"),
+          date: d.date,
+          subject: firstScalar(d, "subject"),
+          // Accept either 'from' (API alias) or 'from_' (legacy/local)
+          from_: firstScalar(d, "from_", "from", "from_company"),
+          to: firstScalar(d, "to", "to_company"),
+          reference: d.reference,
+          keywords: firstList(d, "keywords", "Key_words"),
+          additional_keywords: firstList(
+            d,
+            "additional_keywords",
+            "additionalKeywords"
+          ),
+          contractual_clauses:
+            firstList(d, "contractual_clauses", "Contractual Clauses", "clauses"),
+          key_reply_points: firstList(d, "key_reply_points", "keyReplyPoints"),
+          extracted_tags:
+            normalizeStringList(d.extracted_tags).length
+              ? normalizeStringList(d.extracted_tags)
+              : normalizeStringList(d.metadata?.tags),
+          extracted_subTags:
+            normalizeStringList(d.extracted_subTags).length
+              ? normalizeStringList(d.extracted_subTags)
+              : normalizeStringList(d.metadata?.subTags ?? d.metadata?.sub_tags),
+          asset_type: firstScalar(d, "asset_type", "assetType"),
+          location: firstScalar(d, "location"),
+          specific_area: firstScalar(d, "specific_area", "specificArea"),
+          chainage_from: firstScalar(d, "chainage_from", "chainageFrom"),
+          chainage_to: firstScalar(d, "chainage_to", "chainageTo"),
+          work_type: firstScalar(d, "work_type", "workType"),
+          issue_nature: firstScalar(d, "issue_nature", "issueNature"),
+          claim_category: firstScalar(d, "claim_category", "claimCategory"),
+          alleged_responsibility: firstScalar(
+            d,
+            "alleged_responsibility",
+            "allegedResponsibility"
+          ),
+          priority: firstScalar(d, "priority"),
+          linked_event_suggested: firstScalar(
+            d,
+            "linked_event_suggested",
+            "linkedEventSuggested"
+          ),
+          reference_chain: firstScalar(d, "reference_chain", "referenceChain"),
         };
         setDoc(merged);
       } catch (e: any) {
@@ -167,6 +299,60 @@ const LetterSummaryPage: React.FC = () => {
       return parseBulletString(k);
     }
     return [];
+  }, [doc]);
+
+  const metadataFields = useMemo(() => {
+    if (!doc) return [];
+    const chainage =
+      doc.chainage_from && doc.chainage_to
+        ? `${doc.chainage_from} to ${doc.chainage_to}`
+        : doc.chainage_from || doc.chainage_to;
+
+    return [
+      { label: "Asset Type", value: doc.asset_type },
+      { label: "Location", value: doc.location },
+      { label: "Specific Area", value: doc.specific_area },
+      { label: "Chainage", value: chainage },
+      { label: "Work Type", value: doc.work_type },
+      { label: "Issue Nature", value: doc.issue_nature },
+      { label: "Claim Category", value: doc.claim_category },
+      { label: "Responsibility", value: doc.alleged_responsibility },
+      { label: "Priority", value: doc.priority, badge: true },
+      { label: "Reference Chain", value: doc.reference_chain },
+      {
+        label: "Linked Event Suggested",
+        value: doc.linked_event_suggested,
+        wide: true,
+      },
+    ].filter((field) => cleanScalar(field.value));
+  }, [doc]);
+
+  const keywordGroups = useMemo<
+    Array<{
+      label: string;
+      items: string[];
+      variant: BadgeProps["variant"];
+    }>
+  >(() => {
+    if (!doc) return [];
+    return [
+      { label: "Keywords", items: doc.keywords || [], variant: "neutral" },
+      {
+        label: "Additional Keywords",
+        items: doc.additional_keywords || [],
+        variant: "outline",
+      },
+      {
+        label: "Extracted Tags",
+        items: doc.extracted_tags || [],
+        variant: "primary",
+      },
+      {
+        label: "Extracted Sub-tags",
+        items: doc.extracted_subTags || [],
+        variant: "outline",
+      },
+    ].filter((group) => group.items.length);
   }, [doc]);
 
   const copyText = async (text: string) => {
@@ -259,6 +445,47 @@ const LetterSummaryPage: React.FC = () => {
           </div>
         </CardContent>
       </Card>
+
+      {metadataFields.length ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <MapPin className="h-4 w-4" /> Extracted Metadata
+            </CardTitle>
+            <CardDescription>
+              Asset, location, claim, responsibility, and chronology fields
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+              {metadataFields.map((field) => (
+                <div
+                  key={field.label}
+                  className={`rounded-md border bg-white px-3 py-2 ${
+                    field.wide ? "sm:col-span-2" : ""
+                  }`}
+                >
+                  <div className="text-xs uppercase text-muted-foreground mb-1">
+                    {field.label}
+                  </div>
+                  {field.badge ? (
+                    <Badge
+                      variant={priorityVariant(field.value)}
+                      className="text-sm py-1 px-2"
+                    >
+                      {field.value}
+                    </Badge>
+                  ) : (
+                    <div className="text-sm font-medium text-gray-900 break-words">
+                      {field.value}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Tabs defaultValue="keypoints" className="w-full">
         <TabsList className="grid w-full grid-cols-3">
@@ -378,20 +605,33 @@ const LetterSummaryPage: React.FC = () => {
           <CardTitle className="text-lg flex items-center gap-2">
             <Tag className="h-4 w-4" /> Keywords
           </CardTitle>
-          <CardDescription>Detected key terms</CardDescription>
+          <CardDescription>Detected key terms and extracted tags</CardDescription>
         </CardHeader>
         <CardContent>
-          {doc.keywords && doc.keywords.length ? (
-            <div className="flex flex-wrap gap-2">
-              {doc.keywords.map((k: string, i: number) => (
-                <Badge key={i} variant="neutral" className="text-sm py-1 px-2">
-                  {k}
-                </Badge>
+          {keywordGroups.length ? (
+            <div className="space-y-4">
+              {keywordGroups.map((group) => (
+                <div key={group.label}>
+                  <div className="text-xs uppercase text-muted-foreground mb-2">
+                    {group.label}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {group.items.map((k: string, i: number) => (
+                      <Badge
+                        key={`${group.label}-${i}`}
+                        variant={group.variant}
+                        className="text-sm py-1 px-2"
+                      >
+                        {k}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           ) : (
             <div className="text-sm text-muted-foreground">
-              No keywords detected.
+              No keywords or tags detected.
             </div>
           )}
         </CardContent>

@@ -36,6 +36,10 @@ class ObservabilityRegistry:
     _errors_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _domain_events_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _backup_health: Dict[str, float] = field(default_factory=dict)
+    _arbitration_agent_runs_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _arbitration_bundle_exports_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _arbitration_readiness_score: Dict[Tuple[str, str], float] = field(default_factory=dict)
+    _arbitration_missing_evidence: Dict[Tuple[str, str], int] = field(default_factory=dict)
 
     async def record_request(
         self,
@@ -83,6 +87,37 @@ class ObservabilityRegistry:
                 "unhealthy_artifacts": float(unhealthy_artifacts),
             }
 
+    async def record_arbitration_agent_run(
+        self,
+        *,
+        agent_type: str,
+        status: str,
+        missing_evidence_count: int = 0,
+    ) -> None:
+        key = (str(agent_type or "unknown"), str(status or "unknown"))
+        async with self._lock:
+            self._arbitration_agent_runs_total[key] = self._arbitration_agent_runs_total.get(key, 0) + 1
+            missing_key = (str(agent_type or "unknown"), str(status or "unknown"))
+            self._arbitration_missing_evidence[missing_key] = int(missing_evidence_count or 0)
+
+    async def record_arbitration_bundle_export(self, *, format: str, status: str) -> None:
+        key = (str(format or "unknown"), str(status or "unknown"))
+        async with self._lock:
+            self._arbitration_bundle_exports_total[key] = self._arbitration_bundle_exports_total.get(key, 0) + 1
+
+    async def record_arbitration_readiness(
+        self,
+        *,
+        case_id: str,
+        status: str,
+        score: float,
+        missing_evidence_count: int = 0,
+    ) -> None:
+        key = (self._case_label(case_id), str(status or "unknown"))
+        async with self._lock:
+            self._arbitration_readiness_score[key] = float(score or 0)
+            self._arbitration_missing_evidence[("readiness", str(status or "unknown"))] = int(missing_evidence_count or 0)
+
     def snapshot(self) -> Dict[str, object]:
         total_requests = sum(self._request_total.values())
         total_errors = sum(self._errors_total.values())
@@ -93,6 +128,8 @@ class ObservabilityRegistry:
             "server_error_total": total_errors,
             "domain_event_total": sum(self._domain_events_total.values()),
             "backup_health": dict(self._backup_health),
+            "arbitration_agent_run_total": sum(self._arbitration_agent_runs_total.values()),
+            "arbitration_bundle_export_total": sum(self._arbitration_bundle_exports_total.values()),
         }
 
     def render_prometheus(self) -> str:
@@ -168,6 +205,46 @@ class ObservabilityRegistry:
             ]
         )
 
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_agent_runs_total Arbitration case agent runs by agent type and status.",
+                "# TYPE contractdms_arbitration_agent_runs_total counter",
+            ]
+        )
+        for (agent_type, run_status), value in sorted(self._arbitration_agent_runs_total.items()):
+            labels = _labels((("agent_type", agent_type), ("status", run_status)))
+            lines.append(f"contractdms_arbitration_agent_runs_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_bundle_exports_total Arbitration filing bundle export jobs by format and status.",
+                "# TYPE contractdms_arbitration_bundle_exports_total counter",
+            ]
+        )
+        for (format_value, export_status), value in sorted(self._arbitration_bundle_exports_total.items()):
+            labels = _labels((("format", format_value), ("status", export_status)))
+            lines.append(f"contractdms_arbitration_bundle_exports_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_readiness_score Latest arbitration readiness score by case and status.",
+                "# TYPE contractdms_arbitration_readiness_score gauge",
+            ]
+        )
+        for (case_id, readiness_status), value in sorted(self._arbitration_readiness_score.items()):
+            labels = _labels((("case_id", case_id), ("status", readiness_status)))
+            lines.append(f"contractdms_arbitration_readiness_score{labels} {value:.3f}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_missing_evidence Latest missing evidence count by arbitration signal and status.",
+                "# TYPE contractdms_arbitration_missing_evidence gauge",
+            ]
+        )
+        for (signal, signal_status), value in sorted(self._arbitration_missing_evidence.items()):
+            labels = _labels((("signal", signal), ("status", signal_status)))
+            lines.append(f"contractdms_arbitration_missing_evidence{labels} {value}")
+
         return "\n".join(lines) + "\n"
 
     def _normalize_path(self, path: str) -> str:
@@ -182,6 +259,14 @@ class ObservabilityRegistry:
             else:
                 parts.append(part)
         return "/" + "/".join(parts)
+
+    def _case_label(self, case_id: str) -> str:
+        value = str(case_id or "unknown")
+        if len(value) == 24 and all(ch in "0123456789abcdefABCDEF" for ch in value):
+            return "{id}"
+        if len(value) >= 32 and "-" in value:
+            return "{id}"
+        return value
 
 
 observability_registry = ObservabilityRegistry()

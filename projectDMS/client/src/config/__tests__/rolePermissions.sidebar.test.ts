@@ -35,6 +35,7 @@ const SIDEBAR_PATHS = [
   "/contracts/appraisal",
   "/contracts/timeline",
   "/chronology",
+  "/arbitration/cases",
   "/arbitration/drafts",
   "/arbitration/claim",
   "/arbitration/defence",

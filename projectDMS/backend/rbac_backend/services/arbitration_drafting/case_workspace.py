@@ -1,0 +1,1431 @@
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import re
+import uuid
+import zipfile
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+from fastapi import HTTPException, status
+
+from ...models.arbitration_drafting import (
+    ArbitrationAgentRun,
+    ArbitrationAgentRunRequest,
+    ArbitrationCase,
+    ArbitrationCaseCreate,
+    ArbitrationCaseStatus,
+    ArbitrationCaseUpdate,
+    ArbitrationClaimHead,
+    ArbitrationMatrixReviewRequest,
+    ArbitrationMatrixRow,
+    ArbitrationMatrixRowCreate,
+    ArbitrationMatrixRowUpdate,
+    ArbitrationReadinessCheck,
+    ArbitrationReadinessResponse,
+    ArbitrationSelectedReference,
+    ReadinessCheckStatus,
+)
+from ..background_jobs import submit_background_job
+from ..observability import observability_registry
+from ..task_sync_service import TaskSyncService
+from .agents import run_arbitration_agent
+from .exporter import ArbitrationDraftExporter
+from .matrix_registry import MATRIX_COLLECTIONS
+from .repository import ArbitrationDraftingRepository, _collect, _jsonable
+
+
+BLOCKING_READINESS_STATUSES = {
+    ReadinessCheckStatus.NEEDS_EVIDENCE.value,
+    ReadinessCheckStatus.NEEDS_CLAUSE_SUPPORT.value,
+    ReadinessCheckStatus.NEEDS_QUANTUM_SUPPORT.value,
+    ReadinessCheckStatus.NEEDS_LEGAL_REVIEW.value,
+    ReadinessCheckStatus.NEEDS_USER_CONFIRMATION.value,
+    ReadinessCheckStatus.BLOCKED.value,
+}
+
+BUNDLE_EXPORT_FORMATS = {
+    "zip": ("application/zip", "arbitration-case-bundle.zip"),
+    "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "arbitration-filing-bundle.docx"),
+    "pdf": ("application/pdf", "arbitration-filing-bundle.pdf"),
+}
+MAX_INLINE_BUNDLE_EXPORT_BYTES = 12 * 1024 * 1024
+
+
+def _actor_id(user: Any) -> Optional[str]:
+    if isinstance(user, dict):
+        return user.get("id") or user.get("email") or user.get("_id")
+    return getattr(user, "id", None) or getattr(user, "email", None)
+
+
+def _actor_snapshot(user: Any) -> Dict[str, Any]:
+    if isinstance(user, dict):
+        return dict(user)
+    return {
+        "id": getattr(user, "id", None),
+        "email": getattr(user, "email", None),
+        "organization_id": getattr(user, "organization_id", None),
+    }
+
+
+def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None and key != "id"}
+
+
+def _is_positive(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "yes", "true", "approved", "ready", "verified"}
+
+
+def _is_ready_row(row: Dict[str, Any], *, approval_key: str = "approval_status") -> bool:
+    review_status = str(row.get("review_status") or "").lower()
+    if review_status in {"assigned", "under_review", "partially_approved", "changes_requested", "rejected"}:
+        return False
+    required_roles = {str(role).lower() for role in row.get("review_required_roles") or [] if role}
+    completed_roles = {str(role).lower() for role in row.get("review_completed_roles") or [] if role}
+    if required_roles and not required_roles.issubset(completed_roles):
+        return False
+    status_values = {
+        str(row.get(approval_key) or "").lower(),
+        str(row.get("human_approval_status") or "").lower(),
+        str(row.get("readiness_status") or "").lower(),
+        str(row.get("verification_status") or "").lower(),
+    }
+    return bool(status_values & {"approved", "ready", "verified", "supported"})
+
+
+def _date_sort_value(row: Dict[str, Any]) -> str:
+    value = row.get("document_date") or row.get("date") or row.get("created_at") or ""
+    return str(value)
+
+
+class ArbitrationCaseWorkspaceService:
+    def __init__(self, db: Any) -> None:
+        self.db = db
+        self.draft_repo = ArbitrationDraftingRepository(db)
+
+    async def create_case(self, payload: ArbitrationCaseCreate, current_user: Any) -> Dict[str, Any]:
+        case_payload = payload.model_dump()
+        case_payload["organization_id"] = payload.organization_id or getattr(current_user, "organization_id", None)
+        case = ArbitrationCase(
+            **case_payload,
+            status=ArbitrationCaseStatus.MATRIX_PREPARATION,
+            created_by=_actor_id(current_user),
+            updated_at=datetime.utcnow(),
+        ).model_dump(by_alias=True)
+        await self.db.arbitration_cases.insert_one(_jsonable(case))
+        return case
+
+    async def list_cases(
+        self,
+        scope: Dict[str, Any],
+        filters: Dict[str, Any],
+        *,
+        skip: int = 0,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        query = dict(scope or {})
+        query["deleted_at"] = {"$exists": False}
+        for key in ["project_id", "contract_id", "status"]:
+            if filters.get(key):
+                query[key] = filters[key]
+        if filters.get("q"):
+            text = str(filters["q"])
+            query["$or"] = [
+                {"title": {"$regex": text, "$options": "i"}},
+                {"case_reference": {"$regex": text, "$options": "i"}},
+            ]
+        cursor = self.db.arbitration_cases.find(query).sort("updated_at", -1).skip(skip).limit(limit)
+        return await _collect(cursor)
+
+    async def get_case(self, case_id: str) -> Dict[str, Any]:
+        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration case not found")
+        return case
+
+    async def update_case(self, case_id: str, payload: ArbitrationCaseUpdate, current_user: Any) -> Dict[str, Any]:
+        await self.get_case(case_id)
+        update = _clean_payload(payload.model_dump(exclude_unset=True))
+        update["updated_by"] = _actor_id(current_user)
+        update["updated_at"] = datetime.utcnow()
+        updated = await self.db.arbitration_cases.find_one_and_update(
+            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {"$set": _jsonable(update)},
+            return_document=True,
+        )
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration case not found")
+        return updated
+
+    async def soft_delete_case(self, case_id: str, current_user: Any) -> None:
+        await self.get_case(case_id)
+        await self.db.arbitration_cases.update_one(
+            {"_id": case_id},
+            {
+                "$set": {
+                    "deleted_at": datetime.utcnow(),
+                    "deleted_by": _actor_id(current_user),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+
+    def _collection(self, matrix_slug: str) -> Any:
+        collection_name = MATRIX_COLLECTIONS.get(matrix_slug)
+        if not collection_name:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"message": "Unknown arbitration matrix", "matrix": matrix_slug, "available": sorted(MATRIX_COLLECTIONS)},
+            )
+        return self.db[collection_name]
+
+    async def list_matrix_rows(self, case_id: str, matrix_slug: str, *, draft_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        await self.get_case(case_id)
+        query: Dict[str, Any] = {"case_id": case_id, "deleted_at": {"$exists": False}}
+        if draft_id:
+            query["draft_id"] = draft_id
+        rows = await _collect(self._collection(matrix_slug).find(query).sort("created_at", 1))
+        if matrix_slug == "document-index":
+            rows.sort(key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0), _date_sort_value(row)))
+        return rows
+
+    async def create_matrix_row(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        payload: ArbitrationMatrixRowCreate,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        body = _clean_payload(payload.model_dump(exclude_none=True))
+        now = datetime.utcnow()
+        row = ArbitrationMatrixRow(
+            **body,
+            case_id=case_id,
+            organization_id=case.get("organization_id"),
+            project_id=case.get("project_id"),
+            contract_id=case.get("contract_id"),
+            created_by=_actor_id(current_user),
+            created_at=now,
+            updated_by=_actor_id(current_user),
+            updated_at=now,
+        ).model_dump(by_alias=True)
+        row = await self._assign_exhibit_if_needed(case_id, matrix_slug, row)
+        await self._collection(matrix_slug).insert_one(_jsonable(row))
+        await self._touch_case(case_id, current_user)
+        return row
+
+    async def update_matrix_row(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        row_id: str,
+        payload: ArbitrationMatrixRowUpdate,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        await self.get_case(case_id)
+        update = _clean_payload(payload.model_dump(exclude_unset=True, by_alias=True))
+        update.pop("_id", None)
+        update["updated_by"] = _actor_id(current_user)
+        update["updated_at"] = datetime.utcnow()
+        collection = self._collection(matrix_slug)
+        updated = await collection.find_one_and_update(
+            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {"$set": _jsonable(update)},
+            return_document=True,
+        )
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+        if matrix_slug == "document-index" and not updated.get("exhibit_id"):
+            updated = await self._assign_and_update_exhibit(case_id, updated)
+        await self._touch_case(case_id, current_user)
+        return updated
+
+    async def matrix_row_from_payload(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        payload: ArbitrationMatrixRowUpdate,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        row_id = payload.id
+        if not row_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Matrix row _id is required for PATCH")
+        return await self.update_matrix_row(case_id, matrix_slug, row_id, payload, current_user)
+
+    async def review_matrix_row(
+        self,
+        case_id: str,
+        matrix_slug: str,
+        row_id: str,
+        payload: ArbitrationMatrixReviewRequest,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        collection = self._collection(matrix_slug)
+        row = await collection.find_one({"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}})
+        if not row:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+
+        action = str(getattr(payload.action, "value", payload.action))
+        role = str(getattr(payload.reviewer_role, "value", payload.reviewer_role) or "legal").lower()
+        actor = _actor_id(current_user)
+        now = datetime.utcnow()
+        required_roles = self._review_roles(payload.required_roles or row.get("review_required_roles") or self._default_review_roles(matrix_slug))
+        completed_roles = self._review_roles(row.get("review_completed_roles") or [])
+        assignments = list(row.get("review_assignments") or [])
+        comments = list(row.get("review_comments") or [])
+        approval_log = list(row.get("approval_log") or [])
+
+        if action in {"request_changes", "reject"} and not (payload.comment or "").strip():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Review comment is required for this action")
+        if action == "assign" and not payload.reviewer_user_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="reviewer_user_id is required when assigning review")
+
+        event = {
+            "_id": str(uuid.uuid4()),
+            "action": action,
+            "reviewer_role": role,
+            "reviewer_user_id": payload.reviewer_user_id,
+            "comment": (payload.comment or "").strip() or None,
+            "actor_id": actor,
+            "actor_email": getattr(current_user, "email", None),
+            "created_at": now,
+            "due_at": payload.due_at,
+        }
+        approval_log.append(event)
+        if event["comment"]:
+            comments.append(event)
+
+        update: Dict[str, Any] = {
+            "review_required_roles": required_roles,
+            "review_completed_roles": completed_roles,
+            "review_comments": comments,
+            "approval_log": approval_log,
+            "last_review_action": action,
+            "last_reviewed_by": actor,
+            "last_reviewed_at": now,
+            "updated_by": actor,
+            "updated_at": now,
+        }
+
+        if action == "assign":
+            assignment = {
+                "_id": str(uuid.uuid4()),
+                "reviewer_role": role,
+                "reviewer_user_id": payload.reviewer_user_id,
+                "assigned_by": actor,
+                "assigned_at": now,
+                "due_at": payload.due_at,
+                "status": "assigned",
+            }
+            assignments.append(assignment)
+            update.update(
+                {
+                    "review_status": "under_review",
+                    "review_assignments": assignments,
+                    "assigned_reviewer_id": payload.reviewer_user_id,
+                    "approval_status": "needs_review",
+                    "human_approval_status": "needs_review",
+                    "verification_status": "needs_review",
+                    "readiness_status": "needs_review",
+                }
+            )
+        elif action == "comment":
+            update["review_status"] = row.get("review_status") or "under_review"
+            update["review_assignments"] = assignments
+        elif action == "request_changes":
+            update.update(
+                {
+                    "review_status": "changes_requested",
+                    "approval_status": "needs_review",
+                    "human_approval_status": "needs_review",
+                    "verification_status": "needs_review",
+                    "readiness_status": "needs_review",
+                    "review_assignments": self._mark_assignments(assignments, role, "changes_requested", now),
+                }
+            )
+        elif action == "approve":
+            if role not in completed_roles:
+                completed_roles.append(role)
+            all_roles_complete = set(required_roles).issubset(set(completed_roles))
+            update["review_completed_roles"] = completed_roles
+            update["review_assignments"] = self._mark_assignments(assignments, role, "completed", now)
+            if all_roles_complete:
+                update.update(
+                    {
+                        "review_status": "approved",
+                        "approval_status": "approved",
+                        "human_approval_status": "approved",
+                        "verification_status": "verified",
+                        "readiness_status": "ready",
+                        "approved_by": actor,
+                        "approved_at": now,
+                    }
+                )
+            else:
+                update.update(
+                    {
+                        "review_status": "partially_approved",
+                        "approval_status": "needs_review",
+                        "human_approval_status": "needs_review",
+                        "verification_status": "needs_review",
+                        "readiness_status": "needs_review",
+                    }
+                )
+        elif action == "reject":
+            update.update(
+                {
+                    "review_status": "rejected",
+                    "approval_status": "rejected",
+                    "human_approval_status": "rejected",
+                    "verification_status": "rejected",
+                    "readiness_status": "rejected",
+                    "review_assignments": self._mark_assignments(assignments, role, "rejected", now),
+                    "rejected_by": actor,
+                    "rejected_at": now,
+                }
+            )
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported review action: {action}")
+
+        updated = await collection.find_one_and_update(
+            {"_id": row_id, "case_id": case_id, "deleted_at": {"$exists": False}},
+            {"$set": _jsonable(update)},
+            return_document=True,
+        )
+        if not updated:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
+
+        task_sync = TaskSyncService(self.db)
+        if action == "assign":
+            await task_sync.on_arbitration_matrix_review_assigned(case, updated, matrix_slug, payload.reviewer_user_id, actor, due_at=payload.due_at)
+        elif action in {"approve", "reject"} and str(updated.get("review_status") or "") in {"approved", "rejected"}:
+            await task_sync.on_arbitration_matrix_review_completed(updated, actor)
+
+        await self.readiness(case_id)
+        return updated
+
+    async def dashboard(self, case_id: str) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        matrix_counts: Dict[str, int] = {}
+        approved_counts: Dict[str, int] = {}
+        for slug in MATRIX_COLLECTIONS:
+            rows = await self.list_matrix_rows(case_id, slug)
+            matrix_counts[slug] = len(rows)
+            approved_counts[slug] = sum(1 for row in rows if _is_ready_row(row))
+        draft_cursor = self.db.arbitration_drafts.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("updated_at", -1)
+        drafts = await _collect(draft_cursor)
+        readiness = await self.readiness(case_id)
+        latest_runs = await _collect(self.db.arbitration_agent_runs.find({"case_id": case_id}).sort("created_at", -1).limit(10))
+        return {
+            "case": case,
+            "matrix_counts": matrix_counts,
+            "approved_counts": approved_counts,
+            "drafts": drafts,
+            "readiness": readiness,
+            "latest_agent_runs": latest_runs,
+        }
+
+    async def readiness(
+        self,
+        case_id: str,
+        *,
+        draft_id: Optional[str] = None,
+        draft_type: Optional[str] = None,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        if draft_id and not draft_type:
+            draft = await self.draft_repo.get_draft(draft_id)
+            draft_type = (draft or {}).get("draft_type")
+        rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
+        checks = self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
+        ready_count = sum(1 for check in checks if check["status"] == ReadinessCheckStatus.READY.value)
+        score = round((ready_count / max(len(checks), 1)) * 100)
+        blockers = [check for check in checks if check["status"] in BLOCKING_READINESS_STATUSES]
+        response = {
+            "case_id": case_id,
+            "draft_id": draft_id,
+            "readiness_score": score,
+            "status": "ready" if not blockers else "blocked",
+            "blockers": blockers,
+            "checks": checks,
+        }
+        if persist:
+            await self._persist_readiness(case_id, draft_id, checks, score, blockers)
+        missing_evidence_count = sum(1 for check in checks if check["status"] == ReadinessCheckStatus.NEEDS_EVIDENCE.value)
+        await observability_registry.record_arbitration_readiness(
+            case_id=case_id,
+            status=response["status"],
+            score=score,
+            missing_evidence_count=missing_evidence_count,
+        )
+        return response
+
+    async def approve_readiness(self, case_id: str, current_user: Any) -> Dict[str, Any]:
+        readiness = await self.readiness(case_id)
+        if readiness["blockers"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Readiness blockers must be resolved before drafting approval",
+                    "blockers": readiness["blockers"],
+                },
+            )
+        updated = await self.db.arbitration_cases.find_one_and_update(
+            {"_id": case_id, "deleted_at": {"$exists": False}},
+            {
+                "$set": {
+                    "status": ArbitrationCaseStatus.READY_FOR_DRAFTING.value,
+                    "readiness_approved_by": _actor_id(current_user),
+                    "readiness_approved_at": datetime.utcnow(),
+                    "updated_by": _actor_id(current_user),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+            return_document=True,
+        )
+        return {"case": updated, "readiness": readiness}
+
+    async def assert_case_ready_for_draft(self, draft: Dict[str, Any]) -> None:
+        case_id = draft.get("case_id")
+        if not case_id:
+            return
+        readiness = await self.readiness(case_id, draft_id=str(draft.get("_id")), draft_type=str(draft.get("draft_type") or ""))
+        if readiness["blockers"]:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Arbitration case matrices are not ready for draft generation",
+                    "case_id": case_id,
+                    "readiness_score": readiness["readiness_score"],
+                    "blockers": readiness["blockers"],
+                },
+            )
+
+    async def prepare_draft_from_case(self, draft_id: str, current_user: Any) -> Dict[str, Any]:
+        draft = await self.draft_repo.get_draft(draft_id)
+        if not draft:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration draft not found")
+        case_id = draft.get("case_id")
+        if not case_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Draft is not linked to an arbitration case")
+        case = await self.get_case(str(case_id))
+        document_rows = [row for row in await self.list_matrix_rows(str(case_id), "document-index") if row.get("source_id")]
+        clause_rows = await self.list_matrix_rows(str(case_id), "clause-matrix")
+        claim_rows = await self.list_matrix_rows(str(case_id), "claim-matrix")
+        references = self._references_from_case_rows(draft_id, document_rows, clause_rows, current_user)
+        claim_heads = self._claim_heads_from_case_rows(draft_id, claim_rows)
+        await self.draft_repo.replace_references(draft_id, references)
+        if claim_heads:
+            await self.draft_repo.replace_claim_heads(draft_id, claim_heads)
+        draft_update = {
+            "tribunal_details": draft.get("tribunal_details") or case.get("tribunal_details"),
+            "arbitration_clause": draft.get("arbitration_clause") or case.get("arbitration_clause"),
+            "governing_law": draft.get("governing_law") or case.get("governing_law"),
+            "updated_by": _actor_id(current_user),
+            "updated_at": datetime.utcnow(),
+        }
+        await self.draft_repo.update_draft(draft_id, {key: value for key, value in draft_update.items() if value is not None})
+        return {
+            "draft_id": draft_id,
+            "case_id": case_id,
+            "references_added": len(references),
+            "claim_heads_added": len(claim_heads),
+        }
+
+    async def run_agent(
+        self,
+        case_id: str,
+        agent_type: str,
+        payload: ArbitrationAgentRunRequest,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        return await self._run_agent_and_persist(case_id, agent_type, payload, current_user)
+
+    async def queue_agent_run(
+        self,
+        case_id: str,
+        agent_type: str,
+        payload: ArbitrationAgentRunRequest,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        input_hash = self._agent_input_hash(case_id, agent_type, payload)
+        run = ArbitrationAgentRun(
+            case_id=case_id,
+            draft_id=payload.draft_id,
+            agent_type=agent_type,
+            status="queued",
+            input_hash=input_hash,
+            prompt_version="arbitration-workflow-deterministic-1",
+            model="deterministic-matrix-agent",
+            created_by=_actor_id(current_user),
+        ).model_dump(by_alias=True)
+        await self.db.arbitration_agent_runs.insert_one(_jsonable(run))
+        job_id = await submit_background_job(
+            f"arbitration-agent:{agent_type}",
+            self.execute_queued_agent_run,
+            case_id,
+            str(run["_id"]),
+            agent_type,
+            payload.model_dump(),
+            _actor_snapshot(current_user),
+            priority=5 if agent_type == "orchestrator" else 3,
+            max_retries=1,
+        )
+        updated = await self.db.arbitration_agent_runs.find_one_and_update(
+            {"_id": run["_id"], "case_id": case_id},
+            {"$set": {"background_job_id": job_id}},
+            return_document=True,
+        )
+        return updated or {**run, "background_job_id": job_id, "case": case}
+
+    async def execute_queued_agent_run(
+        self,
+        case_id: str,
+        run_id: str,
+        agent_type: str,
+        payload_data: Dict[str, Any],
+        actor: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        await self.db.arbitration_agent_runs.update_one(
+            {"_id": run_id, "case_id": case_id},
+            {"$set": {"status": "running", "started_at": datetime.utcnow()}},
+        )
+        try:
+            payload = ArbitrationAgentRunRequest(**(payload_data or {}))
+            return await self._run_agent_and_persist(case_id, agent_type, payload, actor, existing_run_id=run_id)
+        except Exception as exc:
+            failed = await self.db.arbitration_agent_runs.find_one_and_update(
+                {"_id": run_id, "case_id": case_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "errors": [str(exc)],
+                        "completed_at": datetime.utcnow(),
+                    }
+                },
+                return_document=True,
+            )
+            await observability_registry.record_arbitration_agent_run(
+                agent_type=agent_type,
+                status="failed",
+                missing_evidence_count=0,
+            )
+            if failed:
+                return failed
+            raise
+
+    async def _run_agent_and_persist(
+        self,
+        case_id: str,
+        agent_type: str,
+        payload: ArbitrationAgentRunRequest,
+        current_user: Any,
+        *,
+        existing_run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        case = await self.get_case(case_id)
+        input_hash = self._agent_input_hash(case_id, agent_type, payload)
+        result = await run_arbitration_agent(
+            self.db,
+            case,
+            agent_type,
+            payload=payload,
+            current_user=current_user,
+        )
+        errors = result.get("errors") or []
+        warnings = result.get("warnings") or []
+        run = ArbitrationAgentRun(
+            case_id=case_id,
+            draft_id=payload.draft_id,
+            agent_type=agent_type,
+            status="failed" if errors else "completed_with_warnings" if warnings else "completed",
+            input_hash=input_hash,
+            source_ids=result.get("source_ids") or [],
+            output_summary=result.get("output_summary"),
+            created_records=result.get("created_records") or [],
+            warnings=warnings,
+            errors=errors,
+            prompt_version=result.get("prompt_version") or "arbitration-workflow-deterministic-1",
+            model=result.get("model") or "deterministic-matrix-agent",
+            created_by=_actor_id(current_user),
+            completed_at=datetime.utcnow(),
+        ).model_dump(by_alias=True)
+        if existing_run_id:
+            run["_id"] = existing_run_id
+            await self.db.arbitration_agent_runs.update_one(
+                {"_id": existing_run_id, "case_id": case_id},
+                {"$set": _jsonable(run)},
+            )
+            stored = await self.db.arbitration_agent_runs.find_one({"_id": existing_run_id, "case_id": case_id})
+            if stored:
+                run = stored
+        else:
+            await self.db.arbitration_agent_runs.insert_one(_jsonable(run))
+        readiness = await self.readiness(case_id, draft_id=payload.draft_id)
+        missing_evidence_count = sum(1 for check in readiness.get("checks", []) if check.get("status") == ReadinessCheckStatus.NEEDS_EVIDENCE.value)
+        await observability_registry.record_arbitration_agent_run(
+            agent_type=agent_type,
+            status=str(run.get("status") or "unknown"),
+            missing_evidence_count=missing_evidence_count,
+        )
+        return run
+
+    @staticmethod
+    def _agent_input_hash(case_id: str, agent_type: str, payload: ArbitrationAgentRunRequest) -> str:
+        source_state = {
+            "case_id": case_id,
+            "draft_id": payload.draft_id,
+            "agent_type": agent_type,
+            "options": payload.options,
+        }
+        return hashlib.sha256(json.dumps(source_state, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    async def list_agent_runs(self, case_id: str) -> List[Dict[str, Any]]:
+        await self.get_case(case_id)
+        return await _collect(self.db.arbitration_agent_runs.find({"case_id": case_id}).sort("created_at", -1))
+
+    async def get_agent_run(self, case_id: str, run_id: str) -> Dict[str, Any]:
+        await self.get_case(case_id)
+        run = await self.db.arbitration_agent_runs.find_one({"_id": run_id, "case_id": case_id})
+        if not run:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration agent run not found")
+        return run
+
+    async def exhibit_list(self, case_id: str) -> List[Dict[str, Any]]:
+        rows = [row for row in await self.list_matrix_rows(case_id, "document-index") if row.get("exhibit_id")]
+        return sorted(rows, key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0)))
+
+    async def citation_audit(self, case_id: str) -> Dict[str, Any]:
+        exhibits = await self.exhibit_list(case_id)
+        exhibit_ids = {str(row.get("exhibit_id")) for row in exhibits if row.get("exhibit_id")}
+        document_rows = await self.list_matrix_rows(case_id, "document-index")
+        issues: List[Dict[str, Any]] = []
+        for row in document_rows:
+            row_label = row.get("title") or row.get("document_type") or row.get("_id")
+            if not row.get("source_id") and not row.get("source_file_link"):
+                issues.append(
+                    {
+                        "severity": "blocking",
+                        "issue_type": "missing_source_link",
+                        "matrix": "document-index",
+                        "matrix_row_id": row.get("_id"),
+                        "message": f"Document index row has no source id or file link: {row_label}",
+                    }
+                )
+            if not row.get("exhibit_id"):
+                issues.append(
+                    {
+                        "severity": "blocking",
+                        "issue_type": "missing_exhibit_id",
+                        "matrix": "document-index",
+                        "matrix_row_id": row.get("_id"),
+                        "message": f"Document index row has no exhibit id: {row_label}",
+                    }
+                )
+            if not _is_ready_row(row):
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "issue_type": "document_not_approved",
+                        "matrix": "document-index",
+                        "matrix_row_id": row.get("_id"),
+                        "message": f"Document index row is not verified/approved for filing: {row_label}",
+                    }
+                )
+        draft_cursor = self.db.arbitration_drafts.find({"case_id": case_id, "deleted_at": {"$exists": False}})
+        drafts = await _collect(draft_cursor)
+        cited: set[str] = set()
+        draft_reports: List[Dict[str, Any]] = []
+        for draft in drafts:
+            latest = await self.draft_repo.latest_version(str(draft.get("_id")))
+            text = str((latest or {}).get("full_markdown") or "")
+            citations = sorted(set(re.findall(r"\b(?:C|R|J|CE|RE|QE|DE)-\d+\b", text)))
+            source_key_citations = sorted(set(re.findall(r"\[(S\d+):[^\]]+\]", text)))
+            source_ledger = (latest or {}).get("source_ledger") or []
+            source_keys = {str(row.get("source_key")) for row in source_ledger if row.get("source_key")}
+            missing_source_keys = [key for key in source_key_citations if key not in source_keys]
+            cited.update(citations)
+            for citation in citations:
+                if citation not in exhibit_ids:
+                    issues.append(
+                        {
+                            "severity": "blocking",
+                            "issue_type": "missing_exhibit_reference",
+                            "draft_id": draft.get("_id"),
+                            "message": f"Draft cites exhibit {citation}, but it is absent from the case exhibit list.",
+                        }
+                    )
+            for source_key in missing_source_keys:
+                issues.append(
+                    {
+                        "severity": "blocking",
+                        "issue_type": "missing_source_key",
+                        "draft_id": draft.get("_id"),
+                        "message": f"Draft cites {source_key}, but the latest source ledger does not contain that key.",
+                    }
+                )
+            draft_reports.append(
+                {
+                    "draft_id": draft.get("_id"),
+                    "title": draft.get("title"),
+                    "version": (latest or {}).get("version"),
+                    "citations": citations,
+                    "source_key_citations": source_key_citations,
+                    "missing_exhibits": [citation for citation in citations if citation not in exhibit_ids],
+                    "missing_source_keys": missing_source_keys,
+                }
+            )
+        missing = sorted(citation for citation in cited if citation not in exhibit_ids)
+        unused = sorted(exhibit_id for exhibit_id in exhibit_ids if exhibit_id not in cited)
+        blocking_issues = [issue for issue in issues if issue.get("severity") == "blocking"]
+        return {
+            "case_id": case_id,
+            "ok": not blocking_issues,
+            "exhibit_count": len(exhibit_ids),
+            "cited_exhibits": sorted(cited),
+            "missing_exhibits": missing,
+            "unused_exhibits": unused,
+            "issues": issues,
+            "blocking_issue_count": len(blocking_issues),
+            "warning_issue_count": len(issues) - len(blocking_issues),
+            "drafts": draft_reports,
+        }
+
+    async def filing_bundle_manifest(self, case_id: str) -> Dict[str, Any]:
+        payload = await self.filing_bundle_payload(case_id)
+        return {
+            "bundle_version": payload["bundle_version"],
+            "generated_at": payload["generated_at"],
+            "case": payload["case"],
+            "exhibit_list": payload["exhibit_list"],
+            "citation_audit": payload["citation_audit"],
+            "matrix_counts": payload["matrix_counts"],
+            "approved_counts": payload["approved_counts"],
+            "readiness": payload["readiness"],
+            "drafts": payload["drafts"],
+        }
+
+    async def filing_bundle_payload(self, case_id: str) -> Dict[str, Any]:
+        dashboard = await self.dashboard(case_id)
+        matrices = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
+        drafts = await self._filing_bundle_drafts(case_id)
+        return {
+            "bundle_version": "arbitration-filing-bundle.v1",
+            "generated_at": datetime.utcnow(),
+            "case": dashboard["case"],
+            "exhibit_list": await self.exhibit_list(case_id),
+            "citation_audit": await self.citation_audit(case_id),
+            "matrix_counts": dashboard["matrix_counts"],
+            "approved_counts": dashboard["approved_counts"],
+            "readiness": dashboard["readiness"],
+            "drafts": drafts,
+            "matrices": matrices,
+        }
+
+    async def export_filing_bundle_zip(self, case_id: str) -> bytes:
+        payload = await self.filing_bundle_payload(case_id)
+        markdown = self._filing_bundle_markdown(payload)
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("manifest.json", json.dumps(_jsonable(payload), default=str, indent=2))
+            archive.writestr("filing-bundle-summary.md", markdown)
+            archive.writestr("exhibit-list.json", json.dumps(_jsonable(payload.get("exhibit_list") or []), default=str, indent=2))
+            archive.writestr("citation-audit.json", json.dumps(_jsonable(payload.get("citation_audit") or {}), default=str, indent=2))
+            archive.writestr("readiness.json", json.dumps(_jsonable(payload.get("readiness") or {}), default=str, indent=2))
+            for slug, rows in (payload.get("matrices") or {}).items():
+                archive.writestr(f"matrices/{slug}.json", json.dumps(_jsonable(rows), default=str, indent=2))
+            for draft in payload.get("drafts") or []:
+                draft_id = str(draft.get("_id") or draft.get("draft_id") or "draft")
+                safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "-", draft_id).strip("-") or "draft"
+                archive.writestr(f"drafts/{safe_id}/draft.json", json.dumps(_jsonable(draft), default=str, indent=2))
+                latest = draft.get("latest_version") or {}
+                if latest.get("full_markdown"):
+                    archive.writestr(f"drafts/{safe_id}/latest-version.md", str(latest.get("full_markdown") or ""))
+                if latest:
+                    archive.writestr(f"drafts/{safe_id}/latest-version.json", json.dumps(_jsonable(latest), default=str, indent=2))
+        return buffer.getvalue()
+
+    async def export_filing_bundle_docx(self, case_id: str) -> bytes:
+        payload = await self.filing_bundle_payload(case_id)
+        return ArbitrationDraftExporter.build_docx({"full_markdown": self._filing_bundle_markdown(payload)})
+
+    async def export_filing_bundle_pdf(self, case_id: str) -> bytes:
+        payload = await self.filing_bundle_payload(case_id)
+        return ArbitrationDraftExporter.build_pdf({"full_markdown": self._filing_bundle_markdown(payload)})
+
+    async def queue_filing_bundle_export(self, case_id: str, export_format: str, current_user: Any) -> Dict[str, Any]:
+        await self.get_case(case_id)
+        normalized = self._normalize_bundle_format(export_format)
+        content_type, filename = BUNDLE_EXPORT_FORMATS[normalized]
+        export = {
+            "_id": str(uuid.uuid4()),
+            "case_id": case_id,
+            "format": normalized,
+            "status": "queued",
+            "content_type": content_type,
+            "filename": filename,
+            "content_length": 0,
+            "created_by": _actor_id(current_user),
+            "created_at": datetime.utcnow(),
+            "expires_at": datetime.utcnow() + timedelta(days=7),
+        }
+        await self.db.arbitration_bundle_exports.insert_one(_jsonable(export))
+        job_id = await submit_background_job(
+            f"arbitration-filing-bundle:{normalized}",
+            self.execute_filing_bundle_export_job,
+            case_id,
+            export["_id"],
+            normalized,
+            priority=4,
+            max_retries=1,
+        )
+        updated = await self.db.arbitration_bundle_exports.find_one_and_update(
+            {"_id": export["_id"], "case_id": case_id},
+            {"$set": {"background_job_id": job_id}},
+            return_document=True,
+        )
+        return self._public_bundle_export(updated or {**export, "background_job_id": job_id})
+
+    async def execute_filing_bundle_export_job(self, case_id: str, export_id: str, export_format: str) -> Dict[str, Any]:
+        normalized = self._normalize_bundle_format(export_format)
+        await self.db.arbitration_bundle_exports.update_one(
+            {"_id": export_id, "case_id": case_id},
+            {"$set": {"status": "running", "started_at": datetime.utcnow()}},
+        )
+        try:
+            content = await self._build_filing_bundle_export_content(case_id, normalized)
+            if len(content) > MAX_INLINE_BUNDLE_EXPORT_BYTES:
+                raise RuntimeError(
+                    f"Filing bundle export is {len(content)} bytes; inline export limit is {MAX_INLINE_BUNDLE_EXPORT_BYTES} bytes"
+                )
+            content_type, filename = BUNDLE_EXPORT_FORMATS[normalized]
+            updated = await self.db.arbitration_bundle_exports.find_one_and_update(
+                {"_id": export_id, "case_id": case_id},
+                {
+                    "$set": {
+                        "status": "completed",
+                        "content": content,
+                        "content_type": content_type,
+                        "filename": filename,
+                        "content_length": len(content),
+                        "completed_at": datetime.utcnow(),
+                    }
+                },
+                return_document=True,
+            )
+            await observability_registry.record_arbitration_bundle_export(format=normalized, status="completed")
+            return self._public_bundle_export(updated or {})
+        except Exception as exc:
+            failed = await self.db.arbitration_bundle_exports.find_one_and_update(
+                {"_id": export_id, "case_id": case_id},
+                {
+                    "$set": {
+                        "status": "failed",
+                        "error": str(exc),
+                        "completed_at": datetime.utcnow(),
+                    }
+                },
+                return_document=True,
+            )
+            await observability_registry.record_arbitration_bundle_export(format=normalized, status="failed")
+            if failed:
+                return self._public_bundle_export(failed)
+            raise
+
+    async def get_filing_bundle_export(self, case_id: str, export_id: str) -> Dict[str, Any]:
+        await self.get_case(case_id)
+        export = await self.db.arbitration_bundle_exports.find_one({"_id": export_id, "case_id": case_id})
+        if not export:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Filing bundle export job not found")
+        return self._public_bundle_export(export)
+
+    async def get_filing_bundle_export_content(self, case_id: str, export_id: str) -> Dict[str, Any]:
+        export = await self.db.arbitration_bundle_exports.find_one({"_id": export_id, "case_id": case_id})
+        if not export:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Filing bundle export job not found")
+        if export.get("status") != "completed" or not export.get("content"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "Filing bundle export is not ready", "status": export.get("status")},
+            )
+        return {
+            "content": bytes(export.get("content")),
+            "content_type": export.get("content_type") or BUNDLE_EXPORT_FORMATS.get(str(export.get("format")), BUNDLE_EXPORT_FORMATS["zip"])[0],
+            "filename": export.get("filename") or BUNDLE_EXPORT_FORMATS.get(str(export.get("format")), BUNDLE_EXPORT_FORMATS["zip"])[1],
+        }
+
+    async def _build_filing_bundle_export_content(self, case_id: str, export_format: str) -> bytes:
+        if export_format == "zip":
+            return await self.export_filing_bundle_zip(case_id)
+        if export_format == "docx":
+            return await self.export_filing_bundle_docx(case_id)
+        if export_format == "pdf":
+            return await self.export_filing_bundle_pdf(case_id)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported bundle export format: {export_format}")
+
+    @staticmethod
+    def _normalize_bundle_format(export_format: str) -> str:
+        normalized = str(export_format or "").strip().lower()
+        if normalized not in BUNDLE_EXPORT_FORMATS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"message": "Unsupported filing bundle export format", "available": sorted(BUNDLE_EXPORT_FORMATS)},
+            )
+        return normalized
+
+    @staticmethod
+    def _public_bundle_export(export: Dict[str, Any]) -> Dict[str, Any]:
+        public = dict(export or {})
+        public.pop("content", None)
+        return public
+
+    async def _filing_bundle_drafts(self, case_id: str) -> List[Dict[str, Any]]:
+        cursor = self.db.arbitration_drafts.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("updated_at", -1)
+        drafts = await _collect(cursor)
+        out: List[Dict[str, Any]] = []
+        for draft in drafts:
+            latest = await self.draft_repo.latest_version(str(draft.get("_id")))
+            out.append({**draft, "latest_version": latest})
+        return out
+
+    def _filing_bundle_markdown(self, payload: Dict[str, Any]) -> str:
+        case = payload.get("case") or {}
+        readiness = payload.get("readiness") or {}
+        audit = payload.get("citation_audit") or {}
+        lines = [
+            f"# Filing Bundle - {case.get('title') or case.get('_id') or 'Arbitration Case'}",
+            "",
+            f"Generated: {payload.get('generated_at')}",
+            f"Bundle version: {payload.get('bundle_version')}",
+            "",
+            "## Case",
+            "",
+            f"- Case ID: {case.get('_id')}",
+            f"- Reference: {case.get('case_reference') or 'null'}",
+            f"- Project ID: {case.get('project_id')}",
+            f"- Contract ID: {case.get('contract_id') or 'null'}",
+            f"- Party perspective: {case.get('party_perspective') or 'null'}",
+            f"- Status: {case.get('status') or 'null'}",
+            "",
+            "## Readiness",
+            "",
+            f"- Status: {readiness.get('status')}",
+            f"- Score: {readiness.get('readiness_score')}%",
+            f"- Blockers: {len(readiness.get('blockers') or [])}",
+            "",
+            "## Citation Audit",
+            "",
+            f"- OK: {audit.get('ok')}",
+            f"- Exhibit count: {audit.get('exhibit_count')}",
+            f"- Blocking issues: {audit.get('blocking_issue_count') or 0}",
+            f"- Warning issues: {audit.get('warning_issue_count') or 0}",
+            "",
+            "## Exhibit List",
+            "",
+        ]
+        exhibits = payload.get("exhibit_list") or []
+        if exhibits:
+            for row in exhibits:
+                lines.append(f"- {row.get('exhibit_id')}: {row.get('title') or row.get('document_type') or row.get('source_id')} ({row.get('source_id') or 'no source id'})")
+        else:
+            lines.append("- No exhibits assigned.")
+        lines.extend(["", "## Matrix Counts", ""])
+        for slug, count in sorted((payload.get("matrix_counts") or {}).items()):
+            approved = (payload.get("approved_counts") or {}).get(slug, 0)
+            lines.append(f"- {slug}: {approved}/{count} approved")
+        lines.extend(["", "## Matrices", ""])
+        for slug, rows in (payload.get("matrices") or {}).items():
+            lines.extend([f"### {slug}", ""])
+            if not rows:
+                lines.append("- No rows.")
+                lines.append("")
+                continue
+            for row in rows[:50]:
+                label = (
+                    row.get("title")
+                    or row.get("claim_head")
+                    or row.get("issue")
+                    or row.get("topic")
+                    or row.get("event")
+                    or row.get("calculation_id")
+                    or row.get("notice_ref")
+                    or row.get("_id")
+                )
+                status_text = row.get("review_status") or row.get("approval_status") or row.get("readiness_status") or "unmarked"
+                lines.append(f"- {label} [{status_text}]")
+            lines.append("")
+        lines.extend(["## Drafts", ""])
+        drafts = payload.get("drafts") or []
+        if drafts:
+            for draft in drafts:
+                latest = draft.get("latest_version") or {}
+                lines.append(
+                    f"- {draft.get('title') or draft.get('_id')} ({draft.get('draft_type') or 'draft'}), "
+                    f"version {latest.get('version') or 'none'}, status {draft.get('status') or 'unknown'}"
+                )
+        else:
+            lines.append("- No drafts linked to this case.")
+        lines.extend(["", "## Audit Issues", ""])
+        issues = audit.get("issues") or []
+        if issues:
+            for issue in issues:
+                lines.append(f"- {issue.get('severity') or 'issue'}: {issue.get('message')}")
+        else:
+            lines.append("- No citation audit issues.")
+        return "\n".join(lines).strip() + "\n"
+
+    async def _assign_exhibit_if_needed(self, case_id: str, matrix_slug: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        if matrix_slug != "document-index":
+            return row
+        prefix = str(row.get("exhibit_prefix") or "C").strip().upper()
+        if row.get("exhibit_id") and row.get("exhibit_number"):
+            return row
+        if not row.get("exhibit_number"):
+            existing = await _collect(self.db.arbitration_document_index.find({"case_id": case_id, "exhibit_prefix": prefix}))
+            used = [int(item.get("exhibit_number") or 0) for item in existing if str(item.get("exhibit_number") or "").isdigit()]
+            row["exhibit_number"] = (max(used) if used else 0) + 1
+        row["exhibit_prefix"] = prefix
+        row["exhibit_id"] = f"{prefix}-{row['exhibit_number']}"
+        return row
+
+    async def _assign_and_update_exhibit(self, case_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        updated = await self._assign_exhibit_if_needed(case_id, "document-index", row)
+        await self.db.arbitration_document_index.update_one(
+            {"_id": updated["_id"], "case_id": case_id},
+            {"$set": {"exhibit_prefix": updated.get("exhibit_prefix"), "exhibit_number": updated.get("exhibit_number"), "exhibit_id": updated.get("exhibit_id")}},
+        )
+        return updated
+
+    @staticmethod
+    def _review_roles(values: Any) -> List[str]:
+        if values in (None, ""):
+            return []
+        if not isinstance(values, list):
+            values = [values]
+        out: List[str] = []
+        for value in values:
+            role = str(getattr(value, "value", value) or "").strip().lower()
+            if role and role not in out:
+                out.append(role)
+        return out
+
+    @staticmethod
+    def _default_review_roles(matrix_slug: str) -> List[str]:
+        defaults = {
+            "document-index": ["contracts"],
+            "chronology-matrix": ["delay"],
+            "clause-matrix": ["legal", "contracts"],
+            "issue-matrix": ["legal"],
+            "claim-matrix": ["legal", "quantum"],
+            "defence-matrix": ["legal"],
+            "counterclaim-matrix": ["legal", "quantum"],
+            "rejoinder-matrix": ["legal"],
+            "quantum-annexures": ["quantum"],
+            "notice-compliance": ["legal", "contracts"],
+        }
+        return list(defaults.get(matrix_slug, ["reviewer"]))
+
+    @staticmethod
+    def _mark_assignments(assignments: List[Dict[str, Any]], role: str, status_value: str, at: datetime) -> List[Dict[str, Any]]:
+        updated: List[Dict[str, Any]] = []
+        for assignment in assignments:
+            item = dict(assignment)
+            if str(item.get("reviewer_role") or "").lower() == role and item.get("status") in {None, "assigned", "in_review"}:
+                item["status"] = status_value
+                item["completed_at"] = at
+            updated.append(item)
+        return updated
+
+    @staticmethod
+    def _review_blocks_readiness(row: Dict[str, Any]) -> bool:
+        review_status = str(row.get("review_status") or "").lower()
+        if review_status in {"assigned", "under_review", "partially_approved", "changes_requested", "rejected"}:
+            return True
+        required = {str(role).lower() for role in row.get("review_required_roles") or [] if role}
+        completed = {str(role).lower() for role in row.get("review_completed_roles") or [] if role}
+        return bool(required and not required.issubset(completed))
+
+    def _compute_readiness_checks(
+        self,
+        case: Dict[str, Any],
+        rows: Dict[str, List[Dict[str, Any]]],
+        *,
+        draft_id: Optional[str] = None,
+        draft_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        checks: List[Dict[str, Any]] = []
+
+        def add(check_key: str, check_group: str, check_status: ReadinessCheckStatus, message: str, row_id: Optional[str] = None) -> None:
+            checks.append(
+                ArbitrationReadinessCheck(
+                    case_id=str(case.get("_id")),
+                    draft_id=draft_id,
+                    check_key=check_key,
+                    check_group=check_group,
+                    status=check_status,
+                    message=message,
+                    linked_matrix_row_id=row_id,
+                    updated_at=datetime.utcnow(),
+                ).model_dump(by_alias=True)
+            )
+
+        document_rows = rows.get("document-index") or []
+        usable_documents = [
+            row
+            for row in document_rows
+            if row.get("source_id") and row.get("exhibit_id") and _is_ready_row(row)
+        ]
+        add(
+            "document_index_verified",
+            "documents",
+            ReadinessCheckStatus.READY if usable_documents else ReadinessCheckStatus.NEEDS_EVIDENCE,
+            "At least one verified and approved exhibit-backed document is available." if usable_documents else "Add at least one verified document index row with source link, exhibit id, and approval.",
+        )
+        missing_exhibits = [row for row in document_rows if not row.get("exhibit_id")]
+        if missing_exhibits:
+            add(
+                "document_index_exhibit_numbers",
+                "documents",
+                ReadinessCheckStatus.NEEDS_USER_CONFIRMATION,
+                f"{len(missing_exhibits)} document index row(s) need exhibit numbering before filing.",
+                str(missing_exhibits[0].get("_id")) if missing_exhibits else None,
+            )
+
+        clause_rows = rows.get("clause-matrix") or []
+        usable_clauses = [
+            row for row in clause_rows if (row.get("clause_number") or row.get("clause_text_excerpt")) and _is_ready_row(row)
+        ]
+        add(
+            "clause_support",
+            "clauses",
+            ReadinessCheckStatus.READY if usable_clauses else ReadinessCheckStatus.NEEDS_CLAUSE_SUPPORT,
+            "Approved clause matrix support is available." if usable_clauses else "Approve at least one clause matrix row with clause number or clause excerpt.",
+        )
+
+        issue_rows = rows.get("issue-matrix") or []
+        usable_issues = [row for row in issue_rows if row.get("issue") and _is_ready_row(row, approval_key="status")]
+        add(
+            "issue_framing",
+            "issues",
+            ReadinessCheckStatus.READY if usable_issues else ReadinessCheckStatus.BLOCKED,
+            "Issue matrix contains approved tribunal-facing issues." if usable_issues else "Create and approve issue matrix rows before drafting.",
+        )
+
+        pending_review_rows = [
+            row
+            for matrix_rows in rows.values()
+            for row in matrix_rows
+            if self._review_blocks_readiness(row)
+        ]
+        if pending_review_rows:
+            first = pending_review_rows[0]
+            add(
+                "matrix_human_review",
+                "human_review",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                f"{len(pending_review_rows)} matrix row(s) are pending, rejected, or incomplete in human review.",
+                str(first.get("_id")) if first else None,
+            )
+
+        claim_rows = rows.get("claim-matrix") or []
+        defence_rows = rows.get("defence-matrix") or []
+        counterclaim_rows = rows.get("counterclaim-matrix") or []
+        rejoinder_rows = rows.get("rejoinder-matrix") or []
+        normalized_type = str(draft_type or "").lower()
+        if not normalized_type:
+            perspective = str(case.get("party_perspective") or "").lower()
+            normalized_type = "statement_of_defence" if perspective == "respondent" else "statement_of_claim"
+        if normalized_type == "statement_of_claim":
+            self._claim_readiness(add, claim_rows)
+        elif normalized_type == "statement_of_defence":
+            self._defence_readiness(add, defence_rows)
+        elif normalized_type == "counterclaim":
+            self._counterclaim_readiness(add, counterclaim_rows)
+        elif normalized_type == "rejoinder":
+            self._rejoinder_readiness(add, rejoinder_rows)
+
+        quantum_rows = rows.get("quantum-annexures") or []
+        amount_claim_rows = [row for row in claim_rows + counterclaim_rows if row.get("amount_or_days") or row.get("amount")]
+        if amount_claim_rows:
+            ready_quantum = [row for row in quantum_rows if row.get("amount") and _is_ready_row(row)]
+            add(
+                "quantum_support",
+                "quantum",
+                ReadinessCheckStatus.READY if ready_quantum else ReadinessCheckStatus.NEEDS_QUANTUM_SUPPORT,
+                "Approved quantum annexure is available for monetary/time claims." if ready_quantum else "Claims with amount/days require an approved quantum annexure.",
+                str(amount_claim_rows[0].get("_id")) if amount_claim_rows else None,
+            )
+
+        notice_rows = rows.get("notice-compliance") or []
+        risky_notice_rows = [row for row in notice_rows if str(row.get("compliance_status") or "").lower() in {"non_compliant", "late", "missing"}]
+        if risky_notice_rows:
+            add(
+                "notice_compliance_risk",
+                "procedure",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                "Notice compliance table contains missing, late, or non-compliant entries requiring legal review.",
+                str(risky_notice_rows[0].get("_id")),
+            )
+
+        return checks
+
+    def _claim_readiness(self, add: Any, claim_rows: List[Dict[str, Any]]) -> None:
+        ready_claims = [row for row in claim_rows if (row.get("claim_head") or row.get("facts")) and _is_ready_row(row)]
+        add(
+            "claim_matrix",
+            "claims",
+            ReadinessCheckStatus.READY if ready_claims else ReadinessCheckStatus.BLOCKED,
+            "Claim matrix has approved entitlement, facts, causation, and relief rows." if ready_claims else "Statement of Claim requires approved claim matrix rows.",
+        )
+
+    def _defence_readiness(self, add: Any, defence_rows: List[Dict[str, Any]]) -> None:
+        ready_defences = [row for row in defence_rows if (row.get("admission_denial") or row.get("defence")) and _is_ready_row(row)]
+        add(
+            "defence_matrix",
+            "defence",
+            ReadinessCheckStatus.READY if ready_defences else ReadinessCheckStatus.BLOCKED,
+            "Defence matrix has approved para-wise admissions/denials and positive case rows." if ready_defences else "Statement of Defence requires approved defence matrix rows.",
+        )
+
+    def _counterclaim_readiness(self, add: Any, counterclaim_rows: List[Dict[str, Any]]) -> None:
+        ready_counterclaims = [row for row in counterclaim_rows if (row.get("breach") or row.get("facts")) and _is_ready_row(row)]
+        add(
+            "counterclaim_matrix",
+            "counterclaim",
+            ReadinessCheckStatus.READY if ready_counterclaims else ReadinessCheckStatus.BLOCKED,
+            "Counterclaim matrix has approved jurisdiction, limitation, breach, causation, and relief rows." if ready_counterclaims else "Counterclaim requires approved counterclaim matrix rows.",
+        )
+
+    def _rejoinder_readiness(self, add: Any, rejoinder_rows: List[Dict[str, Any]]) -> None:
+        ready_replies = [row for row in rejoinder_rows if (row.get("claimant_reply") or row.get("reply_to_counterclaim")) and _is_ready_row(row)]
+        add(
+            "rejoinder_matrix",
+            "rejoinder",
+            ReadinessCheckStatus.READY if ready_replies else ReadinessCheckStatus.BLOCKED,
+            "Rejoinder matrix has approved paragraph-wise replies." if ready_replies else "Rejoinder requires approved reply matrix rows.",
+        )
+        new_matter = [row for row in rejoinder_rows if _is_positive(row.get("new_matter")) and not _is_positive(row.get("tribunal_permission_required"))]
+        if new_matter:
+            add(
+                "rejoinder_new_matter",
+                "rejoinder",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                "Rejoinder row introduces new matter without tribunal permission/legal review flag.",
+                str(new_matter[0].get("_id")),
+            )
+
+    async def _persist_readiness(
+        self,
+        case_id: str,
+        draft_id: Optional[str],
+        checks: List[Dict[str, Any]],
+        score: int,
+        blockers: List[Dict[str, Any]],
+    ) -> None:
+        query: Dict[str, Any] = {"case_id": case_id}
+        if draft_id:
+            query["draft_id"] = draft_id
+        else:
+            query["draft_id"] = None
+        await self.db.arbitration_readiness_checks.delete_many(query)
+        if checks:
+            for check in checks:
+                check["draft_id"] = draft_id
+            await self.db.arbitration_readiness_checks.insert_many(_jsonable(checks))
+        await self.db.arbitration_cases.update_one(
+            {"_id": case_id},
+            {
+                "$set": {
+                    "readiness_score": score,
+                    "readiness_blockers": _jsonable(blockers),
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+
+    def _references_from_case_rows(
+        self,
+        draft_id: str,
+        document_rows: List[Dict[str, Any]],
+        clause_rows: List[Dict[str, Any]],
+        current_user: Any,
+    ) -> List[Dict[str, Any]]:
+        references: List[Dict[str, Any]] = []
+        for row in document_rows:
+            references.append(
+                ArbitrationSelectedReference(
+                    draft_id=draft_id,
+                    source_type=row.get("source_type") or "document",
+                    source_id=str(row.get("source_id")),
+                    label=row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
+                    citation=row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
+                    snippet=row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    page_numbers=row.get("page_numbers") or [],
+                    letter_no=row.get("letter_no"),
+                    event_date=row.get("document_date") if isinstance(row.get("document_date"), datetime) else None,
+                    allowed_use=row.get("allowed_use") or "fact",
+                    selected_by=_actor_id(current_user),
+                    metadata={
+                        "verification_status": row.get("verification_status"),
+                        "exhibit_id": row.get("exhibit_id"),
+                        "matrix_row_id": row.get("_id"),
+                    },
+                ).model_dump(by_alias=True)
+            )
+        for row in clause_rows:
+            if not row.get("clause_number") and not row.get("clause_text_excerpt"):
+                continue
+            references.append(
+                ArbitrationSelectedReference(
+                    draft_id=draft_id,
+                    source_type="clause",
+                    source_id=str(row.get("clause_source_id") or row.get("_id")),
+                    label=row.get("topic") or row.get("clause_number") or "Clause matrix row",
+                    citation=row.get("clause_number") or row.get("topic"),
+                    snippet=row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    clause_number=row.get("clause_number"),
+                    allowed_use="clause",
+                    selected_by=_actor_id(current_user),
+                    metadata={"matrix_row_id": row.get("_id"), "risk": row.get("risk")},
+                ).model_dump(by_alias=True)
+            )
+        return references
+
+    def _claim_heads_from_case_rows(self, draft_id: str, claim_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        heads: List[Dict[str, Any]] = []
+        for row in claim_rows:
+            description = row.get("claim_head") or row.get("facts") or row.get("relief")
+            if not description:
+                continue
+            amount = row.get("amount") if row.get("amount") is not None else None
+            heads.append(
+                ArbitrationClaimHead(
+                    draft_id=draft_id,
+                    description=str(description),
+                    amount=amount,
+                    currency=row.get("currency"),
+                    calculation_basis=row.get("causation") or row.get("calculation_id"),
+                    supporting_source_ids=[str(item) for item in row.get("evidence_ids") or []],
+                    status="supported" if _is_ready_row(row) else "evidence_required",
+                ).model_dump(by_alias=True)
+            )
+        return heads
+
+    async def _touch_case(self, case_id: str, current_user: Any) -> None:
+        await self.db.arbitration_cases.update_one(
+            {"_id": case_id},
+            {"$set": {"updated_by": _actor_id(current_user), "updated_at": datetime.utcnow()}},
+        )
+
+
+__all__ = ["ArbitrationCaseWorkspaceService", "MATRIX_COLLECTIONS"]

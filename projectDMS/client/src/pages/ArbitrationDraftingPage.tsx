@@ -319,6 +319,11 @@ const ArbitrationDraftingPage: React.FC = () => {
             <Button variant="outline" asChild>
               <Link to="/arbitration/drafts">Saved Drafts</Link>
             </Button>
+            {draft?.case_id && (
+              <Button variant="outline" asChild>
+                <Link to={`/arbitration/cases/${draft.case_id}`}>Case Workspace</Link>
+              </Button>
+            )}
             <Button onClick={generate} disabled={generating || !draft}>
               {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
               Generate
@@ -589,6 +594,9 @@ const ArbitrationDraftingPage: React.FC = () => {
           <p className="text-sm text-muted-foreground">Create, continue, generate, and export arbitration pleadings.</p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <Button variant="outline" asChild>
+            <Link to="/arbitration/cases">Case Workspaces</Link>
+          </Button>
           <Button asChild>
             <Link to="/arbitration/claim">New SoC</Link>
           </Button>

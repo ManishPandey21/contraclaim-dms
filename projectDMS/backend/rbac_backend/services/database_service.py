@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from bson.objectid import ObjectId
 
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..models.document_metadata import extracted_metadata_updates
 try:
     from .llamaindex_service import LlamaIndexVectorService
     _LLAMA_INDEX_AVAILABLE = True
@@ -252,6 +253,7 @@ class DatabaseService:
                 updates["contractual_clauses"] = parsed_metadata.contractual_clauses
             if hasattr(parsed_metadata, "key_reply_points") and parsed_metadata.key_reply_points:
                 updates["key_reply_points"] = parsed_metadata.key_reply_points
+            updates.update(extracted_metadata_updates(parsed_metadata))
 
             # Parse date if available
             if hasattr(parsed_metadata, "date") and parsed_metadata.date:
@@ -378,6 +380,31 @@ class DatabaseService:
                     "embedding_version": getattr(self.config, "embedding_version", "v1"),
                     "chunking_version": getattr(self.config, "chunking_version", "v1"),
                 }
+                for field in (
+                    "subject",
+                    "summary",
+                    "keywords",
+                    "additional_keywords",
+                    "contractual_clauses",
+                    "key_reply_points",
+                    "asset_type",
+                    "location",
+                    "specific_area",
+                    "chainage_from",
+                    "chainage_to",
+                    "work_type",
+                    "issue_nature",
+                    "claim_category",
+                    "alleged_responsibility",
+                    "priority",
+                    "linked_event_suggested",
+                    "reference_chain",
+                    "extracted_tags",
+                    "extracted_subTags",
+                ):
+                    value = doc.get(field)
+                    if value not in (None, "", [], {}):
+                        metadata[field] = value
                 metadata["checksum_sha256"] = checksum
                 payloads.append(
                     {

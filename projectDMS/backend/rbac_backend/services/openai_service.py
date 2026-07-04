@@ -105,7 +105,7 @@ class OpenAIService:
                         ]
                     }
                 ],
-                max_tokens=4000,
+                max_tokens=max(getattr(self.config, "max_output_tokens", 4096), 4096),
                 temperature=0.1
             )
             
@@ -193,6 +193,41 @@ class OpenAIService:
     
     def _get_extraction_prompt(self) -> str:
         """Get extraction prompt for document processing"""
+        return self._expanded_extraction_prompt()
+
+    def _expanded_extraction_prompt(self) -> str:
+        """Expanded contract letter metadata extraction prompt."""
+        return (
+            "You are a Contract expert extracting structured metadata from letters. "
+            "Extract the following fields from the contract letter (attached PDF) and return them in this exact format. "
+            "Use 'null' for any field that is absent. Dates must be formatted as DD-MM-YYYY.\n\n"
+            "1) Date: [extracted date or 'null' formatted as DD-MM-YYYY]\n"
+            "2) Letter No.: [extracted letter number or 'null']\n"
+            "3) From (Company): [sender company or 'null']\n"
+            "4) To (Company): [recipient company or 'null']\n"
+            "5) Subject: [document subject or 'null']\n"
+            "6) References: [list each reference letter no./date on a new line with - prefix or 'null']\n"
+            "7) Asset Type: [Station/Tunnel/Ramp/Shaft/Road/Flyover/Bridge/Vehicular Underpass/Pedestrian Subway/Depot/Viaduct/Track/Utility/Restoration/Rework/General Contractual/Other or 'null']\n"
+            "8) Location: [named location/station/area or 'null']\n"
+            "9) Specific Area: [platform/concourse/entry/shaft/undercroft/chainage stretch/road section/etc. or 'null']\n"
+            "11) Chainage From: [start chainage or 'null']\n"
+            "12) Chainage To: [end chainage or 'null']\n"
+            "13) Work Type: [D-wall/excavation/tunnelling/road restoration/seepage treatment/utility diversion/finishing/testing/payment/variation/etc. or 'null']\n"
+            "14) Issue Nature: [Delay/EOT/Hindrance/Land Handover/Design Delay/Drawing Approval/Utility Diversion/Access Constraint/Traffic Diversion/Variation/Quantity Variation/Negative Variation/Payment/Price Variation/IPC or RA Bill/Final Bill/Deduction/LD/Risk and Cost/Quality/NCR/Safety/Seepage/Defect/Restoration/Rework/Testing and Commissioning/CMRS Compliance/Insurance/Bank Guarantee/Subcontractor Payment/Contractual Notice/Conciliation/Arbitration/Other or 'null']\n"
+            "15) Claim Category: [EOT Claim/Prolongation Cost/Idle Machinery/Idle Manpower/Escalation or Price Variation/Unpaid Certified Amount/Variation Claim/Additional Work Claim/Rework Claim/Loss Due to Delay/LD Defence/LD Recovery/Risk and Cost Recovery/Set-off/Counterclaim/Interest Claim/Cost Claim/Not claim related or 'null']\n"
+            "16) Alleged Responsibility: [Employer/Contractor/Engineer/Authority/Utility Agency/Subcontractor/Concurrent/Not clear or 'null']\n"
+            "17) Priority: [Critical/High/Normal/Low or 'null']\n"
+            "18) Key Words: [comma-separated list of key contractual words mentioned, tags, topic, claim type, location, work type, and issue nature]\n"
+            "19) Linked Event Suggested: [short event title useful for chronology/claim matrix or 'null']\n"
+            "20) Reference Chain: [whether this letter is original notice/reply/reminder/response to previous letter/follow-up or 'null']\n"
+            "21) Key Words: [comma-separated additional tags useful for search/RAG, including location tags, issue tags, claim tags, clause tags, delay event tags, payment tags, authority tags, and document topic tags. Use concise tags only.]\n"
+            "22) Summary: [Write a 4-6 line contractual/legal summary/fact of the matter suitable for vector search/RAG. Mention issue, location, responsibility alleged, contractual implication, and required action where available.]\n"
+            "23) Contractual Clauses: [comma-separated list of clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon; write 'null' if absent]\n"
+            "24) Key Reply Points - Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response - one point per line with a - prefix, or 'null']\n"
+            "25) Full Content: [cleaned text of the full letter]\n"
+            "26) tags: [select from table tags or null]\n"
+            "27) subTags: [select from table subtags based on tags or null]\n"
+        )
         return (
             "You are a Contract expert extracting structured metadata from letters. "
             "Extract the following fields from the attached PDF and return them in this exact format:\n\n"

@@ -349,6 +349,79 @@ async def ensure_indexes(db):
         [("draft_id", 1), ("created_at", -1)],
         background=True,
     )
+    await db.arbitration_drafts.create_index(
+        [("case_id", 1), ("updated_at", -1)],
+        background=True,
+    )
+    await db.arbitration_cases.create_index(
+        [("organization_id", 1), ("project_id", 1), ("contract_id", 1), ("status", 1)],
+        background=True,
+    )
+    await db.arbitration_cases.create_index(
+        [("organization_id", 1), ("project_id", 1), ("updated_at", -1)],
+        background=True,
+    )
+    await db.arbitration_cases.create_index(
+        [("status", 1), ("readiness_score", 1), ("updated_at", -1)],
+        background=True,
+    )
+    for _matrix_collection in [
+        "arbitration_document_index",
+        "arbitration_chronology_matrix",
+        "arbitration_clause_matrix",
+        "arbitration_issue_matrix",
+        "arbitration_claim_matrix",
+        "arbitration_defence_matrix",
+        "arbitration_counterclaim_matrix",
+        "arbitration_rejoinder_matrix",
+        "arbitration_quantum_annexures",
+        "arbitration_notice_compliance",
+    ]:
+        await db[_matrix_collection].create_index(
+            [("case_id", 1), ("draft_id", 1), ("created_at", 1)],
+            background=True,
+        )
+        await db[_matrix_collection].create_index(
+            [("organization_id", 1), ("project_id", 1), ("case_id", 1)],
+            background=True,
+        )
+        await db[_matrix_collection].create_index(
+            [("case_id", 1), ("readiness_status", 1), ("approval_status", 1), ("updated_at", -1)],
+            background=True,
+        )
+    await db.arbitration_document_index.create_index(
+        [("case_id", 1), ("exhibit_id", 1)],
+        unique=True,
+        partialFilterExpression={"exhibit_id": {"$exists": True}},
+        background=True,
+    )
+    await db.arbitration_readiness_checks.create_index(
+        [("case_id", 1), ("draft_id", 1), ("check_key", 1)],
+        background=True,
+    )
+    await db.arbitration_readiness_checks.create_index(
+        [("case_id", 1), ("status", 1), ("updated_at", -1)],
+        background=True,
+    )
+    await db.arbitration_agent_runs.create_index(
+        [("case_id", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.arbitration_agent_runs.create_index(
+        [("case_id", 1), ("status", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.arbitration_agent_runs.create_index("background_job_id", background=True)
+    await db.arbitration_bundle_exports.create_index(
+        [("case_id", 1), ("status", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.arbitration_bundle_exports.create_index(
+        [("case_id", 1), ("format", 1), ("created_at", -1)],
+        background=True,
+    )
+    await db.arbitration_bundle_exports.create_index("background_job_id", background=True)
+    await db.arbitration_bundle_exports.create_index("expires_at", background=True)
 
     # Matter chronology builder
     await db.matter_chronologies.create_index(

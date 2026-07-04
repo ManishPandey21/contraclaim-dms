@@ -29,6 +29,18 @@ async def test_observability_registry_renders_prometheus_metrics():
         missing_artifacts=1,
         unhealthy_artifacts=2,
     )
+    await registry.record_arbitration_agent_run(
+        agent_type="orchestrator",
+        status="completed",
+        missing_evidence_count=2,
+    )
+    await registry.record_arbitration_bundle_export(format="zip", status="completed")
+    await registry.record_arbitration_readiness(
+        case_id="case-1",
+        status="blocked",
+        score=67,
+        missing_evidence_count=1,
+    )
 
     rendered = registry.render_prometheus()
 
@@ -38,6 +50,11 @@ async def test_observability_registry_renders_prometheus_metrics():
     assert "contractdms_document_audit_events_total" in rendered
     assert "contractdms_backup_health 0" in rendered
     assert "contractdms_backup_latest_age_seconds 108000.000" in rendered
+    assert "contractdms_arbitration_agent_runs_total" in rendered
+    assert 'agent_type="orchestrator"' in rendered
+    assert "contractdms_arbitration_bundle_exports_total" in rendered
+    assert "contractdms_arbitration_readiness_score" in rendered
+    assert "contractdms_arbitration_missing_evidence" in rendered
 
 
 def test_observability_snapshot_counts_recorded_events():

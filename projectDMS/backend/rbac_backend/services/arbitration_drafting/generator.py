@@ -70,7 +70,13 @@ def _evidence_note(rows: List[Dict[str, Any]], fallback: str = "[Evidence requir
 
 
 def _facts(context: Dict[str, Any]) -> List[str]:
-    rows = context.get("source_ledger") or []
+    matrix = context.get("matrix_context") or {}
+    rows = [
+        *(matrix.get("chronology") or []),
+        *(matrix.get("documents") or []),
+        *(matrix.get("issues") or []),
+        *(context.get("source_ledger") or []),
+    ]
     facts = []
     for row in rows[:8]:
         snippet = row.get("snippet")
@@ -79,6 +85,29 @@ def _facts(context: Dict[str, Any]) -> List[str]:
     if context.get("draft", {}).get("manual_facts"):
         facts.insert(0, f"{context['draft']['manual_facts']} [User-provided fact; verify before filing]")
     return facts or ["[Evidence required]"]
+
+
+def _matrix_rows(context: Dict[str, Any], key: str) -> List[Dict[str, Any]]:
+    return list((context.get("matrix_context") or {}).get(key) or [])
+
+
+def _matrix_counts(context: Dict[str, Any]) -> Dict[str, int]:
+    return {key: len(value or []) for key, value in (context.get("matrix_context") or {}).items()}
+
+
+def _row_excerpt(row: Dict[str, Any]) -> str:
+    parts = [
+        str(row.get("label") or "").strip(),
+        str(row.get("snippet") or "").strip(),
+    ]
+    text = " - ".join(part for part in parts if part)
+    return text or str(row.get("citation") or row.get("source_id") or "Matrix source")
+
+
+def _numbered_sources(rows: List[Dict[str, Any]], fallback: str = "[Evidence required]") -> str:
+    if not rows:
+        return fallback
+    return "\n".join(f"{idx}. {_row_excerpt(row)} {_source_label(row)}" for idx, row in enumerate(rows, start=1))
 
 
 class ArbitrationDraftGenerator:
@@ -122,6 +151,7 @@ class ArbitrationDraftGenerator:
                 "source_policy": SOURCE_POLICY,
                 "source_count": len(source_ledger),
                 "source_hashes": [row.get("source_hash") for row in source_ledger if row.get("source_hash")],
+                "matrix_context_counts": _matrix_counts(context),
                 "missing_evidence_count": len(context.get("missing_evidence") or []),
                 "section_key": section_key,
                 "generation_instruction_included": bool(additional_instruction),
@@ -149,18 +179,18 @@ class ArbitrationDraftGenerator:
             {
                 "key": "jurisdiction",
                 "heading": "Jurisdiction and Arbitration Agreement",
-                "body": draft.get("arbitration_clause") or "[Evidence required]",
+                "body": self._jurisdiction_text(context),
             },
             {"key": "factual_background", "heading": "Factual Background", "body": self._numbered(facts)},
             {
                 "key": "legal_claims",
                 "heading": "Legal Claims / Causes of Action",
-                "body": self._claim_heads(claim_heads, evidence),
+                "body": self._claim_matrix_text(context, claim_heads, evidence),
             },
             {
                 "key": "quantum",
                 "heading": "Damages, Causation, Mitigation and Quantum",
-                "body": self._quantum(draft, claim_heads, evidence),
+                "body": self._quantum(context, draft, claim_heads, evidence),
             },
             {"key": "relief", "heading": "Prayer for Relief", "body": draft.get("relief_sought") or "[Evidence required]"},
             {"key": "annexures", "heading": "List of Relied-Upon Documents / Annexures", "body": self._annexure_text(evidence)},
@@ -181,12 +211,14 @@ class ArbitrationDraftGenerator:
             {
                 "key": "paragraph_response",
                 "heading": "Paragraph-by-Paragraph Response to SoC",
-                "body": self._paragraph_responses(responses, evidence, default="Statement of Claim paragraphs must be imported."),
+                "body": self._paragraph_responses(responses, evidence, default="Statement of Claim paragraphs must be imported.")
+                if responses
+                else self._defence_matrix_text(context, evidence),
             },
             {"key": "respondent_facts", "heading": "Respondent's Factual Background", "body": self._numbered(_facts(context))},
-            {"key": "legal_defences", "heading": "Legal Defences on Merits", "body": self._defence_text(evidence)},
-            {"key": "quantum_challenge", "heading": "Quantum Challenge", "body": self._quantum_challenge(draft, evidence)},
-            {"key": "counterclaim", "heading": "Counterclaim, if applicable", "body": "[Evidence required]"},
+            {"key": "legal_defences", "heading": "Legal Defences on Merits", "body": self._defence_matrix_text(context, evidence)},
+            {"key": "quantum_challenge", "heading": "Quantum Challenge", "body": self._quantum_challenge(context, draft, evidence)},
+            {"key": "counterclaim", "heading": "Counterclaim, if applicable", "body": self._counterclaim_matrix_text(context)},
             {"key": "relief", "heading": "Prayer for Relief", "body": draft.get("relief_sought") or "[Evidence required]"},
             {"key": "annexures", "heading": "List of Relied-Upon Documents / Annexures", "body": self._annexure_text(evidence)},
         ]
@@ -210,12 +242,14 @@ class ArbitrationDraftGenerator:
             {
                 "key": "paragraph_replies",
                 "heading": "Paragraph-by-Paragraph Reply to the Statement of Defence",
-                "body": self._paragraph_responses(responses, evidence, default="Statement of Defence paragraphs must be imported."),
+                "body": self._paragraph_responses(responses, evidence, default="Statement of Defence paragraphs must be imported.")
+                if responses
+                else self._rejoinder_matrix_text(context),
             },
             {"key": "clarified_facts", "heading": "Claimant's Clarified Factual Position", "body": self._numbered(_facts(context))},
-            {"key": "legal_defences_reply", "heading": "Reply to Legal Defences", "body": self._defence_text(evidence)},
-            {"key": "quantum_reply", "heading": "Reply to Quantum Objections", "body": self._quantum_challenge(draft, evidence)},
-            {"key": "counterclaim_reply", "heading": "Reply to Counterclaim, if any", "body": "[Evidence required]"},
+            {"key": "legal_defences_reply", "heading": "Reply to Legal Defences", "body": self._rejoinder_matrix_text(context)},
+            {"key": "quantum_reply", "heading": "Reply to Quantum Objections", "body": self._quantum_challenge(context, draft, evidence)},
+            {"key": "counterclaim_reply", "heading": "Reply to Counterclaim, if any", "body": self._counterclaim_matrix_text(context)},
             {"key": "reaffirmed_relief", "heading": "Reaffirmation of Reliefs", "body": draft.get("relief_sought") or "[Evidence required]"},
             {"key": "annexures", "heading": "Updated List of Documents / Annexures", "body": self._annexure_text(evidence)},
         ]
@@ -235,6 +269,66 @@ class ArbitrationDraftGenerator:
         parties = (draft.get("case_details") or {}).get("parties")
         return str(parties) if parties else "[Evidence required]"
 
+    def _jurisdiction_text(self, context: Dict[str, Any]) -> str:
+        draft = context["draft"]
+        clause_rows = _matrix_rows(context, "clauses")
+        if draft.get("arbitration_clause"):
+            cited_clause = _evidence_note([row for row in clause_rows if "arbitration" in _row_excerpt(row).lower()], "")
+            suffix = f" {cited_clause}" if cited_clause else ""
+            return f"{draft.get('arbitration_clause')}{suffix}"
+        arbitration_rows = [row for row in clause_rows if "arbitration" in _row_excerpt(row).lower() or "dispute" in _row_excerpt(row).lower()]
+        if arbitration_rows:
+            return _numbered_sources(arbitration_rows)
+        return "[Evidence required]"
+
+    def _claim_matrix_text(
+        self,
+        context: Dict[str, Any],
+        claim_heads: List[Dict[str, Any]],
+        evidence: List[Dict[str, Any]],
+    ) -> str:
+        claim_rows = _matrix_rows(context, "claims")
+        if not claim_rows:
+            return self._claim_heads(claim_heads, evidence)
+        lines: List[str] = []
+        for idx, row in enumerate(claim_rows, start=1):
+            metadata = row.get("metadata") or {}
+            support = _source_label(row)
+            parts = [f"{idx}. {row.get('label') or 'Claim'}"]
+            if row.get("snippet"):
+                parts.append(str(row.get("snippet")))
+            if row.get("clause_number"):
+                parts.append(f"Clause support: {row.get('clause_number')}")
+            if metadata.get("amount_or_days"):
+                parts.append(f"Amount/days: {metadata.get('amount_or_days')}")
+            parts.append(support)
+            lines.append(" - ".join(parts))
+        return "\n".join(lines)
+
+    def _defence_matrix_text(self, context: Dict[str, Any], evidence: List[Dict[str, Any]]) -> str:
+        defence_rows = _matrix_rows(context, "defences")
+        if defence_rows:
+            return _numbered_sources(defence_rows)
+        return self._defence_text(evidence)
+
+    def _counterclaim_matrix_text(self, context: Dict[str, Any]) -> str:
+        counterclaim_rows = _matrix_rows(context, "counterclaims")
+        return _numbered_sources(counterclaim_rows)
+
+    def _rejoinder_matrix_text(self, context: Dict[str, Any]) -> str:
+        rejoinder_rows = _matrix_rows(context, "rejoinder_replies")
+        if not rejoinder_rows:
+            return "[Evidence required] Statement of Defence paragraphs must be imported or rejoinder matrix rows must be approved."
+        lines: List[str] = []
+        for idx, row in enumerate(rejoinder_rows, start=1):
+            metadata = row.get("metadata") or {}
+            flags = []
+            if metadata.get("new_matter"):
+                flags.append("new matter/legal review")
+            suffix = f" ({', '.join(flags)})" if flags else ""
+            lines.append(f"{idx}. {_row_excerpt(row)} {_source_label(row)}{suffix}")
+        return "\n".join(lines)
+
     def _claim_heads(self, claim_heads: List[Dict[str, Any]], evidence: List[Dict[str, Any]]) -> str:
         if not claim_heads:
             return "[Evidence required]"
@@ -244,7 +338,16 @@ class ArbitrationDraftGenerator:
             lines.append(f"{idx}. {head.get('description')} - {support}")
         return "\n".join(lines)
 
-    def _quantum(self, draft: Dict[str, Any], claim_heads: List[Dict[str, Any]], evidence: List[Dict[str, Any]]) -> str:
+    def _quantum(self, context: Dict[str, Any], draft: Dict[str, Any], claim_heads: List[Dict[str, Any]], evidence: List[Dict[str, Any]]) -> str:
+        quantum_rows = _matrix_rows(context, "quantum")
+        if quantum_rows:
+            lines = ["Approved quantum/calculation annexures:"]
+            lines.extend(f"- {_row_excerpt(row)} {_source_label(row)}" for row in quantum_rows)
+            claim_rows = _matrix_rows(context, "claims")
+            if claim_rows:
+                lines.append("Linked claim matrix rows:")
+                lines.extend(f"- {_row_excerpt(row)} {_source_label(row)}" for row in claim_rows)
+            return "\n".join(lines)
         amount = draft.get("claim_amount")
         if amount is None and not claim_heads:
             return "[Evidence required]"
@@ -260,7 +363,15 @@ class ArbitrationDraftGenerator:
             f"set-off, failure to mitigate, contractual bar, and notice bar where raised. {_evidence_note(evidence)}"
         )
 
-    def _quantum_challenge(self, draft: Dict[str, Any], evidence: List[Dict[str, Any]]) -> str:
+    def _quantum_challenge(self, context: Dict[str, Any], draft: Dict[str, Any], evidence: List[Dict[str, Any]]) -> str:
+        quantum_rows = _matrix_rows(context, "quantum")
+        if quantum_rows:
+            return "\n".join(
+                [
+                    "Address causation, remoteness, mitigation, duplication, rates, and source support against these approved quantum records:",
+                    _numbered_sources(quantum_rows),
+                ]
+            )
         return (
             "Address causation, remoteness, mitigation, duplication, speculative elements, rates, and cost support. "
             f"Payment/quantum support: {_evidence_note([row for row in evidence if row.get('allowed_use') == 'quantum'])}"

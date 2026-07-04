@@ -19,6 +19,7 @@ from ..models.document import (
     EnclosureResponse,
     ReferenceCreate,
 )
+from ..models.document_metadata import extracted_metadata_updates
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
@@ -1173,6 +1174,7 @@ class DocumentService:
                         update_fields["date"] = parse_date_safely(metadata.date)
                     except Exception:
                         logger.debug("Unable to parse metadata date for %s", document_id)
+                update_fields.update(extracted_metadata_updates(metadata))
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)

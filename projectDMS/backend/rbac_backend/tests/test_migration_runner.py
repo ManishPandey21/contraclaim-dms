@@ -12,6 +12,7 @@ from rbac_backend.initial_data.seed_catalog import (
     seed_catalog_validation_issues,
 )
 from rbac_backend.migrations import MIGRATIONS, Migration, MigrationResult, MigrationRunner
+from rbac_backend.migrations.v20260705_0001_arbitration_hardening_indexes import upgrade as upgrade_arbitration_hardening
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -131,3 +132,20 @@ def test_seed_catalog_digest_is_stable_and_validates_current_seeds():
     assert record["_id"] == SEED_CATALOG_ID
     assert record["digest"] == seed_catalog_digest(payload)
     assert record["permission_count"] >= record["client_dms_permission_count"]
+
+
+@pytest.mark.asyncio
+async def test_arbitration_hardening_migration_creates_background_job_indexes():
+    db = _DB()
+
+    dry_run = await upgrade_arbitration_hardening(db, dry_run=True)
+    applied = await upgrade_arbitration_hardening(db, dry_run=False)
+
+    assert dry_run.status == "dry_run"
+    assert any(operation["collection"] == "arbitration_bundle_exports" for operation in dry_run.operations)
+    assert applied.status == "applied"
+    assert (
+        [("case_id", 1), ("status", 1), ("created_at", -1)],
+        {"background": True},
+    ) in db.arbitration_bundle_exports.indexes
+    assert ("background_job_id", {"background": True}) in db.arbitration_agent_runs.indexes

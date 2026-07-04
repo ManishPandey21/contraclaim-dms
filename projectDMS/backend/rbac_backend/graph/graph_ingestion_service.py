@@ -135,13 +135,57 @@ class GraphIngestionService:
                 props["keywords"] = metadata.keywords
             if metadata.contractual_clauses:
                 props["contractual_clauses"] = metadata.contractual_clauses
+            if metadata.key_reply_points:
+                props["key_reply_points"] = metadata.key_reply_points
+            if metadata.additional_keywords:
+                props["additional_keywords"] = metadata.additional_keywords
             if metadata.from_company:
                 props["from_company"] = metadata.from_company
             if metadata.to_company:
                 props["to_company"] = metadata.to_company
+            for field in (
+                "asset_type",
+                "location",
+                "specific_area",
+                "chainage_from",
+                "chainage_to",
+                "work_type",
+                "issue_nature",
+                "claim_category",
+                "alleged_responsibility",
+                "priority",
+                "linked_event_suggested",
+                "reference_chain",
+            ):
+                value = getattr(metadata, field, None)
+                if value:
+                    props[field] = value
+            if metadata.tags:
+                props["extracted_tags"] = metadata.tags
+            if metadata.sub_tags:
+                props["extracted_subTags"] = metadata.sub_tags
 
         if document.get("tags"):
             props["tags"] = document.get("tags")
+        for field in (
+            "asset_type",
+            "location",
+            "specific_area",
+            "chainage_from",
+            "chainage_to",
+            "work_type",
+            "issue_nature",
+            "claim_category",
+            "alleged_responsibility",
+            "priority",
+            "linked_event_suggested",
+            "reference_chain",
+            "additional_keywords",
+            "extracted_tags",
+            "extracted_subTags",
+        ):
+            if field not in props and document.get(field):
+                props[field] = document.get(field)
         if document.get("reference"):
             props["reference"] = document.get("reference")
 

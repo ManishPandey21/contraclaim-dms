@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 RESOURCE_LETTER = "letter"
 RESOURCE_ARBITRATION = "arbitration_draft"
+RESOURCE_ARBITRATION_MATRIX = "arbitration_matrix_row"
 
 _VERB = {"draft": "Draft", "review": "Review", "approve": "Approve"}
 
@@ -113,6 +114,51 @@ class TaskSyncService:
         except Exception:  # pragma: no cover - best effort
             logger.debug("on_arbitration_status_changed task sync skipped", exc_info=True)
 
+    async def on_arbitration_matrix_review_assigned(
+        self,
+        case: Any,
+        row: Any,
+        matrix_slug: str,
+        reviewer_id: Optional[str],
+        actor_id: Optional[str],
+        *,
+        due_at: Optional[datetime] = None,
+    ) -> None:
+        """Open one active review task for an arbitration matrix row."""
+        try:
+            rid = _field(row, "id", "_id")
+            if not rid:
+                return
+            label = self._matrix_label(case, row, matrix_slug)
+            obj = {
+                "_id": rid,
+                "title": label,
+                "organization_id": _field(case, "organization_id") or _field(row, "organization_id"),
+                "project_id": _field(case, "project_id") or _field(row, "project_id"),
+            }
+            await self._close_stage(RESOURCE_ARBITRATION_MATRIX, rid, "review")
+            await self._create_stage(
+                RESOURCE_ARBITRATION_MATRIX,
+                obj,
+                "review",
+                "Matrix Review",
+                assigned_to=reviewer_id,
+                label=label,
+                due_date=due_at,
+            )
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("on_arbitration_matrix_review_assigned task sync skipped", exc_info=True)
+
+    async def on_arbitration_matrix_review_completed(self, row: Any, actor_id: Optional[str]) -> None:
+        """Close active review tasks for an arbitration matrix row."""
+        try:
+            rid = _field(row, "id", "_id")
+            if not rid:
+                return
+            await self._close_stage(RESOURCE_ARBITRATION_MATRIX, rid, "review")
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("on_arbitration_matrix_review_completed task sync skipped", exc_info=True)
+
     # -- helpers -----------------------------------------------------------
 
     @staticmethod
@@ -122,6 +168,16 @@ class TaskSyncService:
         if short and title:
             return f"{short} — {title}"
         return short or title
+
+    @staticmethod
+    def _matrix_label(case: Any, row: Any, matrix_slug: str) -> str:
+        title = (
+            _field(row, "title", "claim_head", "issue", "topic", "event", "calculation_id", "notice_ref")
+            or _field(case, "title")
+            or _field(row, "_id", "id")
+            or "Matrix row"
+        )
+        return f"{matrix_slug}: {title}"
 
     async def _close_stage(self, resource_type: str, resource_id: str, task_type: str) -> None:
         await self.db.tasks.update_many(
@@ -143,6 +199,7 @@ class TaskSyncService:
         *,
         assigned_to: Optional[str],
         label: Optional[str] = None,
+        due_date: Optional[datetime] = None,
     ) -> None:
         rid = _field(obj, "id", "_id")
         title = label or _field(obj, "title") or rid or "Item"
@@ -154,6 +211,7 @@ class TaskSyncService:
             resource_id=rid,
             workflow_stage=stage,
             assigned_to=assigned_to,
+            due_date=due_date,
             organization_id=_field(obj, "organization_id"),
             project_id=_field(obj, "project_id"),
             status="open",

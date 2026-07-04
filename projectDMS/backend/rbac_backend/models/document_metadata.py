@@ -4,10 +4,38 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 ReferenceValue = Union[str, Dict[str, Any]]
+
+NULLISH_VALUES = {"", "null", "'null'", '"null"', "not found", "none", "n/a", "na", "not applicable", "-", "--"}
+
+
+def _clean_scalar(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.lower() in NULLISH_VALUES:
+        return None
+    return text
+
+
+def _clean_list(values: Any) -> List[Any]:
+    if values in (None, "", [], {}):
+        return []
+    raw_items = values if isinstance(values, list) else [values]
+    cleaned: List[Any] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            row = {key: value for key, value in item.items() if _clean_scalar(value) is not None}
+            if row:
+                cleaned.append(row)
+            continue
+        value = _clean_scalar(item)
+        if value is not None:
+            cleaned.append(value)
+    return cleaned
 
 
 class ParsedDocumentMetadata(BaseModel):
@@ -17,11 +45,66 @@ class ParsedDocumentMetadata(BaseModel):
     from_company: Optional[str] = None
     to_company: Optional[str] = None
     references: List[ReferenceValue] = Field(default_factory=list)
+    asset_type: Optional[str] = None
+    location: Optional[str] = None
+    specific_area: Optional[str] = None
+    chainage_from: Optional[str] = None
+    chainage_to: Optional[str] = None
+    work_type: Optional[str] = None
+    issue_nature: Optional[str] = None
+    claim_category: Optional[str] = None
+    alleged_responsibility: Optional[str] = None
+    priority: Optional[str] = None
     summary: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
+    linked_event_suggested: Optional[str] = None
+    reference_chain: Optional[str] = None
+    additional_keywords: List[str] = Field(default_factory=list)
     contractual_clauses: List[str] = Field(default_factory=list)
     key_reply_points: List[str] = Field(default_factory=list)
     full_content: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    sub_tags: List[str] = Field(default_factory=list, alias="subTags")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _normalize_nullish_values(self):
+        scalar_fields = (
+            "date",
+            "subject",
+            "letter_no",
+            "from_company",
+            "to_company",
+            "asset_type",
+            "location",
+            "specific_area",
+            "chainage_from",
+            "chainage_to",
+            "work_type",
+            "issue_nature",
+            "claim_category",
+            "alleged_responsibility",
+            "priority",
+            "summary",
+            "linked_event_suggested",
+            "reference_chain",
+            "full_content",
+        )
+        for field in scalar_fields:
+            setattr(self, field, _clean_scalar(getattr(self, field, None)))
+
+        for field in (
+            "references",
+            "keywords",
+            "additional_keywords",
+            "contractual_clauses",
+            "key_reply_points",
+            "tags",
+            "sub_tags",
+        ):
+            setattr(self, field, _clean_list(getattr(self, field, None)))
+        return self
 
 
 class ProcessingResult(BaseModel):
@@ -38,4 +121,68 @@ class ProcessingResult(BaseModel):
     partial_failures: Dict[str, Any] = Field(default_factory=dict)
 
 
-__all__ = ["ParsedDocumentMetadata", "ProcessingResult", "ReferenceValue"]
+__all__ = [
+    "ParsedDocumentMetadata",
+    "ProcessingResult",
+    "ReferenceValue",
+    "EXTRACTED_METADATA_FIELDS",
+    "parsed_metadata_snapshot",
+    "extracted_metadata_updates",
+]
+
+
+EXTRACTED_METADATA_FIELDS: tuple[str, ...] = (
+    "asset_type",
+    "location",
+    "specific_area",
+    "chainage_from",
+    "chainage_to",
+    "work_type",
+    "issue_nature",
+    "claim_category",
+    "alleged_responsibility",
+    "priority",
+    "linked_event_suggested",
+    "reference_chain",
+    "additional_keywords",
+    "tags",
+    "sub_tags",
+)
+
+
+def parsed_metadata_snapshot(metadata: Any) -> Dict[str, Any]:
+    """Return a Mongo-safe snapshot of all extracted metadata fields."""
+    if not metadata:
+        return {}
+    if hasattr(metadata, "model_dump"):
+        return metadata.model_dump(by_alias=True, exclude_none=True)  # type: ignore[attr-defined]
+    if isinstance(metadata, dict):
+        return {key: value for key, value in metadata.items() if value not in (None, "", [], {})}
+    return {}
+
+
+def extracted_metadata_updates(metadata: Any) -> Dict[str, Any]:
+    """Top-level document fields derived from extended AI metadata.
+
+    User-managed document ``tags`` and ``subTags`` are not overwritten. Extracted
+    classification suggestions are stored under explicit extracted_* fields.
+    """
+    snapshot = parsed_metadata_snapshot(metadata)
+    updates: Dict[str, Any] = {}
+    if snapshot:
+        updates["metadata"] = snapshot
+
+    for field in EXTRACTED_METADATA_FIELDS:
+        if isinstance(metadata, dict):
+            value = metadata.get("subTags") if field == "sub_tags" else metadata.get(field)
+        else:
+            value = getattr(metadata, field, None) if metadata is not None else None
+        if value in (None, "", [], {}):
+            continue
+        if field == "tags":
+            updates["extracted_tags"] = value
+        elif field == "sub_tags":
+            updates["extracted_subTags"] = value
+        else:
+            updates[field] = value
+    return updates

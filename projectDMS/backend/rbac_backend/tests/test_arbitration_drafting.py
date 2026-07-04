@@ -1,12 +1,304 @@
+import asyncio
+import io
+import json
+import zipfile
+from pathlib import Path
+
 from backend.rbac_backend.models.arbitration_drafting import (
+    ArbitrationAgentRunRequest,
     ArbitrationDraftCreate,
     ArbitrationDisputeType,
+    ArbitrationMatrixReviewRequest,
     ArbitrationPartyRole,
     ArbitrationDraftType,
 )
+from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
+from backend.rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
 from backend.rbac_backend.services.arbitration_drafting.generator import ArbitrationDraftGenerator
+from backend.rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
+from backend.rbac_backend.services.arbitration_drafting.agents import run_arbitration_agent
 from backend.rbac_backend.services.arbitration_drafting.service import stable_generation_input_hash
 from backend.rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
+
+
+class _FakeCursor:
+    def __init__(self, rows):
+        self.rows = list(rows)
+
+    def sort(self, *args, **kwargs):
+        return self
+
+    def skip(self, *args, **kwargs):
+        return self
+
+    def limit(self, value):
+        self.rows = self.rows[:value]
+        return self
+
+    async def to_list(self, length=None):
+        return list(self.rows if length is None else self.rows[:length])
+
+
+class _FakeCollection:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+
+    def find(self, query=None):
+        query = query or {}
+        return _FakeCursor([row for row in self.rows if self._matches(row, query)])
+
+    async def find_one(self, query=None, *args, **kwargs):
+        rows = await self.find(query).to_list()
+        return rows[0] if rows else None
+
+    async def insert_one(self, row):
+        self.rows.append(dict(row))
+        return type("InsertOneResult", (), {"inserted_id": row.get("_id")})()
+
+    async def insert_many(self, rows):
+        self.rows.extend([dict(row) for row in rows])
+        return type("InsertManyResult", (), {"inserted_ids": [row.get("_id") for row in rows]})()
+
+    async def delete_many(self, query=None):
+        query = query or {}
+        before = len(self.rows)
+        self.rows = [row for row in self.rows if not self._matches(row, query)]
+        return type("DeleteResult", (), {"deleted_count": before - len(self.rows)})()
+
+    async def update_one(self, query=None, update=None, *args, **kwargs):
+        row = await self.find_one(query)
+        if row and update and "$set" in update:
+            row.update(update["$set"])
+        return type("UpdateResult", (), {"matched_count": 1 if row else 0, "modified_count": 1 if row else 0})()
+
+    async def update_many(self, query=None, update=None, *args, **kwargs):
+        matched = 0
+        for row in self.rows:
+            if self._matches(row, query or {}):
+                matched += 1
+                if update and "$set" in update:
+                    row.update(update["$set"])
+        return type("UpdateResult", (), {"matched_count": matched, "modified_count": matched})()
+
+    async def find_one_and_update(self, query=None, update=None, *args, **kwargs):
+        row = await self.find_one(query)
+        if row and update and "$set" in update:
+            row.update(update["$set"])
+        return row
+
+    def _matches(self, row, query):
+        for key, expected in query.items():
+            if key == "deleted_at" and isinstance(expected, dict) and expected.get("$exists") is False:
+                if "deleted_at" in row:
+                    return False
+                continue
+            actual = row.get(key)
+            if isinstance(expected, dict) and "$in" in expected:
+                if actual not in expected["$in"]:
+                    return False
+                continue
+            if isinstance(expected, dict) and "$ne" in expected:
+                if actual == expected["$ne"]:
+                    return False
+                continue
+            if actual != expected:
+                return False
+        return True
+
+
+class _FakeDb:
+    def __init__(self):
+        self.arbitration_cases = _FakeCollection(
+            [
+                {
+                    "_id": "case-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "contract_id": "contract-1",
+                    "title": "EOT claim",
+                    "party_perspective": "claimant",
+                    "case_summary": "Delay and prolongation claim arising from late access.",
+                    "arbitration_clause": "Disputes shall be referred to arbitration.",
+                }
+            ]
+        )
+        self.arbitration_document_index = _FakeCollection(
+            [
+                {
+                    "_id": "doc-row-1",
+                    "case_id": "case-1",
+                    "source_id": "doc-1",
+                    "source_type": "document",
+                    "title": "Delay notice",
+                    "exhibit_id": "C-1",
+                    "relevance_note": "Notice records late access and delay.",
+                    "verification_status": "verified",
+                    "approval_status": "approved",
+                    "source_file_link": "/documents/doc-1",
+                },
+                {
+                    "_id": "doc-row-2",
+                    "case_id": "case-1",
+                    "source_id": "doc-review",
+                    "source_type": "document",
+                    "title": "Unreviewed note",
+                    "exhibit_id": "C-2",
+                    "verification_status": "needs_review",
+                },
+            ]
+        )
+        self.arbitration_chronology_matrix = _FakeCollection(
+            [
+                {
+                    "_id": "chrono-row-1",
+                    "case_id": "case-1",
+                    "chronology_id": "chron-1",
+                    "chronology_event_id": "event-1",
+                    "event": "Access was handed over late.",
+                    "document_ref": "C-1",
+                    "verification_status": "verified",
+                    "pleading_use": "soc_breach",
+                }
+            ]
+        )
+        self.matter_chronology_events = _FakeCollection(
+            [
+                {
+                    "_id": "event-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "chronology_id": "chron-1",
+                    "title": "Late access",
+                    "description": "Access was handed over after the planned start.",
+                    "verification_status": "verified",
+                    "source_page": 2,
+                }
+            ]
+        )
+        self.arbitration_clause_matrix = _FakeCollection(
+            [
+                {
+                    "_id": "clause-row-1",
+                    "case_id": "case-1",
+                    "topic": "Site access",
+                    "clause_number": "Clause 2.1",
+                    "clause_text_excerpt": "Employer shall give access to site.",
+                    "approval_status": "approved",
+                }
+            ]
+        )
+        self.arbitration_issue_matrix = _FakeCollection([])
+        self.arbitration_claim_matrix = _FakeCollection([])
+        self.arbitration_defence_matrix = _FakeCollection([])
+        self.arbitration_counterclaim_matrix = _FakeCollection([])
+        self.arbitration_rejoinder_matrix = _FakeCollection([])
+        self.arbitration_quantum_annexures = _FakeCollection(
+            [
+                {
+                    "_id": "quantum-row-1",
+                    "case_id": "case-1",
+                    "calculation_id": "Q-1",
+                    "calculation_type": "prolongation",
+                    "amount": 1000000,
+                    "currency": "INR",
+                    "formula": "Delay days x preliminaries rate",
+                    "approval_status": "approved",
+                }
+            ]
+        )
+        self.arbitration_notice_compliance = _FakeCollection([])
+        self.arbitration_readiness_checks = _FakeCollection([])
+        self.arbitration_agent_runs = _FakeCollection([])
+        self.arbitration_bundle_exports = _FakeCollection([])
+        self.arbitration_drafts = _FakeCollection(
+            [
+                {
+                    "_id": "draft-1",
+                    "case_id": "case-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "contract_id": "contract-1",
+                    "draft_type": "statement_of_claim",
+                    "title": "EOT Statement of Claim",
+                    "status": "draft",
+                    "updated_at": "2026-07-01T00:00:00",
+                }
+            ]
+        )
+        self.arbitration_draft_versions = _FakeCollection(
+            [
+                {
+                    "_id": "version-1",
+                    "draft_id": "draft-1",
+                    "version": 1,
+                    "full_markdown": "# EOT Statement of Claim\n\nRelies on C-1 and [S1: Delay notice].\n",
+                    "structured_output": {"source_hashes": ["abc"]},
+                    "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "Delay notice"}],
+                }
+            ]
+        )
+        self.arbitration_selected_references = _FakeCollection([])
+        self.arbitration_claim_heads = _FakeCollection([])
+        self.arbitration_paragraph_responses = _FakeCollection([])
+        self.arbitration_generation_runs = _FakeCollection([])
+        self.tasks = _FakeCollection([])
+        self.documents = _FakeCollection(
+            [
+                {
+                    "_id": "doc-agent-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "contract_id": "contract-1",
+                    "subject": "Notice of delay due to late access",
+                    "letter_no": "LTR-001",
+                    "document_date": "2025-04-08",
+                    "from_company": "Contractor",
+                    "to_company": "Employer",
+                    "summary": "Contractor notified delay caused by late access.",
+                    "file_url": "/documents/doc-agent-1",
+                }
+            ]
+        )
+        self.contract_clauses = _FakeCollection([])
+        self.document_vectors = _FakeCollection(
+            [
+                {
+                    "_id": "vec-clause-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "contract_id": "contract-1",
+                    "clause_number": "Clause 2.1",
+                    "text": "Clause 2.1: Employer shall give access to site in accordance with the programme.",
+                    "title": "Site access",
+                }
+            ]
+        )
+        self.claims = _FakeCollection(
+            [
+                {
+                    "_id": "claim-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "title": "EOT claim",
+                    "claim_ref": "CL-001",
+                    "status": "submitted",
+                    "amount_claimed": 1000000,
+                    "currency": "INR",
+                    "contract_clauses": ["Clause 2.1"],
+                }
+            ]
+        )
+        self.variations = _FakeCollection([])
+        self.ipc_bills = _FakeCollection([])
+        self.bank_guarantees = _FakeCollection([])
+
+    def __getitem__(self, name):
+        return getattr(self, name)
+
+
+class _FakeUser:
+    id = "user-1"
+    email = "user@example.test"
 
 
 def test_arbitration_draft_create_accepts_rejoinder_payload():
@@ -76,6 +368,72 @@ def test_statement_of_claim_generator_preserves_source_citations():
 
     assert "[S1: CPL/2025/0142]" in generated["full_markdown"]
     assert "Award extension of time." in generated["full_markdown"]
+
+
+def test_statement_of_claim_generator_uses_case_matrix_context():
+    context = {
+        "draft": {
+            "_id": "draft-1",
+            "project_id": "project-1",
+            "draft_type": "statement_of_claim",
+            "title": "EOT Claim",
+            "relief_sought": "Award extension of time and prolongation costs.",
+        },
+        "source_ledger": [
+            {
+                "source_key": "S1",
+                "source_id": "claim-row-1",
+                "source_type": "claim_matrix",
+                "source_origin": "case_claim-matrix",
+                "label": "EOT claim",
+                "citation": "CL-001",
+                "snippet": "Late access caused critical delay and prolongation costs.",
+                "clause_number": "Clause 2.1",
+                "metadata": {"amount_or_days": "INR 1000000"},
+                "source_hash": "claim-hash",
+            },
+            {
+                "source_key": "S2",
+                "source_id": "Q-CLAIMS-CL-001",
+                "source_type": "quantum_annexure",
+                "source_origin": "case_quantum_annexure",
+                "label": "claim_summary",
+                "citation": "Q-CLAIMS-CL-001",
+                "snippet": "Amount taken from source register pending reviewer validation. INR 1000000",
+                "source_hash": "quantum-hash",
+            },
+        ],
+        "matrix_context": {
+            "claims": [
+                {
+                    "source_key": "S1",
+                    "label": "EOT claim",
+                    "citation": "CL-001",
+                    "snippet": "Late access caused critical delay and prolongation costs.",
+                    "clause_number": "Clause 2.1",
+                    "metadata": {"amount_or_days": "INR 1000000"},
+                }
+            ],
+            "quantum": [
+                {
+                    "source_key": "S2",
+                    "label": "claim_summary",
+                    "citation": "Q-CLAIMS-CL-001",
+                    "snippet": "Amount taken from source register pending reviewer validation. INR 1000000",
+                }
+            ],
+        },
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+    }
+
+    generated = ArbitrationDraftGenerator().generate(context)
+
+    assert "Late access caused critical delay and prolongation costs. [S1: CL-001]" in generated["full_markdown"]
+    assert "Approved quantum/calculation annexures" in generated["full_markdown"]
+    assert "[S2: Q-CLAIMS-CL-001]" in generated["full_markdown"]
+    assert generated["structured_output"]["matrix_context_counts"]["claims"] == 1
 
 
 def test_validator_blocks_unknown_source_citation_amount_and_date():
@@ -170,6 +528,44 @@ def test_paragraph_denial_with_support_preserves_source_citation():
     assert "4. Deny: Denied as misleading. [S1: CPL/2025/0142]" in generated["full_markdown"]
 
 
+def test_rejoinder_generator_uses_rejoinder_matrix_when_paragraphs_not_imported():
+    context = {
+        "draft": {"_id": "draft-1", "project_id": "project-1", "draft_type": "rejoinder", "title": "Reply"},
+        "source_ledger": [
+            {
+                "source_key": "S1",
+                "source_id": "rejoinder-row-1",
+                "source_type": "rejoinder_matrix",
+                "source_origin": "case_rejoinder-matrix",
+                "label": "Delay defence reply",
+                "citation": "SoD para 12",
+                "snippet": "The alleged contractor delay is denied because access was handed over late.",
+                "metadata": {"new_matter": False},
+                "source_hash": "rejoinder-hash",
+            }
+        ],
+        "matrix_context": {
+            "rejoinder_replies": [
+                {
+                    "source_key": "S1",
+                    "label": "Delay defence reply",
+                    "citation": "SoD para 12",
+                    "snippet": "The alleged contractor delay is denied because access was handed over late.",
+                    "metadata": {"new_matter": False},
+                }
+            ]
+        },
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+    }
+
+    generated = ArbitrationDraftGenerator().generate(context, section_key="paragraph_replies")
+
+    assert "Delay defence reply" in generated["full_markdown"]
+    assert "[S1: SoD para 12]" in generated["full_markdown"]
+
+
 def test_generation_input_hash_is_stable_across_runtime_fields():
     base_context = {
         "draft": {
@@ -204,3 +600,363 @@ def test_generation_input_hash_is_stable_across_runtime_fields():
 
     assert stable_generation_input_hash(base_context) == stable_generation_input_hash(same_inputs)
     assert stable_generation_input_hash(base_context) != stable_generation_input_hash(changed_inputs)
+
+
+def test_case_workspace_sources_are_added_to_source_ledger():
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+        "claim_amount": 1000000,
+    }
+
+    context = asyncio.run(ArbitrationContextBuilder(_FakeDb()).build(draft, [], [], [], object()))
+
+    origins = {row.get("source_origin") for row in context["source_ledger"]}
+    assert "case_document_index" in origins
+    assert "case_chronology_matrix" in origins
+    assert "case_clause_matrix" in origins
+    assert "case_quantum_annexure" in origins
+    assert "claim_register" in origins
+    assert all(row.get("source_id") != "doc-review" for row in context["source_ledger"])
+    assert any(row.get("allowed_use") == "quantum" for row in context["source_ledger"])
+    assert "Claim amount is entered but no quantum/payment source is selected." not in context["missing_evidence"]
+
+
+def test_review_mode_can_include_unverified_case_sources_with_warning():
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    context = asyncio.run(
+        ArbitrationContextBuilder(_FakeDb()).build(
+            draft,
+            [],
+            [],
+            [],
+            object(),
+            include_unverified_graph_links=True,
+        )
+    )
+
+    assert any(row.get("source_id") == "doc-review" for row in context["source_ledger"])
+    assert any("Review-only document index source included" in warning for warning in context["context_warnings"])
+
+
+def test_context_builder_groups_case_matrix_sources_for_generation():
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    context = asyncio.run(ArbitrationContextBuilder(_FakeDb()).build(draft, [], [], [], object()))
+
+    assert context["matrix_context"]["documents"]
+    assert context["matrix_context"]["chronology"]
+    assert context["matrix_context"]["clauses"]
+    assert context["matrix_context"]["quantum"]
+
+
+def test_orchestrator_creates_traceable_matrix_rows_and_is_idempotent():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+    payload = ArbitrationAgentRunRequest(options={"auto_approve": True})
+
+    first = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "orchestrator",
+            payload=payload,
+            current_user=_FakeUser(),
+        )
+    )
+    second = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "orchestrator",
+            payload=payload,
+            current_user=_FakeUser(),
+        )
+    )
+
+    created_matrices = {record["matrix"] for record in first["created_records"]}
+    assert "document-index" in created_matrices
+    assert "clause-matrix" in created_matrices
+    assert "claim-matrix" in created_matrices
+    assert "quantum-annexures" in created_matrices
+    assert "notice-compliance" in created_matrices
+    assert "issue-matrix" in created_matrices
+    assert any(row.get("source_id") == "doc-agent-1" for row in db.arbitration_document_index.rows)
+    assert any(row.get("source_claim_id") == "claim-1" for row in db.arbitration_claim_matrix.rows)
+    assert any(row.get("calculation_id") == "Q-CLAIMS-CL-001" for row in db.arbitration_quantum_annexures.rows)
+    assert len(second["created_records"]) == 0
+
+
+def test_case_workspace_run_agent_persists_run_and_readiness():
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+
+    run = asyncio.run(
+        service.run_agent(
+            "case-1",
+            "document-indexing",
+            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            _FakeUser(),
+        )
+    )
+
+    assert run["status"] == "completed"
+    assert run["created_records"]
+    assert db.arbitration_agent_runs.rows[0]["_id"] == run["_id"]
+    assert db.arbitration_cases.rows[0]["readiness_score"] >= 0
+    assert db.arbitration_readiness_checks.rows
+
+    rerun = asyncio.run(
+        service.run_agent(
+            "case-1",
+            "document-indexing",
+            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            _FakeUser(),
+        )
+    )
+
+    assert rerun["input_hash"] == run["input_hash"]
+    assert rerun["created_records"] == []
+
+
+def test_queue_agent_run_persists_queued_status_and_background_job(monkeypatch):
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+
+    async def fake_submit(name, func, *args, **kwargs):
+        assert name == "arbitration-agent:orchestrator"
+        assert args[0] == "case-1"
+        return "job-agent-1"
+
+    monkeypatch.setattr(case_workspace_module, "submit_background_job", fake_submit)
+
+    queued = asyncio.run(
+        service.queue_agent_run(
+            "case-1",
+            "orchestrator",
+            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            _FakeUser(),
+        )
+    )
+
+    assert queued["status"] == "queued"
+    assert queued["background_job_id"] == "job-agent-1"
+    assert db.arbitration_agent_runs.rows[0]["status"] == "queued"
+
+
+def test_execute_queued_agent_run_updates_existing_run(monkeypatch):
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+
+    async def fake_submit(*args, **kwargs):
+        return "job-agent-2"
+
+    monkeypatch.setattr(case_workspace_module, "submit_background_job", fake_submit)
+    queued = asyncio.run(
+        service.queue_agent_run(
+            "case-1",
+            "document-indexing",
+            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            _FakeUser(),
+        )
+    )
+    completed = asyncio.run(
+        service.execute_queued_agent_run(
+            "case-1",
+            queued["_id"],
+            "document-indexing",
+            {"options": {"auto_approve": True}},
+            {"id": "user-1", "email": "user@example.test"},
+        )
+    )
+
+    assert completed["_id"] == queued["_id"]
+    assert completed["status"] == "completed"
+    assert completed["created_records"]
+
+
+def test_matrix_review_assignment_creates_task_and_blocks_readiness():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(
+        {
+            "_id": "claim-row-review",
+            "case_id": "case-1",
+            "claim_no": "CL-001",
+            "claim_head": "EOT claim",
+            "facts": "Late access caused delay.",
+            "approval_status": "approved",
+            "verification_status": "verified",
+            "readiness_status": "ready",
+        }
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    reviewed = asyncio.run(
+        service.review_matrix_row(
+            "case-1",
+            "claim-matrix",
+            "claim-row-review",
+            ArbitrationMatrixReviewRequest(
+                action="assign",
+                reviewer_role="legal",
+                reviewer_user_id="reviewer-1",
+                required_roles=["legal"],
+                comment="Please review entitlement.",
+            ),
+            _FakeUser(),
+        )
+    )
+
+    assert reviewed["review_status"] == "under_review"
+    assert reviewed["approval_status"] == "needs_review"
+    assert reviewed["review_required_roles"] == ["legal"]
+    assert reviewed["review_comments"][0]["comment"] == "Please review entitlement."
+    assert db.tasks.rows[-1]["resource_type"] == "arbitration_matrix_row"
+    assert db.tasks.rows[-1]["assigned_to"] == "reviewer-1"
+    readiness = asyncio.run(service.readiness("case-1"))
+    assert any(check["check_key"] == "matrix_human_review" for check in readiness["blockers"])
+
+
+def test_matrix_review_approval_requires_all_roles_then_closes_task():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(
+        {
+            "_id": "claim-row-multirole",
+            "case_id": "case-1",
+            "claim_no": "CL-002",
+            "claim_head": "Prolongation cost",
+            "facts": "Late access caused prolongation.",
+            "review_status": "under_review",
+            "review_required_roles": ["legal", "quantum"],
+            "review_completed_roles": [],
+            "review_assignments": [{"reviewer_role": "legal", "status": "assigned"}],
+            "approval_status": "needs_review",
+            "verification_status": "needs_review",
+            "readiness_status": "needs_review",
+        }
+    )
+    db.tasks.rows.append(
+        {
+            "_id": "task-1",
+            "resource_type": "arbitration_matrix_row",
+            "resource_id": "claim-row-multirole",
+            "task_type": "review",
+            "status": "open",
+        }
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    partial = asyncio.run(
+        service.review_matrix_row(
+            "case-1",
+            "claim-matrix",
+            "claim-row-multirole",
+            ArbitrationMatrixReviewRequest(action="approve", reviewer_role="legal", comment="Entitlement supported."),
+            _FakeUser(),
+        )
+    )
+    partial_status = partial["review_status"]
+    partial_approval_status = partial["approval_status"]
+    final = asyncio.run(
+        service.review_matrix_row(
+            "case-1",
+            "claim-matrix",
+            "claim-row-multirole",
+            ArbitrationMatrixReviewRequest(action="approve", reviewer_role="quantum", comment="Quantum support checked."),
+            _FakeUser(),
+        )
+    )
+
+    assert partial_status == "partially_approved"
+    assert partial_approval_status == "needs_review"
+    assert final["review_status"] == "approved"
+    assert final["approval_status"] == "approved"
+    assert final["readiness_status"] == "ready"
+    assert set(final["review_completed_roles"]) == {"legal", "quantum"}
+    assert db.tasks.rows[0]["status"] == "done"
+
+
+def test_filing_bundle_zip_contains_manifest_matrices_and_drafts():
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+
+    content = asyncio.run(service.export_filing_bundle_zip("case-1"))
+
+    with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
+        names = set(archive.namelist())
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+        summary = archive.read("filing-bundle-summary.md").decode("utf-8")
+
+    assert "citation-audit.json" in names
+    assert "readiness.json" in names
+    assert "matrices/document-index.json" in names
+    assert "drafts/draft-1/latest-version.md" in names
+    assert manifest["case"]["_id"] == "case-1"
+    assert manifest["bundle_version"] == "arbitration-filing-bundle.v1"
+    assert "Filing Bundle - EOT claim" in summary
+    assert "C-1: Delay notice" in summary
+
+
+def test_filing_bundle_docx_and_pdf_exports_are_real_files():
+    service = ArbitrationCaseWorkspaceService(_FakeDb())
+
+    docx_content = asyncio.run(service.export_filing_bundle_docx("case-1"))
+    pdf_content = asyncio.run(service.export_filing_bundle_pdf("case-1"))
+
+    assert docx_content[:2] == b"PK"
+    assert pdf_content[:4] == b"%PDF"
+
+
+def test_queue_filing_bundle_export_persists_status_and_content(monkeypatch):
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+
+    async def fake_submit(name, func, *args, **kwargs):
+        assert name == "arbitration-filing-bundle:zip"
+        assert args[0] == "case-1"
+        return "job-export-1"
+
+    monkeypatch.setattr(case_workspace_module, "submit_background_job", fake_submit)
+
+    queued = asyncio.run(service.queue_filing_bundle_export("case-1", "zip", _FakeUser()))
+    completed = asyncio.run(service.execute_filing_bundle_export_job("case-1", queued["_id"], "zip"))
+    artifact = asyncio.run(service.get_filing_bundle_export_content("case-1", queued["_id"]))
+
+    assert queued["status"] == "queued"
+    assert queued["background_job_id"] == "job-export-1"
+    assert completed["status"] == "completed"
+    assert completed["content_length"] > 0
+    assert artifact["content"][:2] == b"PK"
+    assert artifact["filename"] == "arbitration-case-bundle.zip"
+
+
+def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
+    fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
+    data = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+    draft_types = {draft["draft_type"] for draft in data["drafts"]}
+    assert {"statement_of_claim", "statement_of_defence", "rejoinder"}.issubset(draft_types)
+    assert data["case"]["dispute_type"] == "eot_delay"
+    assert data["matrices"]["document-index"]
+    assert data["matrices"]["claim-matrix"]
+    assert data["matrices"]["defence-matrix"]
+    assert data["matrices"]["rejoinder-matrix"]

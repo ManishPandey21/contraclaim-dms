@@ -104,6 +104,26 @@ export interface Document {
   processed_path?: string | null;
   metadata_source?: string | null;
   processed_at?: string | null;
+  metadata?: Record<string, any> | null;
+  summary?: string | null;
+  keywords?: string[];
+  additional_keywords?: string[];
+  contractual_clauses?: string[];
+  key_reply_points?: string[];
+  asset_type?: string | null;
+  location?: string | null;
+  specific_area?: string | null;
+  chainage_from?: string | null;
+  chainage_to?: string | null;
+  work_type?: string | null;
+  issue_nature?: string | null;
+  claim_category?: string | null;
+  alleged_responsibility?: string | null;
+  priority?: string | null;
+  linked_event_suggested?: string | null;
+  reference_chain?: string | null;
+  extracted_tags?: string[];
+  extracted_subTags?: string[];
 }
 
 export interface DocumentProcessingJobStatus {

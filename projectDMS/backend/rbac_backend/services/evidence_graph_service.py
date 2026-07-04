@@ -592,6 +592,10 @@ class EvidenceGraphService:
         full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
         refs = [dict(item) for item in (document_data.get("reference") or []) if isinstance(item, dict)]
         clause_values = list(getattr(metadata, "contractual_clauses", None) or document_data.get("contractual_clauses") or [])
+        keywords = list(getattr(metadata, "keywords", None) or document_data.get("keywords") or [])
+        additional_keywords = list(
+            getattr(metadata, "additional_keywords", None) or document_data.get("additional_keywords") or []
+        )
         text = " ".join([subject, summary, full_text[:12000]])
         return {
             "document_class": self._classify_document(text, upload_type),
@@ -604,17 +608,30 @@ class EvidenceGraphService:
             "party": getattr(metadata, "from_company", None) or document_data.get("from"),
             "package": document_data.get("package") or document_data.get("package_name"),
             "location": self._first_value(document_data, metadata, "location"),
-            "claim_type": self._extract_claim_type(text),
-            "delay_responsibility": self._extract_delay_responsibility(text),
+            "specific_area": self._first_value(document_data, metadata, "specific_area"),
+            "asset_type": self._first_value(document_data, metadata, "asset_type"),
+            "chainage_from": self._first_value(document_data, metadata, "chainage_from"),
+            "chainage_to": self._first_value(document_data, metadata, "chainage_to"),
+            "work_type": self._first_value(document_data, metadata, "work_type"),
+            "issue_nature": self._first_value(document_data, metadata, "issue_nature"),
+            "claim_type": self._first_value(document_data, metadata, "claim_category") or self._extract_claim_type(text),
+            "delay_responsibility": self._first_value(document_data, metadata, "alleged_responsibility") or self._extract_delay_responsibility(text),
+            "priority": self._first_value(document_data, metadata, "priority"),
+            "linked_event_suggested": self._first_value(document_data, metadata, "linked_event_suggested"),
+            "reference_chain": self._first_value(document_data, metadata, "reference_chain"),
             "payment_status": self._extract_payment_status(text),
             "references": refs,
             "clauses": self._extract_clauses(text, clause_values),
+            "keywords": keywords,
+            "additional_keywords": additional_keywords,
             "drawing_refs": self._extract_pattern(text, r"\b(?:DWG|DRG|GFC|IFC)[-/ ]?[A-Z0-9][A-Z0-9./_-]{2,}\b"),
             "payment_refs": self._extract_pattern(text, r"\b(?:IPC|IP|RA|BILL)[-/ ]?\d+[A-Z0-9./_-]*\b"),
             "milestone_refs": self._extract_pattern(text, r"\b(?:KD|MS|M)[-/ ]?\d+[A-Z0-9./_-]*\b"),
             "delay_refs": self._extract_pattern(text, r"\b(?:DEL|DLY|D)[-/ ]?\d+[A-Z0-9./_-]*\b"),
             "source_spans": self._extract_source_spans(text),
             "tags": document_data.get("tags") or [],
+            "extracted_tags": getattr(metadata, "tags", None) or document_data.get("extracted_tags") or [],
+            "extracted_subTags": getattr(metadata, "sub_tags", None) or document_data.get("extracted_subTags") or [],
         }
 
     def _first_value(self, document_data: Dict[str, Any], metadata: Any, field: str) -> Optional[str]:
@@ -709,7 +726,7 @@ class EvidenceGraphService:
         event_date = document_data.get("date")
         if not isinstance(event_date, datetime):
             event_date = datetime.utcnow()
-        title = parsed.get("subject") or parsed.get("letter_no") or document_data.get("filename") or "Document event"
+        title = parsed.get("linked_event_suggested") or parsed.get("subject") or parsed.get("letter_no") or document_data.get("filename") or "Document event"
         event_type = ProjectEventType.LETTER
         if parsed.get("document_class") in {"instruction", "meeting_record", "payment", "variation", "bg", "eot_claim", "programme", "drawing_transmittal"}:
             event_type = {
@@ -745,6 +762,18 @@ class EvidenceGraphService:
                     "delay_responsibility": parsed.get("delay_responsibility"),
                     "payment_status": parsed.get("payment_status"),
                     "location": parsed.get("location"),
+                    "specific_area": parsed.get("specific_area"),
+                    "asset_type": parsed.get("asset_type"),
+                    "chainage_from": parsed.get("chainage_from"),
+                    "chainage_to": parsed.get("chainage_to"),
+                    "work_type": parsed.get("work_type"),
+                    "issue_nature": parsed.get("issue_nature"),
+                    "priority": parsed.get("priority"),
+                    "reference_chain": parsed.get("reference_chain"),
+                    "keywords": parsed.get("keywords") or [],
+                    "additional_keywords": parsed.get("additional_keywords") or [],
+                    "extracted_tags": parsed.get("extracted_tags") or [],
+                    "extracted_subTags": parsed.get("extracted_subTags") or [],
                     "clauses": parsed.get("clauses") or [],
                     "drawing_refs": parsed.get("drawing_refs") or [],
                     "payment_refs": parsed.get("payment_refs") or [],

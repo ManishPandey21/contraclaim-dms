@@ -1,0 +1,220 @@
+{
+  "organization": {
+    "_id": "org-metro",
+    "name": "Metro Civil Authority"
+  },
+  "project": {
+    "_id": "project-metro-01",
+    "organization_id": "org-metro",
+    "name": "Metro Rail Underground Package UG-01"
+  },
+  "case": {
+    "_id": "case-metro-eot-001",
+    "organization_id": "org-metro",
+    "project_id": "project-metro-01",
+    "contract_id": "contract-ug-01",
+    "title": "UG-01 EOT and Prolongation Cost Dispute",
+    "case_reference": "ARB/UG01/2026",
+    "dispute_type": "eot_delay",
+    "party_perspective": "both",
+    "status": "matrix_preparation",
+    "seat": "New Delhi",
+    "governing_law": "Indian law",
+    "arbitration_clause": "GCC 20.6 requires disputes to be referred to arbitration after notice and engineer determination.",
+    "case_summary": "The contractor alleges delayed land handover, utility diversion, and late drawings caused critical delay and prolongation cost. The employer disputes causation and quantum."
+  },
+  "matrices": {
+    "document-index": [
+      {
+        "_id": "doc-eot-notice",
+        "case_id": "case-metro-eot-001",
+        "source_type": "document",
+        "source_id": "letter-eot-001",
+        "title": "Contractor EOT notice for delayed access",
+        "document_date": "2025-04-08",
+        "exhibit_prefix": "C",
+        "exhibit_number": 1,
+        "exhibit_id": "C-1",
+        "verification_status": "verified",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      },
+      {
+        "_id": "doc-employer-reply",
+        "case_id": "case-metro-eot-001",
+        "source_type": "document",
+        "source_id": "letter-sod-001",
+        "title": "Employer denial of critical delay",
+        "document_date": "2025-05-12",
+        "exhibit_prefix": "R",
+        "exhibit_number": 1,
+        "exhibit_id": "R-1",
+        "verification_status": "verified",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "chronology-matrix": [
+      {
+        "_id": "chrono-access-delay",
+        "case_id": "case-metro-eot-001",
+        "event_date": "2025-03-15",
+        "event": "Station box access was handed over 45 days later than the approved programme.",
+        "document_ref": "C-1",
+        "pleading_use": "soc_breach",
+        "verification_status": "verified",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "clause-matrix": [
+      {
+        "_id": "clause-access",
+        "case_id": "case-metro-eot-001",
+        "topic": "Site access and possession",
+        "clause_number": "GCC 2.1",
+        "clause_text_excerpt": "The Employer shall give the Contractor right of access to and possession of the Site.",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      },
+      {
+        "_id": "clause-eot",
+        "case_id": "case-metro-eot-001",
+        "topic": "Extension of time",
+        "clause_number": "GCC 8.4",
+        "clause_text_excerpt": "The Contractor shall be entitled to extension of time for Employer delay.",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "issue-matrix": [
+      {
+        "_id": "issue-critical-delay",
+        "case_id": "case-metro-eot-001",
+        "issue": "Whether delayed access and utility diversion caused critical delay to the works.",
+        "tribunal_question": "Was the contractor entitled to EOT and prolongation cost?",
+        "status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "claim-matrix": [
+      {
+        "_id": "claim-eot",
+        "case_id": "case-metro-eot-001",
+        "claim_no": "CL-001",
+        "claim_head": "EOT and prolongation cost",
+        "facts": "Delayed access and utility diversion prevented planned excavation and D-wall sequencing.",
+        "clause_number": "GCC 2.1, GCC 8.4",
+        "amount_or_days": "45 days and INR 12,500,000",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "defence-matrix": [
+      {
+        "_id": "defence-concurrent-delay",
+        "case_id": "case-metro-eot-001",
+        "source_soc_para": "12",
+        "admission_denial": "deny",
+        "defence": "The employer alleges concurrent contractor delay due to late mobilisation and insufficient resources.",
+        "supporting_document_ref": "R-1",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "counterclaim-matrix": [
+      {
+        "_id": "counterclaim-ld",
+        "case_id": "case-metro-eot-001",
+        "counterclaim_no": "CC-001",
+        "breach": "Delay attributable to contractor resource shortfall.",
+        "relief": "Liquidated damages set-off",
+        "amount": "INR 3,000,000",
+        "approval_status": "needs_review",
+        "readiness_status": "needs_review"
+      }
+    ],
+    "rejoinder-matrix": [
+      {
+        "_id": "rejoinder-para-12",
+        "case_id": "case-metro-eot-001",
+        "source_sod_para": "12",
+        "claimant_reply": "The concurrent delay allegation is denied; access delay preceded mobilisation constraints and drove the critical path.",
+        "supporting_document_ref": "C-1",
+        "new_matter": false,
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "quantum-annexures": [
+      {
+        "_id": "quantum-prolongation",
+        "case_id": "case-metro-eot-001",
+        "calculation_id": "Q-001",
+        "calculation_type": "prolongation",
+        "amount": 12500000,
+        "currency": "INR",
+        "formula": "45 delay days x approved preliminaries daily rate",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ],
+    "notice-compliance": [
+      {
+        "_id": "notice-eot",
+        "case_id": "case-metro-eot-001",
+        "notice_ref": "C-1",
+        "notice_type": "EOT notice",
+        "contractual_deadline": "28 days",
+        "compliance_status": "compliant",
+        "approval_status": "approved",
+        "readiness_status": "ready"
+      }
+    ]
+  },
+  "drafts": [
+    {
+      "_id": "draft-soc",
+      "case_id": "case-metro-eot-001",
+      "draft_type": "statement_of_claim",
+      "title": "Statement of Claim - EOT and Prolongation Cost",
+      "status": "draft"
+    },
+    {
+      "_id": "draft-sod",
+      "case_id": "case-metro-eot-001",
+      "draft_type": "statement_of_defence",
+      "title": "Statement of Defence - EOT and Prolongation Cost",
+      "status": "draft"
+    },
+    {
+      "_id": "draft-rejoinder",
+      "case_id": "case-metro-eot-001",
+      "draft_type": "rejoinder",
+      "title": "Rejoinder - Reply to Defence",
+      "status": "draft"
+    }
+  ],
+  "readiness": {
+    "case_id": "case-metro-eot-001",
+    "readiness_score": 88,
+    "status": "blocked",
+    "blockers": [
+      {
+        "_id": "check-counterclaim-review",
+        "case_id": "case-metro-eot-001",
+        "check_key": "matrix_human_review",
+        "check_group": "human_review",
+        "status": "needs_legal_review",
+        "message": "Counterclaim LD set-off row requires legal and quantum review."
+      }
+    ],
+    "checks": []
+  },
+  "expected_workflow": [
+    "Run orchestrator in queued mode to populate matrices from scoped project evidence.",
+    "Generate SoC from claim, clause, chronology, notice, and quantum matrices.",
+    "Import SoC paragraphs and generate SoD paragraph responses.",
+    "Import SoC and SoD, generate Rejoinder replies, and export filing bundle ZIP/DOCX/PDF."
+  ]
+}

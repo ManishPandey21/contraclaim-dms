@@ -245,9 +245,15 @@ const Sidebar = () => {
       label: "Chronology Builder",
     },
     {
-      path: "/arbitration/drafts",
+      path: "/arbitration",
       icon: <Landmark size={20} />,
       label: "Arbitration",
+    },
+    {
+      path: "/arbitration/cases",
+      icon: <Landmark size={20} />,
+      label: "Case Workspaces",
+      sub: true,
     },
     {
       path: "/arbitration/drafts",

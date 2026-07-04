@@ -32,6 +32,7 @@ export interface ArbitrationClaimHeadInput {
 }
 
 export interface ArbitrationDraftCreatePayload {
+  case_id?: string | null;
   organization_id?: string | null;
   project_id: string;
   contract_id?: string | null;
@@ -54,6 +55,7 @@ export interface ArbitrationDraftCreatePayload {
 
 export interface ArbitrationDraft {
   _id: string;
+  case_id?: string | null;
   organization_id?: string | null;
   project_id: string;
   contract_id?: string | null;
@@ -111,6 +113,11 @@ export async function getArbitrationDraft(draftId: string) {
 
 export async function generateArbitrationDraft(draftId: string, payload: Record<string, unknown> = {}) {
   const { data } = await api.post<ArbitrationDraft>(`/arbitration/drafts/${draftId}/generate`, payload);
+  return data;
+}
+
+export async function prepareArbitrationDraftFromCase(draftId: string) {
+  const { data } = await api.post(`/arbitration/drafts/${draftId}/prepare-from-case`);
   return data;
 }
 
