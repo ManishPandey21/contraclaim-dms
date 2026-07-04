@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ..core.database import get_database
 from ..core.security import CurrentUser, get_current_user
 from ..models.letter_drafting import (
+    ApproveStageRequest,
     AssignReviewerRequest,
     ConfirmAnalysisRequest,
     ConfirmPlanRequest,
@@ -424,8 +425,25 @@ async def approve_draft_run(
     service: DraftRunService = Depends(get_draft_run_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Approve a non-blocking draft and create the accepted draft version."""
+    """Advance the next pending stage of the drafter -> reviewer -> final
+    approval chain (legacy single-approve endpoint)."""
     return await service.approve_run(letter_id, run_id, current_user)
+
+
+@router.post("/runs/{run_id}/approve-stage", response_model=DraftRunResponse)
+@handle_exceptions
+async def approve_draft_stage(
+    letter_id: str,
+    run_id: str,
+    payload: ApproveStageRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Record one stage of the drafter -> reviewer -> final approval chain.
+
+    Stages run in order, each with its own permission and a different actor
+    (separation of duties); only the final stage locks and approves the draft."""
+    return await service.approve_stage(letter_id, run_id, payload, current_user)
 
 
 @router.post("/runs/{run_id}/export", response_model=DraftRunResponse)

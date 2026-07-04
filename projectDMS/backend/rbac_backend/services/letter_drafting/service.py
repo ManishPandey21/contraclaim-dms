@@ -12,6 +12,9 @@ from fastapi import HTTPException
 
 from ...models.letter import Letter
 from ...models.letter_drafting import (
+    ApprovalStage,
+    ApprovalStep,
+    ApproveStageRequest,
     AssignReviewerRequest,
     ConfirmAnalysisRequest,
     ConfirmPlanRequest,
@@ -1604,12 +1607,48 @@ class DraftRunService:
         )
         return result
 
-    async def approve_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
-        letter = await self._load_and_authorize(
+    # Approval chain (multi-agent workflow Phase 4):
+    # drafter -> reviewer -> final, each stage its own permission + actor.
+    _APPROVAL_STAGE_ORDER: tuple = ("drafter", "reviewer", "final")
+    _APPROVAL_STAGE_PERMISSION: dict = {
+        "drafter": "drafting.draft.submit_for_review",
+        "reviewer": "drafting.review.approve",
+        "final": "drafting.final.approve",
+    }
+    _APPROVAL_STAGE_STATUS: dict = {
+        "drafter": "drafter_approved",
+        "reviewer": "reviewer_approved",
+        "final": "approved",
+    }
+
+    @classmethod
+    def next_approval_stage(cls, approvals: List[ApprovalStep]) -> Optional[ApprovalStage]:
+        done = [step.stage for step in approvals or []]
+        for stage in cls._APPROVAL_STAGE_ORDER:
+            if stage not in done:
+                return stage  # type: ignore[return-value]
+        return None
+
+    async def approve_stage(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ApproveStageRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        """One step of the drafter -> reviewer -> final approval chain.
+
+        Order is enforced; each stage requires its own permission and a
+        different actor (separation of duties), with drafting.admin as the
+        escape hatch. Only the final stage locks the draft version and marks
+        the run approved.
+        """
+        stage = request.stage
+        await self._load_and_authorize(
             letter_id,
             current_user,
             "write",
-            drafting_permission="drafting.review.approve",
+            drafting_permission=self._APPROVAL_STAGE_PERMISSION[stage],
         )
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
@@ -1618,54 +1657,125 @@ class DraftRunService:
             raise HTTPException(status_code=400, detail="Draft is already approved or finalized")
         if existing.status in {"blocked", "failed", "needs_attention"}:
             raise HTTPException(status_code=400, detail="Draft must pass validation before approval")
-        if existing.approval_status and existing.approval_status not in {
-            "under_review",
-            "plan_confirmed",
-            "returned_for_correction",
-        }:
+        if existing.mode not in {"draft", "review"} or not existing.draft_artifact:
+            raise HTTPException(status_code=400, detail="Run does not contain an approvable draft")
+        if not (existing.plan or "").strip():
             raise HTTPException(
-                status_code=400,
-                detail=f"Draft cannot be approved from approval status '{existing.approval_status}'",
+                status_code=400, detail="Draft cannot be approved without a saved strategic plan"
             )
-        if existing.created_by and str(existing.created_by) == str(self._user_id(current_user)):
-            can_self_approve = await self.policy_service.has_permission(current_user, "drafting.admin")
-            if not can_self_approve:
-                raise HTTPException(status_code=403, detail="Drafters cannot approve their own draft")
-        run = await self.accept_draft(letter_id, run_id, current_user)
+        if existing.validation_report.blocking:
+            raise HTTPException(status_code=400, detail="Draft has blocking validation findings")
+
+        expected = self.next_approval_stage(existing.approvals)
+        if expected is None:
+            raise HTTPException(status_code=409, detail="Approval chain is already complete")
+        if stage != expected:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Approval stages must run in order; next expected stage is '{expected}'",
+            )
+
+        actor = self._user_id(current_user)
+        is_admin = await self.policy_service.has_permission(current_user, "drafting.admin")
+        prior_actors = {step.stage: step.approved_by for step in existing.approvals}
+
+        if stage == "drafter":
+            # The drafter's own sign-off: only the run creator (or admin).
+            if (
+                existing.created_by
+                and str(existing.created_by) != str(actor)
+                and not is_admin
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Drafter approval must come from the draft's creator",
+                )
+        else:
+            # Separation of duties: reviewer/final must differ from the earlier
+            # actors in the chain (admin may override).
+            if not is_admin:
+                conflicting = {prior_actors.get("drafter")}
+                if stage == "final":
+                    conflicting.add(prior_actors.get("reviewer"))
+                if str(actor) in {str(a) for a in conflicting if a}:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"{stage.capitalize()} approval requires a different approver",
+                    )
+            if (
+                stage == "reviewer"
+                and existing.assigned_reviewer_id
+                and str(existing.assigned_reviewer_id) != str(actor)
+                and not is_admin
+            ):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Reviewer approval is restricted to the assigned reviewer",
+                )
+
         now = datetime.now(timezone.utc)
-        approved_version = await self.repository.lock_approved_draft_version(
-            letter_id,
-            run_id,
-            self._user_id(current_user),
-        )
-        updated = await self.repository.update_fields(
-            letter_id,
-            run_id,
-            {
-                "status": "approved",
-                "approval_status": "approved",
-                "approved_by": self._user_id(current_user),
-                "approved_at": now,
-            },
-        )
-        result = updated or run
+        approvals = list(existing.approvals or []) + [
+            ApprovalStep(stage=stage, approved_by=actor, approved_at=now, comment=request.comment)
+        ]
+        fields: Dict[str, Any] = {
+            "approvals": approvals,
+            "approval_status": self._APPROVAL_STAGE_STATUS[stage],
+        }
+        approved_version = None
+        if stage == "final":
+            await self.repository.accept_draft(letter_id, existing, actor)
+            approved_version = await self.repository.lock_approved_draft_version(
+                letter_id, run_id, actor
+            )
+            fields.update(
+                status="approved",
+                approved_by=actor,
+                approved_at=now,
+            )
+        run = await self.repository.update_fields(letter_id, run_id, fields)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+
         await self.repository.append_event(
             letter_id,
             run_id,
-            "approved",
-            actor_user_id=self._user_id(current_user),
-            status=result.status,
-            payload={"approved_draft_version": approved_version},
+            f"{stage}_approved",
+            actor_user_id=actor,
+            status=run.status,
+            payload={"comment": request.comment} if request.comment else None,
         )
-        await self._emit_notification(
-            NotificationType.DRAFT_APPROVED,
-            letter_id,
-            current_user,
-            include_users=[run.created_by] if run.created_by else None,
-            title="Draft approved",
-            message="A letter draft has been approved.",
+        if stage == "final":
+            # Legacy audit consumers count "approved" events — keep emitting it.
+            await self.repository.append_event(
+                letter_id,
+                run_id,
+                "approved",
+                actor_user_id=actor,
+                status=run.status,
+                payload={"approved_draft_version": approved_version},
+            )
+            await self._emit_notification(
+                NotificationType.DRAFT_APPROVED,
+                letter_id,
+                current_user,
+                include_users=[existing.created_by] if existing.created_by else None,
+                title="Draft approved",
+                message="A letter draft has completed the approval chain.",
+            )
+        return run
+
+    async def approve_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
+        """Legacy single-approve endpoint: advances the next pending stage of
+        the drafter -> reviewer -> final chain."""
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        stage = self.next_approval_stage(existing.approvals)
+        if stage is None:
+            raise HTTPException(status_code=409, detail="Approval chain is already complete")
+        return await self.approve_stage(
+            letter_id, run_id, ApproveStageRequest(stage=stage), current_user
         )
-        return result
 
     async def export_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
         await self._load_and_authorize(

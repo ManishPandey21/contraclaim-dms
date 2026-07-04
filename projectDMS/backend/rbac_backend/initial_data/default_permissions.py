@@ -150,6 +150,7 @@ DEFAULT_PERMISSIONS = [
     {"_id": "drafting.review.approve", "name": "Approve Expert Review"},
     {"_id": "drafting.review.return_for_revision", "name": "Return Draft for Revision"},
     {"_id": "drafting.final.view", "name": "View Final Drafting Output"},
+    {"_id": "drafting.final.approve", "name": "Final Approval of Drafts"},
     {"_id": "drafting.audit.view", "name": "View Drafting Audit Trail"},
     {"_id": "drafting.admin", "name": "Administer Drafting"},
     {"_id": "billing.plan.view", "name": "View Billing Plans"},

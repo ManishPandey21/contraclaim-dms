@@ -289,6 +289,7 @@ DEFAULT_ROLES = [
             "drafting.review.approve",
             "drafting.review.return_for_revision",
             "drafting.final.view",
+            "drafting.final.approve",
             "drafting.audit.view",
             "drafting.admin",
         ],

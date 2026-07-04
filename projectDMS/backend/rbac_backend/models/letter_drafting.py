@@ -61,6 +61,9 @@ DraftLifecycleEventType = Literal[
     "user_direction_provided",
     "legal_risk_reviewed",
     "paragraphs_locked",
+    "drafter_approved",
+    "reviewer_approved",
+    "final_approved",
     "plan_confirmed",
     "plan_accepted",
     "draft_accepted",
@@ -128,6 +131,23 @@ class LockParagraphsRequest(BaseModel):
     """Human-approved paragraphs the AI must not change on redraft."""
 
     locked_paragraphs: List[str] = Field(default_factory=list)
+
+
+ApprovalStage = Literal["drafter", "reviewer", "final"]
+
+
+class ApprovalStep(BaseModel):
+    """One completed step of the drafter -> reviewer -> final approval chain."""
+
+    stage: ApprovalStage
+    approved_by: Optional[str] = None
+    approved_at: datetime = Field(default_factory=now_utc)
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
+class ApproveStageRequest(BaseModel):
+    stage: ApprovalStage
+    comment: Optional[str] = Field(default=None, max_length=2000)
 
 
 class ProbingQuestion(BaseModel):
@@ -650,6 +670,7 @@ class DraftRun(BaseModel):
     revision_of_run_id: Optional[str] = None
     revision_action: Optional[RevisionAction] = None
     approval_status: Optional[str] = None
+    approvals: List[ApprovalStep] = Field(default_factory=list)
     assigned_reviewer_id: Optional[str] = None
     returned_reason: Optional[str] = None
     required_changes: List[str] = Field(default_factory=list)
