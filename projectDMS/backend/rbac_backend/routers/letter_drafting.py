@@ -26,6 +26,7 @@ from ..models.letter_drafting import (
     ReturnForCorrectionRequest,
     ReviseDraftRequest,
     SourceLedgerResponse,
+    UserDirectionRequest,
 )
 from ..services.letter_drafting import DraftRunService
 from ..services.policy_service import PolicyService
@@ -174,6 +175,22 @@ async def confirm_incoming_analysis(
 ):
     """Persist user-confirmed incoming letter analysis on a run."""
     return await service.confirm_analysis(letter_id, run_id, payload, current_user)
+
+
+@router.post("/runs/{run_id}/user-direction", response_model=DraftRunResponse)
+@handle_exceptions
+async def provide_user_direction(
+    letter_id: str,
+    run_id: str,
+    payload: UserDirectionRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Record the drafter's answers to the probing questions / line of action.
+
+    Directions are stored on the run and merged into the inputs of subsequent
+    strategy/draft runs for this letter."""
+    return await service.provide_user_direction(letter_id, run_id, payload, current_user)
 
 
 @router.post("/prepare-plan", response_model=DraftRunResponse)

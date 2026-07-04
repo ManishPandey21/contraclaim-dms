@@ -58,6 +58,7 @@ DraftLifecycleEventType = Literal[
     "reviewer_assigned",
     "comment_added",
     "analysis_confirmed",
+    "user_direction_provided",
     "plan_confirmed",
     "plan_accepted",
     "draft_accepted",
@@ -95,6 +96,29 @@ SourceType = Literal[
 SourceUse = Literal["fact", "style_continuity", "history_only", "clause", "comment"]
 ValidationLevel = Literal["warning", "error"]
 AssertionSupportStatus = Literal["supported", "user_provided", "unsupported", "needs_confirmation"]
+
+
+class ProbingQuestion(BaseModel):
+    """A question the User Direction agent asks before planning/drafting."""
+
+    question_id: str
+    question: str
+    category: Literal[
+        "position", "deadline", "clause", "amount", "missing_input", "scope"
+    ] = "scope"
+    why: Optional[str] = None
+
+
+class UserDirectionAnswer(BaseModel):
+    question_id: Optional[str] = None
+    answer: str = Field(..., min_length=1, max_length=4000)
+
+
+class UserDirectionRequest(BaseModel):
+    """User's line of action: structured answers and/or free-text direction."""
+
+    answers: List[UserDirectionAnswer] = Field(default_factory=list)
+    directions: Optional[str] = Field(default=None, max_length=8000)
 
 
 class DraftRunCreateRequest(BaseModel):
@@ -572,6 +596,8 @@ class DraftRun(BaseModel):
     recipient_focus: Optional[str] = None
     inputs: Dict[str, Any] = Field(default_factory=dict)
     incoming_analysis: Optional[IncomingLetterAnalysis] = None
+    probing_questions: List[ProbingQuestion] = Field(default_factory=list)
+    user_directions: List[UserDirectionAnswer] = Field(default_factory=list)
     planning_sheet: Optional[PlanningSheet] = None
     reply_matrix: List[ReplyMatrixRow] = Field(default_factory=list)
     context_bundle: DraftContextBundle = Field(default_factory=DraftContextBundle)

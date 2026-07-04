@@ -40,10 +40,12 @@ from ...models.letter_drafting import (
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
     IncomingLetterAnalysis,
+    ProbingQuestion,
     ReviseDraftRequest,
     ReturnForCorrectionRequest,
     SourceEvidence,
     SourceLedgerResponse,
+    UserDirectionRequest,
     ValidationFinding,
     ValidationReport,
 )
@@ -59,6 +61,7 @@ from ...services.letter_service import LetterService
 from ...services.falkor_graph_service import normalize_letter_code
 from ...services.file_object_service import FileObjectService
 from ...utils.notification_service import NotificationService
+from .clause_checker import ClauseCheckingAgent
 from .context import DraftContextBuilder
 from .generator import DraftGenerator, StrategyPlanner
 from .incoming_analyzer import IncomingLetterAnalyzer
@@ -66,6 +69,7 @@ from .input_validator import DraftInputValidator
 from .planning import PlanningSheetBuilder
 from .prompts import PromptRegistry
 from .repository import DraftRunRepository
+from .user_direction import UserDirectionAgent
 from .validator import DraftValidator
 
 
@@ -82,6 +86,7 @@ class DraftRunService:
         self.validator = DraftValidator()
         self.input_validator = DraftInputValidator()
         self.incoming_analyzer = IncomingLetterAnalyzer()
+        self.clause_checker = ClauseCheckingAgent(db)
         self.planning_builder = PlanningSheetBuilder()
 
     async def create_run(
@@ -102,6 +107,22 @@ class DraftRunService:
         )
         role = self._resolve_role(letter, request)
         recipient_focus = request.recipient_focus or getattr(letter, "strategy_recipient", None)
+
+        # Carry the user's line of action (answers from a previous analysis run)
+        # into this run's inputs so strategy/draft stages honour it.
+        directions_block = await self._latest_user_directions(letter_id)
+        if directions_block and directions_block not in (request.points or ""):
+            request = request.model_copy(
+                update={
+                    "points": (
+                        f"{request.points}\n\n{directions_block}"
+                        if request.points
+                        else directions_block
+                    )
+                }
+            )
+            trace.append({"stage": "user_direction", "status": "applied"})
+
         inputs = self._inputs_payload(letter, request)
 
         document_service = DocumentService(self.db)
@@ -126,11 +147,44 @@ class DraftRunService:
             trace.append({"stage": "context", "status": "success", "source_count": len(sources)})
 
             incoming_analysis: Optional[IncomingLetterAnalysis] = None
+            probing_questions: list[ProbingQuestion] = []
             if request.draft_type == "reply":
                 incoming_analysis = await self.incoming_analyzer.analyze(
                     letter, request, document_service
                 )
                 trace.append({"stage": "incoming_analysis", "status": "success"})
+                # Clause Checking Agent: verify cited clauses against the
+                # project's structured clause records before planning.
+                try:
+                    incoming_analysis = await self.clause_checker.enrich(
+                        incoming_analysis,
+                        str(getattr(letter, "organization_id", "") or ""),
+                        str(getattr(letter, "project_id", "") or ""),
+                    )
+                    trace.append(
+                        {
+                            "stage": "clause_check",
+                            "status": "success",
+                            "verified": sum(
+                                1
+                                for ev in incoming_analysis.cited_clause_evaluations
+                                if ev.exists_in_contract is not None
+                            ),
+                        }
+                    )
+                except Exception as exc:
+                    warnings.append(f"Clause check skipped: {exc}")
+                    trace.append({"stage": "clause_check", "status": "failed"})
+                missing_inputs = [
+                    key for key, present in context.threshold_inputs.items() if not present
+                ]
+                probing_questions = UserDirectionAgent.build_questions(
+                    incoming_analysis, request, missing_inputs
+                )
+                if probing_questions:
+                    trace.append(
+                        {"stage": "user_direction_questions", "count": len(probing_questions)}
+                    )
 
             planning_sheet, reply_matrix, source_summary, deterministic_plan = (
                 self.planning_builder.build(
@@ -168,6 +222,7 @@ class DraftRunService:
                     recipient_focus=recipient_focus,
                     inputs=inputs,
                     incoming_analysis=incoming_analysis,
+                    probing_questions=probing_questions,
                     planning_sheet=planning_sheet,
                     reply_matrix=reply_matrix,
                     context_bundle=context,
@@ -210,6 +265,7 @@ class DraftRunService:
                     recipient_focus=recipient_focus,
                     inputs=inputs,
                     incoming_analysis=incoming_analysis,
+                    probing_questions=probing_questions,
                     planning_sheet=planning_sheet,
                     reply_matrix=reply_matrix,
                     context_bundle=context,
@@ -328,6 +384,7 @@ class DraftRunService:
                 recipient_focus=recipient_focus,
                 inputs=inputs,
                 incoming_analysis=incoming_analysis,
+                probing_questions=probing_questions,
                 planning_sheet=planning_sheet,
                 reply_matrix=reply_matrix,
                 context_bundle=context,
@@ -1135,6 +1192,62 @@ class DraftRunService:
             status=run.status,
         )
         return run
+
+    async def provide_user_direction(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: UserDirectionRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        """User Direction Agent: record the drafter's answers / line of action.
+
+        Answers are stored on the run and automatically merged into the inputs
+        of subsequent strategy/draft runs for this letter.
+        """
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.edit",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        answers = list(existing.user_directions or [])
+        answers.extend(request.answers)
+        if request.directions and request.directions.strip():
+            from ...models.letter_drafting import UserDirectionAnswer
+
+            answers.append(
+                UserDirectionAnswer(question_id="free_text", answer=request.directions.strip())
+            )
+        if not answers:
+            raise HTTPException(status_code=422, detail="No direction provided")
+        run = await self.repository.update_fields(
+            letter_id, run_id, {"user_directions": answers}
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "user_direction_provided",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={"answer_count": len(answers)},
+        )
+        return run
+
+    async def _latest_user_directions(self, letter_id: str) -> Optional[str]:
+        """Most recent run's user directions, formatted for drafting inputs."""
+        try:
+            latest = await self.repository.latest(letter_id, None)
+        except Exception:
+            return None
+        if not latest or not latest.user_directions:
+            return None
+        return UserDirectionAgent.format_directions(latest.user_directions) or None
 
     async def prepare_plan(
         self,
