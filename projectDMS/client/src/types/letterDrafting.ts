@@ -105,6 +105,55 @@ export interface DraftArtifact {
   prompt_version?: number;
 }
 
+export interface ProbingQuestion {
+  question_id: string;
+  question: string;
+  category?: "position" | "deadline" | "clause" | "amount" | "missing_input" | "scope";
+  why?: string;
+}
+
+export interface UserDirectionAnswer {
+  question_id?: string;
+  answer: string;
+}
+
+export interface UserDirectionRequest {
+  answers?: UserDirectionAnswer[];
+  directions?: string;
+}
+
+export interface LegalRiskFlag {
+  flag_id: string;
+  category: "admission" | "waiver" | "contradiction" | "entitlement";
+  severity: "info" | "caution" | "high";
+  excerpt: string;
+  explanation: string;
+}
+
+export interface LegalRiskReport {
+  flags: LegalRiskFlag[];
+  human_review_required?: boolean;
+  reviewed_at?: string;
+}
+
+export type ApprovalStage = "drafter" | "reviewer" | "final";
+
+export interface ApprovalStep {
+  stage: ApprovalStage;
+  approved_by?: string;
+  approved_at?: string;
+  comment?: string;
+}
+
+export interface ApproveStageRequest {
+  stage: ApprovalStage;
+  comment?: string;
+}
+
+export interface LockParagraphsRequest {
+  locked_paragraphs: string[];
+}
+
 export interface DraftRunResponse {
   run_id: string;
   letter_id: string;
@@ -170,6 +219,11 @@ export interface DraftRunResponse {
   iteration_count?: number;
   revision_of_run_id?: string;
   revision_action?: RevisionAction;
+  probing_questions?: ProbingQuestion[];
+  user_directions?: UserDirectionAnswer[];
+  legal_risk_report?: LegalRiskReport;
+  locked_paragraphs?: string[];
+  approvals?: ApprovalStep[];
   approval_status?: string;
   assigned_reviewer_id?: string;
   returned_reason?: string;
@@ -201,6 +255,12 @@ export interface DraftLifecycleEvent {
     | "reviewer_assigned"
     | "comment_added"
     | "analysis_confirmed"
+    | "user_direction_provided"
+    | "legal_risk_reviewed"
+    | "paragraphs_locked"
+    | "drafter_approved"
+    | "reviewer_approved"
+    | "final_approved"
     | "plan_confirmed"
     | "plan_accepted"
     | "draft_accepted"
@@ -381,4 +441,6 @@ export interface ReviseDraftRequest {
   revision_action: RevisionAction;
   custom_instruction?: string;
   additional_requirements?: string;
+  /** null/undefined = inherit the source run's locks; [] = clear all locks. */
+  locked_paragraphs?: string[];
 }

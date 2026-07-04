@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
 import type {
+  ApproveStageRequest,
   AssignReviewerRequest,
   DraftCommentRequest,
   DraftAuditResponse,
@@ -13,9 +14,11 @@ import type {
   DraftRunResponse,
   ExactClauseSearchRequest,
   ExactReferenceSearchRequest,
+  LockParagraphsRequest,
   ReviseDraftRequest,
   ReturnForCorrectionRequest,
   SourceLedgerResponse,
+  UserDirectionRequest,
 } from "@/types/letterDrafting";
 
 async function requestJson<T>(endpoint: string, init: RequestInit = {}): Promise<T> {
@@ -236,6 +239,42 @@ export const useLetterDrafting = () => {
     []
   );
 
+  const approveStage = useCallback(
+    (letterId: string, runId: string, payload: ApproveStageRequest) =>
+      requestJson<DraftRunResponse>(
+        `/letters/${letterId}/drafting/runs/${runId}/approve-stage`,
+        { method: "POST", body: JSON.stringify(payload) }
+      ).then((json) => {
+        setData(json);
+        return json;
+      }),
+    []
+  );
+
+  const provideUserDirection = useCallback(
+    (letterId: string, runId: string, payload: UserDirectionRequest) =>
+      requestJson<DraftRunResponse>(
+        `/letters/${letterId}/drafting/runs/${runId}/user-direction`,
+        { method: "POST", body: JSON.stringify(payload) }
+      ).then((json) => {
+        setData(json);
+        return json;
+      }),
+    []
+  );
+
+  const lockParagraphs = useCallback(
+    (letterId: string, runId: string, payload: LockParagraphsRequest) =>
+      requestJson<DraftRunResponse>(
+        `/letters/${letterId}/drafting/runs/${runId}/lock-paragraphs`,
+        { method: "POST", body: JSON.stringify(payload) }
+      ).then((json) => {
+        setData(json);
+        return json;
+      }),
+    []
+  );
+
   const exportRun = useCallback(
     (letterId: string, runId: string) =>
       requestJson<DraftRunResponse>(
@@ -327,6 +366,9 @@ export const useLetterDrafting = () => {
     validateRun,
     critiqueRun,
     approveRun,
+    approveStage,
+    provideUserDirection,
+    lockParagraphs,
     exportRun,
     issueRun,
     assignReviewer,

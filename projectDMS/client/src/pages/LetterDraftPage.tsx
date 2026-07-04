@@ -16,6 +16,10 @@ import { LinkedDocumentSelector } from "@/components/letter-workflow/LinkedDocum
 import BackgroundSummary from "@/components/letter-workflow/BackgroundSummary";
 import DraftSourcesPanel from "@/components/letter-workflow/DraftSourcesPanel";
 import { DraftEvidencePanel } from "@/components/letter-workflow/DraftEvidencePanel";
+import ProbingQuestionsCard from "@/components/letter-workflow/ProbingQuestionsCard";
+import LegalRiskPanel from "@/components/letter-workflow/LegalRiskPanel";
+import ApprovalChainCard from "@/components/letter-workflow/ApprovalChainCard";
+import LockedParagraphsPanel from "@/components/letter-workflow/LockedParagraphsPanel";
 import type { ContextDocumentSummary } from "@/services/letter-workflow-api";
 import type {
   LanggraphBackgroundItem,
@@ -92,6 +96,9 @@ const LetterDraftPage = () => {
     validateRun,
     critiqueRun,
     approveRun,
+    approveStage,
+    provideUserDirection,
+    lockParagraphs,
     exportRun,
     issueRun,
     loading: draftingV2Loading,
@@ -592,6 +599,75 @@ const LetterDraftPage = () => {
     [approveRun, exportRun, fetchLetters, id, issueRun, toast, v2Run]
   );
 
+  const handleApproveStage = useCallback(
+    async (stage: "drafter" | "reviewer" | "final", comment?: string) => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response = await approveStage(id, v2Run.run_id, { stage, comment });
+        setV2Run(response);
+        await fetchLetters();
+        toast({
+          title: `${stage.charAt(0).toUpperCase() + stage.slice(1)} approval recorded`,
+          description:
+            stage === "final"
+              ? "Approval chain complete — draft approved and version locked."
+              : "Next approval stage is now pending.",
+        });
+      } catch (error: any) {
+        toast({
+          title: "Approval failed",
+          description: error?.message ?? "Approval stage was rejected.",
+          variant: "destructive",
+        });
+      }
+    },
+    [approveStage, fetchLetters, id, toast, v2Run]
+  );
+
+  const handleUserDirection = useCallback(
+    async (answers: { question_id?: string; answer: string }[], directions?: string) => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response = await provideUserDirection(id, v2Run.run_id, { answers, directions });
+        setV2Run(response);
+        toast({
+          title: "Direction recorded",
+          description: "Your line of action will be carried into the next strategy/draft run.",
+        });
+      } catch (error: any) {
+        toast({
+          title: "Unable to record direction",
+          description: error?.message ?? "User direction failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [id, provideUserDirection, toast, v2Run]
+  );
+
+  const handleLockParagraphs = useCallback(
+    async (lockedParagraphs: string[]) => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response = await lockParagraphs(id, v2Run.run_id, {
+          locked_paragraphs: lockedParagraphs,
+        });
+        setV2Run(response);
+        toast({
+          title: "Locks saved",
+          description: `${lockedParagraphs.length} paragraph(s) locked against AI redrafts.`,
+        });
+      } catch (error: any) {
+        toast({
+          title: "Unable to save locks",
+          description: error?.message ?? "Lock paragraphs failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [id, lockParagraphs, toast, v2Run]
+  );
+
   const handleEditorUpdate = useCallback(
     async (updatedLetter: any) => {
       if (!id || !uiLetter) return;
@@ -990,20 +1066,6 @@ const LetterDraftPage = () => {
                     size="sm"
                     variant="outline"
                     className="gap-1"
-                    onClick={() => handleLifecycleAction("approve")}
-                    disabled={
-                      draftingV2Loading ||
-                      v2Run.status === "blocked" ||
-                      Boolean(v2Run.validation_report?.blocking)
-                    }
-                  >
-                    <CheckCircle2 className="h-4 w-4" />
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="gap-1"
                     onClick={() => handleLifecycleAction("export")}
                     disabled={draftingV2Loading}
                   >
@@ -1087,6 +1149,32 @@ const LetterDraftPage = () => {
           />
 
           <DraftEvidencePanel letterId={id} runId={v2Run?.run_id} run={v2Run} />
+
+          {v2Run && (
+            <>
+              <ProbingQuestionsCard
+                questions={v2Run.probing_questions ?? []}
+                existingDirections={v2Run.user_directions ?? []}
+                loading={draftingV2Loading}
+                onSubmit={handleUserDirection}
+              />
+              <LegalRiskPanel report={v2Run.legal_risk_report} />
+              <LockedParagraphsPanel
+                run={v2Run}
+                loading={draftingV2Loading}
+                onSave={handleLockParagraphs}
+              />
+              <ApprovalChainCard
+                approvals={v2Run.approvals ?? []}
+                disabled={
+                  draftingV2Loading ||
+                  v2Run.status === "blocked" ||
+                  Boolean(v2Run.validation_report?.blocking)
+                }
+                onApproveStage={handleApproveStage}
+              />
+            </>
+          )}
 
           <Card>
             <CardHeader>
