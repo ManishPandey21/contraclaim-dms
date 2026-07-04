@@ -58,7 +58,15 @@ ISSUE_KEYWORDS = [
 
 
 class IncomingLetterAnalyzer:
-    """Extracts a lightweight, reviewable analysis from an incoming source."""
+    """Document Understanding Agent: extracts a reviewable analysis from an
+    incoming source.
+
+    Metadata-first: when the incoming document has AI-extracted metadata stored
+    on it (subject, letter no., parties, contractual summary, contractual
+    clauses, key reply points, linked references) that is authoritative and the
+    regex extraction only fills the gaps. Regex remains the fallback for
+    ad-hoc/pasted text with no stored document.
+    """
 
     async def analyze(
         self,
@@ -66,9 +74,11 @@ class IncomingLetterAnalyzer:
         request: DraftRunCreateRequest,
         document_service: Any,
     ) -> IncomingLetterAnalysis:
-        text = await self._incoming_text(letter, request, document_service)
-        subject = request.subject or getattr(letter, "subject", None)
-        if not text:
+        incoming_doc = await self._incoming_document(request, document_service)
+        meta = self._metadata_from_document(incoming_doc)
+        text = await self._incoming_text(letter, request, document_service, incoming_doc)
+        subject = request.subject or meta.get("subject") or getattr(letter, "subject", None)
+        if not text and not meta:
             return IncomingLetterAnalysis(
                 sender_role_or_party_type=self._party_type(
                     request.role or getattr(letter, "strategy_role", None)
@@ -89,31 +99,40 @@ class IncomingLetterAnalyzer:
                 extraction_confidence=0.25,
             )
 
-        clauses = list(
-            dict.fromkeys(clause.strip(" .;,") for clause in CLAUSE_PATTERN.findall(text))
-        )[:10]
+        text = text or ""
+        regex_clauses = [clause.strip(" .;,") for clause in CLAUSE_PATTERN.findall(text)]
+        # Stored contractual clauses (AI metadata) lead; regex fills gaps.
+        clauses = list(dict.fromkeys([*meta.get("contractual_clauses", []), *regex_clauses]))[:10]
         amount = self._first_match(AMOUNT_PATTERN, text)
         dates = DATE_PATTERN.findall(text)
         deadline = request.response_deadline or self._first_match(RESPONSE_DUE_PATTERN, text)
-        issue_type = request.issue_type or self._issue_type(text)
+        issue_type = request.issue_type or self._issue_type(
+            " ".join([text, subject or "", " ".join(meta.get("key_reply_points", []))])
+        )
         contract_ref = self._first_match(CONTRACT_REF_PATTERN, text)
         subject_from_text = self._subject_from_text(text)
         action_requested = request.required_action or self._action_requested(text)
-        main_request = condense_text(request.purpose or request.requirements or text, 500)
+        main_request = condense_text(
+            request.purpose or request.requirements or meta.get("summary") or text, 500
+        )
         return IncomingLetterAnalysis(
-            letter_no=self._letter_no(letter, text),
-            letter_date=dates[0] if dates else None,
-            sender=self._line_value(SENDER_PATTERN, text),
+            letter_no=meta.get("letter_no") or self._letter_no(letter, text),
+            letter_date=meta.get("date") or (dates[0] if dates else None),
+            sender=meta.get("sender") or self._line_value(SENDER_PATTERN, text),
             sender_role_or_party_type=self._party_type(
                 request.role or getattr(letter, "strategy_role", None)
             ),
-            recipient=request.recipient or getattr(letter, "recipient", None),
-            subject=subject_from_text or subject,
+            recipient=request.recipient or meta.get("recipient") or getattr(letter, "recipient", None),
+            subject=meta.get("subject") or subject_from_text or subject,
             contract_project_reference=contract_ref,
-            subject_matches_requested_matter=self._subject_matches(subject, subject_from_text),
+            subject_matches_requested_matter=self._subject_matches(
+                subject, meta.get("subject") or subject_from_text
+            ),
             issue_type=issue_type,
             issue_type_source="manual" if request.issue_type else "ai",
             main_request=main_request,
+            key_reply_points=meta.get("key_reply_points", []),
+            linked_references=meta.get("references", []),
             clauses_cited=clauses,
             cited_clause_evaluations=[
                 CitedClauseEvaluation(
@@ -140,29 +159,90 @@ class IncomingLetterAnalyzer:
             approval_urgency="urgent" if self._deadline_risk(deadline) == "high" else "normal",
             workflow_due_date=deadline,
             contractual_risk=self._risk_label(request, clauses, amount),
-            extraction_confidence=0.65 if text else 0.25,
+            # Stored AI metadata is authoritative -> higher confidence than
+            # regex-only extraction over raw text.
+            extraction_confidence=0.85 if meta else (0.65 if text else 0.25),
         )
+
+    @staticmethod
+    async def _incoming_document(request: DraftRunCreateRequest, document_service: Any):
+        """Fetch the incoming document once so text + metadata share one read."""
+        if not request.incoming_document_id:
+            return None
+        try:
+            docs = await document_service.get_documents_by_ids([request.incoming_document_id])
+        except Exception:
+            docs = []
+        return docs[0] if docs else None
+
+    @staticmethod
+    def _metadata_from_document(doc: Any) -> dict:
+        """Stored AI metadata from the document-processing pipeline (may be {})."""
+        if doc is None:
+            return {}
+
+        def _clean_list(values: Any) -> list[str]:
+            if not isinstance(values, (list, tuple)):
+                return []
+            return [str(v).strip() for v in values if v and str(v).strip()][:12]
+
+        references: list[str] = []
+        for ref in getattr(doc, "reference", None) or []:
+            if isinstance(ref, dict):
+                label = ref.get("letter_no") or ref.get("letterNo") or ref.get("text")
+            else:
+                label = (
+                    getattr(ref, "letter_no", None)
+                    or getattr(ref, "letterNo", None)
+                    or getattr(ref, "text", None)
+                    or str(ref)
+                )
+            if label and str(label).strip():
+                references.append(str(label).strip())
+
+        date_value = getattr(doc, "date", None)
+        meta = {
+            "subject": condense_text(getattr(doc, "subject", None), 300),
+            "letter_no": getattr(doc, "letterNo", None) or getattr(doc, "letter_no", None),
+            "date": date_value.date().isoformat() if hasattr(date_value, "date") else (
+                str(date_value) if date_value else None
+            ),
+            "sender": condense_text(
+                getattr(doc, "from_", None) or getattr(doc, "from", None), 160
+            ),
+            "recipient": condense_text(getattr(doc, "to", None), 160),
+            "summary": condense_text(getattr(doc, "summary", None), 800),
+            "contractual_clauses": _clean_list(getattr(doc, "contractual_clauses", None)),
+            "key_reply_points": _clean_list(getattr(doc, "key_reply_points", None)),
+            "references": references[:12],
+        }
+        # Only treat it as metadata when something meaningful was stored.
+        has_signal = any(
+            meta.get(key)
+            for key in ("subject", "letter_no", "summary", "key_reply_points", "contractual_clauses")
+        )
+        return meta if has_signal else {}
 
     async def _incoming_text(
         self,
         letter: Letter,
         request: DraftRunCreateRequest,
         document_service: Any,
+        incoming_doc: Any = None,
     ) -> Optional[str]:
-        if request.incoming_document_id:
-            try:
-                docs = await document_service.get_documents_by_ids([request.incoming_document_id])
-            except Exception:
-                docs = []
-            if docs:
-                doc = docs[0]
-                return condense_text(
-                    getattr(doc, "summary", None)
-                    or getattr(doc, "full_text", None)
-                    or getattr(doc, "ocrText", None)
-                    or getattr(doc, "content", None),
-                    2500,
-                )
+        doc = incoming_doc
+        if doc is None and request.incoming_document_id:
+            doc = await self._incoming_document(request, document_service)
+        if doc is not None:
+            text = condense_text(
+                getattr(doc, "summary", None)
+                or getattr(doc, "full_text", None)
+                or getattr(doc, "ocrText", None)
+                or getattr(doc, "content", None),
+                2500,
+            )
+            if text:
+                return text
         return condense_text(
             request.points
             or request.requirements

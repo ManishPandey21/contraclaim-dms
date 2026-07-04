@@ -108,6 +108,7 @@ class DraftRunService:
         context_builder = DraftContextBuilder(
             document_service=document_service,
             conversation_service=ConversationService(self.letter_service),
+            db=self.db,
         )
 
         try:

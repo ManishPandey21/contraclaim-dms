@@ -33,11 +33,14 @@ class DraftContextBuilder:
         conversation_service: ConversationService,
         contract_service: Optional[ContractService] = None,
         graph_service: Optional[FalkorGraphService] = None,
+        db: Any = None,
     ) -> None:
         self.document_service = document_service
         self.conversation_service = conversation_service
         self.contract_service = contract_service or ContractService()
         self.graph_service = graph_service or FalkorGraphService()
+        # Raw handle for structured clause records + register evidence.
+        self.db = db
 
     async def build(
         self,
@@ -70,15 +73,26 @@ class DraftContextBuilder:
         )
         sources.extend(document_sources)
 
+        # Structured clause records first (clause-first evidence), then the
+        # legacy contract-search chunks as supplement.
+        clause_record_sources = await self._clause_record_sources(
+            letter, request, org_id, project_id, warnings
+        )
+        sources.extend(clause_record_sources)
+
         clause_sources = await self._contract_clause_sources(
             letter, request, org_id, project_id, current_user, warnings
         )
         sources.extend(clause_sources)
 
+        register_sources = await self._register_sources(org_id, project_id, warnings)
+        sources.extend(register_sources)
+
         prior_ids, prior_sources = await self._prior_correspondence_sources(
             letter, request, current_user, org_id, project_id, warnings
         )
         sources.extend(prior_sources)
+        sources.extend(self._previous_position_sources(prior_sources, org_id, project_id))
 
         graph_codes, graph_sources = self._graph_sources(letter, request, org_id, project_id, warnings)
         sources.extend(graph_sources)
@@ -263,6 +277,209 @@ class DraftContextBuilder:
                 )
             )
         return sources
+
+    async def _clause_record_sources(
+        self,
+        letter: Letter,
+        request: DraftRunCreateRequest,
+        org_id: str,
+        project_id: str,
+        warnings: List[str],
+    ) -> List[SourceEvidence]:
+        """Structured clause records (contract_clauses) — the primary clause
+        evidence; verified, page-grounded and hierarchy-aware."""
+        if self.db is None or not org_id or not project_id:
+            return []
+        query_text = " ".join(
+            part
+            for part in [
+                request.subject or letter.subject,
+                request.purpose,
+                request.points,
+                " ".join(request.clauses_to_consider),
+            ]
+            if part
+        ).lower()
+        terms = {t for t in query_text.split() if len(t) > 3}
+        try:
+            cursor = self.db.contract_clauses.find(
+                {
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "is_current": True,
+                    "is_authorised_for_ai": True,
+                }
+            ).limit(60)
+            records = [doc async for doc in cursor]
+        except Exception as exc:
+            warnings.append(f"Clause record retrieval skipped: {exc}")
+            return []
+        scored: List[tuple[float, dict]] = []
+        for record in records:
+            haystack = " ".join(
+                str(part or "")
+                for part in (
+                    record.get("cleaned_text"),
+                    record.get("clause_title"),
+                    record.get("clause_no"),
+                )
+            ).lower()
+            hits = sum(1 for term in terms if term in haystack)
+            requested = any(
+                record.get("clause_no") == wanted.strip()
+                for wanted in request.clauses_to_consider
+            )
+            score = hits / max(len(terms), 1) + (1.0 if requested else 0.0)
+            if score > 0:
+                scored.append((score, record))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        sources: List[SourceEvidence] = []
+        for score, record in scored[:6]:
+            text = condense_text(record.get("cleaned_text"), 1000)
+            clause_no = record.get("clause_no")
+            pages = [p for p in [record.get("page_start"), record.get("page_end")] if p]
+            sources.append(
+                SourceEvidence(
+                    source_id=f"clause_record:{record.get('clause_uid')}",
+                    source_type="contract_clause",
+                    allowed_use="clause",
+                    organization_id=org_id,
+                    project_id=project_id,
+                    label=f"Clause {clause_no or ''} {record.get('clause_title') or ''}".strip(),
+                    text=text,
+                    snippet=condense_text(text, 300),
+                    document_id=str(record.get("document_id") or "") or None,
+                    clause_number=clause_no,
+                    clause_title=record.get("clause_title"),
+                    page_numbers=sorted(set(int(p) for p in pages)),
+                    score=round(score, 3),
+                    metadata={
+                        "clause_uid": record.get("clause_uid"),
+                        "document_type": record.get("document_type"),
+                        "structured": True,
+                    },
+                )
+            )
+        return sources
+
+    async def _register_sources(
+        self, org_id: str, project_id: str, warnings: List[str]
+    ) -> List[SourceEvidence]:
+        """Key dates / variation / bank-guarantee register rows as fact evidence."""
+        if self.db is None or not org_id or not project_id:
+            return []
+        scope = {"organization_id": org_id, "project_id": project_id}
+        sources: List[SourceEvidence] = []
+
+        async def _rows(collection: str, sort_field: str) -> List[dict]:
+            try:
+                cursor = self.db[collection].find(scope).sort(sort_field, -1).limit(5)
+                return [doc async for doc in cursor]
+            except Exception as exc:
+                warnings.append(f"Register {collection} unavailable: {exc}")
+                return []
+
+        for row in await _rows("key_date_milestones", "current_approved_key_date"):
+            date = self._date_label(
+                row.get("current_approved_key_date") or row.get("original_planned_key_date")
+            )
+            text = " — ".join(
+                str(part)
+                for part in [row.get("title"), date, condense_text(row.get("remarks"), 200)]
+                if part
+            )
+            sources.append(
+                SourceEvidence(
+                    source_id=f"register:key_date:{row.get('_id')}",
+                    source_type="context_document",
+                    allowed_use="fact",
+                    organization_id=org_id,
+                    project_id=project_id,
+                    label=f"Key date: {row.get('title') or row.get('milestone_ref') or 'milestone'}",
+                    text=text,
+                    snippet=condense_text(text, 240),
+                    metadata={"register": "key_dates", "date": date},
+                )
+            )
+        for row in await _rows("variations", "created_at"):
+            text = " — ".join(
+                str(part)
+                for part in [
+                    row.get("variation_number"),
+                    condense_text(row.get("description"), 240),
+                    f"submitted {row.get('submitted_amount')}" if row.get("submitted_amount") else None,
+                    f"approved {row.get('approved_amount')}" if row.get("approved_amount") else None,
+                    row.get("letter_reference"),
+                ]
+                if part
+            )
+            sources.append(
+                SourceEvidence(
+                    source_id=f"register:variation:{row.get('_id')}",
+                    source_type="context_document",
+                    allowed_use="fact",
+                    organization_id=org_id,
+                    project_id=project_id,
+                    label=f"Variation {row.get('variation_number') or ''}".strip(),
+                    text=text,
+                    snippet=condense_text(text, 240),
+                    metadata={"register": "variations"},
+                )
+            )
+        for row in await _rows("bank_guarantees", "bg_expiry_date"):
+            expiry = self._date_label(row.get("bg_expiry_date"))
+            text = " — ".join(
+                str(part)
+                for part in [
+                    row.get("bg_number"),
+                    row.get("bg_type"),
+                    f"amount {row.get('bg_amount')} {row.get('currency') or ''}".strip()
+                    if row.get("bg_amount")
+                    else None,
+                    f"expires {expiry}" if expiry else None,
+                    row.get("bg_status"),
+                ]
+                if part
+            )
+            sources.append(
+                SourceEvidence(
+                    source_id=f"register:bg:{row.get('_id')}",
+                    source_type="context_document",
+                    allowed_use="fact",
+                    organization_id=org_id,
+                    project_id=project_id,
+                    label=f"Bank guarantee {row.get('bg_number') or ''}".strip(),
+                    text=text,
+                    snippet=condense_text(text, 240),
+                    metadata={"register": "bank_guarantees", "expiry": expiry},
+                )
+            )
+        return sources
+
+    @staticmethod
+    def _previous_position_sources(
+        prior_sources: List[SourceEvidence], org_id: str, project_id: str
+    ) -> List[SourceEvidence]:
+        """Promote the most recent prior letter's summary to fact evidence so
+        the draft stays consistent with the position already taken."""
+        for source in reversed(prior_sources):
+            if source.source_type != "prior_correspondence" or not source.text:
+                continue
+            return [
+                SourceEvidence(
+                    source_id=f"position:{source.letter_id or source.source_id}",
+                    source_type="prior_correspondence",
+                    allowed_use="fact",
+                    organization_id=org_id,
+                    project_id=project_id,
+                    label=f"Previous position — {source.label}",
+                    text=source.text,
+                    snippet=source.snippet,
+                    letter_id=source.letter_id,
+                    metadata={**(source.metadata or {}), "previous_position": True},
+                )
+            ]
+        return []
 
     async def _prior_correspondence_sources(
         self,

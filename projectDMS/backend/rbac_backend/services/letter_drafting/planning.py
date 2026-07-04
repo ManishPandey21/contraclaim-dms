@@ -103,6 +103,13 @@ class PlanningSheetBuilder:
         analysis: Optional[IncomingLetterAnalysis],
     ) -> List[ReplyMatrixRow]:
         points: List[str] = []
+        # Key Reply Points extracted from the incoming letter's stored AI
+        # metadata are the agenda for the reply — they lead the matrix.
+        if analysis:
+            for point in analysis.key_reply_points or []:
+                cleaned = str(point).strip(" -\t")
+                if cleaned:
+                    points.append(cleaned)
         if analysis and analysis.main_request:
             points.append(analysis.main_request)
         for line in (request.points or "").splitlines():

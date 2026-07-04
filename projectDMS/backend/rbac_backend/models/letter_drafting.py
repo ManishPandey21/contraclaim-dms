@@ -164,6 +164,11 @@ class IncomingLetterAnalysis(BaseModel):
     issue_type_source: IssueTypeSource = "system_default"
     issue_type_editable: bool = True
     main_request: Optional[str] = None
+    # Points the AI metadata pipeline extracted as "to be addressed while
+    # responding" on the incoming document — seeds the reply matrix.
+    key_reply_points: List[str] = Field(default_factory=list)
+    # Reference letters linked on the incoming document's stored metadata.
+    linked_references: List[str] = Field(default_factory=list)
     clauses_cited: List[str] = Field(default_factory=list)
     cited_clause_evaluations: List[CitedClauseEvaluation] = Field(default_factory=list)
     amount_claimed: Optional[str] = None
