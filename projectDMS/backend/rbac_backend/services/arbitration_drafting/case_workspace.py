@@ -31,7 +31,7 @@ from ...models.arbitration_drafting import (
 from ..background_jobs import submit_background_job
 from ..observability import observability_registry
 from ..task_sync_service import TaskSyncService
-from .agents import run_arbitration_agent
+from .agents import agent_run_metadata, run_arbitration_agent
 from .exporter import ArbitrationDraftExporter
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
@@ -559,14 +559,15 @@ class ArbitrationCaseWorkspaceService:
     ) -> Dict[str, Any]:
         case = await self.get_case(case_id)
         input_hash = self._agent_input_hash(case_id, agent_type, payload)
+        run_metadata = agent_run_metadata(payload.options)
         run = ArbitrationAgentRun(
             case_id=case_id,
             draft_id=payload.draft_id,
             agent_type=agent_type,
             status="queued",
             input_hash=input_hash,
-            prompt_version="arbitration-workflow-deterministic-1",
-            model="deterministic-matrix-agent",
+            prompt_version=run_metadata["prompt_version"],
+            model=run_metadata["model"],
             created_by=_actor_id(current_user),
         ).model_dump(by_alias=True)
         await self.db.arbitration_agent_runs.insert_one(_jsonable(run))
@@ -1132,6 +1133,7 @@ class ArbitrationCaseWorkspaceService:
             "rejoinder-matrix": ["legal"],
             "quantum-annexures": ["quantum"],
             "notice-compliance": ["legal", "contracts"],
+            "jurisdiction-matrix": ["legal"],
         }
         return list(defaults.get(matrix_slug, ["reviewer"]))
 
@@ -1277,7 +1279,105 @@ class ArbitrationCaseWorkspaceService:
                 str(risky_notice_rows[0].get("_id")),
             )
 
+        self._jurisdiction_readiness(add, rows.get("jurisdiction-matrix") or [])
+
         return checks
+
+    def _jurisdiction_readiness(self, add: Any, jurisdiction_rows: List[Dict[str, Any]]) -> None:
+        limitation_rows = [row for row in jurisdiction_rows if str(row.get("check_type") or "") == "limitation"]
+        if not limitation_rows:
+            add(
+                "limitation_analysis",
+                "jurisdiction",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                "Limitation analysis has not been prepared. Run the jurisdiction agent or add limitation rows to the jurisdiction matrix.",
+            )
+        else:
+            time_barred = [row for row in limitation_rows if str(row.get("limitation_status") or "").lower() == "time_barred"]
+            unresolved = [
+                row
+                for row in limitation_rows
+                if str(row.get("limitation_status") or "").lower() != "within_limitation" or not _is_ready_row(row)
+            ]
+            if time_barred:
+                add(
+                    "limitation_analysis",
+                    "jurisdiction",
+                    ReadinessCheckStatus.BLOCKED,
+                    f"{len(time_barred)} limitation row(s) appear time-barred; the claim cannot proceed to drafting without legal resolution.",
+                    str(time_barred[0].get("_id")),
+                )
+            elif unresolved:
+                add(
+                    "limitation_analysis",
+                    "jurisdiction",
+                    ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                    f"{len(unresolved)} limitation row(s) need legal confirmation (at-risk, missing dates, or pending approval).",
+                    str(unresolved[0].get("_id")),
+                )
+            else:
+                add(
+                    "limitation_analysis",
+                    "jurisdiction",
+                    ReadinessCheckStatus.READY,
+                    "Limitation analysis confirms claims are within limitation.",
+                )
+
+        prearb_rows = [row for row in jurisdiction_rows if str(row.get("check_type") or "") == "pre_arbitration_step"]
+        incomplete_statuses = {"pending", "not_started", "incomplete", "in_progress"}
+        resolved_statuses = {"complete", "completed", "not_applicable", "waived", "not_required"}
+        if not prearb_rows:
+            add(
+                "pre_arbitration_compliance",
+                "jurisdiction",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                "Pre-arbitration compliance steps have not been recorded. Run the jurisdiction agent or add pre-arbitration rows to the jurisdiction matrix.",
+            )
+        else:
+            incomplete_required = [
+                row
+                for row in prearb_rows
+                if _is_positive(row.get("required")) and str(row.get("compliance_status") or "").lower() in incomplete_statuses
+            ]
+            unresolved = [
+                row
+                for row in prearb_rows
+                if str(row.get("compliance_status") or "").lower() not in resolved_statuses or not _is_ready_row(row)
+            ]
+            if incomplete_required:
+                add(
+                    "pre_arbitration_compliance",
+                    "jurisdiction",
+                    ReadinessCheckStatus.BLOCKED,
+                    f"Arbitration appears premature: {len(incomplete_required)} required pre-arbitration step(s) are incomplete.",
+                    str(incomplete_required[0].get("_id")),
+                )
+            elif unresolved:
+                add(
+                    "pre_arbitration_compliance",
+                    "jurisdiction",
+                    ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                    f"{len(unresolved)} pre-arbitration step(s) need confirmation or approval.",
+                    str(unresolved[0].get("_id")),
+                )
+            else:
+                add(
+                    "pre_arbitration_compliance",
+                    "jurisdiction",
+                    ReadinessCheckStatus.READY,
+                    "Pre-arbitration procedural steps are complete or confirmed not applicable.",
+                )
+
+        scope_rows = [row for row in jurisdiction_rows if str(row.get("check_type") or "") == "arbitration_clause_scope"]
+        out_of_scope = [row for row in scope_rows if str(row.get("scope_status") or "").lower() == "out_of_scope"]
+        if out_of_scope:
+            add(
+                "arbitration_clause_scope",
+                "jurisdiction",
+                ReadinessCheckStatus.BLOCKED,
+                f"{len(out_of_scope)} claim(s) are marked outside the arbitration clause; the tribunal may lack jurisdiction.",
+                str(out_of_scope[0].get("_id")),
+            )
 
     def _claim_readiness(self, add: Any, claim_rows: List[Dict[str, Any]]) -> None:
         ready_claims = [row for row in claim_rows if (row.get("claim_head") or row.get("facts")) and _is_ready_row(row)]

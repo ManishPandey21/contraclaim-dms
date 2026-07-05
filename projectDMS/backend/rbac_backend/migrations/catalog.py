@@ -27,6 +27,10 @@ from .v20260705_0001_arbitration_hardening_indexes import DESCRIPTION as ARB_HAR
 from .v20260705_0001_arbitration_hardening_indexes import NAME as ARB_HARDENING_NAME
 from .v20260705_0001_arbitration_hardening_indexes import VERSION as ARB_HARDENING_VERSION
 from .v20260705_0001_arbitration_hardening_indexes import upgrade as upgrade_arbitration_hardening
+from .v20260705_0002_arbitration_jurisdiction_matrix import DESCRIPTION as ARB_JURISDICTION_DESCRIPTION
+from .v20260705_0002_arbitration_jurisdiction_matrix import NAME as ARB_JURISDICTION_NAME
+from .v20260705_0002_arbitration_jurisdiction_matrix import VERSION as ARB_JURISDICTION_VERSION
+from .v20260705_0002_arbitration_jurisdiction_matrix import upgrade as upgrade_arbitration_jurisdiction
 
 
 MIGRATIONS = [
@@ -59,5 +63,11 @@ MIGRATIONS = [
         name=ARB_HARDENING_NAME,
         description=ARB_HARDENING_DESCRIPTION,
         upgrade=upgrade_arbitration_hardening,
+    ),
+    Migration(
+        version=ARB_JURISDICTION_VERSION,
+        name=ARB_JURISDICTION_NAME,
+        description=ARB_JURISDICTION_DESCRIPTION,
+        upgrade=upgrade_arbitration_jurisdiction,
     ),
 ]

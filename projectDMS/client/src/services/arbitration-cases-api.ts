@@ -64,7 +64,8 @@ export type MatrixSlug =
   | "counterclaim-matrix"
   | "rejoinder-matrix"
   | "quantum-annexures"
-  | "notice-compliance";
+  | "notice-compliance"
+  | "jurisdiction-matrix";
 
 export interface MatrixRow {
   _id: string;
@@ -193,6 +194,7 @@ export const MATRIX_DEFINITIONS: Array<{ slug: MatrixSlug; label: string }> = [
   { slug: "rejoinder-matrix", label: "Rejoinder Matrix" },
   { slug: "quantum-annexures", label: "Quantum Annexures" },
   { slug: "notice-compliance", label: "Notice Compliance" },
+  { slug: "jurisdiction-matrix", label: "Jurisdiction & Limitation" },
   { slug: "chronology-matrix", label: "Chronology Matrix" },
 ];
 

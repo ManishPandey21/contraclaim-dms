@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from textwrap import shorten
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -15,23 +15,15 @@ MODEL_NAME = "deterministic-matrix-agent"
 VERIFIED_STATUSES = {"approved", "edited_verified", "ready", "supported", "user_verified", "verified"}
 REVIEW_STATUSES = {"ai_suggested", "draft", "needs_review", "pending", "under_review"}
 
-
-async def run_arbitration_agent(
-    db: Any,
-    case: Dict[str, Any],
-    agent_type: str,
-    *,
-    payload: Any,
-    current_user: Any,
-) -> Dict[str, Any]:
-    agent = DeterministicArbitrationAgent(
-        db=db,
-        case=case,
-        draft_id=getattr(payload, "draft_id", None),
-        options=dict(getattr(payload, "options", {}) or {}),
-        current_user=current_user,
-    )
-    return await agent.run(agent_type)
+# Standard pre-arbitration procedural steps from the SoC/SoD/Rejoinder guide (§2).
+PRE_ARBITRATION_STEPS = [
+    "dispute_notice",
+    "engineer_decision",
+    "amicable_settlement",
+    "conciliation",
+    "cooling_period",
+]
+DEFAULT_LIMITATION_PERIOD_YEARS = 3
 
 
 class DeterministicArbitrationAgent:
@@ -71,6 +63,7 @@ class DeterministicArbitrationAgent:
             "document-indexing",
             "chronology-builder-adapter",
             "clause-interpretation",
+            "jurisdiction",
             "claim-identification",
             "quantum",
             "notice-compliance",
@@ -88,7 +81,7 @@ class DeterministicArbitrationAgent:
             "clause-interpretation": self._clause_interpretation,
             "issue-framing": self._issue_framing,
             "claim-identification": self._claim_identification,
-            "defence-analysis": self._review_only_agent,
+            "defence-analysis": self._defence_analysis,
             "counterclaim-setoff": self._review_only_agent,
             "rejoinder-reply": self._review_only_agent,
             "quantum": self._quantum,
@@ -391,9 +384,125 @@ class DeterministicArbitrationAgent:
     async def _jurisdiction(self, agent_type: str) -> None:
         if self.case.get("arbitration_clause"):
             await self._clause_interpretation("clause-interpretation")
-            self.warnings.append("Jurisdiction MVP added the arbitration clause to the clause matrix; limitation and procedure checks need legal review.")
+            scope_row = {
+                "check_type": "arbitration_clause_scope",
+                "clause_source_id": self.case.get("arbitration_clause_source_id")
+                or f"case:{self.case_id}:arbitration_clause",
+                "claim_description": _condense(self.case.get("case_summary") or self.case.get("title"), 300),
+                "scope_status": "needs_review",
+                "notes": "Confirm every claim head falls within the arbitration agreement before drafting.",
+            }
+            await self._insert_matrix_row(
+                "jurisdiction-matrix",
+                scope_row,
+                unique={"check_type": "arbitration_clause_scope"},
+                agent_type=agent_type,
+                source_id=str(scope_row["clause_source_id"]),
+                label="Arbitration clause scope check",
+            )
         else:
-            self.warnings.append("Jurisdiction agent requires arbitration clause text or a verified clause source.")
+            self.warnings.append(
+                "Jurisdiction agent found no arbitration clause text; record the clause and scope check manually."
+            )
+        await self._limitation_analysis(agent_type)
+        await self._pre_arbitration_steps(agent_type)
+
+    async def _limitation_analysis(self, agent_type: str) -> None:
+        period_years = int(self.options.get("limitation_period_years") or DEFAULT_LIMITATION_PERIOD_YEARS)
+        claims = await self._find_source_rows("claims", limit=int(self.options.get("claim_limit") or 50))
+        subjects: List[Tuple[str, str, Dict[str, Any]]] = []
+        for claim in claims:
+            claim_id = _id(claim)
+            if claim_id:
+                subjects.append((claim_id, _first(claim, "title", "claim_ref", "description") or f"Claim {claim_id}", claim))
+        if not subjects:
+            subjects.append((self.case_id, "Case-level limitation review", {}))
+        dated_rows = 0
+        for subject_id, subject_label, record in subjects:
+            cause_date = _parse_date(_first(record, "cause_of_action_date", "event_date") or self.options.get("cause_of_action_date"))
+            rejection_date = _parse_date(_first(record, "rejection_date", "determination_date") or self.options.get("rejection_date"))
+            final_bill_date = _parse_date(_first(record, "final_bill_date") or self.options.get("final_bill_date"))
+            acknowledgements = [
+                parsed
+                for parsed in (
+                    _parse_date(item)
+                    for item in _string_list(_first(record, "acknowledgement_dates") or self.options.get("acknowledgement_dates"))
+                )
+                if parsed
+            ]
+            base = max((d for d in [cause_date, rejection_date, final_bill_date, *acknowledgements] if d), default=None)
+            expiry = _add_years(base, period_years) if base else None
+            if base:
+                dated_rows += 1
+            row = {
+                "check_type": "limitation",
+                "limitation_subject_id": subject_id,
+                "subject": _condense(subject_label, 200),
+                "cause_of_action_date": _iso_date(cause_date),
+                "rejection_date": _iso_date(rejection_date),
+                "final_bill_date": _iso_date(final_bill_date),
+                "acknowledgement_dates": [_iso_date(item) for item in acknowledgements],
+                "limitation_period_years": period_years,
+                "limitation_base_date": _iso_date(base),
+                "limitation_expiry_date": _iso_date(expiry),
+                "limitation_status": _limitation_status(expiry),
+                "basis": (
+                    "Deterministic check from the latest of cause-of-action, rejection, final-bill, and "
+                    "acknowledgement dates; confirm under the applicable limitation statute."
+                ),
+            }
+            await self._insert_matrix_row(
+                "jurisdiction-matrix",
+                row,
+                unique={"check_type": "limitation", "limitation_subject_id": subject_id},
+                agent_type=agent_type,
+                source_id=subject_id,
+                label=f"Limitation: {row['subject']}",
+            )
+        if not dated_rows:
+            self.warnings.append(
+                "Limitation dates were not found in claim records or run options; complete the limitation rows manually "
+                "(cause_of_action_date, rejection_date, final_bill_date, acknowledgement_dates)."
+            )
+
+    async def _pre_arbitration_steps(self, agent_type: str) -> None:
+        steps = self.options.get("pre_arbitration_steps") or PRE_ARBITRATION_STEPS
+        for entry in steps:
+            if isinstance(entry, dict):
+                step = str(entry.get("step") or "").strip()
+                required = entry.get("required")
+                compliance_status = str(entry.get("compliance_status") or "needs_review")
+                completed_date = entry.get("completed_date")
+            else:
+                step = str(entry).strip()
+                required = None
+                compliance_status = "needs_review"
+                completed_date = None
+            if not step:
+                continue
+            row = {
+                "check_type": "pre_arbitration_step",
+                "step": step,
+                "required": required,
+                "compliance_status": compliance_status,
+                "completed_date": completed_date,
+                "contractual_requirement": (
+                    "Confirm whether this step is a contractual precondition, its deadline, and its completion evidence."
+                ),
+            }
+            await self._insert_matrix_row(
+                "jurisdiction-matrix",
+                row,
+                unique={"check_type": "pre_arbitration_step", "step": step},
+                agent_type=agent_type,
+                source_id=f"prearb:{step}",
+                label=f"Pre-arbitration step: {step}",
+            )
+
+    async def _defence_analysis(self, agent_type: str) -> None:
+        # Deterministic mode has no safe heuristic for admissions/denials; named
+        # separately so the LLM agent subclass can supply a real implementation.
+        await self._review_only_agent(agent_type)
 
     async def _review_only_agent(self, agent_type: str) -> None:
         self.warnings.append(f"{agent_type} is registered for the workflow but needs pleading-specific source import before row generation.")
@@ -627,6 +736,46 @@ def _condense(value: Any, width: int = 700) -> str:
     if len(text) <= width:
         return text
     return shorten(text, width=width, placeholder="...")
+
+
+def _parse_date(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value
+    if value in (None, "", []):
+        return None
+    text = str(value).strip()
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(text[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _iso_date(value: Optional[datetime]) -> Optional[str]:
+    return value.date().isoformat() if value else None
+
+
+def _add_years(value: datetime, years: int) -> datetime:
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:  # 29 February
+        return value.replace(year=value.year + years, day=28)
+
+
+def _limitation_status(expiry: Optional[datetime], *, at_risk_days: int = 90) -> str:
+    if not expiry:
+        return "needs_review"
+    now = datetime.utcnow()
+    if expiry < now:
+        return "time_barred"
+    if expiry <= now + timedelta(days=at_risk_days):
+        return "at_risk"
+    return "within_limitation"
 
 
 def _numeric(value: Any) -> Optional[float]:

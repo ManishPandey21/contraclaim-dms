@@ -4,6 +4,9 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationAgentRunRequest,
     ArbitrationDraftCreate,
@@ -16,7 +19,13 @@ from backend.rbac_backend.services.arbitration_drafting import case_workspace as
 from backend.rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
 from backend.rbac_backend.services.arbitration_drafting.generator import ArbitrationDraftGenerator
 from backend.rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
-from backend.rbac_backend.services.arbitration_drafting.agents import run_arbitration_agent
+from backend.rbac_backend.services.arbitration_drafting.agents import (
+    LLM_FALLBACK_WARNING,
+    agent_run_metadata,
+    resolve_agent_mode,
+    run_arbitration_agent,
+)
+from backend.rbac_backend.services.arbitration_drafting.agents import llm as llm_agents_module
 from backend.rbac_backend.services.arbitration_drafting.service import stable_generation_input_hash
 from backend.rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
 
@@ -207,6 +216,7 @@ class _FakeDb:
             ]
         )
         self.arbitration_notice_compliance = _FakeCollection([])
+        self.arbitration_jurisdiction_matrix = _FakeCollection([])
         self.arbitration_readiness_checks = _FakeCollection([])
         self.arbitration_agent_runs = _FakeCollection([])
         self.arbitration_bundle_exports = _FakeCollection([])
@@ -947,6 +957,391 @@ def test_queue_filing_bundle_export_persists_status_and_content(monkeypatch):
     assert completed["content_length"] > 0
     assert artifact["content"][:2] == b"PK"
     assert artifact["filename"] == "arbitration-case-bundle.zip"
+
+
+class _FakeLLMGenerator:
+    """Injectable stand-in for retrieval.generator.LLMGenerator."""
+
+    response = "[]"
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    @property
+    def available(self):
+        return True
+
+    async def generate(self, prompt, max_tokens=512, model=None):
+        type(self).last_prompt = prompt
+        return type(self).response
+
+
+def test_agent_mode_option_overrides_environment(monkeypatch):
+    monkeypatch.setenv("ARBITRATION_AGENT_MODE", "llm")
+    assert resolve_agent_mode({}) == "llm"
+    assert resolve_agent_mode({"agent_mode": "deterministic"}) == "deterministic"
+    monkeypatch.delenv("ARBITRATION_AGENT_MODE", raising=False)
+    assert resolve_agent_mode({}) == "deterministic"
+    assert resolve_agent_mode({"agent_mode": "bogus"}) == "deterministic"
+    assert agent_run_metadata({"agent_mode": "llm"})["prompt_version"] == "arbitration-agents-llm-1"
+    assert agent_run_metadata({})["model"] == "deterministic-matrix-agent"
+
+
+def test_llm_agent_creates_needs_review_rows_from_mocked_output(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    class _Gen(_FakeLLMGenerator):
+        response = json.dumps(
+            [
+                {
+                    "source_id": "claim-1",
+                    "claim_head": "Extension of time",
+                    "facts": "Late site access delayed critical works.",
+                    "causation": "Employer-caused access delay affected the critical path.",
+                    "weakness": "Notice timing",
+                    "relief": "Award EOT without LD",
+                }
+            ]
+        )
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "claim-identification",
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm", "auto_approve": True}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["prompt_version"] == "arbitration-agents-llm-1"
+    assert result["model"] != "deterministic-matrix-agent"
+    assert result["errors"] == []
+    row = next(r for r in db.arbitration_claim_matrix.rows if r.get("source_claim_id") == "claim-1")
+    # LLM output can never be auto-approved.
+    assert row["approval_status"] == "needs_review"
+    assert row["verification_status"] == "needs_review"
+    assert any("auto_approve is ignored" in warning for warning in result["warnings"])
+    assert row["claim_head"] == "Extension of time"
+    # Amount is grounded from the claim register, not the model output.
+    assert row["amount"] == 1000000.0
+    assert row["currency"] == "INR"
+    # Prompt contained only scoped sources keyed by id.
+    assert "[id=claim-1]" in _Gen.last_prompt
+    assert "Return ONLY a JSON array" in _Gen.last_prompt
+
+
+def test_llm_agent_rejects_rows_citing_unknown_sources(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    class _Gen(_FakeLLMGenerator):
+        response = json.dumps(
+            [{"source_id": "claim-999", "claim_head": "Fabricated claim", "facts": "Invented facts."}]
+        )
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "claim-identification",
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm"}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["created_records"] == []
+    assert not db.arbitration_claim_matrix.rows
+    assert any("unknown source id 'claim-999'" in warning for warning in result["warnings"])
+
+
+def test_llm_agent_unparseable_output_warns_and_creates_nothing(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    class _Gen(_FakeLLMGenerator):
+        response = "I cannot answer that question."
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "claim-identification",
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm"}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["created_records"] == []
+    assert result["errors"] == []
+    assert any("parseable JSON" in warning for warning in result["warnings"])
+
+
+def test_llm_mode_falls_back_to_deterministic_when_unavailable(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    class _Gen(_FakeLLMGenerator):
+        @property
+        def available(self):
+            return False
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "claim-identification",
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm", "auto_approve": True}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["model"] == "deterministic-matrix-agent"
+    assert result["warnings"][0] == LLM_FALLBACK_WARNING
+    assert any(row.get("source_claim_id") == "claim-1" for row in db.arbitration_claim_matrix.rows)
+
+
+def test_llm_defence_analysis_rejects_blanket_denials(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+    db.arbitration_claim_matrix.rows.extend(
+        [
+            {
+                "_id": "claim-row-a",
+                "case_id": "case-1",
+                "claim_no": "CL-001",
+                "claim_head": "EOT claim",
+                "facts": "Late access caused delay.",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "claim-row-b",
+                "case_id": "case-1",
+                "claim_no": "CL-002",
+                "claim_head": "Prolongation cost",
+                "facts": "Extended stay costs incurred.",
+                "approval_status": "approved",
+            },
+        ]
+    )
+
+    class _Gen(_FakeLLMGenerator):
+        response = json.dumps(
+            [
+                {"source_id": "claim-row-a", "admission_denial": "denied", "defence": ""},
+                {
+                    "source_id": "claim-row-b",
+                    "admission_denial": "denied",
+                    "defence": "No compensable delay: the claimed period overlaps contractor-caused resource shortfalls.",
+                    "quantum_objection": "No actual cost records identified in the source.",
+                },
+            ]
+        )
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "defence-analysis",
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm"}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert any("denial without a stated reason" in warning for warning in result["warnings"])
+    defences = db.arbitration_defence_matrix.rows
+    assert len(defences) == 1
+    assert defences[0]["source_claim_no"] == "CL-002"
+    assert defences[0]["approval_status"] == "needs_review"
+
+
+def test_deterministic_defence_analysis_remains_review_only():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "defence-analysis",
+            payload=ArbitrationAgentRunRequest(options={}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["created_records"] == []
+    assert not db.arbitration_defence_matrix.rows
+
+
+def test_jurisdiction_agent_computes_limitation_and_seeds_prearb_steps():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "jurisdiction",
+            payload=ArbitrationAgentRunRequest(
+                options={"cause_of_action_date": "2020-01-10", "limitation_period_years": 3}
+            ),
+            current_user=_FakeUser(),
+        )
+    )
+
+    rows = db.arbitration_jurisdiction_matrix.rows
+    limitation = [row for row in rows if row.get("check_type") == "limitation"]
+    assert limitation, "jurisdiction agent must create limitation rows"
+    assert limitation[0]["limitation_status"] == "time_barred"
+    assert limitation[0]["limitation_expiry_date"] == "2023-01-10"
+    assert limitation[0]["limitation_period_years"] == 3
+    steps = {row.get("step") for row in rows if row.get("check_type") == "pre_arbitration_step"}
+    assert {"dispute_notice", "engineer_decision", "conciliation"}.issubset(steps)
+    scope = [row for row in rows if row.get("check_type") == "arbitration_clause_scope"]
+    assert scope and scope[0]["scope_status"] == "needs_review"
+    assert result["errors"] == []
+
+    # Idempotent on re-run.
+    rerun = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "jurisdiction",
+            payload=ArbitrationAgentRunRequest(
+                options={"cause_of_action_date": "2020-01-10", "limitation_period_years": 3}
+            ),
+            current_user=_FakeUser(),
+        )
+    )
+    assert rerun["created_records"] == []
+
+
+def test_jurisdiction_agent_marks_recent_cause_of_action_within_limitation():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "jurisdiction",
+            payload=ArbitrationAgentRunRequest(options={"cause_of_action_date": "2026-01-01"}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    limitation = [row for row in db.arbitration_jurisdiction_matrix.rows if row.get("check_type") == "limitation"]
+    assert limitation[0]["limitation_status"] == "within_limitation"
+    assert limitation[0]["limitation_expiry_date"] == "2029-01-01"
+
+
+def test_readiness_flags_missing_limitation_and_prearb_records():
+    db = _FakeDb()
+
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness("case-1"))
+
+    blockers = {check["check_key"]: check["status"] for check in readiness["blockers"]}
+    assert blockers.get("limitation_analysis") == "needs_legal_review"
+    assert blockers.get("pre_arbitration_compliance") == "needs_legal_review"
+
+
+def test_readiness_blocks_time_barred_premature_and_out_of_scope_case():
+    db = _FakeDb()
+    db.arbitration_jurisdiction_matrix.rows.extend(
+        [
+            {
+                "_id": "jur-lim-1",
+                "case_id": "case-1",
+                "check_type": "limitation",
+                "limitation_status": "time_barred",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "jur-pre-1",
+                "case_id": "case-1",
+                "check_type": "pre_arbitration_step",
+                "step": "conciliation",
+                "required": True,
+                "compliance_status": "pending",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "jur-scope-1",
+                "case_id": "case-1",
+                "check_type": "arbitration_clause_scope",
+                "scope_status": "out_of_scope",
+                "approval_status": "approved",
+            },
+        ]
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    readiness = asyncio.run(service.readiness("case-1"))
+
+    blockers = {check["check_key"]: check["status"] for check in readiness["blockers"]}
+    assert blockers.get("limitation_analysis") == "blocked"
+    assert blockers.get("pre_arbitration_compliance") == "blocked"
+    assert blockers.get("arbitration_clause_scope") == "blocked"
+
+    # Acceptance: blockers prevent approve-readiness.
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.approve_readiness("case-1", _FakeUser()))
+    assert exc_info.value.status_code == 409
+
+
+def test_readiness_passes_when_limitation_and_prearb_resolved():
+    db = _FakeDb()
+    db.arbitration_jurisdiction_matrix.rows.extend(
+        [
+            {
+                "_id": "jur-lim-ok",
+                "case_id": "case-1",
+                "check_type": "limitation",
+                "limitation_status": "within_limitation",
+                "limitation_expiry_date": "2029-01-01",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "jur-pre-ok",
+                "case_id": "case-1",
+                "check_type": "pre_arbitration_step",
+                "step": "dispute_notice",
+                "required": True,
+                "compliance_status": "complete",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "jur-pre-na",
+                "case_id": "case-1",
+                "check_type": "pre_arbitration_step",
+                "step": "conciliation",
+                "required": False,
+                "compliance_status": "not_applicable",
+                "approval_status": "approved",
+            },
+        ]
+    )
+
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness("case-1"))
+
+    blocker_keys = {check["check_key"] for check in readiness["blockers"]}
+    assert "limitation_analysis" not in blocker_keys
+    assert "pre_arbitration_compliance" not in blocker_keys
+    assert "arbitration_clause_scope" not in blocker_keys
+    checks = {check["check_key"]: check["status"] for check in readiness["checks"]}
+    assert checks["limitation_analysis"] == "ready"
+    assert checks["pre_arbitration_compliance"] == "ready"
 
 
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():

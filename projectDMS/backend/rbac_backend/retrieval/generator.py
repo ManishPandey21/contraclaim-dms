@@ -29,6 +29,11 @@ class LLMGenerator:
             logger.warning("Failed to initialize AsyncOpenAI client: %s", exc)
             self._client = None
 
+    @property
+    def available(self) -> bool:
+        """True when a live LLM client is configured; False in offline fallback mode."""
+        return self._client is not None
+
     async def generate(self, prompt: str, max_tokens: int = 512, model: Optional[str] = None) -> str:
         if self._client:
             try:

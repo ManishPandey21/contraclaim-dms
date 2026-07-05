@@ -198,6 +198,15 @@ const MATRIX_FIELDS: Record<MatrixSlug, Array<{ key: string; label: string; type
     { key: "compliance_status", label: "Compliance status" },
     { key: "risk_note", label: "Risk note", type: "textarea" },
   ],
+  "jurisdiction-matrix": [
+    { key: "check_type", label: "Check type (limitation / pre_arbitration_step / arbitration_clause_scope)" },
+    { key: "step", label: "Pre-arb step" },
+    { key: "required", label: "Required (pre-arb step)" },
+    { key: "compliance_status", label: "Compliance status" },
+    { key: "cause_of_action_date", label: "Cause of action date" },
+    { key: "limitation_status", label: "Limitation status" },
+    { key: "notes", label: "Notes", type: "textarea" },
+  ],
 };
 
 const projectId = (project: ProjectOption) => String(project.id || project._id || "");
