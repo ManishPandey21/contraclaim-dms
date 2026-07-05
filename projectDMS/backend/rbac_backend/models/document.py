@@ -179,6 +179,28 @@ class DocumentUpdate(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+
+class DocumentSummaryExtractedMetadataUpdate(BaseModel):
+    asset_type: Optional[str] = None
+    location: Optional[str] = None
+    work_type: Optional[str] = None
+    issue_nature: Optional[str] = None
+    claim_category: Optional[str] = None
+    alleged_responsibility: Optional[str] = Field(default=None, alias="responsibility")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class DocumentSummaryMetadataUpdate(BaseModel):
+    extracted_metadata: Optional[DocumentSummaryExtractedMetadataUpdate] = None
+    keywords: Optional[List[str]] = None
+    additional_keywords: Optional[List[str]] = None
+    extracted_tags: Optional[List[str]] = None
+    extracted_sub_tags: Optional[List[str]] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 # NEW: Bulk Upload Models
 
 class BulkUploadRequest(BaseModel):
@@ -379,4 +401,3 @@ class DocumentProcessingTask(BaseModel):
     result: Optional[Dict[str, Any]] = Field(default=None)
     
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
-

@@ -13,6 +13,15 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   FileText,
   BookOpen,
@@ -21,10 +30,15 @@ import {
   ExternalLink,
   ArrowLeft,
   MapPin,
+  Pencil,
+  Plus,
+  X,
 } from "lucide-react";
 import { format } from "date-fns";
+import { toast } from "sonner";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
+import useHasPermission from "@/hooks/useHasPermission";
 
 interface LetterOut {
   id: string;
@@ -67,6 +81,38 @@ interface Comment {
   authorRoles?: string[];
   createdAt?: string;
 }
+
+type MetadataFormState = {
+  asset_type: string;
+  location: string;
+  work_type: string;
+  issue_nature: string;
+  claim_category: string;
+  responsibility: string;
+};
+
+type KeywordFormState = {
+  keywords: string[];
+  additional_keywords: string[];
+  extracted_tags: string[];
+  extracted_subTags: string[];
+};
+
+const EMPTY_METADATA_FORM: MetadataFormState = {
+  asset_type: "",
+  location: "",
+  work_type: "",
+  issue_nature: "",
+  claim_category: "",
+  responsibility: "",
+};
+
+const EMPTY_KEYWORD_FORM: KeywordFormState = {
+  keywords: [],
+  additional_keywords: [],
+  extracted_tags: [],
+  extracted_subTags: [],
+};
 
 
 const parseBulletString = (s?: string): string[] => {
@@ -136,6 +182,25 @@ const normalizeStringList = (value: any): string[] => {
     });
 };
 
+const normalizeEditableList = (value: any): string[] => {
+  const rawItems = Array.isArray(value) ? value : value ? [value] : [];
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  rawItems.forEach((item) => {
+    String(item ?? "")
+      .split(/\r?\n|,/)
+      .map((part) => part.trim().replace(/\s+/g, " "))
+      .filter(Boolean)
+      .forEach((part) => {
+        const key = part.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        normalized.push(part);
+      });
+  });
+  return normalized;
+};
+
 const firstScalar = (source: any, ...keys: string[]): string | undefined => {
   for (const key of keys) {
     const value = cleanScalar(source?.[key]);
@@ -170,6 +235,149 @@ const priorityVariant = (priority?: string) => {
   return "neutral";
 };
 
+const normalizeLetter = (d: any, fallbackId: string): LetterOut => {
+  const docId = d.id ?? d._id ?? fallbackId;
+  return {
+    ...d,
+    id: String(docId),
+    letterNo: firstScalar(d, "letterNo", "letter_no"),
+    date: d.date,
+    subject: firstScalar(d, "subject"),
+    from_: firstScalar(d, "from_", "from", "from_company"),
+    to: firstScalar(d, "to", "to_company"),
+    reference: d.reference,
+    keywords: firstList(d, "keywords", "Key_words"),
+    additional_keywords: firstList(
+      d,
+      "additional_keywords",
+      "additionalKeywords"
+    ),
+    contractual_clauses:
+      firstList(d, "contractual_clauses", "Contractual Clauses", "clauses"),
+    key_reply_points: firstList(d, "key_reply_points", "keyReplyPoints"),
+    extracted_tags:
+      normalizeStringList(d.extracted_tags).length
+        ? normalizeStringList(d.extracted_tags)
+        : normalizeStringList(d.metadata?.tags),
+    extracted_subTags:
+      normalizeStringList(d.extracted_subTags).length
+        ? normalizeStringList(d.extracted_subTags)
+        : normalizeStringList(d.metadata?.subTags ?? d.metadata?.sub_tags),
+    asset_type: firstScalar(d, "asset_type", "assetType"),
+    location: firstScalar(d, "location"),
+    specific_area: firstScalar(d, "specific_area", "specificArea"),
+    chainage_from: firstScalar(d, "chainage_from", "chainageFrom"),
+    chainage_to: firstScalar(d, "chainage_to", "chainageTo"),
+    work_type: firstScalar(d, "work_type", "workType"),
+    issue_nature: firstScalar(d, "issue_nature", "issueNature"),
+    claim_category: firstScalar(d, "claim_category", "claimCategory"),
+    alleged_responsibility: firstScalar(
+      d,
+      "alleged_responsibility",
+      "allegedResponsibility",
+      "responsibility"
+    ),
+    priority: firstScalar(d, "priority"),
+    linked_event_suggested: firstScalar(
+      d,
+      "linked_event_suggested",
+      "linkedEventSuggested"
+    ),
+    reference_chain: firstScalar(d, "reference_chain", "referenceChain"),
+  };
+};
+
+const metadataFormFromDoc = (doc: LetterOut | null): MetadataFormState => ({
+  asset_type: doc?.asset_type || "",
+  location: doc?.location || "",
+  work_type: doc?.work_type || "",
+  issue_nature: doc?.issue_nature || "",
+  claim_category: doc?.claim_category || "",
+  responsibility: doc?.alleged_responsibility || "",
+});
+
+const keywordFormFromDoc = (doc: LetterOut | null): KeywordFormState => ({
+  keywords: normalizeEditableList(doc?.keywords),
+  additional_keywords: normalizeEditableList(doc?.additional_keywords),
+  extracted_tags: normalizeEditableList(doc?.extracted_tags),
+  extracted_subTags: normalizeEditableList(doc?.extracted_subTags),
+});
+
+const ChipListEditor: React.FC<{
+  label: string;
+  items: string[];
+  placeholder: string;
+  onChange: (items: string[]) => void;
+}> = ({ label, items, placeholder, onChange }) => {
+  const [draft, setDraft] = useState("");
+
+  const addDraft = () => {
+    const additions = normalizeEditableList(draft);
+    if (!additions.length) return;
+    onChange(normalizeEditableList([...items, ...additions]));
+    setDraft("");
+  };
+
+  const updateItem = (index: number, value: string) => {
+    onChange(items.map((item, itemIndex) => (itemIndex === index ? value : item)));
+  };
+
+  const removeItem = (index: number) => {
+    onChange(items.filter((_, itemIndex) => itemIndex !== index));
+  };
+
+  const normalizeCurrent = () => {
+    onChange(normalizeEditableList(items));
+  };
+
+  return (
+    <div className="space-y-2">
+      <Label className="text-xs uppercase text-muted-foreground">{label}</Label>
+      <div className="flex flex-wrap gap-2 rounded-md border bg-white p-2">
+        {items.map((item, index) => (
+          <span
+            key={`${label}-${index}`}
+            className="inline-flex max-w-full items-center gap-1 rounded-full border bg-gray-50 px-2 py-1"
+          >
+            <input
+              className="h-6 min-w-[7rem] max-w-[14rem] bg-transparent text-sm outline-none"
+              value={item}
+              onBlur={normalizeCurrent}
+              onChange={(event) => updateItem(index, event.target.value)}
+              aria-label={`${label} item ${index + 1}`}
+            />
+            <button
+              type="button"
+              className="rounded-full p-0.5 text-gray-500 hover:bg-gray-200 hover:text-gray-900"
+              onClick={() => removeItem(index)}
+              aria-label={`Remove ${item || label}`}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </span>
+        ))}
+        <div className="flex min-w-[14rem] flex-1 items-center gap-2">
+          <Input
+            className="h-8"
+            placeholder={placeholder}
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addDraft();
+              }
+            }}
+          />
+          <Button type="button" variant="outline" size="sm" onClick={addDraft}>
+            <Plus className="h-4 w-4" /> Add
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const LetterSummaryPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -180,6 +388,14 @@ const LetterSummaryPage: React.FC = () => {
   const [comments, setComments] = useState<Comment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [savingComment, setSavingComment] = useState(false);
+  const canEditMetadata = useHasPermission("dms.document.edit_metadata");
+  const [metadataDialogOpen, setMetadataDialogOpen] = useState(false);
+  const [keywordDialogOpen, setKeywordDialogOpen] = useState(false);
+  const [metadataForm, setMetadataForm] =
+    useState<MetadataFormState>(EMPTY_METADATA_FORM);
+  const [keywordForm, setKeywordForm] =
+    useState<KeywordFormState>(EMPTY_KEYWORD_FORM);
+  const [savingSummaryMetadata, setSavingSummaryMetadata] = useState(false);
 
   const loadComments = useCallback(async () => {
     if (!id) return;
@@ -223,56 +439,7 @@ const LetterSummaryPage: React.FC = () => {
         const res = await authenticatedFetch(joinApiUrl(`/documents/${id}`));
         if (!res.ok) throw new Error(`Failed to fetch letter: ${res.status}`);
         const d = await res.json();
-        const docId = d.id ?? d._id ?? id;
-        const merged: LetterOut = {
-          ...d,
-          id: String(docId),
-          letterNo: firstScalar(d, "letterNo", "letter_no"),
-          date: d.date,
-          subject: firstScalar(d, "subject"),
-          // Accept either 'from' (API alias) or 'from_' (legacy/local)
-          from_: firstScalar(d, "from_", "from", "from_company"),
-          to: firstScalar(d, "to", "to_company"),
-          reference: d.reference,
-          keywords: firstList(d, "keywords", "Key_words"),
-          additional_keywords: firstList(
-            d,
-            "additional_keywords",
-            "additionalKeywords"
-          ),
-          contractual_clauses:
-            firstList(d, "contractual_clauses", "Contractual Clauses", "clauses"),
-          key_reply_points: firstList(d, "key_reply_points", "keyReplyPoints"),
-          extracted_tags:
-            normalizeStringList(d.extracted_tags).length
-              ? normalizeStringList(d.extracted_tags)
-              : normalizeStringList(d.metadata?.tags),
-          extracted_subTags:
-            normalizeStringList(d.extracted_subTags).length
-              ? normalizeStringList(d.extracted_subTags)
-              : normalizeStringList(d.metadata?.subTags ?? d.metadata?.sub_tags),
-          asset_type: firstScalar(d, "asset_type", "assetType"),
-          location: firstScalar(d, "location"),
-          specific_area: firstScalar(d, "specific_area", "specificArea"),
-          chainage_from: firstScalar(d, "chainage_from", "chainageFrom"),
-          chainage_to: firstScalar(d, "chainage_to", "chainageTo"),
-          work_type: firstScalar(d, "work_type", "workType"),
-          issue_nature: firstScalar(d, "issue_nature", "issueNature"),
-          claim_category: firstScalar(d, "claim_category", "claimCategory"),
-          alleged_responsibility: firstScalar(
-            d,
-            "alleged_responsibility",
-            "allegedResponsibility"
-          ),
-          priority: firstScalar(d, "priority"),
-          linked_event_suggested: firstScalar(
-            d,
-            "linked_event_suggested",
-            "linkedEventSuggested"
-          ),
-          reference_chain: firstScalar(d, "reference_chain", "referenceChain"),
-        };
-        setDoc(merged);
+        setDoc(normalizeLetter(d, id));
       } catch (e: any) {
         setError(e?.message || "Failed to fetch");
       } finally {
@@ -281,6 +448,72 @@ const LetterSummaryPage: React.FC = () => {
     };
     run();
   }, [id]);
+
+  const openMetadataEditor = () => {
+    setMetadataForm(metadataFormFromDoc(doc));
+    setMetadataDialogOpen(true);
+  };
+
+  const openKeywordEditor = () => {
+    setKeywordForm(keywordFormFromDoc(doc));
+    setKeywordDialogOpen(true);
+  };
+
+  const readErrorMessage = async (res: Response) => {
+    try {
+      const body = await res.json();
+      return body?.detail || body?.message || `Request failed: ${res.status}`;
+    } catch {
+      return `Request failed: ${res.status}`;
+    }
+  };
+
+  const saveSummaryMetadata = async (payload: Record<string, any>) => {
+    if (!id) return;
+    setSavingSummaryMetadata(true);
+    try {
+      const res = await authenticatedFetch(
+        joinApiUrl(`/documents/${id}/summary-metadata`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) throw new Error(await readErrorMessage(res));
+      const updated = await res.json();
+      setDoc(normalizeLetter(updated, id));
+      toast.success("Letter summary metadata saved");
+      setMetadataDialogOpen(false);
+      setKeywordDialogOpen(false);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save letter summary metadata");
+    } finally {
+      setSavingSummaryMetadata(false);
+    }
+  };
+
+  const saveMetadataForm = () => {
+    saveSummaryMetadata({
+      extracted_metadata: {
+        asset_type: metadataForm.asset_type.trim(),
+        location: metadataForm.location.trim(),
+        work_type: metadataForm.work_type.trim(),
+        issue_nature: metadataForm.issue_nature.trim(),
+        claim_category: metadataForm.claim_category.trim(),
+        responsibility: metadataForm.responsibility.trim(),
+      },
+    });
+  };
+
+  const saveKeywordForm = () => {
+    saveSummaryMetadata({
+      keywords: normalizeEditableList(keywordForm.keywords),
+      additional_keywords: normalizeEditableList(keywordForm.additional_keywords),
+      extracted_tags: normalizeEditableList(keywordForm.extracted_tags),
+      extracted_sub_tags: normalizeEditableList(keywordForm.extracted_subTags),
+    });
+  };
 
   const keyPoints = useMemo(
     () => parseBulletString(doc?.summary),
@@ -446,17 +679,24 @@ const LetterSummaryPage: React.FC = () => {
         </CardContent>
       </Card>
 
-      {metadataFields.length ? (
-        <Card>
-          <CardHeader>
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
             <CardTitle className="text-lg flex items-center gap-2">
               <MapPin className="h-4 w-4" /> Extracted Metadata
             </CardTitle>
             <CardDescription>
               Asset, location, claim, responsibility, and chronology fields
             </CardDescription>
-          </CardHeader>
-          <CardContent>
+          </div>
+          {canEditMetadata && (
+            <Button variant="outline" size="sm" onClick={openMetadataEditor}>
+              <Pencil className="h-4 w-4 mr-2" /> Edit
+            </Button>
+          )}
+        </CardHeader>
+        <CardContent>
+          {metadataFields.length ? (
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
               {metadataFields.map((field) => (
                 <div
@@ -483,9 +723,13 @@ const LetterSummaryPage: React.FC = () => {
                 </div>
               ))}
             </div>
-          </CardContent>
-        </Card>
-      ) : null}
+          ) : (
+            <div className="text-sm text-muted-foreground">
+              No extracted metadata available.
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Tabs defaultValue="keypoints" className="w-full">
         <TabsList className="grid w-full grid-cols-3">
@@ -601,11 +845,18 @@ const LetterSummaryPage: React.FC = () => {
       </Tabs>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-lg flex items-center gap-2">
-            <Tag className="h-4 w-4" /> Keywords
-          </CardTitle>
-          <CardDescription>Detected key terms and extracted tags</CardDescription>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Tag className="h-4 w-4" /> Keywords
+            </CardTitle>
+            <CardDescription>Detected key terms and extracted tags</CardDescription>
+          </div>
+          {canEditMetadata && (
+            <Button variant="outline" size="sm" onClick={openKeywordEditor}>
+              <Pencil className="h-4 w-4 mr-2" /> Edit Keywords
+            </Button>
+          )}
         </CardHeader>
         <CardContent>
           {keywordGroups.length ? (
@@ -706,6 +957,185 @@ const LetterSummaryPage: React.FC = () => {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={metadataDialogOpen} onOpenChange={setMetadataDialogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Edit Extracted Metadata</DialogTitle>
+            <DialogDescription>
+              Manual edits override the displayed AI-extracted metadata.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="summary-asset-type">Asset Type</Label>
+              <Input
+                id="summary-asset-type"
+                value={metadataForm.asset_type}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    asset_type: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="summary-location">Location</Label>
+              <Input
+                id="summary-location"
+                value={metadataForm.location}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    location: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="summary-work-type">Work Type</Label>
+              <Input
+                id="summary-work-type"
+                value={metadataForm.work_type}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    work_type: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="summary-issue-nature">Issue Nature</Label>
+              <Input
+                id="summary-issue-nature"
+                value={metadataForm.issue_nature}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    issue_nature: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="summary-claim-category">Claim Category</Label>
+              <Input
+                id="summary-claim-category"
+                value={metadataForm.claim_category}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    claim_category: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="summary-responsibility">Responsibility</Label>
+              <Input
+                id="summary-responsibility"
+                value={metadataForm.responsibility}
+                onChange={(event) =>
+                  setMetadataForm((current) => ({
+                    ...current,
+                    responsibility: event.target.value,
+                  }))
+                }
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setMetadataDialogOpen(false)}
+              disabled={savingSummaryMetadata}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={saveMetadataForm}
+              disabled={savingSummaryMetadata}
+            >
+              {savingSummaryMetadata ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={keywordDialogOpen} onOpenChange={setKeywordDialogOpen}>
+        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Keywords</DialogTitle>
+            <DialogDescription>
+              Add, rename, or remove terms. Empty and duplicate chips are removed on save.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-5">
+            <ChipListEditor
+              label="Keywords"
+              items={keywordForm.keywords}
+              placeholder="Add keyword"
+              onChange={(items) =>
+                setKeywordForm((current) => ({ ...current, keywords: items }))
+              }
+            />
+            <ChipListEditor
+              label="Additional Keywords"
+              items={keywordForm.additional_keywords}
+              placeholder="Add additional keyword"
+              onChange={(items) =>
+                setKeywordForm((current) => ({
+                  ...current,
+                  additional_keywords: items,
+                }))
+              }
+            />
+            <ChipListEditor
+              label="Extracted Tags"
+              items={keywordForm.extracted_tags}
+              placeholder="Add tag"
+              onChange={(items) =>
+                setKeywordForm((current) => ({
+                  ...current,
+                  extracted_tags: items,
+                }))
+              }
+            />
+            <ChipListEditor
+              label="Extracted Sub-Tags"
+              items={keywordForm.extracted_subTags}
+              placeholder="Add sub-tag"
+              onChange={(items) =>
+                setKeywordForm((current) => ({
+                  ...current,
+                  extracted_subTags: items,
+                }))
+              }
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setKeywordDialogOpen(false)}
+              disabled={savingSummaryMetadata}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={saveKeywordForm}
+              disabled={savingSummaryMetadata}
+            >
+              {savingSummaryMetadata ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

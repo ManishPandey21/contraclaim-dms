@@ -1805,6 +1805,48 @@ class DocumentService:
         except Exception as e:
             logger.error(f"Failed to update document {document_id}: {e}")
             raise DocumentServiceError(f"Document update failed: {str(e)}")
+
+    async def update_summary_metadata(
+        self,
+        document_id: str,
+        update_fields: Dict[str, Any],
+        *,
+        updated_by: Optional[str] = None,
+    ) -> Optional[Document]:
+        """Persist manually edited summary metadata without reprocessing content."""
+        if not update_fields:
+            return await self.get_document(document_id)
+
+        try:
+            candidates: list[Any] = [document_id]
+            try:
+                candidates.append(ObjectId(document_id))
+            except Exception:
+                pass
+
+            now = datetime.utcnow()
+            set_payload: Dict[str, Any] = {
+                **update_fields,
+                "updatedAt": now,
+                "updated_at": now,
+                "summary_metadata_updated_at": now,
+                "manual_summary_metadata_override": True,
+            }
+            if updated_by:
+                set_payload["updated_by"] = updated_by
+                set_payload["summary_metadata_updated_by"] = updated_by
+
+            db = await self._get_db()
+            result = await db.documents.update_one(
+                {"_id": {"$in": candidates}, "lifecycle_state": {"$ne": "deleted"}},
+                {"$set": set_payload, "$inc": {"_revision": 1}},
+            )
+            if result.matched_count == 0:
+                return None
+            return await self.get_document(document_id)
+        except Exception as e:
+            logger.error("Failed to update summary metadata for document %s: %s", document_id, e)
+            raise DocumentServiceError(f"Document summary metadata update failed: {str(e)}")
     
     async def delete_document(
         self,

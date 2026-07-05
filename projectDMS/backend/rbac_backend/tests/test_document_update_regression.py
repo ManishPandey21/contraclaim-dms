@@ -12,7 +12,8 @@ pytest.importorskip("bson")
 
 from bson import ObjectId
 
-from rbac_backend.models.document import Document
+from rbac_backend.models.document import Document, DocumentSummaryMetadataUpdate
+from rbac_backend.routers.documents import _build_summary_metadata_update
 from rbac_backend.services.document_service import DocumentService
 
 
@@ -89,8 +90,9 @@ class RecordingCollection:
         self.last_update_payload = dict(update)
 
         identifier = filter.get("_id")
-        key = self._key(identifier)
-        existing = self._docs.get(key)
+        identifiers = identifier.get("$in") if isinstance(identifier, dict) and "$in" in identifier else [identifier]
+        key = next((self._key(candidate) for candidate in identifiers if self._key(candidate) in self._docs), None)
+        existing = self._docs.get(key) if key else None
         matched = 1 if existing else 0
         modified = 0
 
@@ -129,3 +131,68 @@ async def test_update_document_strips_identifier_fields_from_update_payload() ->
         "_id": document_id,
         "lifecycle_state": {"$ne": "deleted"},
     }
+
+
+def test_summary_metadata_update_payload_normalizes_manual_edits() -> None:
+    payload = DocumentSummaryMetadataUpdate(
+        extracted_metadata={
+            "asset_type": " Tunnel ",
+            "location": " Kanpur ",
+            "work_type": " Borewell construction ",
+            "issue_nature": " Variation ",
+            "claim_category": " Additional Work Claim ",
+            "responsibility": " Employer ",
+        },
+        keywords=[" borewell ", "Kanpur", "borewell", "variation, payment"],
+        additional_keywords=[" contract\npayment ", "contract"],
+        extracted_tags=["Tunnel", "Variation", "Tunnel"],
+        extracted_sub_tags=["Kanpur", "Borewell", "", "Kanpur"],
+    )
+
+    update = _build_summary_metadata_update(payload)
+
+    assert update["asset_type"] == "Tunnel"
+    assert update["metadata.asset_type"] == "Tunnel"
+    assert update["alleged_responsibility"] == "Employer"
+    assert update["metadata.responsibility"] == "Employer"
+    assert update["keywords"] == ["borewell", "Kanpur", "variation", "payment"]
+    assert update["metadata.keywords"] == ["borewell", "Kanpur", "variation", "payment"]
+    assert update["additional_keywords"] == ["contract", "payment"]
+    assert update["extracted_tags"] == ["Tunnel", "Variation"]
+    assert update["extracted_subTags"] == ["Kanpur", "Borewell"]
+    assert update["metadata.subTags"] == ["Kanpur", "Borewell"]
+
+
+@pytest.mark.asyncio
+async def test_update_summary_metadata_persists_manual_fields_without_reprocessing() -> None:
+    document_id = ObjectId()
+    stored = _document_payload(_id=document_id, asset_type="Old asset")
+    collection = RecordingCollection([stored])
+    fake_db = SimpleNamespace(documents=collection)
+
+    service = DocumentService(fake_db)
+
+    result = await service.update_summary_metadata(
+        str(document_id),
+        {
+            "asset_type": "Tunnel",
+            "metadata.asset_type": "Tunnel",
+            "keywords": ["borewell", "Kanpur"],
+        },
+        updated_by="user-1",
+    )
+
+    assert result is not None
+    assert result.asset_type == "Tunnel"
+    assert result.keywords == ["borewell", "Kanpur"]
+
+    assert collection.last_update_payload is not None
+    set_payload = collection.last_update_payload.get("$set", {})
+    assert set_payload["asset_type"] == "Tunnel"
+    assert set_payload["metadata.asset_type"] == "Tunnel"
+    assert set_payload["keywords"] == ["borewell", "Kanpur"]
+    assert set_payload["updated_by"] == "user-1"
+    assert set_payload["summary_metadata_updated_by"] == "user-1"
+    assert set_payload["manual_summary_metadata_override"] is True
+    assert "processing_status" not in set_payload
+    assert collection.last_update_payload.get("$inc") == {"_revision": 1}

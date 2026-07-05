@@ -48,6 +48,7 @@ from ..utils.file_validation import sniff_mime_from_bytes
 from ..models.document import (
     Document,
     DocumentUpdate,
+    DocumentSummaryMetadataUpdate,
     DocumentListResponse,
     Enclosure,
     EnclosureResponse,
@@ -155,6 +156,73 @@ async def _set_document_revision_headers(
     if revision is not None:
         response.headers["X-Document-Revision"] = str(revision)
         response.headers["ETag"] = f'"{revision}"'
+
+
+def _clean_summary_scalar(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value).strip()
+
+
+def _normalize_summary_list(values: Optional[List[str]]) -> List[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    normalized: List[str] = []
+    for raw in values:
+        if raw is None:
+            continue
+        for part in str(raw).replace("\r", "\n").replace("\n", ",").split(","):
+            text = " ".join(part.strip().split())
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(text)
+    return normalized
+
+
+SUMMARY_METADATA_UPDATE_PATHS: Dict[str, tuple[str, ...]] = {
+    "asset_type": ("asset_type", "metadata.asset_type"),
+    "location": ("location", "metadata.location"),
+    "work_type": ("work_type", "metadata.work_type"),
+    "issue_nature": ("issue_nature", "metadata.issue_nature"),
+    "claim_category": ("claim_category", "metadata.claim_category"),
+    "alleged_responsibility": (
+        "alleged_responsibility",
+        "metadata.alleged_responsibility",
+        "metadata.responsibility",
+    ),
+}
+
+SUMMARY_KEYWORD_UPDATE_PATHS: Dict[str, tuple[str, ...]] = {
+    "keywords": ("keywords", "metadata.keywords"),
+    "additional_keywords": ("additional_keywords", "metadata.additional_keywords"),
+    "extracted_tags": ("extracted_tags", "metadata.tags"),
+    "extracted_sub_tags": ("extracted_subTags", "metadata.subTags", "metadata.sub_tags"),
+}
+
+
+def _build_summary_metadata_update(payload: DocumentSummaryMetadataUpdate) -> Dict[str, Any]:
+    update_fields: Dict[str, Any] = {}
+
+    if payload.extracted_metadata is not None:
+        metadata = payload.extracted_metadata.model_dump(exclude_unset=True)
+        for field, value in metadata.items():
+            for path in SUMMARY_METADATA_UPDATE_PATHS.get(field, ()):
+                update_fields[path] = _clean_summary_scalar(value)
+
+    for field, paths in SUMMARY_KEYWORD_UPDATE_PATHS.items():
+        if field not in payload.model_fields_set:
+            continue
+        value = getattr(payload, field)
+        normalized = _normalize_summary_list(value)
+        for path in paths:
+            update_fields[path] = normalized
+
+    return update_fields
 
 
 class DocumentController:
@@ -2443,6 +2511,45 @@ async def update_document(
     )
     await _set_document_revision_headers(response, controller, id)
     return document
+
+
+@router.patch("/documents/{id}/summary-metadata", response_model=Document)
+@handle_exceptions
+async def update_document_summary_metadata(
+    id: str,
+    payload: DocumentSummaryMetadataUpdate,
+    response: Response,
+    controller: DocumentController = Depends(get_document_controller),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Update manually curated Letter Summary metadata and keyword fields."""
+    existing = await controller.document_service.get_document_by_id(id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_EDIT_METADATA, existing)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+
+    update_fields = _build_summary_metadata_update(payload)
+    updated_document = await controller.document_service.update_summary_metadata(
+        id,
+        update_fields,
+        updated_by=getattr(current_user, "id", None) or getattr(current_user, "email", None),
+    )
+    if not updated_document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    await controller.audit_service.emit(
+        resource_type="document",
+        resource_id=id,
+        event_type="document.summary_metadata_updated",
+        actor_id=getattr(current_user, "id", None),
+        organization_id=existing.organization_id,
+        project_id=existing.project_id,
+        metadata={"updated_fields": sorted(update_fields.keys())},
+    )
+    await _set_document_revision_headers(response, controller, id)
+    return await controller.document_service.enrich_document(updated_document)
 
 
 @router.delete("/documents/{id}", status_code=204)
