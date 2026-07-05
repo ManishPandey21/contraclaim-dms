@@ -6,18 +6,24 @@ from typing import Any, Dict, List, Optional
 PROMPT_VERSION = "arbitration_pleadings.v2"
 SOURCE_POLICY = "source-ledger-only-with-evidence-required-fallback"
 
+_CLAIM_SECTION_KEYS = {
+    "caption",
+    "index",
+    "introduction",
+    "parties",
+    "jurisdiction",
+    "factual_background",
+    "legal_claims",
+    "quantum",
+    "interest",
+    "costs",
+    "relief",
+    "verification",
+    "annexures",
+}
+
 SECTION_KEYS_BY_DRAFT_TYPE: Dict[str, set[str]] = {
-    "statement_of_claim": {
-        "caption",
-        "introduction",
-        "parties",
-        "jurisdiction",
-        "factual_background",
-        "legal_claims",
-        "quantum",
-        "relief",
-        "annexures",
-    },
+    "statement_of_claim": set(_CLAIM_SECTION_KEYS),
     "statement_of_defence": {
         "caption",
         "overview",
@@ -26,6 +32,7 @@ SECTION_KEYS_BY_DRAFT_TYPE: Dict[str, set[str]] = {
         "respondent_facts",
         "legal_defences",
         "quantum_challenge",
+        "interest_costs_reply",
         "counterclaim",
         "relief",
         "annexures",
@@ -38,21 +45,12 @@ SECTION_KEYS_BY_DRAFT_TYPE: Dict[str, set[str]] = {
         "clarified_facts",
         "legal_defences_reply",
         "quantum_reply",
+        "interest_costs_reply",
         "counterclaim_reply",
         "reaffirmed_relief",
         "annexures",
     },
-    "counterclaim": {
-        "caption",
-        "introduction",
-        "parties",
-        "jurisdiction",
-        "factual_background",
-        "legal_claims",
-        "quantum",
-        "relief",
-        "annexures",
-    },
+    "counterclaim": set(_CLAIM_SECTION_KEYS),
 }
 
 
@@ -168,7 +166,7 @@ class ArbitrationDraftGenerator:
         facts = _facts(context)
         claim_heads = context.get("claim_heads") or []
         pleading = "Counterclaim" if counterclaim else "Statement of Claim"
-        return [
+        sections: List[Dict[str, str]] = [
             {"key": "caption", "heading": "Caption / Cover Page", "body": self._caption(draft, pleading)},
             {
                 "key": "introduction",
@@ -192,9 +190,20 @@ class ArbitrationDraftGenerator:
                 "heading": "Damages, Causation, Mitigation and Quantum",
                 "body": self._quantum(context, draft, claim_heads, evidence),
             },
+            {"key": "interest", "heading": "Interest", "body": self._interest_text(context, draft)},
+            {"key": "costs", "heading": "Costs", "body": self._costs_text()},
             {"key": "relief", "heading": "Prayer for Relief", "body": draft.get("relief_sought") or "[Evidence required]"},
+            {
+                "key": "verification",
+                "heading": "Verification / Statement of Truth",
+                "body": self._verification_text(pleading),
+            },
             {"key": "annexures", "heading": "List of Relied-Upon Documents / Annexures", "body": self._annexure_text(evidence)},
         ]
+        headings = [section["heading"] for section in sections]
+        headings.insert(1, "Index")
+        sections.insert(1, {"key": "index", "heading": "Index", "body": self._index_text(context, headings)})
+        return sections
 
     def _statement_of_defence(self, context: Dict[str, Any]) -> List[Dict[str, str]]:
         draft = context["draft"]
@@ -207,7 +216,15 @@ class ArbitrationDraftGenerator:
                 "heading": "Introduction and Overview",
                 "body": f"The Respondent responds to the Statement of Claim on the basis of the available record. {_evidence_note(evidence)}",
             },
-            {"key": "preliminary_objections", "heading": "Preliminary Objections", "body": "[Evidence required]"},
+            {
+                "key": "preliminary_objections",
+                "heading": "Preliminary Objections",
+                "body": self._preliminary_objections_text(
+                    context,
+                    "The Respondent raises the following preliminary objections based on the jurisdiction, "
+                    "limitation, and pre-arbitration record:",
+                ),
+            },
             {
                 "key": "paragraph_response",
                 "heading": "Paragraph-by-Paragraph Response to SoC",
@@ -218,6 +235,11 @@ class ArbitrationDraftGenerator:
             {"key": "respondent_facts", "heading": "Respondent's Factual Background", "body": self._numbered(_facts(context))},
             {"key": "legal_defences", "heading": "Legal Defences on Merits", "body": self._defence_matrix_text(context, evidence)},
             {"key": "quantum_challenge", "heading": "Quantum Challenge", "body": self._quantum_challenge(context, draft, evidence)},
+            {
+                "key": "interest_costs_reply",
+                "heading": "Reply to Interest and Costs",
+                "body": self._interest_costs_reply(context),
+            },
             {"key": "counterclaim", "heading": "Counterclaim, if applicable", "body": self._counterclaim_matrix_text(context)},
             {"key": "relief", "heading": "Prayer for Relief", "body": draft.get("relief_sought") or "[Evidence required]"},
             {"key": "annexures", "heading": "List of Relied-Upon Documents / Annexures", "body": self._annexure_text(evidence)},
@@ -238,7 +260,15 @@ class ArbitrationDraftGenerator:
                     f"in the Statement of Claim. {_evidence_note(evidence)}"
                 ),
             },
-            {"key": "preliminary_objections", "heading": "Response to Preliminary Objections", "body": "[Evidence required]"},
+            {
+                "key": "preliminary_objections",
+                "heading": "Response to Preliminary Objections",
+                "body": self._preliminary_objections_text(
+                    context,
+                    "The Claimant replies to the Respondent's preliminary objections by reference to the "
+                    "jurisdiction, limitation, and pre-arbitration record:",
+                ),
+            },
             {
                 "key": "paragraph_replies",
                 "heading": "Paragraph-by-Paragraph Reply to the Statement of Defence",
@@ -249,10 +279,90 @@ class ArbitrationDraftGenerator:
             {"key": "clarified_facts", "heading": "Claimant's Clarified Factual Position", "body": self._numbered(_facts(context))},
             {"key": "legal_defences_reply", "heading": "Reply to Legal Defences", "body": self._rejoinder_matrix_text(context)},
             {"key": "quantum_reply", "heading": "Reply to Quantum Objections", "body": self._quantum_challenge(context, draft, evidence)},
+            {
+                "key": "interest_costs_reply",
+                "heading": "Reply to Interest and Costs",
+                "body": self._interest_costs_reply(context),
+            },
             {"key": "counterclaim_reply", "heading": "Reply to Counterclaim, if any", "body": self._counterclaim_matrix_text(context)},
             {"key": "reaffirmed_relief", "heading": "Reaffirmation of Reliefs", "body": draft.get("relief_sought") or "[Evidence required]"},
             {"key": "annexures", "heading": "Updated List of Documents / Annexures", "body": self._annexure_text(evidence)},
         ]
+
+    def _index_text(self, context: Dict[str, Any], headings: List[str]) -> str:
+        lines = ["Pleading index:"]
+        lines.extend(f"{idx}. {heading}" for idx, heading in enumerate(headings, start=1))
+        lines.append("")
+        lines.append("Document index (exhibits):")
+        document_rows = _matrix_rows(context, "documents")
+        if document_rows:
+            for row in document_rows:
+                exhibit = (row.get("metadata") or {}).get("exhibit_id") or row.get("citation")
+                lines.append(f"- {exhibit}: {row.get('label')} {_source_label(row)}")
+        else:
+            lines.append("- [Evidence required]")
+        return "\n".join(lines)
+
+    def _interest_rows(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows = []
+        for row in _matrix_rows(context, "quantum"):
+            metadata = row.get("metadata") or {}
+            text = f"{row.get('label') or ''} {row.get('citation') or ''} {metadata.get('calculation_type') or ''}".lower()
+            if "interest" in text:
+                rows.append(row)
+        return rows
+
+    def _interest_text(self, context: Dict[str, Any], draft: Dict[str, Any]) -> str:
+        interest_rows = self._interest_rows(context)
+        rate = draft.get("interest_rate")
+        lines: List[str] = []
+        if rate is not None:
+            lines.append(
+                f"The Claimant claims pre-reference, pendente lite, and future interest at {rate} percent per annum."
+            )
+        if interest_rows:
+            lines.append("Interest is computed in the following calculation annexures:")
+            lines.append(_numbered_sources(interest_rows))
+        elif rate is not None:
+            lines.append("Interest calculation annexure: [Evidence required]")
+        if not lines:
+            return "[Evidence required]"
+        return "\n".join(lines)
+
+    def _costs_text(self) -> str:
+        return (
+            "The Claimant claims the costs of the arbitration, including tribunal and institutional fees, "
+            "counsel fees, expert fees, and documentation and hearing costs. "
+            "Quantification of costs: [Evidence required]"
+        )
+
+    def _verification_text(self, pleading: str) -> str:
+        return (
+            f"Verified by the authorised representative that the contents of this {pleading} are true and "
+            "correct to their knowledge and the party's records, and that no material fact has been concealed. "
+            "Place: [Evidence required]. Date: [Evidence required]. "
+            "Signatory authority (board resolution / power of attorney): [Evidence required]"
+        )
+
+    def _preliminary_objections_text(self, context: Dict[str, Any], lead_in: str) -> str:
+        rows = _matrix_rows(context, "jurisdiction")
+        if not rows:
+            return "[Evidence required]"
+        return f"{lead_in}\n{_numbered_sources(rows)}"
+
+    def _interest_costs_reply(self, context: Dict[str, Any]) -> str:
+        lines = [
+            "The claim to interest is denied; entitlement, the applicable rate, the period, and the computation "
+            "must each be established. The claim to costs is denied; costs are in the discretion of the Tribunal "
+            "and any claimed cost heads must be proved.",
+        ]
+        interest_rows = self._interest_rows(context)
+        if interest_rows:
+            lines.append("Interest computation records under challenge:")
+            lines.append(_numbered_sources(interest_rows))
+        else:
+            lines.append("Interest and cost computation records: [Evidence required]")
+        return "\n".join(lines)
 
     def _caption(self, draft: Dict[str, Any], pleading: str) -> str:
         case = draft.get("case_details") or {}

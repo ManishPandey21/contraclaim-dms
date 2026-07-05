@@ -1489,6 +1489,276 @@ def test_context_warns_on_expert_amount_mismatch_and_unaddressed_concurrency():
     assert any("Expert alignment contradiction" in item for item in warnings)
 
 
+def test_filing_bundle_zip_embeds_exhibit_files_in_volumes(tmp_path):
+    db = _FakeDb()
+    exhibit_file = tmp_path / "delay-notice.pdf"
+    exhibit_file.write_bytes(b"%PDF-1.4 exhibit-bytes")
+    db.documents.rows.append(
+        {"_id": "doc-1", "filename": "delay-notice.pdf", "filepath_local": str(exhibit_file)}
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    content = asyncio.run(service.export_filing_bundle_zip("case-1"))
+
+    with zipfile.ZipFile(io.BytesIO(content), "r") as archive:
+        names = set(archive.namelist())
+        # "Delay notice" maps to the programme/delay records volume (guide §19 Vol 4).
+        exhibit_path = "volume-4-programme-delay-records/C-1 - Delay notice.pdf"
+        assert exhibit_path in names
+        assert archive.read(exhibit_path) == b"%PDF-1.4 exhibit-bytes"
+        assert "volume-1-pleadings/draft-1.md" in names
+        assert "volume-6-claim-calculations/quantum-annexures.json" in names
+        assert "volume-7-expert-reports/expert-alignment.json" in names
+        manifest_entries = json.loads(archive.read("exhibits/exhibit-files.json").decode("utf-8"))
+
+    by_exhibit = {entry["exhibit_id"]: entry for entry in manifest_entries}
+    assert by_exhibit["C-1"]["error"] is None
+    assert by_exhibit["C-1"]["size"] == len(b"%PDF-1.4 exhibit-bytes")
+    # C-2's source (doc-review) has no stored file: recorded, not silently dropped.
+    assert by_exhibit["C-2"]["error"]
+    assert by_exhibit["C-2"]["path"] is None
+
+
+def test_citation_audit_flags_missing_exhibit_file_and_invalid_pin_cite():
+    db = _FakeDb()
+    db.arbitration_document_index.rows[0]["page_numbers"] = [1, 2]
+    db.arbitration_draft_versions.rows[0]["full_markdown"] = (
+        "# EOT Statement of Claim\n\nRelies on C-1, p.2 and separately on C-1, p.5. [S1: Delay notice]\n"
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    audit = asyncio.run(service.citation_audit("case-1"))
+
+    issue_types = {issue["issue_type"] for issue in audit["issues"] if issue["severity"] == "blocking"}
+    assert "exhibit_file_missing" in issue_types
+    assert "invalid_pin_cite" in issue_types
+    assert audit["ok"] is False
+
+    pin_issues = [issue for issue in audit["issues"] if issue["issue_type"] == "invalid_pin_cite"]
+    assert len(pin_issues) == 1
+    assert "page 5" in pin_issues[0]["message"]
+
+    report = audit["drafts"][0]
+    assert {cite["page"] for cite in report["pin_cites"]} == {2, 5}
+
+
+def test_citation_audit_passes_pin_cites_when_file_and_pages_resolve(tmp_path):
+    db = _FakeDb()
+    exhibit_file = tmp_path / "delay-notice.pdf"
+    exhibit_file.write_bytes(b"%PDF-1.4")
+    db.documents.rows.append(
+        {"_id": "doc-1", "filename": "delay-notice.pdf", "filepath_local": str(exhibit_file)}
+    )
+    db.arbitration_document_index.rows[0]["page_numbers"] = [1, 2, 3]
+    # Remove the unreviewed second row so only the resolvable exhibit remains.
+    db.arbitration_document_index.rows = [db.arbitration_document_index.rows[0]]
+    db.arbitration_draft_versions.rows[0]["full_markdown"] = (
+        "# EOT Statement of Claim\n\nRelies on C-1, p.3. [S1: Delay notice]\n"
+    )
+    service = ArbitrationCaseWorkspaceService(db)
+
+    audit = asyncio.run(service.citation_audit("case-1"))
+
+    issue_types = {issue["issue_type"] for issue in audit["issues"]}
+    assert "exhibit_file_missing" not in issue_types
+    assert "invalid_pin_cite" not in issue_types
+
+
+def test_statement_of_claim_includes_index_interest_costs_and_verification():
+    context = {
+        "draft": {
+            "_id": "draft-1",
+            "project_id": "project-1",
+            "draft_type": "statement_of_claim",
+            "title": "EOT Claim",
+            "relief_sought": "Award extension of time.",
+            "interest_rate": 12,
+        },
+        "source_ledger": [],
+        "matrix_context": {
+            "documents": [
+                {
+                    "source_key": "S1",
+                    "label": "Delay notice",
+                    "citation": "C-1",
+                    "metadata": {"exhibit_id": "C-1"},
+                }
+            ],
+            "quantum": [
+                {
+                    "source_key": "S2",
+                    "label": "interest",
+                    "citation": "Q-INTEREST-CLAIMS-CL-001",
+                    "snippet": "Simple interest: 1000000 x 12% p.a. x 365/365 days",
+                    "metadata": {"calculation_type": "interest"},
+                }
+            ],
+        },
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+    }
+
+    generated = ArbitrationDraftGenerator().generate(context)
+    markdown = generated["full_markdown"]
+
+    for heading in ["## Index", "## Interest", "## Costs", "## Verification / Statement of Truth"]:
+        assert heading in markdown
+    assert "12 percent per annum" in markdown
+    assert "[S2: Q-INTEREST-CLAIMS-CL-001]" in markdown
+    # Index lists the exhibit-backed document index.
+    assert "C-1: Delay notice" in markdown
+    section_keys = {section["key"] for section in generated["sections"]}
+    assert {"index", "interest", "costs", "verification"}.issubset(section_keys)
+
+
+def test_sod_preliminary_objections_render_from_jurisdiction_matrix():
+    context = {
+        "draft": {
+            "_id": "draft-1",
+            "project_id": "project-1",
+            "draft_type": "statement_of_defence",
+            "title": "SoD",
+            "relief_sought": "Dismiss the claim.",
+        },
+        "source_ledger": [],
+        "matrix_context": {
+            "jurisdiction": [
+                {
+                    "source_key": "S1",
+                    "label": "Limitation: EOT claim",
+                    "citation": "time_barred",
+                    "snippet": "Status: time_barred\nExpiry: 2023-01-10",
+                }
+            ]
+        },
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+    }
+
+    generated = ArbitrationDraftGenerator().generate(context)
+    markdown = generated["full_markdown"]
+    objections = next(section for section in generated["sections"] if section["key"] == "preliminary_objections")
+
+    assert "Limitation: EOT claim" in objections["body"]
+    assert "[S1: time_barred]" in objections["body"]
+    assert objections["body"] != "[Evidence required]"
+    assert "## Reply to Interest and Costs" in markdown
+
+
+def test_context_builder_ingests_jurisdiction_matrix_rows():
+    db = _FakeDb()
+    db.arbitration_jurisdiction_matrix.rows.append(
+        {
+            "_id": "jur-lim-ctx",
+            "case_id": "case-1",
+            "check_type": "limitation",
+            "subject": "EOT claim",
+            "limitation_status": "within_limitation",
+            "limitation_expiry_date": "2029-01-01",
+            "approval_status": "approved",
+        }
+    )
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_defence",
+        "title": "SoD",
+    }
+
+    context = asyncio.run(ArbitrationContextBuilder(db).build(draft, [], [], [], object()))
+
+    origins = {row.get("source_origin") for row in context["source_ledger"]}
+    assert "case_jurisdiction_matrix" in origins
+    assert context["matrix_context"]["jurisdiction"]
+    assert "Limitation: EOT claim" in context["matrix_context"]["jurisdiction"][0]["label"]
+
+
+def test_quantum_agent_computes_interest_and_claim_summary_rollup():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "quantum",
+            payload=ArbitrationAgentRunRequest(
+                options={"auto_approve": True, "interest_rate": 12, "interest_period_days": 365}
+            ),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["errors"] == []
+    rows = db.arbitration_quantum_annexures.rows
+    by_calc = {str(row.get("calculation_id")): row for row in rows}
+
+    interest_row = by_calc["Q-INTEREST-CLAIMS-CL-001"]
+    from backend.rbac_backend.services.arbitration_drafting.agents.deterministic import compute_simple_interest
+
+    assert interest_row["amount"] == compute_simple_interest(1000000, 12, 365) == 120000.0
+    assert interest_row["principal_calculation_id"] == "Q-CLAIMS-CL-001"
+    assert interest_row["interest_rate_percent"] == 12
+
+    rollup = by_calc["Q-CLAIM-SUMMARY"]
+    principals = [
+        row
+        for row in rows
+        if str(row.get("calculation_type")) not in {"interest", "claim_summary_rollup"} and row.get("amount") is not None
+    ]
+    interests = [row for row in rows if str(row.get("calculation_type")) == "interest"]
+    assert rollup["principal_total"] == round(sum(float(row["amount"]) for row in principals), 2)
+    assert rollup["interest_total"] == round(sum(float(row["amount"]) for row in interests), 2)
+    assert rollup["amount"] == round(rollup["principal_total"] + rollup["interest_total"], 2)
+    assert rollup["amount"] == round(sum(item["total"] for item in rollup["line_items"]), 2)
+
+
+def test_quantum_agent_rollup_is_stable_on_rerun():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+    options = {"auto_approve": True, "interest_rate": 12, "interest_period_days": 365}
+
+    asyncio.run(
+        run_arbitration_agent(db, case, "quantum", payload=ArbitrationAgentRunRequest(options=options), current_user=_FakeUser())
+    )
+    first_rollup = dict(
+        next(row for row in db.arbitration_quantum_annexures.rows if row.get("calculation_id") == "Q-CLAIM-SUMMARY")
+    )
+    second = asyncio.run(
+        run_arbitration_agent(db, case, "quantum", payload=ArbitrationAgentRunRequest(options=options), current_user=_FakeUser())
+    )
+
+    rollups = [row for row in db.arbitration_quantum_annexures.rows if row.get("calculation_id") == "Q-CLAIM-SUMMARY"]
+    assert len(rollups) == 1
+    assert second["created_records"] == []
+    assert rollups[0]["amount"] == first_rollup["amount"]
+
+
+def test_quantum_agent_links_cost_head_and_delay_events():
+    db = _FakeDb()
+    db.arbitration_chronology_matrix.rows[0]["claim_link"] = "CL-001"
+    case = db.arbitration_cases.rows[0]
+
+    asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "quantum",
+            payload=ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    row = next(r for r in db.arbitration_quantum_annexures.rows if r.get("calculation_id") == "Q-CLAIMS-CL-001")
+    # "EOT claim" maps to the prolongation/overheads cost head (guide §11.3 link).
+    assert row["cost_head"] == "prolongation_overheads"
+    assert row["delay_event_ids"] == ["event-1"]
+
+
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
     fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
     data = json.loads(fixture_path.read_text(encoding="utf-8"))

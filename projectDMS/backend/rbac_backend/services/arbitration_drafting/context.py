@@ -231,9 +231,97 @@ class ArbitrationContextBuilder:
         rows.extend(await self._claim_defence_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._quantum_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._notice_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._jurisdiction_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._expert_alignment_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._register_sources(draft, offset + len(rows), include_review_sources, context_warnings))
         return rows
+
+    async def _jurisdiction_matrix_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_jurisdiction_matrix.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            check_type = str(row.get("check_type") or "jurisdiction")
+            if check_type == "limitation":
+                label = f"Limitation: {row.get('subject') or row.get('limitation_subject_id') or 'case'}"
+                snippet = "\n".join(
+                    part
+                    for part in [
+                        f"Status: {row.get('limitation_status')}" if row.get("limitation_status") else "",
+                        f"Base date: {row.get('limitation_base_date')}" if row.get("limitation_base_date") else "",
+                        f"Expiry: {row.get('limitation_expiry_date')}" if row.get("limitation_expiry_date") else "",
+                        str(row.get("basis") or ""),
+                    ]
+                    if part
+                )
+                citation = row.get("limitation_status") or check_type
+            elif check_type == "pre_arbitration_step":
+                label = f"Pre-arbitration step: {row.get('step')}"
+                snippet = "\n".join(
+                    part
+                    for part in [
+                        f"Required: {row.get('required')}" if row.get("required") is not None else "",
+                        f"Compliance: {row.get('compliance_status')}" if row.get("compliance_status") else "",
+                        str(row.get("contractual_requirement") or ""),
+                    ]
+                    if part
+                )
+                citation = row.get("compliance_status") or check_type
+            else:
+                label = "Arbitration clause scope check"
+                snippet = "\n".join(
+                    part
+                    for part in [
+                        f"Scope status: {row.get('scope_status')}" if row.get("scope_status") else "",
+                        str(row.get("claim_description") or ""),
+                        str(row.get("notes") or ""),
+                    ]
+                    if part
+                )
+                citation = row.get("scope_status") or check_type
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("_id")),
+                "source_type": "jurisdiction_check",
+                "allowed_use": "fact",
+                "permitted_uses": ["background", "fact"],
+                "label": label,
+                "citation": citation,
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": None,
+                "verification_status": row.get("approval_status") or "approved",
+                "is_user_supplied": True,
+                "source_origin": "case_jurisdiction_matrix",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "jurisdiction-matrix",
+                    "matrix_row_id": row.get("_id"),
+                    "check_type": check_type,
+                    "limitation_status": row.get("limitation_status"),
+                    "compliance_status": row.get("compliance_status"),
+                    "scope_status": row.get("scope_status"),
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
 
     async def _expert_alignment_sources(
         self,
@@ -635,9 +723,13 @@ class ArbitrationContextBuilder:
                     "matrix": "quantum-annexures",
                     "matrix_row_id": row.get("_id"),
                     "source_records": row.get("source_records") or [],
+                    "calculation_type": row.get("calculation_type"),
                     "amount": row.get("amount"),
                     "currency": row.get("currency"),
                     "tax_treatment": row.get("tax_treatment"),
+                    "cost_head": row.get("cost_head"),
+                    "critical_path_days": row.get("critical_path_days"),
+                    "delay_event_ids": row.get("delay_event_ids") or [],
                 },
                 "source_hash": "",
             }
@@ -1057,6 +1149,7 @@ class ArbitrationContextBuilder:
             "quantum": [],
             "notices": [],
             "experts": [],
+            "jurisdiction": [],
         }
         origin_map = {
             "case_document_index": "documents",
@@ -1070,6 +1163,7 @@ class ArbitrationContextBuilder:
             "case_quantum_annexure": "quantum",
             "case_notice_compliance": "notices",
             "case_expert_alignment": "experts",
+            "case_jurisdiction_matrix": "jurisdiction",
         }
         for row in source_ledger:
             group = origin_map.get(str(row.get("source_origin") or ""))

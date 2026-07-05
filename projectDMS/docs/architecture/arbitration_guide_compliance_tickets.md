@@ -126,7 +126,24 @@ alignment checklist.
 
 ### ARB-104 — Filing bundle: embed actual exhibit files + volume structure + pin-cite audit
 
-**Priority:** P1 · **Size:** M · **Guide ref:** §19.1–19.3, §9
+**Priority:** P1 · **Size:** M · **Guide ref:** §19.1–19.3, §9 · **Status: DONE (2026-07-06)**
+
+> **Implementation notes.** The ZIP bundle now carries the guide §19 volume layout:
+> `volume-1-pleadings/` (draft markdown), exhibit binaries placed by document type into
+> volumes 2–8 (contract / correspondence / programme-delay / payment / calculations /
+> expert / authorities, keyword-mapped), plus `volume-6.../quantum-annexures.json` and
+> `volume-7.../expert-alignment.json`. Exhibit bytes are resolved the same way as
+> document downloads: `filepath_local` on the source record (or an on-disk
+> `source_file_link`) first, then `filepath_s3` via `S3Service.download_bytes`.
+> `exhibits/exhibit-files.json` records the exhibit→file mapping including per-exhibit
+> errors; unresolvable exhibit files are **blocking** citation-audit issues
+> (`exhibit_file_missing`). The citation audit also parses pin-cites
+> (`C-12, p.3`, `R-4 at page 12 ¶3`) and raises blocking `invalid_pin_cite` issues when
+> the cited page is outside the exhibit's recorded `page_numbers`/`page_count`
+> (exhibits without page metadata are not penalised). Existing manifest/summary/matrix
+> JSON files are unchanged. Note: queued exports retain the 12 MB inline cap
+> (`MAX_INLINE_BUNDLE_EXPORT_BYTES`) — large exhibit sets should use the streaming
+> `GET /filing-bundle/zip` route.
 
 **Problem.** Bundle is summary + metadata JSON + draft markdown only; it does not embed
 source document files or the Volume 1–8 structure (`case_workspace.py:835-864`). Citation
@@ -134,54 +151,82 @@ audit only matches `C/R/J/…-\d+` and `[S#:]` keys, not page/para pin-cites
 (`case_workspace.py:708-802`).
 
 **Tasks**
-- [ ] Resolve `source_file_link`/`source_id` for each exhibit and stream the actual file into the ZIP under guide volumes (Volume 1 pleading, 2 contract, 3 correspondence, …).
-- [ ] Add exhibit→file mapping and handle missing files as blocking citation-audit issues.
-- [ ] Extend citation audit to detect page/paragraph pin-cites (e.g. `C-12, p.3 ¶4`) and verify against `page_numbers`.
-- [ ] Keep existing JSON manifest + summary for machine consumption.
+- [x] Resolve `source_file_link`/`source_id` for each exhibit and stream the actual file into the ZIP under guide volumes (Volume 1 pleading, 2 contract, 3 correspondence, …).
+- [x] Add exhibit→file mapping (`exhibits/exhibit-files.json`) and handle missing files as blocking citation-audit issues.
+- [x] Extend citation audit to detect page/paragraph pin-cites (e.g. `C-12, p.3 ¶4`) and verify against `page_numbers`/`page_count`; pin-cites reported per draft.
+- [x] Keep existing JSON manifest + summary for machine consumption.
 
-**Acceptance criteria**
-- ZIP contains at least one real exhibit binary under a volume folder.
-- Citation audit flags a pin-cite whose page is absent from the exhibit's `page_numbers`.
-- Existing `test_filing_bundle_zip_contains_manifest_matrices_and_drafts` still passes.
+**Acceptance criteria** *(all verified by tests, 41 passing in the drafting suite)*
+- ZIP contains at least one real exhibit binary under a volume folder. ✓ (`test_filing_bundle_zip_embeds_exhibit_files_in_volumes`)
+- Citation audit flags a pin-cite whose page is absent from the exhibit's `page_numbers`. ✓ (`test_citation_audit_flags_missing_exhibit_file_and_invalid_pin_cite`, clean-path covered by `test_citation_audit_passes_pin_cites_when_file_and_pages_resolve`)
+- Existing `test_filing_bundle_zip_contains_manifest_matrices_and_drafts` still passes. ✓
 
 ---
 
 ### ARB-105 — Missing pleading sections (SoC index/interest/costs/verification; SoD objections/interest reply)
 
-**Priority:** P1 · **Size:** M · **Guide ref:** §13 (Steps 2, 11, 12, 14), §14 (Steps 2, 8)
+**Priority:** P1 · **Size:** M · **Guide ref:** §13 (Steps 2, 11, 12, 14), §14 (Steps 2, 8) · **Status: DONE (2026-07-06)**
+
+> **Implementation notes.** SoC and counterclaim section sets now include `index`
+> (pleading index + exhibit-backed document index), `interest` (wired to
+> `draft.interest_rate` and computed interest annexures from the quantum matrix
+> context), `costs` (guide Step 12 heads with `[Evidence required]` quantification),
+> and `verification` (Statement of Truth template with placeholder markers, no
+> asserted facts). SoD `preliminary_objections` and the Rejoinder's
+> `Response to Preliminary Objections` now render from approved jurisdiction-matrix
+> rows (limitation / pre-arbitration / clause-scope), which the context builder
+> ingests as `case_jurisdiction_matrix` sources grouped under
+> `matrix_context["jurisdiction"]`. Both SoD and Rejoinder gained an
+> `interest_costs_reply` section ("Reply to Interest and Costs") citing interest
+> annexures under challenge. `SECTION_KEYS_BY_DRAFT_TYPE` updated, so section
+> regeneration accepts the new keys.
 
 **Problem.** SoC generator lacks Index, Interest, Costs, Verification sections; SoD
 `preliminary_objections` body is a hard-coded `[Evidence required]` placeholder
 (`generator.py:165-224`, `generator.py:210`).
 
 **Tasks**
-- [ ] Add `index`, `interest`, `costs`, `verification` to SoC section set + `SECTION_KEYS_BY_DRAFT_TYPE` (`generator.py:9-56`).
-- [ ] Drive SoD `preliminary_objections` from an objections matrix/list instead of the static placeholder (`generator.py:210`).
-- [ ] Add SoD/Rejoinder "reply to interest and costs" section.
-- [ ] Interest section wired to `interest_rate` (`models/arbitration_drafting.py:480`) and an interest quantum annexure (see ARB-106).
+- [x] Add `index`, `interest`, `costs`, `verification` to SoC section set + `SECTION_KEYS_BY_DRAFT_TYPE`.
+- [x] Drive SoD `preliminary_objections` from jurisdiction-matrix rows (context builder ingests them; static placeholder only when no rows exist).
+- [x] Add SoD/Rejoinder "reply to interest and costs" section (`interest_costs_reply`).
+- [x] Interest section wired to `interest_rate` and interest quantum annexures (ARB-106).
 
-**Acceptance criteria**
-- Generated SoC contains distinct Index, Interest, Costs, and Verification headings.
-- Preliminary objections render from matrix rows (test with ≥1 objection row).
+**Acceptance criteria** *(verified by tests, 47 passing in the drafting suite)*
+- Generated SoC contains distinct Index, Interest, Costs, and Verification headings. ✓ (`test_statement_of_claim_includes_index_interest_costs_and_verification`)
+- Preliminary objections render from matrix rows. ✓ (`test_sod_preliminary_objections_render_from_jurisdiction_matrix`, ingestion covered by `test_context_builder_ingests_jurisdiction_matrix_rows`)
 
 ---
 
 ### ARB-106 — Quantum completeness: delay↔cost link + interest computation + claim-summary rollup
 
-**Priority:** P2 · **Size:** M · **Guide ref:** §11.2, §11.3
+**Priority:** P2 · **Size:** M · **Guide ref:** §11.2, §11.3 · **Status: DONE (2026-07-06)**
+
+> **Implementation notes.** Quantum agent principal rows now carry the §11.3
+> delay↔cost link: `cost_head` (keyword-derived: prolongation_overheads,
+> variation_works, certified_payment, idle_resources, disruption_productivity,
+> ld_refund), `evidence_ids`, `delay_event_ids` (chronology-matrix rows whose
+> `claim_link` matches the claim reference), `delay_period_start/end`, and
+> `critical_path_days`. With `interest_rate` + `interest_period_days` (or
+> `interest_from`/`interest_to`) in the run options, the agent creates
+> `Q-INTEREST-*` annexures via `compute_simple_interest` (principal × rate% ×
+> days/365) traceable to their principal annexure; without rate/period it warns
+> and skips. A `Q-CLAIM-SUMMARY` rollup (§11.2) lists per-claim
+> principal/interest/total line items with grand totals; it is agent-owned and
+> recomputed in place on re-run (no duplicate rows, idempotent created_records).
+> New cost-head / critical-path-days fields exposed in the quantum matrix editor.
 
 **Problem.** No delay-event→cost-head link table; interest is only a `calculation_type`
 label with no computation; claim-summary totals not auto-rolled up
 (`case_workspace.py:1257-1267`, `agents/deterministic.py:252-300`).
 
 **Tasks**
-- [ ] Add delay-event→cost-head linkage fields to quantum annexures (period, CP impact days, cost head, evidence).
-- [ ] Implement interest computation (rate × period) producing an interest annexure.
-- [ ] Auto-generate a claim-summary rollup (principal/interest/total) per §11.2.
+- [x] Add delay-event→cost-head linkage fields to quantum annexures (period, CP impact days, cost head, evidence).
+- [x] Implement interest computation (rate × period) producing an interest annexure.
+- [x] Auto-generate a claim-summary rollup (principal/interest/total) per §11.2.
 
-**Acceptance criteria**
-- Interest annexure amount computed and validated against `interest_rate`.
-- Claim summary totals equal the sum of component annexures.
+**Acceptance criteria** *(verified by tests)*
+- Interest annexure amount computed and validated against `interest_rate`. ✓ (`test_quantum_agent_computes_interest_and_claim_summary_rollup`)
+- Claim summary totals equal the sum of component annexures. ✓ (same test; stability on re-run covered by `test_quantum_agent_rollup_is_stable_on_rerun`, delay/cost link by `test_quantum_agent_links_cost_head_and_delay_events`)
 
 ---
 

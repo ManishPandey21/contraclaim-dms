@@ -248,6 +248,7 @@ class DeterministicArbitrationAgent:
         for collection_name in ["claims", "variations", "ipc_bills"]:
             for row in await self._find_source_rows(collection_name, limit=int(self.options.get("quantum_limit") or 50)):
                 candidates.append((collection_name, row))
+        chronology_rows = await self._matrix_rows("chronology-matrix")
         created_any = False
         for collection_name, source in candidates:
             source_id = _id(source)
@@ -270,6 +271,12 @@ class DeterministicArbitrationAgent:
                 "ipc_bills": "payment",
             }.get(collection_name, "claim_summary")
             reference = _first(source, "claim_ref", "variation_ref", "ipc_no", "bill_no", "reference_no") or source_id
+            # Guide §11.3: link the amount to its cost head and any delay events.
+            delay_event_ids = [
+                str(event.get("chronology_event_id") or event.get("_id"))
+                for event in chronology_rows
+                if str(event.get("claim_link") or "") and str(event.get("claim_link")) == str(reference)
+            ]
             row = {
                 "calculation_id": f"Q-{collection_name.upper()}-{_safe_key(str(reference))}",
                 "calculation_type": calculation_type,
@@ -280,6 +287,14 @@ class DeterministicArbitrationAgent:
                 "currency": _first(source, "currency") or "INR",
                 "tax_treatment": _first(source, "tax_treatment"),
                 "checked_by": _first(source, "checked_by"),
+                "cost_head": _cost_head(source, collection_name),
+                "evidence_ids": _string_list(
+                    _first(source, "evidence_ids", "supporting_document_ids", "document_ids", "linked_document_ids")
+                ),
+                "delay_event_ids": delay_event_ids,
+                "delay_period_start": _iso_date(_parse_date(_first(source, "delay_start_date", "period_start"))),
+                "delay_period_end": _iso_date(_parse_date(_first(source, "delay_end_date", "period_end"))),
+                "critical_path_days": _numeric(_first(source, "eot_days_claimed", "critical_path_days", "delay_days")),
             }
             inserted = await self._insert_matrix_row(
                 "quantum-annexures",
@@ -292,6 +307,143 @@ class DeterministicArbitrationAgent:
             created_any = created_any or inserted
         if not created_any:
             self.warnings.append("Quantum agent found no scoped amount records with traceable source ids.")
+        await self._interest_annexures(agent_type)
+        await self._claim_summary_rollup(agent_type)
+
+    async def _interest_annexures(self, agent_type: str) -> None:
+        """Guide §11: interest is pleaded from a traceable computation, never a bare rate."""
+        rate = _numeric(self.options.get("interest_rate"))
+        if rate is None:
+            self.warnings.append(
+                "Interest annexures skipped: provide interest_rate (percent per annum) in the quantum agent run options."
+            )
+            return
+        period_days = self._interest_period_days()
+        if period_days is None:
+            self.warnings.append(
+                "Interest annexures skipped: provide interest_period_days or interest_from/interest_to dates in run options."
+            )
+            return
+        for row in await self._matrix_rows("quantum-annexures"):
+            calculation_type = str(row.get("calculation_type") or "")
+            if calculation_type in {"interest", "claim_summary_rollup"}:
+                continue
+            principal = _numeric(row.get("amount"))
+            if principal is None:
+                continue
+            principal_calc_id = str(row.get("calculation_id") or _id(row))
+            reference = principal_calc_id[2:] if principal_calc_id.startswith("Q-") else principal_calc_id
+            interest_row = {
+                "calculation_id": f"Q-INTEREST-{_safe_key(reference)}",
+                "calculation_type": "interest",
+                "principal_calculation_id": principal_calc_id,
+                "principal_amount": principal,
+                "interest_rate_percent": rate,
+                "interest_period_days": period_days,
+                "interest_from": self.options.get("interest_from"),
+                "interest_to": self.options.get("interest_to"),
+                "formula": f"Simple interest: {principal} x {rate}% p.a. x {period_days}/365 days",
+                "amount": compute_simple_interest(principal, rate, period_days),
+                "currency": row.get("currency") or "INR",
+                "source_records": [
+                    {
+                        "source_collection": "arbitration_quantum_annexures",
+                        "source_id": _id(row),
+                        "reference": principal_calc_id,
+                    }
+                ],
+            }
+            await self._insert_matrix_row(
+                "quantum-annexures",
+                interest_row,
+                unique={"calculation_id": interest_row["calculation_id"]},
+                agent_type=agent_type,
+                source_id=_id(row),
+                label=interest_row["calculation_id"],
+            )
+
+    def _interest_period_days(self) -> Optional[int]:
+        period = _numeric(self.options.get("interest_period_days"))
+        if period is not None and period > 0:
+            return int(period)
+        start = _parse_date(self.options.get("interest_from"))
+        end = _parse_date(self.options.get("interest_to"))
+        if start and end and end > start:
+            return (end - start).days
+        return None
+
+    async def _claim_summary_rollup(self, agent_type: str) -> None:
+        """Guide §11.2 claim summary: principal + interest + total per claim, with grand totals."""
+        rows = await self._matrix_rows("quantum-annexures")
+        principals = [
+            row
+            for row in rows
+            if str(row.get("calculation_type") or "") not in {"interest", "claim_summary_rollup"}
+            and _numeric(row.get("amount")) is not None
+        ]
+        if not principals:
+            return
+        interest_by_principal = {
+            str(row.get("principal_calculation_id") or ""): _numeric(row.get("amount")) or 0.0
+            for row in rows
+            if str(row.get("calculation_type") or "") == "interest"
+        }
+        line_items: List[Dict[str, Any]] = []
+        principal_total = 0.0
+        interest_total = 0.0
+        for row in principals:
+            calc_id = str(row.get("calculation_id") or _id(row))
+            principal = _numeric(row.get("amount")) or 0.0
+            interest = interest_by_principal.get(calc_id, 0.0)
+            line_items.append(
+                {
+                    "calculation_id": calc_id,
+                    "description": row.get("cost_head") or row.get("calculation_type") or calc_id,
+                    "principal": round(principal, 2),
+                    "interest": round(interest, 2),
+                    "total": round(principal + interest, 2),
+                }
+            )
+            principal_total += principal
+            interest_total += interest
+        summary_fields = {
+            "calculation_type": "claim_summary_rollup",
+            "line_items": line_items,
+            "principal_total": round(principal_total, 2),
+            "interest_total": round(interest_total, 2),
+            "amount": round(principal_total + interest_total, 2),
+            "currency": principals[0].get("currency") or "INR",
+            "formula": "Sum of principal annexures plus computed interest annexures (guide §11.2 claim summary).",
+            "source_records": [
+                {
+                    "source_collection": "arbitration_quantum_annexures",
+                    "source_id": _id(row),
+                    "reference": row.get("calculation_id"),
+                }
+                for row in principals
+            ],
+        }
+        collection = _collection(self.db, MATRIX_COLLECTIONS["quantum-annexures"])
+        if collection is None:
+            return
+        existing = await collection.find_one(
+            {"case_id": self.case_id, "calculation_id": "Q-CLAIM-SUMMARY", "deleted_at": {"$exists": False}}
+        )
+        if existing:
+            # Agent-owned rollup: recompute totals on re-run without logging a new record.
+            await collection.update_one(
+                {"_id": existing["_id"], "case_id": self.case_id},
+                {"$set": _jsonable({**summary_fields, "updated_at": datetime.utcnow()})},
+            )
+            return
+        await self._insert_matrix_row(
+            "quantum-annexures",
+            {"calculation_id": "Q-CLAIM-SUMMARY", **summary_fields},
+            unique={"calculation_id": "Q-CLAIM-SUMMARY"},
+            agent_type=agent_type,
+            source_id="Q-CLAIM-SUMMARY",
+            label="Claim summary rollup",
+        )
 
     async def _notice_compliance(self, agent_type: str) -> None:
         document_rows = await self._matrix_rows("document-index")
@@ -855,6 +1007,34 @@ def _condense(value: Any, width: int = 700) -> str:
     if len(text) <= width:
         return text
     return shorten(text, width=width, placeholder="...")
+
+
+def compute_simple_interest(principal: float, rate_percent: float, days: int) -> float:
+    """Simple interest per guide §11: principal x rate% p.a. x days/365."""
+    return round(principal * (rate_percent / 100.0) * (days / 365.0), 2)
+
+
+def _cost_head(source: Dict[str, Any], collection_name: str) -> str:
+    if collection_name == "variations":
+        return "variation_works"
+    if collection_name == "ipc_bills":
+        return "certified_payment"
+    text = " ".join(
+        str(_first(source, key) or "") for key in ["title", "claim_head", "description", "type", "summary"]
+    ).lower()
+    if any(term in text for term in ["idle", "plant standby", "machinery standby"]):
+        return "idle_resources"
+    if any(term in text for term in ["disruption", "productivity"]):
+        return "disruption_productivity"
+    if any(term in text for term in ["ld", "liquidated damages", "deduction", "recovery"]):
+        return "ld_refund"
+    if any(term in text for term in ["prolongation", "overhead", "eot", "delay", "extension of time"]):
+        return "prolongation_overheads"
+    if any(term in text for term in ["variation", "extra work", "extra item"]):
+        return "variation_works"
+    if any(term in text for term in ["payment", "ipc", "bill", "certified"]):
+        return "certified_payment"
+    return "claim_amount"
 
 
 def _is_delay_claim(claim: Dict[str, Any]) -> bool:

@@ -7,7 +7,8 @@ import re
 import uuid
 import zipfile
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 
@@ -52,6 +53,55 @@ BUNDLE_EXPORT_FORMATS = {
     "pdf": ("application/pdf", "arbitration-filing-bundle.pdf"),
 }
 MAX_INLINE_BUNDLE_EXPORT_BYTES = 12 * 1024 * 1024
+
+# Filing bundle volume structure from the SoC/SoD/Rejoinder guide (§19).
+BUNDLE_VOLUME_PLEADINGS = "volume-1-pleadings"
+BUNDLE_VOLUME_CONTRACT = "volume-2-contract-documents"
+BUNDLE_VOLUME_CORRESPONDENCE = "volume-3-correspondence"
+BUNDLE_VOLUME_PROGRAMME = "volume-4-programme-delay-records"
+BUNDLE_VOLUME_PAYMENT = "volume-5-payment-measurement-records"
+BUNDLE_VOLUME_CALCULATIONS = "volume-6-claim-calculations"
+BUNDLE_VOLUME_EXPERT = "volume-7-expert-reports"
+BUNDLE_VOLUME_AUTHORITIES = "volume-8-authorities"
+
+# Pin-cites such as "C-12, p.3", "R-4 at page 12 ¶3", "CE-1, p. 7 para 2".
+_PIN_CITE_RE = re.compile(
+    r"\b((?:C|R|J|CE|RE|QE|DE)-\d+)\s*(?:,|\bat\b)?\s*p(?:age|g)?\.?\s*(\d+)"
+    r"(?:\s*(?:¶|para(?:graph)?\.?)\s*(\d+))?",
+    re.IGNORECASE,
+)
+
+
+def _exhibit_volume(row: Dict[str, Any]) -> str:
+    """Map a document-index row to its guide §19 bundle volume."""
+    text = " ".join(
+        str(row.get(key) or "") for key in ["document_type", "title", "relevance_note"]
+    ).lower()
+    if any(term in text for term in ["authority", "case law", "judgment", "precedent"]):
+        return BUNDLE_VOLUME_AUTHORITIES
+    if "expert" in text:
+        return BUNDLE_VOLUME_EXPERT
+    if any(term in text for term in ["programme", "schedule", "delay", "eot", "extension of time", "critical path"]):
+        return BUNDLE_VOLUME_PROGRAMME
+    if any(term in text for term in ["payment", "ipc", "bill", "invoice", "measurement", "certificate"]):
+        return BUNDLE_VOLUME_PAYMENT
+    if any(
+        term in text
+        for term in ["contract", "agreement", "loa", "loi", "gcc", "scc", "boq", "specification", "drawing", "addend"]
+    ):
+        return BUNDLE_VOLUME_CONTRACT
+    return BUNDLE_VOLUME_CORRESPONDENCE
+
+
+def _valid_exhibit_pages(row: Dict[str, Any]) -> Optional[set[int]]:
+    """Known valid page numbers for an exhibit, or None when unverifiable."""
+    pages = [int(page) for page in row.get("page_numbers") or [] if str(page).isdigit()]
+    if pages:
+        return set(pages)
+    page_count = row.get("page_count")
+    if isinstance(page_count, int) and page_count > 0:
+        return set(range(1, page_count + 1))
+    return None
 
 
 def _actor_id(user: Any) -> Optional[str]:
@@ -716,6 +766,101 @@ class ArbitrationCaseWorkspaceService:
         rows = [row for row in await self.list_matrix_rows(case_id, "document-index") if row.get("exhibit_id")]
         return sorted(rows, key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0)))
 
+    async def _find_exhibit_source_record(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        source_id = str(row.get("source_id") or "")
+        if not source_id:
+            return None
+        for collection_name in ("documents", "letters"):
+            collection = getattr(self.db, collection_name, None)
+            if collection is None:
+                continue
+            try:
+                record = await collection.find_one({"_id": source_id})
+            except Exception:
+                record = None
+            if record:
+                return dict(record)
+        return None
+
+    @staticmethod
+    def _existing_local_path(*candidates: Any) -> Optional[Path]:
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                path = Path(str(candidate))
+                if path.is_file():
+                    return path
+            except OSError:
+                continue
+        return None
+
+    async def _exhibit_file_status(self, row: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Cheap resolvability check for the citation audit (no byte fetch)."""
+        record = await self._find_exhibit_source_record(row)
+        if self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link")):
+            return True, None
+        if (record or {}).get("filepath_s3"):
+            return True, None
+        if record is None:
+            return False, "source record not found and source_file_link is not an existing file"
+        return False, "source record has no local file or storage key"
+
+    async def _load_exhibit_file(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve exhibit bytes: local path first, then S3 (mirrors document download)."""
+        record = await self._find_exhibit_source_record(row)
+        local = self._existing_local_path((record or {}).get("filepath_local"), row.get("source_file_link"))
+        if local:
+            try:
+                return {"content": local.read_bytes(), "filename": (record or {}).get("filename") or local.name, "error": None}
+            except OSError as exc:
+                return {"content": None, "filename": (record or {}).get("filename") or local.name, "error": f"Local read failed: {exc}"}
+        s3_key = (record or {}).get("filepath_s3")
+        if s3_key:
+            try:
+                from ..s3_service import S3Service
+
+                content = await S3Service().download_bytes(str(s3_key))
+                return {
+                    "content": content,
+                    "filename": (record or {}).get("filename") or Path(str(s3_key)).name,
+                    "error": None,
+                }
+            except Exception as exc:
+                return {"content": None, "filename": (record or {}).get("filename"), "error": f"S3 download failed: {exc}"}
+        return {
+            "content": None,
+            "filename": (record or {}).get("filename"),
+            "error": "No resolvable file: source record has no local path or storage key.",
+        }
+
+    async def _collect_exhibit_files(self, exhibits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        entries: List[Dict[str, Any]] = []
+        for row in exhibits:
+            exhibit_id = str(row.get("exhibit_id") or "")
+            if not exhibit_id:
+                continue
+            loaded = await self._load_exhibit_file(row)
+            volume = _exhibit_volume(row)
+            filename = str(loaded.get("filename") or f"{exhibit_id}.bin")
+            suffix = Path(filename).suffix or ".bin"
+            title = re.sub(r"[^A-Za-z0-9 _.-]+", "", str(row.get("title") or row.get("document_type") or "exhibit")).strip()
+            archive_path = f"{volume}/{exhibit_id} - {(title or 'exhibit')[:80]}{suffix}"
+            content = loaded.get("content")
+            entries.append(
+                {
+                    "exhibit_id": exhibit_id,
+                    "source_id": row.get("source_id"),
+                    "volume": volume,
+                    "path": archive_path if content is not None else None,
+                    "filename": filename,
+                    "size": len(content) if content is not None else 0,
+                    "error": loaded.get("error"),
+                    "content": content,
+                }
+            )
+        return entries
+
     async def citation_audit(self, case_id: str) -> Dict[str, Any]:
         exhibits = await self.exhibit_list(case_id)
         exhibit_ids = {str(row.get("exhibit_id")) for row in exhibits if row.get("exhibit_id")}
@@ -753,6 +898,20 @@ class ArbitrationCaseWorkspaceService:
                         "message": f"Document index row is not verified/approved for filing: {row_label}",
                     }
                 )
+            if row.get("exhibit_id"):
+                resolvable, reason = await self._exhibit_file_status(row)
+                if not resolvable:
+                    issues.append(
+                        {
+                            "severity": "blocking",
+                            "issue_type": "exhibit_file_missing",
+                            "matrix": "document-index",
+                            "matrix_row_id": row.get("_id"),
+                            "exhibit_id": row.get("exhibit_id"),
+                            "message": f"Exhibit {row.get('exhibit_id')} file cannot be resolved for the bundle ({reason}): {row_label}",
+                        }
+                    )
+        exhibit_pages = {str(row.get("exhibit_id")): _valid_exhibit_pages(row) for row in exhibits}
         draft_cursor = self.db.arbitration_drafts.find({"case_id": case_id, "deleted_at": {"$exists": False}})
         drafts = await _collect(draft_cursor)
         cited: set[str] = set()
@@ -762,6 +921,32 @@ class ArbitrationCaseWorkspaceService:
             text = str((latest or {}).get("full_markdown") or "")
             citations = sorted(set(re.findall(r"\b(?:C|R|J|CE|RE|QE|DE)-\d+\b", text)))
             source_key_citations = sorted(set(re.findall(r"\[(S\d+):[^\]]+\]", text)))
+            pin_cites: List[Dict[str, Any]] = []
+            for match in _PIN_CITE_RE.finditer(text):
+                label, page_text, paragraph_text = match.group(1), match.group(2), match.group(3)
+                pin_cite = {
+                    "exhibit_id": label,
+                    "page": int(page_text),
+                    "paragraph": int(paragraph_text) if paragraph_text else None,
+                    "text": match.group(0),
+                }
+                pin_cites.append(pin_cite)
+                if label not in exhibit_ids:
+                    continue  # reported below as missing_exhibit_reference
+                valid_pages = exhibit_pages.get(label)
+                if valid_pages is not None and pin_cite["page"] not in valid_pages:
+                    issues.append(
+                        {
+                            "severity": "blocking",
+                            "issue_type": "invalid_pin_cite",
+                            "draft_id": draft.get("_id"),
+                            "exhibit_id": label,
+                            "message": (
+                                f"Draft pin-cite '{pin_cite['text']}' references page {pin_cite['page']} of {label}, "
+                                f"but that page is not in the exhibit's recorded pages."
+                            ),
+                        }
+                    )
             source_ledger = (latest or {}).get("source_ledger") or []
             source_keys = {str(row.get("source_key")) for row in source_ledger if row.get("source_key")}
             missing_source_keys = [key for key in source_key_citations if key not in source_keys]
@@ -792,6 +977,7 @@ class ArbitrationCaseWorkspaceService:
                     "version": (latest or {}).get("version"),
                     "citations": citations,
                     "source_key_citations": source_key_citations,
+                    "pin_cites": pin_cites,
                     "missing_exhibits": [citation for citation in citations if citation not in exhibit_ids],
                     "missing_source_keys": missing_source_keys,
                 }
@@ -862,8 +1048,32 @@ class ArbitrationCaseWorkspaceService:
                 latest = draft.get("latest_version") or {}
                 if latest.get("full_markdown"):
                     archive.writestr(f"drafts/{safe_id}/latest-version.md", str(latest.get("full_markdown") or ""))
+                    # Guide §19 volume structure: pleadings are Volume 1.
+                    archive.writestr(f"{BUNDLE_VOLUME_PLEADINGS}/{safe_id}.md", str(latest.get("full_markdown") or ""))
                 if latest:
                     archive.writestr(f"drafts/{safe_id}/latest-version.json", json.dumps(_jsonable(latest), default=str, indent=2))
+            # Guide §19 volumes: exhibit binaries placed by document type.
+            exhibit_files = await self._collect_exhibit_files(payload.get("exhibit_list") or [])
+            for entry in exhibit_files:
+                if entry.get("content") is not None and entry.get("path"):
+                    archive.writestr(entry["path"], entry["content"])
+            archive.writestr(
+                "exhibits/exhibit-files.json",
+                json.dumps(
+                    _jsonable([{key: value for key, value in entry.items() if key != "content"} for entry in exhibit_files]),
+                    default=str,
+                    indent=2,
+                ),
+            )
+            matrices = payload.get("matrices") or {}
+            archive.writestr(
+                f"{BUNDLE_VOLUME_CALCULATIONS}/quantum-annexures.json",
+                json.dumps(_jsonable(matrices.get("quantum-annexures") or []), default=str, indent=2),
+            )
+            archive.writestr(
+                f"{BUNDLE_VOLUME_EXPERT}/expert-alignment.json",
+                json.dumps(_jsonable(matrices.get("expert-alignment") or []), default=str, indent=2),
+            )
         return buffer.getvalue()
 
     async def export_filing_bundle_docx(self, case_id: str) -> bytes:

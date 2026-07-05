@@ -190,6 +190,8 @@ const MATRIX_FIELDS: Record<MatrixSlug, Array<{ key: string; label: string; type
     { key: "formula", label: "Formula", type: "textarea" },
     { key: "amount", label: "Amount", type: "number" },
     { key: "currency", label: "Currency" },
+    { key: "cost_head", label: "Cost head (delay/cost link)" },
+    { key: "critical_path_days", label: "Critical path days", type: "number" },
   ],
   "notice-compliance": [
     { key: "notice_ref", label: "Notice ref" },
