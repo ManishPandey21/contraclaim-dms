@@ -15,6 +15,7 @@ MATRIX_COLLECTIONS: Dict[str, str] = {
     "quantum-annexures": "arbitration_quantum_annexures",
     "notice-compliance": "arbitration_notice_compliance",
     "jurisdiction-matrix": "arbitration_jurisdiction_matrix",
+    "expert-alignment": "arbitration_expert_alignment",
 }
 
 

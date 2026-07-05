@@ -59,7 +59,9 @@ async def _load_and_authorize(draft_id: str, permission: str, db, current_user, 
 
 
 async def _load_case_and_authorize(case_id: str, permission: str, db, current_user, policy) -> Dict[str, Any]:
-    case = await ArbitrationCaseWorkspaceService(db).get_case(case_id)
+    # Tenant scope on the lookup itself (cross-tenant ids 404 without leaking
+    # existence); the policy check below still enforces permission + scope.
+    case = await ArbitrationCaseWorkspaceService(db).get_case(case_id, scope=build_scope_query(current_user))
     await policy.authorize_document(current_user, permission, case, resource_type="arbitration_case")
     return case
 

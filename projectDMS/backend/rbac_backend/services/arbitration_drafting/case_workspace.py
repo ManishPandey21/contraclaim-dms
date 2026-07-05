@@ -143,8 +143,18 @@ class ArbitrationCaseWorkspaceService:
         cursor = self.db.arbitration_cases.find(query).sort("updated_at", -1).skip(skip).limit(limit)
         return await _collect(cursor)
 
-    async def get_case(self, case_id: str) -> Dict[str, Any]:
-        case = await self.db.arbitration_cases.find_one({"_id": case_id, "deleted_at": {"$exists": False}})
+    async def get_case(self, case_id: str, *, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Load a case by id.
+
+        ``scope`` is a tenant filter (e.g. from ``build_scope_query``) applied as
+        defense-in-depth at the router boundary: a cross-tenant id yields 404
+        instead of leaking existence. Internal service calls omit it because the
+        route has already verified access.
+        """
+        query: Dict[str, Any] = {"_id": case_id, "deleted_at": {"$exists": False}}
+        if scope:
+            query.update(scope)
+        case = await self.db.arbitration_cases.find_one(query)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration case not found")
         return case
@@ -1134,6 +1144,7 @@ class ArbitrationCaseWorkspaceService:
             "quantum-annexures": ["quantum"],
             "notice-compliance": ["legal", "contracts"],
             "jurisdiction-matrix": ["legal"],
+            "expert-alignment": ["reviewer"],
         }
         return list(defaults.get(matrix_slug, ["reviewer"]))
 
@@ -1280,8 +1291,83 @@ class ArbitrationCaseWorkspaceService:
             )
 
         self._jurisdiction_readiness(add, rows.get("jurisdiction-matrix") or [])
+        self._expert_readiness(
+            add,
+            claim_rows + counterclaim_rows,
+            rows.get("expert-alignment") or [],
+        )
 
         return checks
+
+    def _expert_readiness(
+        self,
+        add: Any,
+        claim_rows: List[Dict[str, Any]],
+        expert_rows: List[Dict[str, Any]],
+    ) -> None:
+        """Guide §12: claims relying on delay or quantum need an aligned expert record."""
+
+        def _claim_no(row: Dict[str, Any]) -> str:
+            return str(row.get("claim_no") or row.get("counterclaim_no") or row.get("source_claim_id") or row.get("_id"))
+
+        def _is_delay(row: Dict[str, Any]) -> bool:
+            text = " ".join(str(row.get(key) or "") for key in ["claim_head", "facts", "causation", "relief", "breach"]).lower()
+            return any(term in text for term in ["delay", "eot", "extension of time", "prolongation", "critical path"])
+
+        def _has_amount(row: Dict[str, Any]) -> bool:
+            return row.get("amount") is not None or bool(row.get("amount_or_days"))
+
+        relevant = [row for row in claim_rows if _is_delay(row) or _has_amount(row)]
+        if not relevant:
+            return
+
+        aligned: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for row in expert_rows:
+            if not _is_ready_row(row):
+                continue
+            key = (str(row.get("expert_type") or ""), str(row.get("claim_no") or ""))
+            aligned[key] = row
+
+        unaligned: List[Dict[str, Any]] = []
+        contradicted: List[Dict[str, Any]] = []
+        for claim in relevant:
+            claim_no = _claim_no(claim)
+            if _is_delay(claim):
+                delay_row = aligned.get(("delay", claim_no))
+                if not delay_row or not _is_positive(delay_row.get("concurrency_addressed")):
+                    unaligned.append(claim)
+                    continue
+            if _has_amount(claim):
+                quantum_row = aligned.get(("quantum", claim_no))
+                if not quantum_row or not _is_positive(quantum_row.get("calculation_match")):
+                    unaligned.append(claim)
+                    continue
+                if quantum_row.get("contradictions"):
+                    contradicted.append(claim)
+        if unaligned:
+            add(
+                "expert_alignment",
+                "experts",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                f"{len(unaligned)} claim(s) relying on delay or quantum have no approved, aligned expert record "
+                "(concurrency addressed / calculation match required).",
+                str(unaligned[0].get("_id")),
+            )
+        elif contradicted:
+            add(
+                "expert_alignment",
+                "experts",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                f"{len(contradicted)} claim(s) have expert alignment contradictions to resolve.",
+                str(contradicted[0].get("_id")),
+            )
+        else:
+            add(
+                "expert_alignment",
+                "experts",
+                ReadinessCheckStatus.READY,
+                "Delay and quantum claims are aligned with approved expert records.",
+            )
 
     def _jurisdiction_readiness(self, add: Any, jurisdiction_rows: List[Dict[str, Any]]) -> None:
         limitation_rows = [row for row in jurisdiction_rows if str(row.get("check_type") or "") == "limitation"]

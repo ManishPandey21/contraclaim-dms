@@ -88,21 +88,39 @@ pre-arbitration compliance, pleading timetable, or amendment-rule records exist.
 
 ### ARB-103 — Expert alignment (§12): ingestion + consistency agent
 
-**Priority:** P1 · **Size:** M · **Guide ref:** §12, §12.1
+**Priority:** P1 · **Size:** M · **Guide ref:** §12, §12.1 · **Status: DONE (2026-07-05)**
+
+> **Implementation notes.** New `expert-alignment` slug → `arbitration_expert_alignment`
+> collection. The `delay-expert` agent (stub replaced) seeds per-claim checklist rows:
+> `delay` rows start `concurrency_addressed=false` with a `concurrency_not_addressed`
+> risk flag (guide acceptance), `quantum` rows compare the pleaded amount against
+> quantum annexures (match by calculation id, then amount) recording `calculation_match`,
+> `verified_amount`, and contradictions (`amount_mismatch` / `quantum_annexure_missing`).
+> Expert-looking documents in the document index are linked as `expert_report_source_id`.
+> Context builder ingests approved alignment rows as `expert_report` sources
+> (`allowed_use=expert`, matrix group `experts`) and `_expert_consistency_warnings`
+> emits pleaded-vs-verified amount mismatches, contradiction, and unaddressed-concurrency
+> warnings into `context_warnings`, which the drafting service merges into
+> `validation_warnings`. Readiness check `expert_alignment` flags delay/quantum claims
+> without an approved aligned expert record (fires only when such claims exist).
+> Migration `v20260705_0003`; "Expert Alignment" matrix tab in the workspace UI.
+> Deferred: technical/contract expert row types exist via the generic matrix editor but
+> have no automated seeding yet.
 
 **Problem.** `delay-expert` / `review-consistency` are review-only stubs
 (`agents/deterministic.py:96-98, 398-399`); no expert-report source type, matrix, or
 alignment checklist.
 
 **Tasks**
-- [ ] Add expert-report source type to `ArbitrationSourceType` (`models/arbitration_drafting.py:67-83`) and ingest into context (`context.py` register-sources block).
-- [ ] Add `arbitration_expert_alignment` records (expert type, methodology, concurrency addressed, calc-match, contradictions).
-- [ ] Implement the delay/quantum/technical/contract expert alignment checklist agent (replace stub).
-- [ ] Readiness check: claims relying on delay/quantum flagged if no aligned expert record.
+- [x] Expert-report source type (`ArbitrationSourceType.EXPERT_REPORT`, `ArbitrationSourceUse.EXPERT`) and ingestion into context (`context.py` `_expert_alignment_sources`).
+- [x] `arbitration_expert_alignment` records (expert type, methodology, concurrency addressed, calc-match, contradictions, risk flags, report link).
+- [x] Delay/quantum expert alignment checklist agent (`agents/deterministic.py` `_delay_expert_alignment`, replaces stub; in orchestrator sequence).
+- [x] Readiness check `expert_alignment`: delay/quantum claims flagged when no aligned expert record (`case_workspace.py` `_expert_readiness`).
+- [ ] Deferred: automated seeding for technical/contract expert types; `review-consistency` remains a stub (draft-level consistency is covered by the validator).
 
-**Acceptance criteria**
-- Pleaded amount not matching an expert quantum record produces a warning surfaced in `validation_warnings`.
-- Concurrency-not-addressed flag appears for EOT claims.
+**Acceptance criteria** *(verified by tests, 45 passing)*
+- Pleaded amount not matching an expert quantum record produces a warning surfaced in `validation_warnings`. ✓ (`test_context_warns_on_expert_amount_mismatch_and_unaddressed_concurrency` — context warnings merge into `validation_warnings` in `service.generate`)
+- Concurrency-not-addressed flag appears for EOT claims. ✓ (`test_delay_expert_agent_flags_concurrency_and_amount_mismatch`, readiness in `test_expert_alignment_readiness_blocks_then_ready`)
 
 ---
 
@@ -169,21 +187,35 @@ label with no computation; claim-summary totals not auto-rolled up
 
 ### ARB-107 — Tenant isolation: org-scoped case lookup + tests; live API & frontend E2E
 
-**Priority:** P1 · **Size:** M · **Dimension:** RBAC + test coverage
+**Priority:** P1 · **Size:** M · **Dimension:** RBAC + test coverage · **Status: DONE (2026-07-05)**
+
+> **Implementation notes.** `get_case` now accepts a tenant `scope` filter and the
+> router's `_load_case_and_authorize` passes `build_scope_query(current_user)`, so a
+> cross-tenant case id 404s without leaking existence (policy `authorize_document`
+> still runs as the second layer). All matrix/agent-run/exhibit/readiness routes go
+> through the scoped case load. New `test_arbitration_http_isolation.py` (7 tests)
+> follows the `test_http_isolation.py` pattern — real FastAPI app + real
+> PolicyService/ScopeService, stubbed permission/entitlement gates, seeded two-tenant
+> fake db: case list scoping, 404 on cross-tenant case get/patch/matrix/agent-runs/
+> exhibit-list/readiness, 403 on cross-tenant draft reads, 403 on creating a case
+> under a foreign organization, superadmin retained. Frontend:
+> `ArbitrationCaseWorkspacePage.test.tsx` (vitest + testing-library) renders the
+> matrices section, asserts all matrix tabs (incl. Jurisdiction & Limitation and
+> Expert Alignment), and verifies tab interaction reloads rows for the selected matrix.
 
 **Problem.** `get_case` looks up by `_id` only (`case_workspace.py:146-150`); isolation
 relies solely on `policy.authorize_document`. No cross-tenant test, no live API/router
 test, no frontend test in the arbitration suite.
 
 **Tasks**
-- [ ] Add org scoping to `get_case` and matrix queries where a scope is available.
-- [ ] Add cross-tenant tests (case, matrix rows, agent runs, filing bundle) asserting 403/404 across orgs.
-- [ ] Add a router-level (TestClient) test for the core endpoints.
-- [ ] Add a frontend render/interaction test for `ArbitrationCaseWorkspacePage`.
+- [x] Org scoping on `get_case` (scope param applied at the router boundary; matrix queries covered via the scoped case load).
+- [x] Cross-tenant tests (case, matrix rows, agent runs, exhibit list, readiness, drafts, case create) asserting 403/404 across orgs.
+- [x] Router-level (TestClient) tests for the core endpoints (`test_arbitration_http_isolation.py`).
+- [x] Frontend render/interaction test for `ArbitrationCaseWorkspacePage` (`client/src/pages/__tests__/ArbitrationCaseWorkspacePage.test.tsx`).
 
-**Acceptance criteria**
-- A user from org B cannot read/patch org A's case or matrix rows (test-proven).
-- CI runs at least one live-API test hitting `/api/arbitration/...`.
+**Acceptance criteria** *(verified by tests)*
+- A user from org B cannot read/patch org A's case or matrix rows (test-proven). ✓ (`test_case_get_denies_cross_tenant`, `test_case_patch_denies_cross_tenant`, `test_matrix_rows_deny_cross_tenant`)
+- CI runs at least one live-API test hitting `/api/arbitration/...`. ✓ (7 TestClient tests against the real app)
 
 ---
 

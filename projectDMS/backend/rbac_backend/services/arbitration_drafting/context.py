@@ -118,6 +118,22 @@ def _allowed_use(value: Any, fallback: str = "fact") -> str:
     return fallback
 
 
+def _numeric_amount(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    import re as _re
+
+    cleaned = _re.sub(r"[^0-9.\-]", "", str(value))
+    if cleaned in {"", "-", "."}:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
 def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
     if value in (None, ""):
         return None
@@ -160,6 +176,7 @@ class ArbitrationContextBuilder:
         source_ledger = self._dedupe(source_ledger)
         self._annotate_source_quality(source_ledger, context_warnings)
         matrix_context = self._matrix_context(source_ledger)
+        self._expert_consistency_warnings(matrix_context, context_warnings)
         missing = self._missing_evidence(draft, source_ledger, claim_heads, paragraph_responses)
         return {
             "draft": draft,
@@ -214,8 +231,71 @@ class ArbitrationContextBuilder:
         rows.extend(await self._claim_defence_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._quantum_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._notice_matrix_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
+        rows.extend(await self._expert_alignment_sources(str(case_id), offset + len(rows), include_review_sources, context_warnings))
         rows.extend(await self._register_sources(draft, offset + len(rows), include_review_sources, context_warnings))
         return rows
+
+    async def _expert_alignment_sources(
+        self,
+        case_id: str,
+        offset: int,
+        include_review_sources: bool,
+        context_warnings: List[str],
+    ) -> List[Dict[str, Any]]:
+        try:
+            rows = await _collect(
+                self.db.arbitration_expert_alignment.find({"case_id": case_id, "deleted_at": {"$exists": False}}).sort("created_at", 1)
+            )
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if not _is_verified_source(row, include_review_sources=include_review_sources):
+                continue
+            snippet = "\n".join(
+                str(part)
+                for part in [
+                    row.get("methodology"),
+                    row.get("notes"),
+                    *(row.get("contradictions") or []),
+                ]
+                if part
+            )
+            ledger_row = {
+                "source_key": f"S{offset + len(out) + 1}",
+                "source_id": str(row.get("expert_report_source_id") or row.get("_id")),
+                "source_type": "expert_report",
+                "allowed_use": "expert",
+                "permitted_uses": ["expert", "fact"],
+                "label": f"{row.get('expert_type') or 'expert'} alignment: claim {row.get('claim_no')}",
+                "citation": row.get("claim_no") or row.get("_id"),
+                "snippet": condense(snippet, 650),
+                "page_numbers": [],
+                "clause_number": None,
+                "letter_no": None,
+                "verification_status": row.get("alignment_status") or row.get("approval_status") or "approved",
+                "is_user_supplied": False,
+                "source_origin": "case_expert_alignment",
+                "matrix_row_id": row.get("_id"),
+                "quality_flags": [],
+                "metadata": {
+                    "case_id": case_id,
+                    "matrix": "expert-alignment",
+                    "matrix_row_id": row.get("_id"),
+                    "expert_type": row.get("expert_type"),
+                    "claim_no": row.get("claim_no"),
+                    "pleaded_amount": row.get("pleaded_amount"),
+                    "verified_amount": row.get("verified_amount"),
+                    "calculation_match": row.get("calculation_match"),
+                    "concurrency_addressed": row.get("concurrency_addressed"),
+                    "contradictions": row.get("contradictions") or [],
+                    "risk_flags": row.get("risk_flags") or [],
+                },
+                "source_hash": "",
+            }
+            ledger_row["source_hash"] = source_hash(ledger_row)
+            out.append(ledger_row)
+        return out
 
     async def _document_index_sources(
         self,
@@ -976,6 +1056,7 @@ class ArbitrationContextBuilder:
             "rejoinder_replies": [],
             "quantum": [],
             "notices": [],
+            "experts": [],
         }
         origin_map = {
             "case_document_index": "documents",
@@ -988,12 +1069,53 @@ class ArbitrationContextBuilder:
             "case_rejoinder-matrix": "rejoinder_replies",
             "case_quantum_annexure": "quantum",
             "case_notice_compliance": "notices",
+            "case_expert_alignment": "experts",
         }
         for row in source_ledger:
             group = origin_map.get(str(row.get("source_origin") or ""))
             if group:
                 groups[group].append(row)
         return groups
+
+    def _expert_consistency_warnings(
+        self,
+        matrix_context: Dict[str, List[Dict[str, Any]]],
+        context_warnings: List[str],
+    ) -> None:
+        """Guide §12.1: pleaded amounts and delay claims must align with expert records."""
+        expert_rows = matrix_context.get("experts") or []
+        claim_rows = matrix_context.get("claims") or []
+        experts_by_claim: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for row in expert_rows:
+            metadata = row.get("metadata") or {}
+            claim_no = str(metadata.get("claim_no") or "")
+            expert_type = str(metadata.get("expert_type") or "")
+            if claim_no and expert_type:
+                experts_by_claim[(expert_type, claim_no)] = row
+            for contradiction in metadata.get("contradictions") or []:
+                message = f"Expert alignment contradiction: {contradiction}"
+                if message not in context_warnings:
+                    context_warnings.append(message)
+        for claim in claim_rows:
+            metadata = claim.get("metadata") or {}
+            claim_no = str(claim.get("citation") or "")
+            pleaded = _numeric_amount(metadata.get("amount_or_days"))
+            if pleaded is None or not claim_no:
+                continue
+            quantum_expert = experts_by_claim.get(("quantum", claim_no))
+            if not quantum_expert:
+                continue
+            verified = _numeric_amount((quantum_expert.get("metadata") or {}).get("verified_amount"))
+            if verified is not None and abs(verified - pleaded) >= 0.01:
+                context_warnings.append(
+                    f"Pleaded amount {pleaded} for claim {claim_no} does not match the expert-verified amount {verified}."
+                )
+        for (expert_type, claim_no), row in experts_by_claim.items():
+            metadata = row.get("metadata") or {}
+            if expert_type == "delay" and not metadata.get("concurrency_addressed"):
+                context_warnings.append(
+                    f"Concurrency has not been addressed for delay claim {claim_no}; align the pleading with the delay expert."
+                )
 
     def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
         for row in rows:

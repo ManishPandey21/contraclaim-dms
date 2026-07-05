@@ -66,6 +66,7 @@ class DeterministicArbitrationAgent:
             "jurisdiction",
             "claim-identification",
             "quantum",
+            "delay-expert",
             "notice-compliance",
             "issue-framing",
         ]
@@ -86,7 +87,7 @@ class DeterministicArbitrationAgent:
             "rejoinder-reply": self._review_only_agent,
             "quantum": self._quantum,
             "notice-compliance": self._notice_compliance,
-            "delay-expert": self._review_only_agent,
+            "delay-expert": self._delay_expert_alignment,
             "review-consistency": self._review_only_agent,
             "legal-guardrail": self._review_only_agent,
         }
@@ -499,6 +500,124 @@ class DeterministicArbitrationAgent:
                 label=f"Pre-arbitration step: {step}",
             )
 
+    async def _delay_expert_alignment(self, agent_type: str) -> None:
+        """Expert alignment checklist (guide §12): delay and quantum rows per claim.
+
+        Deterministic seeding only — the expert/reviewer must resolve each row.
+        Delay claims start with ``concurrency_addressed = False`` (flagged risk);
+        quantum rows compare the pleaded amount against approved quantum
+        annexures and record contradictions when they do not match.
+        """
+        claim_rows = await self._matrix_rows("claim-matrix")
+        if not claim_rows:
+            self.warnings.append("Delay/expert alignment requires claim matrix rows; run claim identification first.")
+            return
+        quantum_rows = await self._matrix_rows("quantum-annexures")
+        expert_documents = await self._expert_report_documents()
+        for claim in claim_rows:
+            claim_no = str(claim.get("claim_no") or claim.get("source_claim_id") or _id(claim))
+            if _is_delay_claim(claim):
+                report_id = expert_documents.get("delay")
+                risk_flags = ["concurrency_not_addressed"]
+                if not report_id:
+                    risk_flags.append("expert_report_missing")
+                row = {
+                    "expert_type": "delay",
+                    "claim_no": claim_no,
+                    "claim_row_id": _id(claim),
+                    "methodology": None,
+                    "concurrency_addressed": False,
+                    "critical_path_confirmed": False,
+                    "expert_report_source_id": report_id,
+                    "contradictions": [],
+                    "alignment_status": "needs_review",
+                    "risk_flags": risk_flags,
+                    "notes": "Confirm delay methodology, critical path impact, and concurrency treatment with the delay expert.",
+                }
+                inserted = await self._insert_matrix_row(
+                    "expert-alignment",
+                    row,
+                    unique={"expert_type": "delay", "claim_no": claim_no},
+                    agent_type=agent_type,
+                    source_id=_id(claim) or claim_no,
+                    label=f"Delay expert alignment: claim {claim_no}",
+                )
+                if inserted:
+                    self.warnings.append(
+                        f"Concurrency has not been addressed for delay/EOT claim {claim_no}; delay expert alignment is required."
+                    )
+            amount = _numeric(claim.get("amount") if claim.get("amount") is not None else claim.get("amount_or_days"))
+            if amount is None:
+                continue
+            annexure = self._matching_quantum_annexure(claim, amount, quantum_rows)
+            verified_amount = _numeric((annexure or {}).get("amount"))
+            calculation_match = verified_amount is not None and abs(verified_amount - amount) < 0.01
+            contradictions: List[str] = []
+            risk_flags = []
+            if annexure is None:
+                contradictions.append(f"No quantum annexure found supporting pleaded amount {amount} for claim {claim_no}.")
+                risk_flags.append("quantum_annexure_missing")
+            elif not calculation_match:
+                contradictions.append(
+                    f"Pleaded amount {amount} does not match quantum annexure {annexure.get('calculation_id')} amount {verified_amount}."
+                )
+                risk_flags.append("amount_mismatch")
+            row = {
+                "expert_type": "quantum",
+                "claim_no": claim_no,
+                "claim_row_id": _id(claim),
+                "pleaded_amount": amount,
+                "verified_amount": verified_amount,
+                "calculation_id": (annexure or {}).get("calculation_id"),
+                "calculation_match": calculation_match,
+                "expert_report_source_id": expert_documents.get("quantum"),
+                "contradictions": contradictions,
+                "alignment_status": "needs_review",
+                "risk_flags": risk_flags,
+                "notes": "Confirm the pleaded amount, calculation basis, and source records with the quantum expert.",
+            }
+            inserted = await self._insert_matrix_row(
+                "expert-alignment",
+                row,
+                unique={"expert_type": "quantum", "claim_no": claim_no},
+                agent_type=agent_type,
+                source_id=_id(claim) or claim_no,
+                label=f"Quantum expert alignment: claim {claim_no}",
+            )
+            if inserted and contradictions:
+                self.warnings.extend(contradictions)
+
+    async def _expert_report_documents(self) -> Dict[str, str]:
+        """Map expert type -> document-index source id for expert-looking documents."""
+        mapping: Dict[str, str] = {}
+        for row in await self._matrix_rows("document-index"):
+            text = " ".join(str(row.get(key) or "") for key in ["title", "document_type", "relevance_note"]).lower()
+            source_id = str(row.get("source_id") or "")
+            if not source_id:
+                continue
+            if "delay" in text and ("expert" in text or "analysis" in text or "report" in text):
+                mapping.setdefault("delay", source_id)
+            if "quantum" in text and ("expert" in text or "report" in text):
+                mapping.setdefault("quantum", source_id)
+        return mapping
+
+    @staticmethod
+    def _matching_quantum_annexure(
+        claim: Dict[str, Any],
+        amount: float,
+        quantum_rows: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        calculation_id = str(claim.get("calculation_id") or "")
+        if calculation_id:
+            for row in quantum_rows:
+                if str(row.get("calculation_id") or "") == calculation_id:
+                    return row
+        for row in quantum_rows:
+            row_amount = _numeric(row.get("amount"))
+            if row_amount is not None and abs(row_amount - amount) < 0.01:
+                return row
+        return None
+
     async def _defence_analysis(self, agent_type: str) -> None:
         # Deterministic mode has no safe heuristic for admissions/denials; named
         # separately so the LLM agent subclass can supply a real implementation.
@@ -736,6 +855,13 @@ def _condense(value: Any, width: int = 700) -> str:
     if len(text) <= width:
         return text
     return shorten(text, width=width, placeholder="...")
+
+
+def _is_delay_claim(claim: Dict[str, Any]) -> bool:
+    text = " ".join(
+        str(claim.get(key) or "") for key in ["claim_head", "facts", "causation", "relief"]
+    ).lower()
+    return any(term in text for term in ["delay", "eot", "extension of time", "prolongation", "critical path"])
 
 
 def _parse_date(value: Any) -> Optional[datetime]:

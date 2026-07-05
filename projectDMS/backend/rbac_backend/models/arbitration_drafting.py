@@ -80,6 +80,7 @@ class ArbitrationSourceType(str, Enum):
     EVENT_LINK = "event_link"
     CHRONOLOGY_EVENT = "chronology_event"
     MANUAL_FACT = "manual_fact"
+    EXPERT_REPORT = "expert_report"
 
 
 class ArbitrationSourceUse(str, Enum):
@@ -89,6 +90,7 @@ class ArbitrationSourceUse(str, Enum):
     QUANTUM = "quantum"
     ANNEXURE = "annexure"
     BACKGROUND = "background"
+    EXPERT = "expert"
 
 
 class ClaimHeadType(str, Enum):

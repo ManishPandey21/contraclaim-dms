@@ -207,6 +207,15 @@ const MATRIX_FIELDS: Record<MatrixSlug, Array<{ key: string; label: string; type
     { key: "limitation_status", label: "Limitation status" },
     { key: "notes", label: "Notes", type: "textarea" },
   ],
+  "expert-alignment": [
+    { key: "expert_type", label: "Expert type (delay / quantum / technical / contract)" },
+    { key: "claim_no", label: "Claim no." },
+    { key: "methodology", label: "Methodology", type: "textarea" },
+    { key: "concurrency_addressed", label: "Concurrency addressed (delay)" },
+    { key: "verified_amount", label: "Expert-verified amount (quantum)", type: "number" },
+    { key: "calculation_match", label: "Calculation match (quantum)" },
+    { key: "notes", label: "Notes", type: "textarea" },
+  ],
 };
 
 const projectId = (project: ProjectOption) => String(project.id || project._id || "");

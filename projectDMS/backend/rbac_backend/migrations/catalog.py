@@ -31,6 +31,10 @@ from .v20260705_0002_arbitration_jurisdiction_matrix import DESCRIPTION as ARB_J
 from .v20260705_0002_arbitration_jurisdiction_matrix import NAME as ARB_JURISDICTION_NAME
 from .v20260705_0002_arbitration_jurisdiction_matrix import VERSION as ARB_JURISDICTION_VERSION
 from .v20260705_0002_arbitration_jurisdiction_matrix import upgrade as upgrade_arbitration_jurisdiction
+from .v20260705_0003_arbitration_expert_alignment import DESCRIPTION as ARB_EXPERT_DESCRIPTION
+from .v20260705_0003_arbitration_expert_alignment import NAME as ARB_EXPERT_NAME
+from .v20260705_0003_arbitration_expert_alignment import VERSION as ARB_EXPERT_VERSION
+from .v20260705_0003_arbitration_expert_alignment import upgrade as upgrade_arbitration_expert_alignment
 
 
 MIGRATIONS = [
@@ -69,5 +73,11 @@ MIGRATIONS = [
         name=ARB_JURISDICTION_NAME,
         description=ARB_JURISDICTION_DESCRIPTION,
         upgrade=upgrade_arbitration_jurisdiction,
+    ),
+    Migration(
+        version=ARB_EXPERT_VERSION,
+        name=ARB_EXPERT_NAME,
+        description=ARB_EXPERT_DESCRIPTION,
+        upgrade=upgrade_arbitration_expert_alignment,
     ),
 ]

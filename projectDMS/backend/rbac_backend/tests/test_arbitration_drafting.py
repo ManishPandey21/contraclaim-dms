@@ -217,6 +217,7 @@ class _FakeDb:
         )
         self.arbitration_notice_compliance = _FakeCollection([])
         self.arbitration_jurisdiction_matrix = _FakeCollection([])
+        self.arbitration_expert_alignment = _FakeCollection([])
         self.arbitration_readiness_checks = _FakeCollection([])
         self.arbitration_agent_runs = _FakeCollection([])
         self.arbitration_bundle_exports = _FakeCollection([])
@@ -1342,6 +1343,150 @@ def test_readiness_passes_when_limitation_and_prearb_resolved():
     checks = {check["check_key"]: check["status"] for check in readiness["checks"]}
     assert checks["limitation_analysis"] == "ready"
     assert checks["pre_arbitration_compliance"] == "ready"
+
+
+def _eot_claim_row(**overrides):
+    row = {
+        "_id": "claim-row-eot",
+        "case_id": "case-1",
+        "claim_no": "CL-001",
+        "claim_head": "EOT and prolongation",
+        "facts": "Late access caused critical path delay.",
+        "amount_or_days": "INR 500000",
+        "amount": 500000,
+        "calculation_id": "Q-1",
+        "approval_status": "approved",
+        "readiness_status": "ready",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_delay_expert_agent_flags_concurrency_and_amount_mismatch():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+    db.arbitration_claim_matrix.rows.append(_eot_claim_row())
+    # Existing annexure Q-1 carries 1,000,000 while the claim pleads 500,000.
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "delay-expert",
+            payload=ArbitrationAgentRunRequest(options={}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    rows = db.arbitration_expert_alignment.rows
+    delay_row = next(r for r in rows if r["expert_type"] == "delay")
+    assert delay_row["claim_no"] == "CL-001"
+    assert delay_row["concurrency_addressed"] is False
+    assert "concurrency_not_addressed" in delay_row["risk_flags"]
+    assert any("Concurrency has not been addressed" in warning for warning in result["warnings"])
+
+    quantum_row = next(r for r in rows if r["expert_type"] == "quantum")
+    assert quantum_row["calculation_match"] is False
+    assert quantum_row["verified_amount"] == 1000000.0
+    assert "amount_mismatch" in quantum_row["risk_flags"]
+    assert any("does not match quantum annexure Q-1" in item for item in quantum_row["contradictions"])
+    assert any("does not match quantum annexure Q-1" in warning for warning in result["warnings"])
+
+    rerun = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "delay-expert",
+            payload=ArbitrationAgentRunRequest(options={}),
+            current_user=_FakeUser(),
+        )
+    )
+    assert rerun["created_records"] == []
+
+
+def test_expert_alignment_readiness_blocks_then_ready():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(_eot_claim_row())
+    service = ArbitrationCaseWorkspaceService(db)
+
+    readiness = asyncio.run(service.readiness("case-1"))
+    blockers = {check["check_key"]: check["status"] for check in readiness["blockers"]}
+    assert blockers.get("expert_alignment") == "needs_legal_review"
+
+    db.arbitration_expert_alignment.rows.extend(
+        [
+            {
+                "_id": "exp-delay",
+                "case_id": "case-1",
+                "expert_type": "delay",
+                "claim_no": "CL-001",
+                "concurrency_addressed": True,
+                "approval_status": "approved",
+            },
+            {
+                "_id": "exp-quantum",
+                "case_id": "case-1",
+                "expert_type": "quantum",
+                "claim_no": "CL-001",
+                "calculation_match": True,
+                "contradictions": [],
+                "approval_status": "approved",
+            },
+        ]
+    )
+
+    readiness = asyncio.run(service.readiness("case-1"))
+    blocker_keys = {check["check_key"] for check in readiness["blockers"]}
+    assert "expert_alignment" not in blocker_keys
+    checks = {check["check_key"]: check["status"] for check in readiness["checks"]}
+    assert checks["expert_alignment"] == "ready"
+
+
+def test_context_warns_on_expert_amount_mismatch_and_unaddressed_concurrency():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(_eot_claim_row(amount_or_days="INR 1000000", amount=1000000))
+    db.arbitration_expert_alignment.rows.extend(
+        [
+            {
+                "_id": "exp-quantum-bad",
+                "case_id": "case-1",
+                "expert_type": "quantum",
+                "claim_no": "CL-001",
+                "verified_amount": 800000,
+                "calculation_match": False,
+                "contradictions": ["Pleaded amount differs from the verified calculation."],
+                "approval_status": "approved",
+            },
+            {
+                "_id": "exp-delay-open",
+                "case_id": "case-1",
+                "expert_type": "delay",
+                "claim_no": "CL-001",
+                "concurrency_addressed": False,
+                "approval_status": "approved",
+            },
+        ]
+    )
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    context = asyncio.run(ArbitrationContextBuilder(db).build(draft, [], [], [], object()))
+
+    assert context["matrix_context"]["experts"], "expert alignment rows must enter the matrix context"
+    assert any(row.get("source_type") == "expert_report" for row in context["source_ledger"])
+    warnings = context["context_warnings"]
+    assert any(
+        "Pleaded amount 1000000.0 for claim CL-001 does not match the expert-verified amount 800000.0" in item
+        for item in warnings
+    )
+    assert any("Concurrency has not been addressed for delay claim CL-001" in item for item in warnings)
+    assert any("Expert alignment contradiction" in item for item in warnings)
 
 
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
