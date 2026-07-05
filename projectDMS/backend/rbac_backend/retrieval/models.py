@@ -111,7 +111,7 @@ class IterationTrace(BaseModel):
 
 
 class ContractQARequest(RagRequest):
-    require_citations: bool = Field(default=True)
+    require_citations: bool = Field(default=False)
     max_iterations: int = Field(default=3, ge=1, le=5)
     metadata_filters: Dict[str, Any] = Field(default_factory=dict)
 

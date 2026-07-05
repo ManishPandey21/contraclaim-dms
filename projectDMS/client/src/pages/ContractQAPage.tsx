@@ -41,10 +41,11 @@ const ALL_FILES_ID = "__ALL_FILES__";
 const QA_TIMEOUT_MS = 60_000;
 
 const ANSWER_STYLE_PROMPT =
-  "You are a Contract Specialist. Answer the question using ONLY the retrieved context from the selected document. " +
-  "If the SCC modifies a GCC clause, emphasise the SCC's requirement. " +
-  'If the answer is not in the text, reply exactly: "Information not found in the provided documents." ' +
-  "Provide a concise answer first, then list the key clauses you used.";
+  "Answer the user's question using only the retrieved contract context. " +
+  "Explain the contractual condition in your own language. " +
+  "You may refer to relevant clause numbers naturally, but do not insert inline citations, bracketed references, " +
+  "file names, page numbers, chunk IDs, or source metadata inside the answer. " +
+  "Source metadata must be returned only in the separate sources list for display below the answer.";
 
 function buildProbingQuestions(answer: string, question: string): string[] {
   const sourceText = (answer && answer.trim()) || (question && question.trim()) || "this requirement";
@@ -81,7 +82,6 @@ const ContractQAPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [requireCitations, setRequireCitations] = useState<boolean>(true);
   const [showTrace, setShowTrace] = useState<boolean>(false);
   const askAbortRef = useRef<AbortController | null>(null);
 
@@ -248,7 +248,7 @@ const ContractQAPage: React.FC = () => {
         use_enriched_text: true,
         answer_style: ANSWER_STYLE_PROMPT,
         max_tokens: 512,
-        require_citations: requireCitations,
+        require_citations: false,
         max_iterations: 3,
         metadata_filters: {
           uploadType: "contract",
@@ -275,7 +275,7 @@ const ContractQAPage: React.FC = () => {
         setLoading(false);
       }
     }
-  }, [orgId, projId, selectedUpload, question, requireCitations]);
+  }, [orgId, projId, selectedUpload, question]);
 
   const handleCancel = useCallback(() => {
     askAbortRef.current?.abort();
@@ -414,16 +414,6 @@ const ContractQAPage: React.FC = () => {
             Context: {selectedUploadName ? selectedUploadName : "No file selected"}
           </div>
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-xs text-gray-600">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={requireCitations}
-                onChange={(e) => setRequireCitations(e.target.checked)}
-                disabled={loading}
-              />
-              Require citations on every sentence
-            </label>
             {loading && (
               <Button variant="outline" onClick={handleCancel}>
                 Cancel
@@ -443,7 +433,7 @@ const ContractQAPage: React.FC = () => {
             <FileText className="h-5 w-5" />
             Answer
           </CardTitle>
-          <CardDescription>Grounded response with clause references.</CardDescription>
+          <CardDescription>Grounded response. Source references are listed below.</CardDescription>
         </CardHeader>
         <CardContent data-testid="contract-qa-answer" className="space-y-3">
           {loading ? (
@@ -488,7 +478,7 @@ const ContractQAPage: React.FC = () => {
                           : c.page
                           ? `p.${c.page}`
                           : "page n/a"}{" "}
-                        - score {c.score?.toFixed(3) ?? "n/a"}
+                        - chunk {c.chunk_id || "n/a"} - score {c.score?.toFixed(3) ?? "n/a"}
                       </div>
                       {c.section_heading && (
                         <div className="text-xs text-gray-500">
