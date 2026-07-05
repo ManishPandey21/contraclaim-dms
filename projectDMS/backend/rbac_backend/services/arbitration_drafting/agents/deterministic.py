@@ -25,6 +25,56 @@ PRE_ARBITRATION_STEPS = [
 ]
 DEFAULT_LIMITATION_PERIOD_YEARS = 3
 
+# Guide §16 construction-specific issue templates, keyed by dispute category.
+DISPUTE_ISSUE_TEMPLATES: Dict[str, Dict[str, str]] = {
+    "eot_delay": {
+        "respondent_position": (
+            "No timely notice was given, the event did not affect the critical path, and any delay "
+            "was concurrent with contractor-caused delay."
+        ),
+        "required_finding": (
+            "Tribunal finding on notice compliance, critical path impact, concurrency, and entitlement "
+            "to extension of time."
+        ),
+    },
+    "prolongation": {
+        "respondent_position": "No compensable delay is established and no actual cost records support the claim.",
+        "required_finding": "Tribunal finding on compensability, causation, actual cost, and mitigation.",
+    },
+    "variation": {
+        "respondent_position": (
+            "The work was within the original scope, no written instruction was issued, and the claimed "
+            "rate is not per the contract mechanism."
+        ),
+        "required_finding": "Tribunal finding on instruction, scope difference, measurement, and valuation basis.",
+    },
+    "payment": {
+        "respondent_position": "The amount was not certified, the works were defective, or the sum was validly set off.",
+        "required_finding": "Tribunal finding on certification, entitlement, and wrongful withholding.",
+    },
+    "ld": {
+        "respondent_position": (
+            "Milestones were missed due to contractor default and liquidated damages were contractually levied."
+        ),
+        "required_finding": "Tribunal finding on attribution of delay and validity of the deduction.",
+    },
+}
+
+
+def _dispute_category(claim: Dict[str, Any]) -> str:
+    text = " ".join(str(claim.get(key) or "") for key in ["claim_head", "facts", "causation", "relief"]).lower()
+    if any(term in text for term in ["liquidated damages", " ld ", "ld refund", "deduction", "recovery"]):
+        return "ld"
+    if any(term in text for term in ["variation", "extra work", "extra item", "change order"]):
+        return "variation"
+    if any(term in text for term in ["prolongation", "overhead", "idle"]):
+        return "prolongation"
+    if any(term in text for term in ["delay", "eot", "extension of time", "critical path"]):
+        return "eot_delay"
+    if any(term in text for term in ["payment", "ipc", "bill", "certified", "certification"]):
+        return "payment"
+    return "general"
+
 
 class DeterministicArbitrationAgent:
     def __init__(
@@ -88,7 +138,7 @@ class DeterministicArbitrationAgent:
             "quantum": self._quantum,
             "notice-compliance": self._notice_compliance,
             "delay-expert": self._delay_expert_alignment,
-            "review-consistency": self._review_only_agent,
+            "review-consistency": self._review_consistency,
             "legal-guardrail": self._review_only_agent,
         }
         handler = handlers.get(agent_type)
@@ -483,16 +533,20 @@ class DeterministicArbitrationAgent:
                     continue
                 issue_key = f"claim:{claim_no}"
                 issue = f"Whether the claimant is entitled to {claim.get('claim_head') or 'the claimed relief'}."
+                category = _dispute_category(claim)
+                template = DISPUTE_ISSUE_TEMPLATES.get(category, {})
                 row = {
                     "issue_key": issue_key,
                     "issue_no": next_no,
                     "issue": issue,
                     "issue_type": _issue_type(claim),
+                    "dispute_category": category,
                     "claimant_position": _condense(claim.get("facts") or claim.get("relief") or issue, 500),
-                    "respondent_position": "To be developed from Statement of Defence or respondent records.",
+                    "respondent_position": template.get("respondent_position")
+                    or "To be developed from Statement of Defence or respondent records.",
                     "evidence_ids": _string_list(claim.get("evidence_ids")) + _string_list(claim.get("notice_ids")),
                     "clause_ids": _string_list(claim.get("clause_ids")),
-                    "required_finding": _required_finding(claim),
+                    "required_finding": template.get("required_finding") or _required_finding(claim),
                     "status": "ready" if self._auto_approve else "needs_review",
                 }
                 inserted = await self._insert_matrix_row(
@@ -769,6 +823,74 @@ class DeterministicArbitrationAgent:
             if row_amount is not None and abs(row_amount - amount) < 0.01:
                 return row
         return None
+
+    async def _review_consistency(self, agent_type: str) -> None:
+        """Guide §5.2 red-flag review, computed deterministically from the matrices.
+
+        Annotates claim-matrix rows with ``red_flags`` and reports them as agent
+        warnings. It never changes approval/readiness statuses — red flags are
+        review guidance, not automatic blockers. "Wrong party named" is not
+        deterministically checkable and stays a human review item.
+        """
+        claim_rows = await self._matrix_rows("claim-matrix")
+        quantum_rows = await self._matrix_rows("quantum-annexures")
+        chronology_rows = await self._matrix_rows("chronology-matrix")
+        document_rows = await self._matrix_rows("document-index")
+        jurisdiction_rows = await self._matrix_rows("jurisdiction-matrix")
+
+        case_flags: List[str] = []
+        for row in document_rows:
+            text = " ".join(str(row.get(key) or "") for key in ["title", "document_type", "relevance_note"]).lower()
+            if any(term in text for term in ["final bill", "no dues", "no-dues", "no claim certificate", "full and final"]):
+                case_flags.append("final_bill_or_no_dues_waiver_risk")
+                break
+        if any(
+            str(row.get("scope_status") or "").lower() == "out_of_scope"
+            for row in jurisdiction_rows
+            if str(row.get("check_type") or "") == "arbitration_clause_scope"
+        ):
+            case_flags.append("claim_outside_arbitration_clause")
+        if claim_rows and not chronology_rows:
+            case_flags.append("no_contemporaneous_chronology")
+
+        if not claim_rows:
+            self.warnings.append("Red-flag review found no claim matrix rows; run claim identification first.")
+            if case_flags:
+                self.warnings.append(f"Case-level red flags: {', '.join(sorted(set(case_flags)))}.")
+            return
+
+        collection = _collection(self.db, MATRIX_COLLECTIONS["claim-matrix"])
+        for claim in claim_rows:
+            claim_no = str(claim.get("claim_no") or _id(claim))
+            claim_text = " ".join(
+                str(claim.get(key) or "") for key in ["claim_head", "facts", "causation", "relief"]
+            ).lower()
+            flags: List[str] = []
+            if not _string_list(claim.get("notice_ids")):
+                flags.append("no_claim_notice")
+            amount = _numeric(claim.get("amount") if claim.get("amount") is not None else claim.get("amount_or_days"))
+            annexure = self._matching_quantum_annexure(claim, amount, quantum_rows) if amount is not None else None
+            if amount is not None and annexure is None:
+                flags.append("no_cost_records")
+            if _is_delay_claim(claim):
+                has_critical_path = bool(
+                    (annexure or {}).get("critical_path_days") or (annexure or {}).get("delay_event_ids")
+                )
+                if not has_critical_path:
+                    flags.append("no_critical_path_impact")
+            if any(term in claim_text for term in ["variation", "extra work", "extra item"]) and not _string_list(
+                claim.get("evidence_ids")
+            ):
+                flags.append("no_written_instruction_for_variation")
+            all_flags = sorted(set(flags + case_flags))
+            if not all_flags:
+                continue
+            if collection is not None:
+                await collection.update_one(
+                    {"_id": claim.get("_id"), "case_id": self.case_id},
+                    {"$set": {"red_flags": all_flags, "updated_at": datetime.utcnow()}},
+                )
+            self.warnings.append(f"Red flags for claim {claim_no}: {', '.join(all_flags)}.")
 
     async def _defence_analysis(self, agent_type: str) -> None:
         # Deterministic mode has no safe heuristic for admissions/denials; named

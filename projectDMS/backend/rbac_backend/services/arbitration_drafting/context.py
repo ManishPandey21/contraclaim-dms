@@ -675,6 +675,7 @@ class ArbitrationContextBuilder:
                         "calculation_id": row.get("calculation_id"),
                         "amount_or_days": row.get("amount_or_days"),
                         "new_matter": row.get("new_matter"),
+                        "tribunal_permission_required": row.get("tribunal_permission_required"),
                     },
                     "source_hash": "",
                 }
@@ -754,7 +755,16 @@ class ArbitrationContextBuilder:
         for row in rows:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
-            snippet = "\n".join(str(part) for part in [row.get("requirement"), row.get("compliance_status"), row.get("risk_note")] if part)
+            # UI rows use requirement/risk_note; agent rows use contractual_requirement/risk.
+            snippet = "\n".join(
+                str(part)
+                for part in [
+                    row.get("requirement") or row.get("contractual_requirement"),
+                    row.get("compliance_status"),
+                    row.get("risk_note") or row.get("risk"),
+                ]
+                if part
+            )
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("_id")),

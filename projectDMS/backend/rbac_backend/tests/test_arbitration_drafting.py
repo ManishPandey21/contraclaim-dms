@@ -1759,6 +1759,197 @@ def test_quantum_agent_links_cost_head_and_delay_events():
     assert row["delay_event_ids"] == ["event-1"]
 
 
+def test_review_consistency_agent_flags_red_flags():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(
+        {
+            "_id": "claim-row-rf",
+            "case_id": "case-1",
+            "claim_no": "CL-9",
+            "claim_head": "EOT claim",
+            "facts": "Late access caused delay to critical works.",
+            "amount_or_days": 500000,
+            "notice_ids": [],
+            "evidence_ids": [],
+            "approval_status": "approved",
+        }
+    )
+    db.arbitration_document_index.rows.append(
+        {
+            "_id": "doc-row-fb",
+            "case_id": "case-1",
+            "source_id": "doc-fb",
+            "title": "Final bill and no dues certificate",
+            "exhibit_id": "C-9",
+            "approval_status": "approved",
+        }
+    )
+    case = db.arbitration_cases.rows[0]
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "review-consistency",
+            payload=ArbitrationAgentRunRequest(options={}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["errors"] == []
+    row = next(r for r in db.arbitration_claim_matrix.rows if r["_id"] == "claim-row-rf")
+    flags = set(row.get("red_flags") or [])
+    assert {"no_claim_notice", "no_cost_records", "no_critical_path_impact", "final_bill_or_no_dues_waiver_risk"}.issubset(flags)
+    # Approval/readiness statuses are untouched — red flags are guidance only.
+    assert row["approval_status"] == "approved"
+    assert any("Red flags for claim CL-9" in warning for warning in result["warnings"])
+
+
+def test_issue_framing_applies_dispute_type_templates():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(
+        {
+            "_id": "claim-row-tmpl",
+            "case_id": "case-1",
+            "claim_no": "CL-EOT",
+            "claim_head": "EOT claim",
+            "facts": "Late access caused delay to the critical path.",
+            "approval_status": "approved",
+        }
+    )
+    case = db.arbitration_cases.rows[0]
+
+    asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "issue-framing",
+            payload=ArbitrationAgentRunRequest(options={}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    issue = next(row for row in db.arbitration_issue_matrix.rows if row.get("issue_key") == "claim:CL-EOT")
+    assert issue["dispute_category"] == "eot_delay"
+    assert "concurrent" in issue["respondent_position"]
+    assert "critical path" in issue["required_finding"]
+
+
+def test_validator_warns_on_duplicate_heads_and_global_claims():
+    context = {
+        "draft": {"_id": "draft-1", "project_id": "project-1", "draft_type": "statement_of_claim", "title": "SoC"},
+        "source_ledger": [{"source_key": "S1", "source_id": "x", "citation": "x", "snippet": "x"}],
+        "matrix_context": {
+            "claims": [
+                {
+                    "source_key": "S2",
+                    "label": "Prolongation cost",
+                    "citation": "CL-1",
+                    "metadata": {"amount_or_days": "INR 1000000", "evidence_ids": [], "notice_ids": []},
+                },
+                {
+                    "source_key": "S3",
+                    "label": "Prolongation cost",
+                    "citation": "CL-2",
+                    "metadata": {"amount_or_days": "INR 500000", "evidence_ids": ["doc-1"], "notice_ids": []},
+                },
+            ],
+            "quantum": [
+                {
+                    "source_key": "S4",
+                    "citation": "Q-1",
+                    "metadata": {"calculation_type": "prolongation", "cost_head": "prolongation_overheads"},
+                },
+                {
+                    "source_key": "S5",
+                    "citation": "Q-2",
+                    "metadata": {"calculation_type": "claim_summary", "cost_head": "prolongation_overheads"},
+                },
+            ],
+        },
+        "paragraph_responses": [],
+    }
+
+    report = ArbitrationDraftValidator().validation_report(context, "Draft text. [S1: x]")
+
+    assert any("claim head 'prolongation cost'" in warning for warning in report["warnings"])
+    assert any("cost head 'prolongation_overheads'" in warning for warning in report["warnings"])
+    assert any("Global claim risk: claim CL-1" in warning for warning in report["warnings"])
+    # CL-2 has evidence links, so it is not a global-claim risk.
+    assert not any("Global claim risk: claim CL-2" in warning for warning in report["warnings"])
+
+
+def test_validator_strengthened_rejoinder_new_matter_detection():
+    context = {
+        "draft": {"_id": "draft-1", "project_id": "project-1", "draft_type": "rejoinder", "title": "Reply"},
+        "source_ledger": [{"source_key": "S1", "source_id": "x", "citation": "x", "snippet": "x"}],
+        "matrix_context": {
+            "rejoinder_replies": [
+                {
+                    "source_key": "S2",
+                    "citation": "SoD para 12",
+                    "metadata": {"new_matter": True, "tribunal_permission_required": None},
+                }
+            ]
+        },
+        "paragraph_responses": [{"source_paragraph_number": "1", "response_type": "admit"}],
+    }
+
+    # Expanded keyword detection: "further sum" is claim-expansion language.
+    report = ArbitrationDraftValidator().validation_report(
+        context, "The Claimant seeks a further sum by way of compensation. [S1: x]"
+    )
+    assert any("may introduce a new claim" in item for item in report["approval_blockers"])
+    # Structured detection: matrix row flagged new_matter without tribunal permission blocks approval.
+    assert any("tribunal permission flag" in item for item in report["approval_blockers"])
+
+    # Permission flag present -> the structured blocker clears.
+    context["matrix_context"]["rejoinder_replies"][0]["metadata"]["tribunal_permission_required"] = True
+    report = ArbitrationDraftValidator().validation_report(context, "The defences are denied. [S1: x]")
+    assert not any("tribunal permission flag" in item for item in report["approval_blockers"])
+    assert not any("may introduce a new claim" in item for item in report["approval_blockers"])
+
+
+def test_notice_snippet_reads_ui_and_agent_field_names():
+    db = _FakeDb()
+    db.arbitration_notice_compliance.rows.extend(
+        [
+            {
+                "_id": "notice-ui",
+                "case_id": "case-1",
+                "notice_ref": "NTC-UI",
+                "requirement": "Serve delay notice within 28 days",
+                "risk_note": "Late by two days",
+                "approval_status": "approved",
+            },
+            {
+                "_id": "notice-agent",
+                "case_id": "case-1",
+                "notice_ref": "NTC-AGENT",
+                "contractual_requirement": "Confirm notice clause and service method",
+                "risk": "Precondition impact unclear",
+                "approval_status": "approved",
+            },
+        ]
+    )
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    context = asyncio.run(ArbitrationContextBuilder(db).build(draft, [], [], [], object()))
+
+    notices = {row["citation"]: row for row in context["source_ledger"] if row.get("source_origin") == "case_notice_compliance"}
+    assert "Serve delay notice within 28 days" in notices["NTC-UI"]["snippet"]
+    assert "Late by two days" in notices["NTC-UI"]["snippet"]
+    assert "Confirm notice clause and service method" in notices["NTC-AGENT"]["snippet"]
+    assert "Precondition impact unclear" in notices["NTC-AGENT"]["snippet"]
+
+
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
     fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
     data = json.loads(fixture_path.read_text(encoding="utf-8"))

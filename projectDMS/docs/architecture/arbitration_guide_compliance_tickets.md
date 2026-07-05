@@ -264,20 +264,39 @@ test, no frontend test in the arbitration suite.
 
 ---
 
-### ARB-108 (backlog) — Red-flag review, construction-issue templates, style/duplication lint
+### ARB-108 — Red-flag review, construction-issue templates, style/duplication lint
 
-**Priority:** P2 · **Size:** S–M · **Guide ref:** §5.2, §16, §17, §18
+**Priority:** P2 · **Size:** S–M · **Guide ref:** §5.2, §16, §17, §18 · **Status: DONE (2026-07-06)**
+
+> **Implementation notes.** The `review-consistency` agent (previously a stub) now runs
+> the §5.2 red-flag review deterministically: per-claim flags (no_claim_notice,
+> no_cost_records, no_critical_path_impact, no_written_instruction_for_variation) and
+> case-level flags (final_bill_or_no_dues_waiver_risk, claim_outside_arbitration_clause,
+> no_contemporaneous_chronology) are written to claim-matrix rows as `red_flags` and
+> surfaced as agent warnings — guidance only, never status changes ("wrong party named"
+> stays a human review item). Issue framing applies §16 dispute-category templates
+> (eot_delay / prolongation / variation / payment / ld) for respondent positions and
+> required findings, recorded as `dispute_category` on the issue row. The validator adds
+> §18 lint: duplicate claim heads across claim rows, duplicate cost heads across quantum
+> annexures, and global-claim risk (amount without event-to-cost evidence links) — all
+> warnings. Rejoinder new-matter detection is strengthened with an expanded phrase set
+> (further/additional sum-relief-compensation, amendment of the claim, new head/cause of
+> action) plus a structured approval blocker for rejoinder matrix rows flagged
+> `new_matter` without `tribunal_permission_required`. Notice matrix field names are
+> reconciled: the context builder reads both UI (`requirement`/`risk_note`) and agent
+> (`contractual_requirement`/`risk`) names.
 
 **Tasks**
-- [ ] Implement §5.2 red-flag checks as readiness/agent output (no notice, no CP impact, final-bill waiver, wrong party, claim-outside-clause).
-- [ ] Add per-`ArbitrationDisputeType` issue templates (§16).
-- [ ] Add global-claim (event→cost link required) and duplicate-head-across-claims lint (§18) in `validator.py`.
-- [ ] Strengthen rejoinder new-matter detection beyond keyword match (`validator.py:93-95`).
-- [ ] Reconcile notice matrix field names between UI (`requirement`/`risk_note`) and context builder (`contractual_requirement`/`risk`) (`context.py:568-608`, `ArbitrationCaseWorkspacePage.tsx:194-200`).
+- [x] Implement §5.2 red-flag checks as agent output (no notice, no CP impact, no cost records, no written instruction, final-bill waiver, claim-outside-clause, reconstructed chronology; wrong-party check deferred to human review).
+- [x] Add per-dispute-category issue templates (§16) in issue framing.
+- [x] Add global-claim (event→cost link required) and duplicate-head/cost-head lint (§18) in `validator.py`.
+- [x] Strengthen rejoinder new-matter detection: expanded phrase set + structured matrix-metadata approval blocker.
+- [x] Reconcile notice matrix field names between UI and context builder.
 
-**Acceptance criteria**
-- Duplicated cost head across two claim rows raises a warning.
-- Notice fields entered in UI appear in the source ledger snippet.
+**Acceptance criteria** *(verified by tests, 52 passing in the drafting suite)*
+- Duplicated cost head across claim rows raises a warning. ✓ (`test_validator_warns_on_duplicate_heads_and_global_claims`)
+- Notice fields entered in UI appear in the source ledger snippet. ✓ (`test_notice_snippet_reads_ui_and_agent_field_names`)
+- Red flags + templates: `test_review_consistency_agent_flags_red_flags`, `test_issue_framing_applies_dispute_type_templates`, `test_validator_strengthened_rejoinder_new_matter_detection`.
 
 ---
 

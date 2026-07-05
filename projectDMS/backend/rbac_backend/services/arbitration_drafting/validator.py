@@ -64,6 +64,10 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
+        matrix_context = context.get("matrix_context") or {}
+        self._duplication_warnings(matrix_context, warnings)
+        self._global_claim_warnings(matrix_context, warnings)
+
         draft_type = context.get("draft", {}).get("draft_type")
         paragraphs = context.get("paragraph_responses") or []
         if draft_type == "statement_of_defence" and not paragraphs:
@@ -75,6 +79,17 @@ class ArbitrationDraftValidator:
                 message = "Rejoinder may introduce a new claim; mark for legal review before filing."
                 warnings.append(message)
                 approval_blockers.append(message)
+            # Structured check: rejoinder matrix rows flagged as new matter must
+            # carry the tribunal-permission flag before the draft can be approved.
+            for row in matrix_context.get("rejoinder_replies") or []:
+                metadata = row.get("metadata") or {}
+                if metadata.get("new_matter") and not metadata.get("tribunal_permission_required"):
+                    message = (
+                        f"Rejoinder matrix row {row.get('citation') or row.get('source_id')} introduces new matter "
+                        "without a tribunal permission flag; obtain leave or remove the new matter."
+                    )
+                    warnings.append(message)
+                    approval_blockers.append(message)
 
         for response in paragraphs:
             if response.get("response_type") in {"deny", "part_admit_part_deny", "not_admitted", "misconceived", "incorrect", "misleading"}:
@@ -90,6 +105,52 @@ class ArbitrationDraftValidator:
             "source_count": len(source_ledger),
         }
 
+    def _duplication_warnings(self, matrix_context: Dict[str, Any], warnings: List[str]) -> None:
+        """Guide §18: the same loss claimed under multiple heads weakens credibility."""
+        claim_heads: Dict[str, List[str]] = {}
+        for row in matrix_context.get("claims") or []:
+            head = " ".join(str(row.get("label") or "").lower().split())
+            if head:
+                claim_heads.setdefault(head, []).append(str(row.get("citation") or row.get("source_id")))
+        for head, refs in claim_heads.items():
+            if len(refs) > 1:
+                warnings.append(
+                    f"Possible duplication: claim head '{head}' appears in multiple claim rows ({', '.join(refs)}); "
+                    "confirm the same loss is not claimed twice."
+                )
+        cost_heads: Dict[str, List[str]] = {}
+        for row in matrix_context.get("quantum") or []:
+            metadata = row.get("metadata") or {}
+            if str(metadata.get("calculation_type") or "") in {"interest", "claim_summary_rollup"}:
+                continue
+            cost_head = str(metadata.get("cost_head") or "").strip().lower()
+            if cost_head:
+                cost_heads.setdefault(cost_head, []).append(str(row.get("citation") or row.get("source_id")))
+        for cost_head, refs in cost_heads.items():
+            if len(refs) > 1:
+                warnings.append(
+                    f"Possible duplication: cost head '{cost_head}' is claimed in multiple quantum annexures "
+                    f"({', '.join(refs)}); confirm the amounts do not overlap."
+                )
+
+    def _global_claim_warnings(self, matrix_context: Dict[str, Any], warnings: List[str]) -> None:
+        """Guide §18: an amount without an event-to-cost link is a global-claim risk."""
+        for row in matrix_context.get("claims") or []:
+            metadata = row.get("metadata") or {}
+            if not metadata.get("amount_or_days"):
+                continue
+            if not metadata.get("evidence_ids") and not metadata.get("notice_ids"):
+                warnings.append(
+                    f"Global claim risk: claim {row.get('citation') or row.get('source_id')} pleads an amount "
+                    "without event-to-cost evidence links."
+                )
+
+    _NEW_CLAIM_RE = re.compile(
+        r"\bnew claim\b|\bfresh claim\b|\badditional claim\b"
+        r"|\b(?:further|additional)\s+(?:sum|amount|relief|compensation|damages)\b"
+        r"|\bamend(?:s|ed|ment)?\s+(?:of\s+)?the\s+(?:statement\s+of\s+)?claim\b"
+        r"|\bnew\s+(?:head|cause)\s+of\s+(?:claim|action)\b"
+    )
+
     def _looks_like_new_claim(self, markdown: str) -> bool:
-        text = markdown.lower()
-        return bool(re.search(r"\bnew claim\b|\bfresh claim\b|\badditional claim\b", text))
+        return bool(self._NEW_CLAIM_RE.search(markdown.lower()))
