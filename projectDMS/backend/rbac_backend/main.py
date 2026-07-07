@@ -38,6 +38,7 @@ from .routers import (
     email_groups,
     folder_structure,
     input_requests,
+    legal_words,
     letters,
     letter_drafting,
     letter_templates,
@@ -219,6 +220,8 @@ app.include_router(letters.router, prefix="/api", tags=["letters"])
 app.include_router(letter_drafting.router, prefix="/api", tags=["letter-drafting"])
 app.include_router(letter_drafting.session_router, prefix="/api", tags=["letter-drafting"])
 app.include_router(input_requests.router, prefix="/api", tags=["input-requests"])
+app.include_router(legal_words.router, prefix="/api", tags=["legal-words"])
+app.include_router(legal_words.admin_router, prefix="/api", tags=["legal-words-admin"])
 app.include_router(letter_templates.router, prefix="/api", tags=["letter-templates"])
 app.include_router(notifications.router, prefix="/api", tags=["notifications"])
 app.include_router(notifications.test_router, prefix="/api", tags=["notifications"])

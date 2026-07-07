@@ -27,6 +27,8 @@ import {
   Clock,
   Sparkles,
   Bell,
+  BookMarked,
+  BookOpen,
   Activity,
   CreditCard,
   CalendarClock,
@@ -292,6 +294,7 @@ const Sidebar = () => {
     { path: "/retrieval-console", icon: <Search size={20} />, label: "Retrieval Console" },
     { path: "/folders", icon: <FolderClosed size={20} />, label: "Folder Structure" },
     { path: "/reports", icon: <BarChart size={20} />, label: "Reports & Analytics" },
+    { path: "/legal-words", icon: <BookOpen size={20} />, label: "Learn Legal Words" },
     { path: "/notifications", icon: <Bell size={20} />, label: "Notifications" },
 
     // ── Admin tools ──
@@ -315,6 +318,12 @@ const Sidebar = () => {
       icon: <PackageOpen size={20} />,
       label: "Billing Catalog",
       permission: "billing.plan.manage",
+    },
+    {
+      path: "/admin/legal-words",
+      icon: <BookMarked size={20} />,
+      label: "Legal Words Admin",
+      permission: "dms.admin",
     },
     {
       path: "/subscription-management",

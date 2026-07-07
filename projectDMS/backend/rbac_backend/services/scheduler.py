@@ -41,6 +41,7 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
     from .insurance_service import run_insurance_expiry_scan
     from .contract_appraisal.service import AppraisalService
     from .key_date_service import run_key_date_notification_scan
+    from .legal_word_service import run_legal_word_daily_publish
     from .reference_sync_service import run_reference_sync_reaper
     from .sla_service import run_sla_scan
 
@@ -59,6 +60,7 @@ async def start_scheduler() -> Optional["AsyncIOScheduler"]:
         ("key_date_notification_scan", run_key_date_notification_scan, CronTrigger(hour=8, minute=15)),
         ("bg_expiry_scan", run_bg_expiry_scan, CronTrigger(hour=8, minute=30)),
         ("insurance_expiry_scan", run_insurance_expiry_scan, CronTrigger(hour=8, minute=35)),
+        ("legal_word_daily_publish", run_legal_word_daily_publish, CronTrigger(hour=8, minute=40)),
         ("reference_sync_reaper", run_reference_sync_reaper, CronTrigger(hour=8, minute=45)),
         ("appraisal_stuck_job_reaper", reap_appraisal_jobs, CronTrigger(minute="*/15")),
     ]

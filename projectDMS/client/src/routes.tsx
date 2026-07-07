@@ -77,6 +77,8 @@ const ContractViewerPage = lazy(() => import("./pages/ContractViewerPage"));
 const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
 const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
+const LegalWordsPage = lazy(() => import("./pages/LegalWordsPage"));
+const AdminLegalWordsPage = lazy(() => import("./pages/AdminLegalWordsPage"));
 const ArbitrationCaseWorkspacePage = lazy(() => import("./pages/ArbitrationCaseWorkspacePage"));
 const ArbitrationDraftingPage = lazy(() => import("./pages/ArbitrationDraftingPage"));
 const ChronologyBuilderPage = lazy(() => import("./pages/ChronologyBuilderPage"));
@@ -130,6 +132,7 @@ const AppRoutes = () => (
           }
         />
         <Route path="notifications" element={<NotificationCenterPage />} />
+        <Route path="legal-words" element={<LegalWordsPage />} />
         <Route
           path="billing/return"
           element={
@@ -285,6 +288,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/observability" fallback="/overview">
               <ObservabilityPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="admin/legal-words"
+          element={
+            <RoleGuard path="/admin/legal-words" fallback="/overview">
+              <AdminLegalWordsPage />
             </RoleGuard>
           }
         />

@@ -2,7 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowRight, FileText, Users, FolderArchive, Upload, Settings, User, Shield } from 'lucide-react';
+import { ArrowRight, BookOpen, FileText, Users, FolderArchive, Upload, Settings, User, Shield } from 'lucide-react';
 
 const Index = () => {
   const menuItems = [
@@ -33,6 +33,13 @@ const Index = () => {
       icon: <FileText className="h-8 w-8 text-docsumo-blue" />,
       path: "/documents",
       color: "bg-green-50"
+    },
+    {
+      title: "Learn Contractual/Legal Words",
+      description: "Review today's platform-wide contractual writing words",
+      icon: <BookOpen className="h-8 w-8 text-docsumo-blue" />,
+      path: "/legal-words",
+      color: "bg-sky-50"
     },
     {
       title: "Upload",
