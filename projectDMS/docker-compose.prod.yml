@@ -288,8 +288,14 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+    # C1: the bundled gateway speaks plain HTTP only, while the backend enforces
+    # AUTH_COOKIE_SECURE=true in production — so this port must never be the
+    # public entry point. Default to loopback; a host reverse proxy (see
+    # config/nginx-contraclaim.conf) terminates TLS on 443 and proxies here.
+    # Only set HTTP_PORT=80 explicitly when an external load balancer already
+    # terminates TLS in front of this host.
     ports:
-      - "${HTTP_PORT:-80}:80"
+      - "${HTTP_PORT:-127.0.0.1:8080}:80"
     volumes:
       - ./config/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
       - ./config/health.txt:/usr/local/apache2/htdocs/health.txt:ro

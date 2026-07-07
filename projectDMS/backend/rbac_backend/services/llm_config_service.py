@@ -6,7 +6,7 @@ from typing import Optional
 from ..core.config import settings
 from ..models.ai_models import LangGraphLLMConfig
 from ..core.database import get_database
-from .letter_drafting.prompts import ensure_strategy_roadmap
+from .letter_drafting.prompts import ensure_strategy_roadmap, ensure_untrusted_guard
 
 # Centralised defaults for LangGraph drafting configuration
 DEFAULT_LLM_MODELS = [
@@ -269,13 +269,20 @@ class LLMConfigService:
             or getattr(settings, "LANGGRAPH_REVIEWER_MODEL", "gpt-4o-mini"),
             plan_model=doc.get("plan_model")
             or getattr(settings, "LANGGRAPH_PLAN_MODEL", "grok-4-1-fast"),
-            draft_prompt_template=doc.get("draft_prompt_template")
-            or getattr(settings, "LANGGRAPH_DRAFT_PROMPT_TEMPLATE", DEFAULT_DRAFT_PROMPT_TEMPLATE)
-            or DEFAULT_DRAFT_PROMPT_TEMPLATE,
-            plan_prompt_template=ensure_strategy_roadmap(
-                doc.get("plan_prompt_template")
-                or getattr(settings, "LANGGRAPH_PLAN_PROMPT_TEMPLATE", DEFAULT_PLAN_PROMPT_TEMPLATE)
-                or DEFAULT_PLAN_PROMPT_TEMPLATE
+            # H1: both LangGraph templates interpolate OCR'd incoming letters
+            # (adversarial counterparty text); enforce the injection guard on
+            # whatever template wins — DB override, env override, or default.
+            draft_prompt_template=ensure_untrusted_guard(
+                doc.get("draft_prompt_template")
+                or getattr(settings, "LANGGRAPH_DRAFT_PROMPT_TEMPLATE", DEFAULT_DRAFT_PROMPT_TEMPLATE)
+                or DEFAULT_DRAFT_PROMPT_TEMPLATE
+            ),
+            plan_prompt_template=ensure_untrusted_guard(
+                ensure_strategy_roadmap(
+                    doc.get("plan_prompt_template")
+                    or getattr(settings, "LANGGRAPH_PLAN_PROMPT_TEMPLATE", DEFAULT_PLAN_PROMPT_TEMPLATE)
+                    or DEFAULT_PLAN_PROMPT_TEMPLATE
+                )
             ),
             available_models=list(DEFAULT_LLM_MODELS),
             updated_at=doc.get("updated_at"),

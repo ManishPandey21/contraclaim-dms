@@ -3,7 +3,12 @@ set -euo pipefail
 
 MONGO_URI=${MONGO_URI:-${DATABASE_URL:-}}
 MONGO_DB=${MONGO_DB:-${MONGODB_DATABASE:-contraclaim}}
-BACKUP_DIR=${BACKUP_DIR:-./backups/mongo}
+# H5: /health/operations (services/operations_health.py) verifies backup
+# freshness by globbing $BACKUP_ROOT/mongo/*.archive.gz. Default the standalone
+# run to that location so an ad-hoc dump also satisfies the health contract;
+# production_backup.sh passes BACKUP_DIR explicitly and is unaffected.
+BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/contractdms}
+BACKUP_DIR=${BACKUP_DIR:-"${BACKUP_ROOT}/mongo"}
 RETENTION_DAYS=${RETENTION_DAYS:-14}
 
 if [[ -z "${MONGO_URI}" ]]; then

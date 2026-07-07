@@ -26,7 +26,9 @@ from rbac_backend.services.letter_drafting.prompts import (
     DEFAULT_STRATEGY_TEMPLATE,
     PromptRegistry,
     REQUIRED_STRATEGY_ROADMAP_SECTIONS,
+    UNTRUSTED_GUARD_SENTINEL,
     ensure_strategy_roadmap,
+    ensure_untrusted_guard,
     extract_template_variables,
 )
 from rbac_backend.services.llm_config_service import (
@@ -192,6 +194,63 @@ def test_langgraph_plan_prompt_override_gets_roadmap_addendum() -> None:
     assert "Required strategic-plan roadmap" in config.plan_prompt_template
     for section in REQUIRED_STRATEGY_ROADMAP_SECTIONS:
         assert section in config.plan_prompt_template
+
+
+def test_default_templates_carry_untrusted_guard() -> None:
+    # H1: adversarial counterparty letters flow into these prompts; every
+    # default template must instruct the model to treat them as data.
+    assert UNTRUSTED_GUARD_SENTINEL in DEFAULT_DRAFT_TEMPLATE
+    assert UNTRUSTED_GUARD_SENTINEL in DEFAULT_STRATEGY_TEMPLATE
+
+
+def test_ensure_untrusted_guard_appends_once_and_stays_renderable() -> None:
+    template = "Draft using {role} and {sources}."
+    patched = ensure_untrusted_guard(template)
+
+    assert UNTRUSTED_GUARD_SENTINEL in patched
+    # Idempotent: applying twice must not duplicate the guard.
+    assert patched == ensure_untrusted_guard(patched)
+    # Guard must be brace-free so str.format() rendering still works.
+    assert patched.format(role="Contractor", sources="- C1").startswith("Draft using Contractor")
+
+
+def test_prompt_registry_enforces_untrusted_guard_on_overrides() -> None:
+    db = _FakeDB()
+    registry = PromptRegistry(db)
+
+    # An admin override that drops the guard gets it re-appended on save...
+    record = asyncio.run(
+        registry.update_prompt(
+            "letter_drafting.v2.draft",
+            "Draft with {role}, {sources}, {current_materials}.",
+            "admin-1",
+        )
+    )
+    assert UNTRUSTED_GUARD_SENTINEL in record.template
+
+    # ...and legacy DB records written before the guard existed get it at read time.
+    db.prompt_templates.docs[0]["template"] = "Legacy template with {role} and {sources}."
+    active = asyncio.run(registry.get_enabled("letter_drafting.v2.draft"))
+    assert UNTRUSTED_GUARD_SENTINEL in active.template
+
+
+def test_langgraph_templates_enforce_untrusted_guard() -> None:
+    db = _FakeDB()
+    db.app_settings.docs.append(
+        {
+            "_id": "langgraph_llm_config",
+            "drafter_model": "gpt-4o",
+            "reviewer_model": "gpt-4o-mini",
+            "plan_model": "grok-4-1-fast",
+            "draft_prompt_template": "Draft with {subject} and {sources}.",
+            "plan_prompt_template": "Plan with {subject}, {role}, and {sources}.",
+        }
+    )
+
+    config = asyncio.run(LLMConfigService(db).get_config())
+
+    assert UNTRUSTED_GUARD_SENTINEL in config.draft_prompt_template
+    assert UNTRUSTED_GUARD_SENTINEL in config.plan_prompt_template
 
 
 def test_source_metadata_normalizes_aliases_and_hash() -> None:
