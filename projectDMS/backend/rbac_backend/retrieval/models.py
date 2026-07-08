@@ -6,6 +6,9 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..models.ai_guardrails import GuardrailReport
+from ..models.evidence_ledger import EvidenceLedgerEntry
+
 
 class SearchStrategy(str, Enum):
     VANILLA = "vanilla"
@@ -122,3 +125,7 @@ class ContractQAResponse(BaseModel):
     strategy_used: SearchStrategy
     timings: Dict[str, float] = Field(default_factory=dict)
     trace: List[IterationTrace] = Field(default_factory=list)
+    # Unified provenance: one ledger entry per citation. `citations` above is
+    # generated from these entries so existing consumers keep working.
+    evidence_ledger: List[EvidenceLedgerEntry] = Field(default_factory=list)
+    guardrail: Optional[GuardrailReport] = None

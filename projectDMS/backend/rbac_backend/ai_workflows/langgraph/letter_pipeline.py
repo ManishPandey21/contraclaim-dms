@@ -214,13 +214,20 @@ class LetterDraftGraph:
         async def _get_retrieval_service() -> RetrievalService:
             nonlocal retrieval_service
             if retrieval_service is None:
+                from ...core.config import settings as app_settings
+                from ...retrieval.reranker import RerankerService
+                from ...services.ai_guardrails import AIOutputGuardrailService
+
                 observability = ObservabilityService(db)
+                llm_generator = get_llm_generator()
                 retrieval_service = RetrievalService(
                     db=db,
                     embedding_client=get_embedding_client(),
                     vector_client=get_vector_client(),
-                    llm_generator=get_llm_generator(),
+                    llm_generator=llm_generator,
                     observability=observability,
+                    reranker=RerankerService.from_settings(app_settings, llm_generator),
+                    guardrails=AIOutputGuardrailService.from_settings(app_settings),
                 )
             return retrieval_service
 

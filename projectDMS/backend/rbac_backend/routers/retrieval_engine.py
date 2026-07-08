@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..agents.service import DraftingAgentService
 from ..agents.models import AgentRequest, AgentResponse
+from ..core.config import settings
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
@@ -18,8 +19,10 @@ from ..observability.models import AnalyticsRequest
 from ..observability.service import ObservabilityService
 from ..retrieval.dependencies import get_embedding_client, get_llm_generator, get_vector_client
 from ..retrieval.models import ContractQARequest, ContractQAResponse, RagRequest, RagResponse, SearchRequest, SearchResponse
+from ..retrieval.reranker import RerankerService
 from ..retrieval.service import RetrievalService
 from ..retrieval.reconcile import VectorReconciler
+from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.contract_service import ContractService
 
 router = APIRouter(prefix="/v1", tags=["retrieval-engine"])
@@ -31,12 +34,15 @@ async def get_observability(db=Depends(get_db)) -> ObservabilityService:
 
 
 async def get_retrieval_service(db=Depends(get_db), observability: ObservabilityService = Depends(get_observability)) -> RetrievalService:
+    llm_generator = get_llm_generator()
     return RetrievalService(
         db=db,
         embedding_client=get_embedding_client(),
         vector_client=get_vector_client(),
-        llm_generator=get_llm_generator(),
+        llm_generator=llm_generator,
         observability=observability,
+        reranker=RerankerService.from_settings(settings, llm_generator),
+        guardrails=AIOutputGuardrailService.from_settings(settings),
     )
 
 

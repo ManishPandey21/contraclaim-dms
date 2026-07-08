@@ -36,6 +36,9 @@ class _Cursor:
     def limit(self, _n):
         return self
 
+    def sort(self, *_a, **_k):
+        return self
+
     def __aiter__(self):
         self._it = iter(self._docs)
         return self

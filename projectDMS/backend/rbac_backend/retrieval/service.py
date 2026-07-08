@@ -6,11 +6,14 @@ import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from uuid import uuid4
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..core.security import CurrentUser
+from ..models.evidence_ledger import EvidenceLedgerEntry
 from ..observability.service import ObservabilityService
+from ..services.ai_guardrails import AIOutputGuardrailService
 from .embeddings import EmbeddingClient
 from .generator import LLMGenerator
 from .models import (
@@ -26,6 +29,7 @@ from .models import (
     SearchResult,
     SearchStrategy,
 )
+from .reranker import RerankerService
 from .source_metadata import normalize_source_payload
 from .vector_client import VectorClient
 
@@ -40,12 +44,16 @@ class RetrievalService:
         vector_client: VectorClient,
         llm_generator: LLMGenerator,
         observability: ObservabilityService,
+        reranker: Optional[RerankerService] = None,
+        guardrails: Optional[AIOutputGuardrailService] = None,
     ):
         self.db = db
         self.embedding_client = embedding_client
         self.vector_client = vector_client
         self.llm_generator = llm_generator
         self.observability = observability
+        self.reranker = reranker
+        self.guardrails = guardrails
 
     async def search(
         self,
@@ -224,6 +232,10 @@ class RetrievalService:
         timings: Dict[str, float] = {}
         start_total = time.perf_counter()
         limit = request.limit or 8
+        run_id = uuid4().hex
+        input_findings = (
+            self.guardrails.scan_input(request.query, origin="question") if self.guardrails else []
+        )
 
         if request.metadata_filters:
             try:
@@ -244,6 +256,7 @@ class RetrievalService:
         refinements: List[str] = []
         trace: List[IterationTrace] = []
         best_answer: str = ""
+        best_raw_draft: str = ""  # pre-rewrite draft with [Cn] tokens, for guardrail scoring
         best_results: List[SearchResult] = []
 
         for iteration in range(1, request.max_iterations + 1):
@@ -285,9 +298,11 @@ class RetrievalService:
 
             if cleaned_answer:
                 best_answer = cleaned_answer
+                best_raw_draft = draft
                 best_results = results
             elif not best_answer:
                 best_answer = draft
+                best_raw_draft = draft
                 best_results = results
 
             critique_start = time.perf_counter()
@@ -317,7 +332,32 @@ class RetrievalService:
         timings["total_ms"] = (time.perf_counter() - start_total) * 1000
 
         doc_meta = await self._fetch_documents_meta([res.document_id for res in best_results])
-        citations = self._to_citations(best_results, doc_meta)
+        # Ledger entries are the provenance source of truth; the legacy
+        # citation list is generated from them so response shapes stay stable.
+        ledger = self._build_evidence_ledger(best_results, request, run_id, doc_meta)
+        citations = [entry.to_citation() for entry in ledger]
+
+        guardrail_report = None
+        if self.guardrails is not None and self.guardrails.enabled:
+            evidence_findings = self.guardrails.scan_evidence([res.snippet for res in best_results])
+            # Score the pre-rewrite draft: _enforce_citations rewrites [Cn]
+            # tokens into display ids, so coverage must be measured before that.
+            guardrail_report = self.guardrails.evaluate_answer(
+                best_raw_draft or best_answer,
+                {entry.citation_label for entry in ledger if entry.citation_label},
+                require_citations=request.require_citations,
+                extra_findings=input_findings + evidence_findings,
+            )
+            if guardrail_report.verdict == "reject":
+                # Hard-reject mode: suppress the unsupported answer but keep
+                # citations and the report so reviewers can see what happened.
+                best_answer = ""
+
+        counts: Dict[str, int] = {"iterations": len(trace)}
+        if guardrail_report is not None:
+            counts["guardrail_findings"] = len(guardrail_report.findings)
+            if guardrail_report.citation_coverage is not None:
+                counts["citation_coverage_pct"] = int(round(guardrail_report.citation_coverage * 100))
 
         await self.observability.log_run(
             run_type="contract_iterative_qa",
@@ -325,10 +365,18 @@ class RetrievalService:
             project_id=request.filters.project_id,
             strategy=request.strategy.value,
             query=request.query,
-            retrieved=[{"chunk_id": c.chunk_id, "score": c.score} for c in citations],
+            retrieved=[
+                {
+                    "chunk_id": entry.chunk_id,
+                    "score": entry.final_score,
+                    "base_score": entry.retrieval_score,
+                    "reranker_score": entry.reranker_score,
+                }
+                for entry in ledger
+            ],
             breakdown_ms=timings,
             user_id=current_user.id if current_user else None,
-            counts={"iterations": len(trace)},
+            counts=counts,
         )
 
         return ContractQAResponse(
@@ -337,7 +385,36 @@ class RetrievalService:
             strategy_used=request.strategy,
             timings=timings,
             trace=trace,
+            evidence_ledger=ledger,
+            guardrail=guardrail_report,
         )
+
+    def _build_evidence_ledger(
+        self,
+        results: List[SearchResult],
+        request: ContractQARequest,
+        run_id: str,
+        doc_meta: Dict[str, Dict[str, Any]],
+    ) -> List[EvidenceLedgerEntry]:
+        entries: List[EvidenceLedgerEntry] = []
+        for idx, res in enumerate(results):
+            entry = EvidenceLedgerEntry.from_search_result(
+                res,
+                workflow="contract_qa",
+                run_id=run_id,
+                organization_id=request.filters.org_id,
+                project_id=request.filters.project_id,
+                citation_label=f"C{idx + 1}",
+            )
+            if len(entry.snippet) > 1200:
+                entry.snippet = f"{entry.snippet[:1200].rstrip()}..."
+            meta = doc_meta.get(res.document_id, {})
+            if meta.get("title"):
+                entry.metadata["document_title"] = meta.get("title")
+            if meta.get("letterNo"):
+                entry.metadata["letter_no"] = meta.get("letterNo")
+            entries.append(entry)
+        return entries
 
     async def _resolve_backend(self, backend: SearchBackend) -> SearchBackend:
         if backend != SearchBackend.AUTO:
@@ -816,6 +893,10 @@ class RetrievalService:
         merged = await self._augment_with_contract_graph_results(merged, request, limit=max(limit, 1))
         clause_hints = self._extract_clause_hints(request.query, request.metadata_filters)
         reranked = self._rerank_contract_results(merged, request.query, clause_hints, request.metadata_filters)
+        if self.reranker is not None and self.reranker.enabled:
+            # Cross-encoder pass over the heuristic ordering; falls back to it
+            # unchanged on timeout or backend failure.
+            reranked = await self.reranker.rerank(request.query, reranked)
         return reranked[:limit]
 
     async def _augment_with_contract_graph_results(
@@ -1456,7 +1537,17 @@ class RetrievalService:
                     base += 0.15
             return base
 
-        return sorted(results, key=_score, reverse=True)
+        # Annotate the heuristic score so a downstream cross-encoder reranker
+        # can blend it into the final ordering (and observability can see it).
+        for res in results:
+            payload = res.payload if res.payload is not None else {}
+            scores = dict(payload.get("scores") or {})
+            heuristic = _score(res)
+            scores.update({"base_score": float(res.score or 0.0), "heuristic_score": heuristic})
+            payload["scores"] = scores
+            res.payload = payload
+
+        return sorted(results, key=lambda res: res.payload["scores"]["heuristic_score"], reverse=True)
 
     @staticmethod
     def _is_probable_contract_toc_stub(payload: Dict[str, Any], text: str) -> bool:

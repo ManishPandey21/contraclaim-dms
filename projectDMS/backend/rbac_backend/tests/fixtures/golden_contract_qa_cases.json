@@ -1,0 +1,54 @@
+{
+  "description": "Golden contract QA regression cases. Each case runs the full retrieval -> rerank -> citation enforcement -> guardrail pipeline against the seeded GCC corpus (clauses 8.4 Extension of Time, 13.3 Variation Procedure) with deterministic fakes. Gates deployment on retrieval quality, citation quality, and unsupported-answer handling.",
+  "cases": [
+    {
+      "id": "eot_entitlement_cites_clause_8_4",
+      "question": "What extension of time entitlement does the contractor have?",
+      "fake_answer": "The Contractor shall be entitled to an extension of time if completion is delayed [C1].",
+      "require_citations": true,
+      "limit": 1,
+      "required_clauses": ["8.4"],
+      "forbidden_clauses": ["13.3"],
+      "min_citation_coverage": 1.0,
+      "expected_answer_facts": ["extension of time"],
+      "expected_verdict": "pass"
+    },
+    {
+      "id": "variation_procedure_cites_clause_13_3",
+      "question": "How is a variation initiated and the payment adjusted?",
+      "fake_answer": "The Engineer may initiate a variation by instruction and the payment shall be adjusted [C1].",
+      "require_citations": true,
+      "limit": 1,
+      "required_clauses": ["13.3"],
+      "forbidden_clauses": ["8.4"],
+      "min_citation_coverage": 1.0,
+      "expected_answer_facts": ["variation"],
+      "expected_verdict": "pass"
+    },
+    {
+      "id": "uncited_answer_flagged_for_review",
+      "question": "What extension of time entitlement does the contractor have?",
+      "fake_answer": "The contractor is entitled to whatever extension it requests without any supporting clause.",
+      "require_citations": true,
+      "limit": 1,
+      "required_clauses": [],
+      "forbidden_clauses": [],
+      "min_citation_coverage": 0.0,
+      "max_citation_coverage": 0.0,
+      "expected_answer_facts": [],
+      "expected_verdict": "requires_human_review"
+    },
+    {
+      "id": "missing_information_declines_safely",
+      "question": "What is the boq termination payment for offshore works?",
+      "fake_answer": "Information not found in the provided documents.",
+      "require_citations": true,
+      "limit": 1,
+      "required_clauses": [],
+      "forbidden_clauses": [],
+      "min_citation_coverage": 0.0,
+      "expected_answer_facts": ["information not found"],
+      "expected_verdict": "pass"
+    }
+  ]
+}

@@ -325,6 +325,23 @@ class Settings(BaseSettings):
     CONTRACT_APPRAISAL_RETRIEVAL_LIMIT: int = Field(default=50, ge=1, le=50, validation_alias="CONTRACT_APPRAISAL_RETRIEVAL_LIMIT")
     CONTRACT_APPRAISAL_QA_MAX_ITERATIONS: int = Field(default=3, ge=1, le=5, validation_alias="CONTRACT_APPRAISAL_QA_MAX_ITERATIONS")
 
+    # Cross-encoder reranking for contract retrieval. Disabled by default so
+    # existing deployments keep the heuristic-only ordering; when enabled the
+    # heuristic scorer remains the fallback and one input to the blended score.
+    RERANKER_ENABLED: bool = Field(default=False, validation_alias="RERANKER_ENABLED")
+    RERANKER_PROVIDER: str = Field(default="llm", validation_alias="RERANKER_PROVIDER")
+    RERANKER_MODEL: str = Field(default="", validation_alias="RERANKER_MODEL")
+    RERANKER_TOP_N: int = Field(default=20, ge=1, le=50, validation_alias="RERANKER_TOP_N")
+    RERANKER_TIMEOUT_MS: int = Field(default=8000, ge=100, validation_alias="RERANKER_TIMEOUT_MS")
+    RERANKER_WEIGHT: float = Field(default=0.5, ge=0.0, le=1.0, validation_alias="RERANKER_WEIGHT")
+
+    # Deterministic AI output guardrails (citation coverage, injection scan).
+    # GUARDRAIL_REJECT_UNSUPPORTED=false keeps the failure mode at
+    # "requires_human_review" instead of replacing the answer outright.
+    AI_GUARDRAILS_ENABLED: bool = Field(default=True, validation_alias="AI_GUARDRAILS_ENABLED")
+    GUARDRAIL_MIN_CITATION_COVERAGE: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias="GUARDRAIL_MIN_CITATION_COVERAGE")
+    GUARDRAIL_REJECT_UNSUPPORTED: bool = Field(default=False, validation_alias="GUARDRAIL_REJECT_UNSUPPORTED")
+
     # Redaction / observability
     OBSERVABILITY_STORE_RAW_QUERIES: bool = Field(default=False, validation_alias="OBSERVABILITY_STORE_RAW_QUERIES")
     METRICS_ENABLED: bool = Field(default=True, validation_alias="METRICS_ENABLED")
