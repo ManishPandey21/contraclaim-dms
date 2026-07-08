@@ -84,7 +84,8 @@ class _FakeOpenAIChatCompletionsAPI:
 
     async def create(self, *, model: str, messages: list[dict[str, Any]], max_tokens: int, temperature: float) -> Any:
         assert model == "gpt-4o"
-        assert max_tokens == 4000
+        # OpenAIService sends max(config.max_output_tokens, 4096)
+        assert max_tokens == 4096
         assert temperature == 0.1
 
         file_id = messages[0]["content"][1]["file"]["file_id"]

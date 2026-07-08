@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/card";
 import Badge from "@/components/ui/badge";
 import {
+import { toast } from "sonner";
   Search,
   Building2,
   FolderOpen,
@@ -847,11 +848,11 @@ const ContractsSearchPage: React.FC = () => {
 
   const handleSearch = useCallback(async () => {
     if (!orgId) {
-      window.alert("Select an organization before searching.");
+      toast.warning("Select an organization before searching.");
       return;
     }
     if (!expandedQuery.trim()) {
-      window.alert("Enter a search query or select categories.");
+      toast.warning("Enter a search query or select categories.");
       return;
     }
     setPage(1);

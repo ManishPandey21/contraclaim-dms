@@ -200,12 +200,14 @@ async def test_list_tasks_scoped_and_claim_filter():
     # FastAPI Query(None) sentinel objects (truthy) in place of None.
     all_tasks = await list_tasks(
         status_filter=None, assigned_to=None, project_id=None, organization_id=None,
-        linked_claim_id=None, skip=0, limit=100, db=db, current_user=user, policy=_policy(),
+        linked_claim_id=None, task_type=None, resource_type=None, resource_id=None,
+        skip=0, limit=100, db=db, current_user=user, policy=_policy(),
     )
     assert {t.id for t in all_tasks} == {"t1", "t2"}
     by_claim = await list_tasks(
         status_filter=None, assigned_to=None, project_id=None, organization_id=None,
-        linked_claim_id="c1", skip=0, limit=100, db=db, current_user=user, policy=_policy(),
+        linked_claim_id="c1", task_type=None, resource_type=None, resource_id=None,
+        skip=0, limit=100, db=db, current_user=user, policy=_policy(),
     )
     assert [t.id for t in by_claim] == ["t1"]
 

@@ -116,8 +116,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS or ["http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Enumerated rather than "*": with credentialed CORS, keep the preflight
+    # surface to exactly what the client sends.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-CSRF-Token",
+        "X-Request-ID",
+        "X-Requested-With",
+    ],
+    expose_headers=["X-Request-ID", "Content-Disposition"],
 )
 
 

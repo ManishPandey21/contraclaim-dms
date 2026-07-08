@@ -31,6 +31,7 @@ import { Project } from "../types/api";
 import useRBAC from "../hooks/useRBAC";
 import useHasPermission from "@/hooks/useHasPermission";
 import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
+import { toast } from "sonner";
 
 // Extended Project interface for frontend display
 interface ProjectDisplay extends Project {
@@ -171,7 +172,7 @@ const ProjectsPage = () => {
         ) {
           handleTokenExpiration();
         } else {
-          alert("Failed to fetch data. Please try again later.");
+          toast.error("Failed to fetch data. Please try again later.");
         }
       } finally {
         setLoading(false);
@@ -183,7 +184,7 @@ const ProjectsPage = () => {
 
   const handleDeactivateProject = async (id: string) => {
     if (!canDeleteProject) {
-      alert("You do not have permission to deactivate projects.");
+      toast.error("You do not have permission to deactivate projects.");
       return;
     }
     try {
@@ -199,7 +200,7 @@ const ProjectsPage = () => {
         "Error deactivating project:",
         error instanceof Error ? error.message : "Unknown error"
       );
-      alert("Failed to deactivate project. Please try again later.");
+      toast.error("Failed to deactivate project. Please try again later.");
     }
   };
 

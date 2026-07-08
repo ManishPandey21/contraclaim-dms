@@ -264,7 +264,9 @@ services:
     logging: *default-logging
 
   clamav:
-    image: clamav/clamav:latest
+    # Pinned like every other image: AV is fail-closed in production, so an
+    # unexpected upstream release must not be able to break uploads on redeploy.
+    image: clamav/clamav:1.4
     restart: unless-stopped
     deploy:
       resources:

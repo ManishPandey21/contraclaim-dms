@@ -22,6 +22,7 @@ import { listProjects, type Project } from "@/services/projects-api";
 import { downloadDocumentFile } from "@/services/documents-api";
 import enhancedApi, { type Tag } from "@/services/enhanced-api";
 import {
+import { toast } from "sonner";
   Search,
   FileText,
   Download,
@@ -229,7 +230,7 @@ const EnhancedDocumentsPage: React.FC = () => {
       });
     } catch (err) {
       console.error("Download failed:", err);
-      alert("Download failed. Please try again.");
+      toast.error("Download failed. Please try again.");
     }
   };
 

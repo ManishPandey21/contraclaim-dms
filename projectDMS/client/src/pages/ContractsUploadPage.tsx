@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/card";
 import Badge from "@/components/ui/badge";
 import {
+import { toast } from "sonner";
   UploadCloud,
   Loader2,
   FileText,
@@ -382,7 +383,7 @@ const [projId, setProjId] = useState<string>(
     async (params: { document_id?: string; filename?: string }) => {
       try {
         if (!params.document_id) {
-          window.alert("File is not ready to download yet.");
+          toast.warning("File is not ready to download yet.");
           return;
         }
         const fname = params.filename || "contract";
@@ -397,7 +398,7 @@ const [projId, setProjId] = useState<string>(
         window.URL.revokeObjectURL(url);
       } catch (e) {
         console.error("Download failed", e);
-        window.alert(extractErrorMessage(e, "Failed to download file."));
+        toast.error(extractErrorMessage(e, "Failed to download file."));
       }
     },
     []
@@ -574,15 +575,15 @@ const [projId, setProjId] = useState<string>(
 
   const handleUpload = useCallback(async () => {
     if (!orgId) {
-      window.alert("Please select an organization.");
+      toast.warning("Please select an organization.");
       return;
     }
     if (!projId) {
-      window.alert("Please select a project.");
+      toast.warning("Please select a project.");
       return;
     }
     if (files.length === 0) {
-      window.alert("Select one or more files.");
+      toast.warning("Select one or more files.");
       return;
     }
 

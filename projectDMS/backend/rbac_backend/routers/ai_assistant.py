@@ -6,6 +6,7 @@ AI Assistant module with clean architecture, proper security, and performance op
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, BackgroundTasks
 from typing import List, Optional, Dict, Any, Tuple, Union
 from datetime import datetime, timedelta
+import hashlib
 import logging
 import asyncio
 from functools import wraps
@@ -77,8 +78,12 @@ class AIAssistantController:
             # Input validation and sanitization
             query = sanitize_text(validate_input(request.query, max_length=1000))
             
-            # Check cache first
-            cache_key = f"search:{current_user.id}:{hash(query)}:{request.limit}"
+            # Check cache first. hashlib, not hash(): Python's hash() is
+            # randomized per process (PYTHONHASHSEED), so keys built with it
+            # never match across workers or restarts and the cache was
+            # effectively disabled in multi-worker deploys.
+            query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
+            cache_key = f"search:{current_user.id}:{query_digest}:{request.limit}"
             cached_result = await self.cache_service.get(cache_key)
             
             if cached_result:

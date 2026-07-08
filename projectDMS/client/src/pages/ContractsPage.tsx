@@ -1,5 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
+import { toast } from "sonner";
   uploadContractsMultipart,
   uploadContractInChunks,
   getContractStatus,
@@ -97,11 +98,11 @@ const ContractsPage: React.FC = () => {
 
   const handleUpload = useCallback(async () => {
     if (!orgId) {
-      alert("Please provide Organization ID");
+      toast.warning("Please provide Organization ID");
       return;
     }
     if (files.length === 0) {
-      alert("Select one or more files");
+      toast.warning("Select one or more files");
       return;
     }
 
@@ -211,7 +212,7 @@ const ContractsPage: React.FC = () => {
 
   const handleSearch = useCallback(async () => {
     if (!query.trim()) {
-      alert("Enter a search query");
+      toast.warning("Enter a search query");
       return;
     }
     setSearching(true);
@@ -229,7 +230,7 @@ const ContractsPage: React.FC = () => {
       setSearchResult(resp);
     } catch (e) {
       console.error(e);
-      alert("Search failed");
+      toast.error("Search failed");
     } finally {
       setSearching(false);
     }
