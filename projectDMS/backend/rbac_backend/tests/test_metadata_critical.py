@@ -116,8 +116,8 @@ def _sample_expanded_report() -> str:
    - Address notice compliance and contemporaneous records.
    - Confirm critical path impact and mitigation steps.
 25) Full Content: Cleaned full letter body here.
-26) tags: Claims, Delay
-27) subTags: EOT, Access Constraint
+26) tags: Contractual, Delay
+27) subTags: EOT Programme, Site Access
 """.strip()
 
 
@@ -224,8 +224,10 @@ def test_parse_extraction_report_extracts_expanded_contract_metadata() -> None:
         "Confirm critical path impact and mitigation steps",
     ]
     assert parsed.full_content == "Cleaned full letter body here."
-    assert parsed.tags == ["Claims", "Delay"]
-    assert parsed.sub_tags == ["EOT", "Access Constraint"]
+    # Values are enforced against the controlled vocabularies
+    # (EXTRACTED_TAG_OPTIONS / EXTRACTED_SUBTAG_OPTIONS) server-side.
+    assert parsed.tags == ["Contractual", "Delay"]
+    assert parsed.sub_tags == ["EOT Programme", "Site Access"]
 
 
 def test_parse_extraction_report_accepts_extracted_tag_labels() -> None:
@@ -233,8 +235,8 @@ def test_parse_extraction_report_accepts_extracted_tag_labels() -> None:
 
     parsed = service.parse_extraction_report(_sample_extracted_tag_report())
 
-    assert parsed.tags == ["Claims", "Delay"]
-    assert parsed.sub_tags == ["EOT", "Access Constraint"]
+    assert parsed.tags == ["Contractual", "Delay"]
+    assert parsed.sub_tags == ["EOT Programme", "Site Access"]
 
 
 async def test_upsert_document_metadata_inserts_and_updates() -> None:
@@ -347,9 +349,9 @@ async def test_upsert_document_metadata_saves_expanded_fields_without_overwritin
     assert inserted["linked_event_suggested"] == "Late access at Charbagh Station concourse"
     assert inserted["reference_chain"] == "original notice"
     assert inserted["additional_keywords"] == ["station delay", "eot claim", "clause 8.4", "authority access"]
-    assert inserted["extracted_tags"] == ["Claims", "Delay"]
-    assert inserted["extracted_subTags"] == ["EOT", "Access Constraint"]
+    assert inserted["extracted_tags"] == ["Contractual", "Delay"]
+    assert inserted["extracted_subTags"] == ["EOT Programme", "Site Access"]
     assert "tags" not in inserted
     assert "subTags" not in inserted
     assert inserted["metadata"]["asset_type"] == "Station"
-    assert inserted["metadata"]["subTags"] == ["EOT", "Access Constraint"]
+    assert inserted["metadata"]["subTags"] == ["EOT Programme", "Site Access"]

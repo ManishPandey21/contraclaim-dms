@@ -198,9 +198,12 @@ class OpenAIService:
 
     def _expanded_extraction_prompt(self) -> str:
         """Expanded contract letter metadata extraction prompt."""
+        from .ai_guardrails import UNTRUSTED_DOCUMENT_GUARD
+
         tag_options = ", ".join(EXTRACTED_TAG_OPTIONS)
         subtag_options = ", ".join(EXTRACTED_SUBTAG_OPTIONS)
         return (
+            UNTRUSTED_DOCUMENT_GUARD + "\n\n"
             "You are a Contract expert extracting structured metadata from letters. "
             "Extract the following fields from the contract letter (attached PDF) and return them in this exact format. "
             "Use 'null' for any field that is absent. Dates must be formatted as DD-MM-YYYY.\n\n"

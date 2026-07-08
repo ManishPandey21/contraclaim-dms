@@ -71,10 +71,13 @@ class _StubParsedDocumentMetadata:
         }
 
 
-sys.modules["rbac_backend.models.document_metadata"] = SimpleNamespace(
-    ProcessingResult=_StubProcessingResult,
-    ParsedDocumentMetadata=_StubParsedDocumentMetadata,
-)
+# NOTE: this file previously replaced rbac_backend.models.document_metadata in
+# sys.modules with a SimpleNamespace stub. That poisoned the module for every
+# test collected afterwards in the same process (fresh `from ... import X`
+# statements hit the stub, which has no __spec__ and only two attributes) and
+# broke this very file once document_service started importing
+# extracted_metadata_updates. The real module imports cleanly; the local _Stub*
+# classes below remain for constructing lightweight fixtures only.
 
 from rbac_backend.routers.documents import (
     DocumentController,

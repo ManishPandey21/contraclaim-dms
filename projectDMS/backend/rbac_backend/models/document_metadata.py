@@ -75,6 +75,23 @@ EXTRACTED_SUBTAG_OPTIONS: tuple[str, ...] = (
 )
 
 
+def enforce_controlled_vocabulary(values: Any, options: tuple[str, ...]) -> list[str]:
+    """Keep only values from the controlled vocabulary, restoring canonical casing.
+
+    Matching is case-insensitive and whitespace-tolerant; anything the model
+    (or an injected document) invents outside the allowlist is dropped.
+    """
+    canonical = {option.lower(): option for option in options}
+    kept: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        match = canonical.get(str(value).strip().lower())
+        if match and match not in seen:
+            kept.append(match)
+            seen.add(match)
+    return kept
+
+
 def _clean_scalar(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -185,6 +202,14 @@ class ParsedDocumentMetadata(BaseModel):
             "sub_tags",
         ):
             setattr(self, field, _clean_list(getattr(self, field, None)))
+
+        # Controlled vocabularies are enforced server-side, not just requested
+        # in the prompt: extraction output is derived from untrusted document
+        # text, so a document that steers the model ("tag this as X") can at
+        # most pick from the approved list — never invent a tag that then
+        # drives search filters and register views.
+        self.tags = enforce_controlled_vocabulary(self.tags, EXTRACTED_TAG_OPTIONS)
+        self.sub_tags = enforce_controlled_vocabulary(self.sub_tags, EXTRACTED_SUBTAG_OPTIONS)
         return self
 
 
@@ -208,6 +233,7 @@ __all__ = [
     "ReferenceValue",
     "EXTRACTED_TAG_OPTIONS",
     "EXTRACTED_SUBTAG_OPTIONS",
+    "enforce_controlled_vocabulary",
     "EXTRACTED_METADATA_FIELDS",
     "parsed_metadata_snapshot",
     "extracted_metadata_updates",

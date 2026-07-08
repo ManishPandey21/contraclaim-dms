@@ -149,6 +149,12 @@ class TextProcessingService:
         """
         try:
             logger.info("Legacy regex metadata parser engaged (report length=%d)", len(report or ""))
+            # The report carries document-derived content (incl. the full letter
+            # text); flag injection phrasing so a malicious upload is visible to
+            # reviewers even when extraction itself succeeds.
+            from .ai_guardrails import scan_document_text_for_injection
+
+            scan_document_text_for_injection(report, origin="extraction_report_parse")
             # Normalize text for parsing
             lines = (report or "").splitlines()
             text = "\n".join(line.strip() for line in lines if line.strip())
