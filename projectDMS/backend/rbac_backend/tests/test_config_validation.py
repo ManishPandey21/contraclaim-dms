@@ -277,3 +277,59 @@ def test_production_validation_rejects_missing_backup_bucket_when_required():
 
     with pytest.raises(ValueError, match="BACKUP_S3_BUCKET"):
         settings.validate_runtime_configuration()
+
+
+def _production_settings(**overrides):
+    base = dict(
+        ENVIRONMENT="production",
+        DATABASE_URL="mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0",
+        SECRET_KEY="x" * 32,
+        AWS_ACCESS_KEY_ID="aws-key",
+        AWS_SECRET_ACCESS_KEY="aws-secret",
+        AWS_BUCKET_NAME="bucket",
+        OPENAI_API_KEY="openai-key",
+        SMTP_USERNAME="smtp-user",
+        SMTP_PASSWORD="smtp-password",
+        CORS_ORIGINS='["https://app.contraclaim.com"]',
+        LANGGRAPH_ENABLED=False,
+        APP_REDIS_URL="redis://redis:6379/1",
+        METRICS_TOKEN="metrics-token",
+        RBAC_ENTITLEMENT_FAIL_OPEN=False,
+        AUTH_COOKIE_SECURE=True,
+        BACKUP_REQUIRED_IN_PRODUCTION=True,
+        BACKUP_ROOT="/var/backups/contractdms",
+        BACKUP_S3_BUCKET="backups",
+        ANTIVIRUS_ENABLED=True,
+        CLAMAV_FAIL_OPEN=False,
+    )
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_production_razorpay_requires_webhook_secret():
+    """A missing webhook secret means customers pay but never activate:
+    signature verification is deny-by-default, so every activation webhook is
+    rejected. Startup must refuse this configuration."""
+    settings = _production_settings(
+        PAYMENT_PROVIDER="razorpay",
+        RAZORPAY_KEY_ID="rzp_live_key",
+        RAZORPAY_KEY_SECRET="rzp_live_secret",
+        RAZORPAY_WEBHOOK_SECRET="",
+    )
+    with pytest.raises(ValueError, match="RAZORPAY_WEBHOOK_SECRET"):
+        settings.validate_runtime_configuration()
+
+
+def test_production_razorpay_fully_configured_passes():
+    settings = _production_settings(
+        PAYMENT_PROVIDER="razorpay",
+        RAZORPAY_KEY_ID="rzp_live_key",
+        RAZORPAY_KEY_SECRET="rzp_live_secret",
+        RAZORPAY_WEBHOOK_SECRET="whsec",
+    )
+    settings.validate_runtime_configuration()
+
+
+def test_production_noop_provider_needs_no_razorpay_config():
+    settings = _production_settings(PAYMENT_PROVIDER="noop")
+    settings.validate_runtime_configuration()

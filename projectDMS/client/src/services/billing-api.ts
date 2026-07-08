@@ -56,6 +56,51 @@ export function redirectToCheckout(checkout: CheckoutResponse): void {
   }
 }
 
+// --- Pending-checkout continuity --------------------------------------------
+// Razorpay subscription links have no callback_url parameter: after paying on
+// the hosted page the customer is NOT redirected back to the app. We remember
+// the in-flight checkout before leaving; the next visit to the subscription
+// page routes through /billing/return so the user sees payment confirmation
+// (webhook-driven) instead of a stale page.
+
+const PENDING_CHECKOUT_KEY = "cc_pending_checkout";
+const PENDING_CHECKOUT_TTL_MS = 24 * 60 * 60 * 1000;
+
+export function rememberPendingCheckout(subscriptionId: string): void {
+  try {
+    localStorage.setItem(
+      PENDING_CHECKOUT_KEY,
+      JSON.stringify({ subscriptionId, at: Date.now() })
+    );
+  } catch {
+    // Storage unavailable (private mode): the webhook still activates the
+    // subscription; the user just lands on the normal subscription page.
+  }
+}
+
+export function peekPendingCheckout(): string | null {
+  try {
+    const raw = localStorage.getItem(PENDING_CHECKOUT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { subscriptionId?: string; at?: number };
+    if (!parsed?.subscriptionId || Date.now() - (parsed.at ?? 0) > PENDING_CHECKOUT_TTL_MS) {
+      localStorage.removeItem(PENDING_CHECKOUT_KEY);
+      return null;
+    }
+    return String(parsed.subscriptionId);
+  } catch {
+    return null;
+  }
+}
+
+export function clearPendingCheckout(): void {
+  try {
+    localStorage.removeItem(PENDING_CHECKOUT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 // --- Billing records (financial history) ----------------------------------
 
 export interface BillingRecord {

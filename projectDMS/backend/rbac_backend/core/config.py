@@ -526,6 +526,21 @@ class Settings(BaseSettings):
                     production_errors.append(
                         "OIDC is enabled but missing: " + ", ".join(missing_oidc)
                     )
+            # Payments: with PAYMENT_PROVIDER=razorpay, an empty webhook secret is
+            # the worst kind of misconfiguration — checkout works and customers
+            # PAY, but every webhook fails signature verification (deny-by-
+            # default), so their subscription never activates. Fail startup
+            # instead of taking money for nothing.
+            if str(getattr(self, "PAYMENT_PROVIDER", "noop") or "noop").lower() == "razorpay":
+                missing_razorpay = [
+                    name
+                    for name in ("RAZORPAY_KEY_ID", "RAZORPAY_KEY_SECRET", "RAZORPAY_WEBHOOK_SECRET")
+                    if not str(getattr(self, name, "") or "").strip()
+                ]
+                if missing_razorpay:
+                    production_errors.append(
+                        "PAYMENT_PROVIDER=razorpay requires: " + ", ".join(missing_razorpay)
+                    )
             runtime_redis = (
                 str(getattr(self, "RUNTIME_STATE_REDIS_URL", "") or "").strip()
                 or str(getattr(self, "APP_REDIS_URL", "") or "").strip()

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   ArrowUpRight,
   ArrowDownRight,
@@ -77,6 +78,8 @@ import {
 import {
   startSubscriptionCheckout,
   redirectToCheckout,
+  rememberPendingCheckout,
+  peekPendingCheckout,
   getBillingRecords,
   getBillingReviewQueue,
   downloadBillingReceipt,
@@ -142,6 +145,7 @@ const tierIcons = [null, Zap, Sparkles, Crown, Shield];
 const SubscriptionManagementPage: React.FC = () => {
   const { can, roles, loading: rbacLoading } = useRBAC();
   const { requestToken, StepUpDialog } = useStepUp();
+  const navigate = useNavigate();
 
   const [catalog, setCatalog] = useState<PlanCatalogResponse | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -207,6 +211,16 @@ const SubscriptionManagementPage: React.FC = () => {
   useEffect(() => {
     if (!rbacLoading) loadData();
   }, [rbacLoading, loadData]);
+
+  // Returning from the Razorpay hosted page (which cannot redirect back):
+  // route through the payment-status page so the user sees confirmation.
+  useEffect(() => {
+    const pendingSubscriptionId = peekPendingCheckout();
+    if (pendingSubscriptionId) {
+      navigate(`/billing/return?subscription_id=${encodeURIComponent(pendingSubscriptionId)}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeSub = useMemo(
     () =>
@@ -297,6 +311,9 @@ const SubscriptionManagementPage: React.FC = () => {
       setUpgradeDialogOpen(false);
       if (checkout.checkout_url) {
         toast.success("Redirecting to secure checkout…");
+        // Razorpay's hosted page cannot redirect back; remember the in-flight
+        // checkout so the next visit lands on /billing/return for confirmation.
+        rememberPendingCheckout(checkout.subscription_id);
         redirectToCheckout(checkout);
       } else {
         toast.info("Checkout created. Complete payment to activate your plan.", {

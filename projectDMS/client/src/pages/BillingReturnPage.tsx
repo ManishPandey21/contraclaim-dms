@@ -11,18 +11,22 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { CheckCircle2, Clock, Loader2, XCircle } from "lucide-react";
 import { listSubscriptions, type Subscription } from "@/services/plan-settings-api";
+import { clearPendingCheckout, peekPendingCheckout } from "@/services/billing-api";
 import {
   shouldKeepPolling,
   subscriptionDisplayState,
   type CheckoutDisplayState,
 } from "@/lib/billing-helpers";
 
-const MAX_POLLS = 10;
+// Webhook-driven activation can lag the payment by a minute or more; poll for
+// up to ~2 minutes before falling back to the "still processing" guidance.
+const MAX_POLLS = 40;
 const POLL_MS = 3000;
 
 const BillingReturnPage: React.FC = () => {
   const [params] = useSearchParams();
-  const subscriptionId = params.get("subscription_id") || params.get("subscription") || "";
+  const subscriptionId =
+    params.get("subscription_id") || params.get("subscription") || peekPendingCheckout() || "";
   const [sub, setSub] = useState<Subscription | null>(null);
   const [state, setState] = useState<CheckoutDisplayState>("unknown");
   const [polls, setPolls] = useState(0);
@@ -50,6 +54,9 @@ const BillingReturnPage: React.FC = () => {
   }, [subscriptionId]);
 
   useEffect(() => {
+    // This page IS the pending checkout's destination; clear the marker so the
+    // subscription page stops re-routing here on subsequent visits.
+    clearPendingCheckout();
     let active = true;
     const run = async () => {
       const ds = await poll();
