@@ -226,7 +226,7 @@ class AuthController:
                 user=user_info
             )
             
-        except AuthenticationError:
+        except (AuthenticationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
@@ -300,7 +300,7 @@ class AuthController:
                 expires_in=3600
             )
             
-        except AuthenticationError:
+        except (AuthenticationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Token refresh failed: {str(e)}")
@@ -328,6 +328,8 @@ class AuthController:
             
             return {"message": "Logged out successfully"}
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Logout failed: {str(e)}")
             raise HTTPException(
@@ -350,7 +352,7 @@ class AuthController:
             
             return current_user
             
-        except AuthenticationError:
+        except (AuthenticationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Get user info failed: {str(e)}")

@@ -85,7 +85,7 @@ class ConcernController:
             
             return concern
             
-        except ConcernError:
+        except (ConcernError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Concern creation failed: {str(e)}")
@@ -125,6 +125,8 @@ class ConcernController:
                 limit=pagination["limit"]
             )
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get concerns: {str(e)}")
             raise HTTPException(
@@ -159,7 +161,7 @@ class ConcernController:
             
             return concern
             
-        except ConcernError:
+        except (ConcernError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get concern {concern_id}: {str(e)}")
@@ -211,7 +213,7 @@ class ConcernController:
             
             return updated_concern
             
-        except ConcernError:
+        except (ConcernError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update concern {concern_id}: {str(e)}")
@@ -257,7 +259,7 @@ class ConcernController:
             
             return {"message": "Concern deleted successfully"}
             
-        except ConcernError:
+        except (ConcernError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete concern {concern_id}: {str(e)}")

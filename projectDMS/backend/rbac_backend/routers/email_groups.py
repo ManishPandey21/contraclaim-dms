@@ -105,6 +105,8 @@ class EmailGroupController:
                 limit=pagination["limit"]
             )
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get email groups: {str(e)}")
             raise HTTPException(
@@ -165,7 +167,7 @@ class EmailGroupController:
             
             return group
             
-        except EmailGroupError:
+        except (EmailGroupError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email group creation failed: {str(e)}")
@@ -208,7 +210,7 @@ class EmailGroupController:
             
             return group
             
-        except EmailGroupError:
+        except (EmailGroupError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get email group: {str(e)}")
@@ -278,7 +280,7 @@ class EmailGroupController:
             
             return updated_group
             
-        except EmailGroupError:
+        except (EmailGroupError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update email group: {str(e)}")
@@ -329,7 +331,7 @@ class EmailGroupController:
             
             return {"message": "Email group deleted successfully"}
             
-        except EmailGroupError:
+        except (EmailGroupError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete email group: {str(e)}")
@@ -373,7 +375,7 @@ class EmailGroupController:
             # Return deduplicated emails
             return await self.email_group_service.get_unique_emails(group.emails)
             
-        except EmailGroupError:
+        except (EmailGroupError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to resolve group emails: {str(e)}")

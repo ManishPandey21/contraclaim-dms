@@ -69,6 +69,8 @@ async def get_roles(
         roles, total_count = await role_service.get_roles_paginated(filters, pagination)
         return await role_service.filter_roles_for_user(current_user, roles)
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get roles: {str(e)}")
         raise HTTPException(
@@ -130,6 +132,8 @@ async def create_role(
         
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create role: {str(e)}")
         raise HTTPException(
@@ -166,6 +170,8 @@ async def update_role(
         
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update role {role_id}: {str(e)}")
         raise HTTPException(
@@ -234,6 +240,8 @@ async def get_role_permissions(
         permissions = await role_service.get_role_permissions(role_id)
         return permissions
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get role permissions for {role_id}: {str(e)}")
         raise HTTPException(
@@ -271,6 +279,8 @@ async def add_role_permission(
         
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to add permission to role: {str(e)}")
         raise HTTPException(
@@ -308,6 +318,8 @@ async def remove_role_permission(
         
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to remove permission from role: {str(e)}")
         raise HTTPException(

@@ -97,6 +97,8 @@ class AIAssistantController:
             
             return result
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Search failed for user {current_user.id}: {str(e)}")
             raise HTTPException(

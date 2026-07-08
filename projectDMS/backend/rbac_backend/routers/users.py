@@ -228,7 +228,7 @@ class UserController:
                 user=user_response
             )
             
-        except (AuthenticationError, UserError):
+        except (AuthenticationError, UserError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
@@ -286,7 +286,7 @@ class UserController:
             
             return user_response
             
-        except (UserError, AuthenticationError):
+        except (UserError, AuthenticationError, HTTPException):
             raise
         except (ValueError, ValidationError, UserServiceError) as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
@@ -455,7 +455,7 @@ class UserController:
             
             return user_response
             
-        except UserError:
+        except (UserError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
@@ -515,7 +515,7 @@ class UserController:
             
             return {"message": "User deleted successfully"}
             
-        except UserError:
+        except (UserError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete user {user_id}: {str(e)}")
@@ -539,6 +539,8 @@ class UserController:
             
             return {"message": "Logged out successfully"}
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Logout failed for user {current_user.id}: {str(e)}")
             raise HTTPException(

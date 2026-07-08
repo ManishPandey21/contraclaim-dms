@@ -52,6 +52,8 @@ async def get_today_legal_words(
         return await service.get_today_words(date_value)
     except LegalWordServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to get today's legal words")
         raise HTTPException(
@@ -72,6 +74,8 @@ async def search_legal_word(
         return await service.search_or_request_word(payload.query, current_user)
     except LegalWordServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to search legal word")
         raise HTTPException(
@@ -110,6 +114,8 @@ async def list_admin_legal_words(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to list admin legal words")
         raise HTTPException(
@@ -132,6 +138,8 @@ async def create_admin_legal_word(
         return await service.create_word(payload, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to create legal word")
         raise HTTPException(
@@ -153,6 +161,8 @@ async def suggest_admin_legal_words_with_ai(
         return await service.suggest_words_with_ai(current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to suggest legal words with AI")
         raise HTTPException(
@@ -176,6 +186,8 @@ async def update_admin_legal_word(
         return await service.update_word(word_id, payload, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to update legal word %s", word_id)
         raise HTTPException(
@@ -198,6 +210,8 @@ async def approve_admin_legal_word(
         return await service.approve_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to approve legal word %s", word_id)
         raise HTTPException(
@@ -220,6 +234,8 @@ async def reject_admin_legal_word(
         return await service.reject_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to reject legal word %s", word_id)
         raise HTTPException(
@@ -242,6 +258,8 @@ async def deactivate_admin_legal_word(
         return await service.deactivate_word(word_id, current_user)
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to deactivate legal word %s", word_id)
         raise HTTPException(
@@ -269,6 +287,8 @@ async def schedule_admin_legal_word(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to schedule legal word %s", word_id)
         raise HTTPException(
@@ -296,6 +316,8 @@ async def publish_admin_legal_word(
         )
     except LegalWordServiceError as exc:
         raise _raise_service_error(exc) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to publish legal word %s", word_id)
         raise HTTPException(

@@ -80,7 +80,7 @@ class PartyController:
             
             return party
             
-        except PartyError:
+        except (PartyError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Party creation failed: {str(e)}")
@@ -120,6 +120,8 @@ class PartyController:
                 limit=pagination["limit"]
             )
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get parties: {str(e)}")
             raise HTTPException(
@@ -154,7 +156,7 @@ class PartyController:
             
             return party
             
-        except PartyError:
+        except (PartyError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get party {party_id}: {str(e)}")
@@ -206,7 +208,7 @@ class PartyController:
             
             return updated_party
             
-        except PartyError:
+        except (PartyError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update party {party_id}: {str(e)}")
@@ -260,7 +262,7 @@ class PartyController:
             
             return {"message": "Party deleted successfully"}
             
-        except PartyError:
+        except (PartyError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete party {party_id}: {str(e)}")
@@ -311,7 +313,7 @@ class PartyController:
                 "message": f"Party {party_id} successfully associated with project {project_id}"
             }
             
-        except PartyError:
+        except (PartyError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to associate party with project: {str(e)}")
@@ -351,6 +353,8 @@ class PartyController:
                 limit=pagination["limit"]
             )
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get external parties: {str(e)}")
             raise HTTPException(

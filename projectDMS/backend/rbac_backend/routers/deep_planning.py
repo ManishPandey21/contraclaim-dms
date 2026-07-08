@@ -287,6 +287,8 @@ async def get_text_embedding(text: str) -> List[float]:
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded: {str(e)}")
         raise HTTPException(status_code=429, detail="OpenAI rate limit exceeded. Please try again later.")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting embedding: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate embedding: {str(e)}")
@@ -588,6 +590,8 @@ async def generate_draft_with_ai(
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded during draft generation: {str(e)}")
         raise HTTPException(status_code=429, detail="OpenAI rate limit exceeded. Please try again later.")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating draft with AI: {str(e)}")
         raise HTTPException(status_code=500, detail=f"AI draft generation failed: {str(e)}")
@@ -997,6 +1001,8 @@ async def get_deep_planning_history(
         logger.info(f"Retrieved {len(drafts)} history items")
         return {"drafts": drafts}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting deep planning history: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to get history: {str(e)}")
@@ -1034,6 +1040,8 @@ async def analyze_document(
             "quoted_clauses": quoted_clauses
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error analyzing document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Document analysis failed: {str(e)}")

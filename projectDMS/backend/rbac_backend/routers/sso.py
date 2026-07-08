@@ -45,6 +45,8 @@ async def sso_login():
     nonce = secrets.token_urlsafe(24)
     try:
         url = await OidcService().authorization_url(state, nonce)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("OIDC authorization URL failed: %s", exc)
         raise HTTPException(status_code=502, detail="SSO provider is unavailable")
@@ -87,6 +89,8 @@ async def sso_callback(
         )
     except OidcError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.error("OIDC callback failed: %s", exc)
         raise HTTPException(status_code=502, detail="SSO sign-in failed")

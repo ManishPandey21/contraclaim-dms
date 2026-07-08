@@ -75,6 +75,8 @@ async def get_permissions(
             "limit": pagination["limit"]
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get permissions: {str(e)}")
         raise HTTPException(
@@ -131,6 +133,8 @@ async def create_permission(
         )
         return permission
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create permission: {str(e)}")
         raise HTTPException(
@@ -164,6 +168,8 @@ async def update_permission(
         )
         return permission
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update permission {permission_id}: {str(e)}")
         raise HTTPException(

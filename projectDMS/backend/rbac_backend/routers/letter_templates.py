@@ -59,7 +59,7 @@ class LetterTemplateController:
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"],
             )
-        except AuthorizationError:
+        except (AuthorizationError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to get templates: %s", exc)
@@ -83,7 +83,7 @@ class LetterTemplateController:
                 current_user, template, "read"
             )
             return template
-        except AuthorizationError:
+        except (AuthorizationError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -103,7 +103,7 @@ class LetterTemplateController:
                 current_user, "letter_templates:create"
             )
             return await self.template_service.create_template(data, current_user)
-        except AuthorizationError:
+        except (AuthorizationError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -134,7 +134,7 @@ class LetterTemplateController:
             return await self.template_service.update_template(
                 template_id, update_data, current_user
             )
-        except AuthorizationError:
+        except (AuthorizationError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -161,7 +161,7 @@ class LetterTemplateController:
             )
             await self.template_service.delete_template(template_id, current_user)
             return {"message": "Template deleted successfully"}
-        except AuthorizationError:
+        except (AuthorizationError, HTTPException):
             raise
         except TemplateError:
             raise

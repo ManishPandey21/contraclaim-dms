@@ -91,7 +91,7 @@ class PerformanceController:
             
             return PerformanceMetrics(**metrics)
             
-        except PerformanceError:
+        except (PerformanceError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting performance metrics: {str(e)}")
@@ -119,6 +119,8 @@ class PerformanceController:
             
             return [EndpointStats(**stat) for stat in stats]
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting endpoint performance: {str(e)}")
             raise HTTPException(
@@ -145,6 +147,8 @@ class PerformanceController:
             
             return slow_queries
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting slow queries: {str(e)}")
             raise HTTPException(
@@ -166,6 +170,8 @@ class PerformanceController:
             
             return cache_stats
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting cache stats: {str(e)}")
             raise HTTPException(
@@ -192,6 +198,8 @@ class PerformanceController:
                 "message": f"Cache cleared successfully. {cleared_entries} entries removed."
             }
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error clearing cache: {str(e)}")
             raise HTTPException(
@@ -213,6 +221,8 @@ class PerformanceController:
             
             return JobStats(**job_stats)
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Error getting job stats: {str(e)}")
             raise HTTPException(
@@ -252,7 +262,7 @@ class PerformanceController:
             
             return {"message": f"Job {job_id} cancelled successfully"}
             
-        except PerformanceError:
+        except (PerformanceError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error cancelling job: {str(e)}")

@@ -99,7 +99,7 @@ class FolderController:
                 path=safe_path
             )
             
-        except FolderError:
+        except (FolderError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Folder creation failed: {str(e)}")
@@ -135,6 +135,8 @@ class FolderController:
             # Build tree structure efficiently
             return await self._build_folder_tree(folders, None)
             
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Failed to get folder structure: {str(e)}")
             raise HTTPException(
@@ -233,7 +235,7 @@ class FolderController:
                 size=len(content)
             )
             
-        except FolderError:
+        except (FolderError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"File upload failed: {str(e)}")
@@ -277,7 +279,7 @@ class FolderController:
                 self.s3_service.cleanup_deleted_items(safe_path)
             )
             
-        except FolderError:
+        except (FolderError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Deletion failed: {str(e)}")

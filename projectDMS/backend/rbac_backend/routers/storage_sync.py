@@ -601,6 +601,8 @@ async def storage_sync_status(
     """
     try:
         return await _gather_storage_status(method)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to gather storage sync status")
         raise HTTPException(status_code=500, detail=f"Unable to gather storage status: {exc}")

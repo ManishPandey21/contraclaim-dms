@@ -484,6 +484,8 @@ async def semantic_search(
             current_user=current_user
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Semantic search error: {str(e)}")
         raise HTTPException(status_code=500, detail="Semantic search failed")

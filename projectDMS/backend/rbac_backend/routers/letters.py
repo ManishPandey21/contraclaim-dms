@@ -324,6 +324,8 @@ class LetterController:
 
             return letters
 
+        except HTTPException:
+            raise
         except Exception as e:
 
             logger.error(f"Failed to get letters: {str(e)}")
@@ -416,7 +418,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 
@@ -580,7 +582,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 
@@ -728,7 +730,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 
@@ -852,7 +854,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 
@@ -976,7 +978,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 
@@ -1140,7 +1142,7 @@ class LetterController:
 
 
 
-        except LetterError:
+        except (LetterError, HTTPException):
 
 
 

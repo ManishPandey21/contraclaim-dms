@@ -118,7 +118,7 @@ class EmailController:
                 status="queued"
             )
             
-        except EmailError:
+        except (EmailError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email sending failed: {str(e)}")
@@ -177,7 +177,7 @@ class EmailController:
                 status="queued"
             )
             
-        except EmailError:
+        except (EmailError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Notification email failed: {str(e)}")

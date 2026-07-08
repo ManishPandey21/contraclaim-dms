@@ -98,6 +98,8 @@ async def preview_report(
         return await report_service.generate_preview(request, current_user)
     except ReportServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:  # pragma: no cover - unexpected failure
         raise HTTPException(status_code=500, detail=f"Failed to build report: {exc}")
 
@@ -126,5 +128,7 @@ async def download_report(
         )
     except ReportServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except HTTPException:
+        raise
     except Exception as exc:  # pragma: no cover - unexpected failure
         raise HTTPException(status_code=500, detail=f"Failed to download report: {exc}")
