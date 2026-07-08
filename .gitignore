@@ -5,4 +5,4 @@
 **/build/
 
 # Contains VPS IPs + plaintext SSH credentials — must never be tracked.
-projectDMS/installation.txt
+installation.txt
