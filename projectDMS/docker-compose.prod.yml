@@ -18,6 +18,9 @@ x-backend-env: &backend-env
   AUTH_COOKIE_SECURE: "true"
   AUTH_COOKIE_SAMESITE: "${AUTH_COOKIE_SAMESITE:-lax}"
   AUTH_COOKIE_DOMAIN: "${AUTH_COOKIE_DOMAIN:-}"
+  # C2: deny auth (503) while the session store is unreachable so revoked
+  # sessions cannot outlive a Redis outage. false = availability tradeoff.
+  AUTH_SESSION_FAIL_CLOSED: "${AUTH_SESSION_FAIL_CLOSED:-true}"
   CORS_ORIGINS: "${CORS_ORIGINS:?CORS_ORIGINS is required}"
   PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:?PUBLIC_BASE_URL is required}"
   PUBLIC_API_URL: "${PUBLIC_API_URL:-${PUBLIC_BASE_URL}/api}"

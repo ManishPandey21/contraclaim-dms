@@ -16,7 +16,49 @@ from ..services.permission_service import PermissionService
 from ..utils.audit_logger import get_audit_logger
 
 
+import logging
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+logger = logging.getLogger(__name__)
+
+
+class _SessionStoreUnavailableError(Exception):
+    """Raised when the configured session store cannot answer revocation checks."""
+
+
+async def _handle_session_store_unavailable(exc: Exception) -> None:
+    """C2: apply the fail-closed/fail-open policy for session-store outages.
+
+    Revocation state (logout, forced JWT invalidation, lockout) lives in the
+    runtime Redis. When that store is configured but unreachable we either deny
+    authentication with a 503 (default — a revoked session must not outlive a
+    Redis outage) or, when AUTH_SESSION_FAIL_CLOSED=false, log loudly and skip
+    the checks for this request. 503 rather than 401 on purpose: the client's
+    401 handler would clear the session and bounce users to login; 503 keeps
+    their cookie for when the store returns.
+    """
+    try:
+        from ..services.observability import observability_registry
+
+        await observability_registry.record_domain_event(
+            resource_type="auth", event_type="session_store_unavailable"
+        )
+    except Exception:
+        pass
+    if settings.AUTH_SESSION_FAIL_CLOSED:
+        logger.error(
+            "Session store unavailable; failing closed (AUTH_SESSION_FAIL_CLOSED=true): %s", exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable",
+        ) from exc
+    logger.warning(
+        "Session store unavailable; AUTH_SESSION_FAIL_CLOSED=false — proceeding WITHOUT "
+        "revocation checks (logout/lockout not enforced for this request): %s",
+        exc,
+    )
 
 # Compatibility role aliases to normalize various role naming schemes
 ROLE_ALIASES = {
@@ -125,22 +167,32 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                     # JWT Invalidation Check (Phase 3)
                     from ..services.runtime_state import get_runtime_state
                     runtime = get_runtime_state()
-                    redis = await runtime.get_redis()
-                    if redis is not None:
-                        min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
-                        if min_iat and iat < int(min_iat):
-                            raise credentials_exception
-
-                        # Session invalidation: a logged-out or expired session must
-                        # immediately stop authenticating, even within the token TTL.
-                        # Only enforced when Redis is the session store; the
-                        # in-memory fallback is per-process and not authoritative.
-                        session_id = payload.get("session_id")
-                        if session_id:
-                            from ..services.authentication_service import AuthenticationService
-
-                            if not await AuthenticationService().is_session_active(str(session_id)):
+                    # C2: only deployments that configure a runtime Redis have an
+                    # authoritative revocation store; for them, an unreachable
+                    # store must not silently skip the checks (fail-open logout).
+                    if runtime.redis_url:
+                        try:
+                            redis = await runtime.get_redis()
+                            if redis is None:
+                                raise _SessionStoreUnavailableError("runtime Redis unreachable")
+                            min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
+                            if min_iat and iat < int(min_iat):
                                 raise credentials_exception
+
+                            # Session invalidation: a logged-out or expired session must
+                            # immediately stop authenticating, even within the token TTL.
+                            session_id = payload.get("session_id")
+                            if session_id:
+                                from ..services.authentication_service import AuthenticationService
+
+                                if not await AuthenticationService().is_session_active(str(session_id)):
+                                    raise credentials_exception
+                        except HTTPException:
+                            raise  # revocation denials keep their 401 semantics
+                        except Exception as exc:
+                            # Store configured but failing (connection refused,
+                            # timeout mid-call, stale client): apply the policy.
+                            await _handle_session_store_unavailable(exc)
 
                     # Derive organizations for superuser/similar users if not present
                     orgs = user.get("organizations", [])
@@ -174,6 +226,14 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                     )
         except JWTError:
             # Try the next credential source before falling through to dev mode.
+            continue
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE:
+                # C2 fail-closed: a session-store outage must surface as an
+                # outage, not be swallowed by the next-credential fallback.
+                raise
+            # Revocation denials (401) fall through to the next candidate; the
+            # final deny below still applies if none authenticate.
             continue
         except Exception:
             # Any unexpected token error -> try the next credential source.

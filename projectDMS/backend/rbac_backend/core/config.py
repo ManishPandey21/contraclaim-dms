@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     AUTH_COOKIE_SECURE: bool = Field(default=False, validation_alias="AUTH_COOKIE_SECURE")
     AUTH_COOKIE_SAMESITE: str = Field(default="lax", validation_alias="AUTH_COOKIE_SAMESITE")
     AUTH_COOKIE_DOMAIN: Optional[str] = Field(default=None, validation_alias="AUTH_COOKIE_DOMAIN")
+    # C2: when the session store (runtime Redis) is configured but unreachable,
+    # revocation state (logout, forced token invalidation, lockout) cannot be
+    # evaluated. Default fail-closed: deny authentication with a 503 until the
+    # store returns, so a revoked session can never outlive a Redis outage.
+    # Setting this false is an explicit availability-over-revocation tradeoff;
+    # deployments without a Redis URL configured are unaffected either way.
+    AUTH_SESSION_FAIL_CLOSED: bool = Field(default=True, validation_alias="AUTH_SESSION_FAIL_CLOSED")
     
     # CORS Configuration
     CORS_ORIGINS: list[str] = Field(
