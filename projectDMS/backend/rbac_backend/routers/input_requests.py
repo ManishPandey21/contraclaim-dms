@@ -537,7 +537,7 @@ async def get_input_request_controller() -> InputRequestController:
     input_request_service = InputRequestService()
     letter_service = LetterService(db, notification_service=notification_service)
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="input_requests")
     audit_logger = AuditLogger()
     
     return InputRequestController(

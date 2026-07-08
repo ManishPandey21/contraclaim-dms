@@ -36,7 +36,9 @@ const OrganizationsPage = () => {
     const fetchOrganizations = async () => {
       setLoading(true);
       try {
-        const data = await listOrganizations();
+        // Management page: bypass the shared dropdown cache so CRUD always
+        // starts from the server's current list.
+        const data = await listOrganizations({ forceRefresh: true });
         setOrganizations(data);
       } catch (error: unknown) {
         console.error(

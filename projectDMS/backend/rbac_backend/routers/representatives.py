@@ -695,8 +695,9 @@ async def get_representative_controller() -> RepresentativeController:
     org_service = OrganizationService()
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(
-        requests_per_minute=100,
-        window_seconds=3600
+        max_requests=100,
+        window_seconds=3600,
+        scope="representatives",
     )
     audit_logger = AuditLogger()
     

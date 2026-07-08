@@ -24,7 +24,7 @@ from ..utils.validation import sanitize_filename, sanitize_html
 
 router = APIRouter()
 group_service = EmailGroupService()
-public_share_limiter = RateLimiter(requests_per_minute=120, window_seconds=3600)
+public_share_limiter = RateLimiter(max_requests=120, window_seconds=3600, scope="email_share")
 
 
 def _fallback_project_id(current_user: CurrentUser) -> Optional[str]:

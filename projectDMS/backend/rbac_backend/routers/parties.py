@@ -434,7 +434,7 @@ async def get_party_controller() -> PartyController:
     party_service = PartyService()
     project_service = ProjectService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="parties")
     audit_logger = AuditLogger()
     
     return PartyController(

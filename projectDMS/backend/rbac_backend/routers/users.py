@@ -905,8 +905,9 @@ async def get_user_controller(db = Depends(get_db)) -> UserController:
     auth_service = AuthorizationService()
     authentication_service = AuthenticationService()
     rate_limiter = RateLimiter(
-        requests_per_minute=60,
-        window_seconds=3600
+        max_requests=60,
+        window_seconds=3600,
+        scope="users",
     )
     audit_logger = AuditLogger()
     notification_service = NotificationService(db)

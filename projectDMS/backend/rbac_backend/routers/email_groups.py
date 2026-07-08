@@ -457,7 +457,7 @@ async def get_email_group_controller() -> EmailGroupController:
     """Factory function for email group controller."""
     email_group_service = EmailGroupService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="email_groups")
     audit_logger = AuditLogger()
     
     return EmailGroupController(

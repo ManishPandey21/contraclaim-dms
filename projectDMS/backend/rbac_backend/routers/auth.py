@@ -421,9 +421,9 @@ async def get_auth_controller(db = Depends(get_db)) -> AuthController:
     auth_service = AuthenticationService()
     user_service = UserService(db)
     authorization_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="auth")
     audit_logger = AuditLogger()
-    
+
     return AuthController(
         auth_service, user_service, authorization_service,
         rate_limiter, audit_logger

@@ -36,7 +36,7 @@ from ..utils.rate_limiter import RateLimiter
 router = APIRouter(prefix="/rbac-monetization", tags=["rbac-monetization"])
 
 # Rate limiter for monetization mutations (billing, subscriptions)
-monetization_mutation_limiter = RateLimiter(requests_per_minute=30, window_seconds=60)
+monetization_mutation_limiter = RateLimiter(max_requests=30, window_seconds=60, scope="monetization")
 
 
 async def check_monetization_rate_limit(current_user: CurrentUser = Depends(get_current_user)):

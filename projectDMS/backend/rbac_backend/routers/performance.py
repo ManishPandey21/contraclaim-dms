@@ -287,7 +287,7 @@ async def get_performance_controller() -> PerformanceController:
     """Factory function for performance controller."""
     performance_service = PerformanceService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="performance")
     audit_logger = AuditLogger()
     
     return PerformanceController(

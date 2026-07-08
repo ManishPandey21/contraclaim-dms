@@ -27,7 +27,43 @@ export interface OrganizationListResponse {
   has_prev?: boolean;
 }
 
-export async function listOrganizations(): Promise<Organization[]> {
+// The organization list feeds dropdowns on many pages but rarely changes.
+// Cache it module-wide (with in-flight dedupe) so simultaneous mounts share
+// one request instead of each page burning the API rate budget.
+const ORG_CACHE_TTL_MS = 5 * 60 * 1000;
+let orgListCache: { data: Organization[]; fetchedAt: number } | null = null;
+let orgListInFlight: Promise<Organization[]> | null = null;
+
+export function invalidateOrganizationsCache(): void {
+  orgListCache = null;
+  orgListInFlight = null;
+}
+
+export async function listOrganizations(options?: {
+  forceRefresh?: boolean;
+}): Promise<Organization[]> {
+  const force = options?.forceRefresh === true;
+  if (!force) {
+    if (orgListCache && Date.now() - orgListCache.fetchedAt < ORG_CACHE_TTL_MS) {
+      return orgListCache.data;
+    }
+    if (orgListInFlight) {
+      return orgListInFlight;
+    }
+  }
+  const request = fetchOrganizations()
+    .then((data) => {
+      orgListCache = { data, fetchedAt: Date.now() };
+      return data;
+    })
+    .finally(() => {
+      orgListInFlight = null;
+    });
+  orgListInFlight = request;
+  return request;
+}
+
+async function fetchOrganizations(): Promise<Organization[]> {
   const { data } = await api.get<Organization[] | OrganizationListResponse>(
     "/organizations"
   );
@@ -87,6 +123,7 @@ export async function createOrganization(
   payload: Partial<Organization>
 ): Promise<Organization> {
   const { data } = await api.post("/organizations", payload);
+  invalidateOrganizationsCache();
   return data as Organization;
 }
 
@@ -95,6 +132,7 @@ export async function updateOrganization(
   payload: Partial<Organization>
 ): Promise<Organization> {
   const { data } = await api.put(`/organizations/${id}`, payload);
+  invalidateOrganizationsCache();
   return data as Organization;
 }
 
@@ -102,5 +140,6 @@ export async function deleteOrganization(
   id: string
 ): Promise<{ message: string } | { detail?: string }> {
   const { data } = await api.delete(`/organizations/${id}`);
+  invalidateOrganizationsCache();
   return data;
 }

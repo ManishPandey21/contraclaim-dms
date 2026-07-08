@@ -1905,17 +1905,9 @@ async def get_letter_controller(db=Depends(get_db)) -> LetterController:
 
 
     rate_limiter = RateLimiter(
-
-
-
-        requests_per_minute=100,
-
-
-
-        window_seconds=3600
-
-
-
+        max_requests=100,
+        window_seconds=3600,
+        scope="letters",
     )
 
 

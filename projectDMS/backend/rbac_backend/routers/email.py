@@ -347,8 +347,9 @@ async def get_email_controller() -> EmailController:
     auth_service = AuthorizationService()
     template_service = TemplateService()
     rate_limiter = RateLimiter(
-        requests_per_minute=30,
-        window_seconds=3600
+        max_requests=30,
+        window_seconds=3600,
+        scope="email",
     )
     audit_logger = AuditLogger()
     

@@ -726,8 +726,9 @@ async def get_tag_controller() -> TagController:
     tag_service = TagService()
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(
-        requests_per_minute=120,
-        window_seconds=3600
+        max_requests=120,
+        window_seconds=3600,
+        scope="tags",
     )
     audit_logger = AuditLogger()
     

@@ -246,7 +246,10 @@ const ProjectStorageSettings = () => {
     const bootstrap = async () => {
       try {
         const [orgs, projs] = await Promise.all([
-          listOrganizations().catch(() => []),
+          listOrganizations().catch((error) => {
+            console.error("Failed to load organizations:", error);
+            return [];
+          }),
           listProjects(orgId ? { organization_id: orgId } : undefined).catch(
             () => []
           ),

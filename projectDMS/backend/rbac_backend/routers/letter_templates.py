@@ -176,7 +176,7 @@ class LetterTemplateController:
 async def get_letter_template_controller() -> LetterTemplateController:
     template_service = LetterTemplateService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter(requests_per_minute=120, window_seconds=3600)
+    rate_limiter = RateLimiter(max_requests=120, window_seconds=3600, scope="letter_templates")
     return LetterTemplateController(template_service, auth_service, rate_limiter)
 
 

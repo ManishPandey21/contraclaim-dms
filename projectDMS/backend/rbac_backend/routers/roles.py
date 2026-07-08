@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Rate limiter for role mutations (strict limits for security)
-role_mutation_limiter = RateLimiter(requests_per_minute=20, window_seconds=60)
+role_mutation_limiter = RateLimiter(max_requests=20, window_seconds=60, scope="roles")
 
 async def check_role_mutation_rate_limit(current_user: CurrentUser = Depends(get_current_user)):
     await role_mutation_limiter.check_user_limit(current_user.id)

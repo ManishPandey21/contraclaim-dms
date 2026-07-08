@@ -262,8 +262,9 @@ async def get_ai_controller() -> AIAssistantController:
     ai_service = AIService()
     cache_service = CacheService()
     rate_limiter = RateLimiter(
-        requests_per_minute=settings.USER_RATE_LIMIT_REQUESTS,
-        window_seconds=settings.USER_RATE_LIMIT_WINDOW
+        max_requests=settings.USER_RATE_LIMIT_REQUESTS,
+        window_seconds=settings.USER_RATE_LIMIT_WINDOW,
+        scope="ai_assistant",
     )
     llm_config_service = LLMConfigService()
     return AIAssistantController(ai_service, cache_service, rate_limiter, llm_config_service)

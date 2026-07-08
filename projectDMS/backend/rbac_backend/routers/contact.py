@@ -19,7 +19,7 @@ from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/contact", tags=["contact"])
-rate_limiter = RateLimiter(requests_per_minute=5, window_seconds=3600)
+rate_limiter = RateLimiter(max_requests=5, window_seconds=3600, scope="contact")
 
 
 class ContactRequest(BaseModel):

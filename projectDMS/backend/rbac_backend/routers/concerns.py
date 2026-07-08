@@ -318,7 +318,7 @@ async def get_concern_controller() -> ConcernController:
     concern_service = ConcernService()
     party_service = PartyService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter()
+    rate_limiter = RateLimiter(scope="concerns")
     audit_logger = AuditLogger()
     
     return ConcernController(

@@ -77,7 +77,9 @@ class OrganizationController:
             
             return organization
             
-        except OrganizationError:
+        except (OrganizationError, HTTPException):
+            # Let 429s from the rate limiter and auth errors keep their real
+            # status instead of being masked as a 500 "unavailable".
             raise
         except Exception as e:
             logger.error(f"Organization creation failed: {str(e)}")
@@ -153,7 +155,12 @@ class OrganizationController:
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
+        except (OrganizationError, HTTPException):
+            # Rate-limit (429) and authorization errors must surface with
+            # their real status; masking them as 500 "temporarily unavailable"
+            # made intermittent rate-limit hits look like service outages.
+            raise
         except Exception as e:
             logger.error(f"Failed to get organizations: {str(e)}")
             raise HTTPException(
@@ -186,7 +193,7 @@ class OrganizationController:
             
             return organization
             
-        except OrganizationError:
+        except (OrganizationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get organization {organization_id}: {str(e)}")
@@ -237,7 +244,7 @@ class OrganizationController:
             
             return updated_org
             
-        except OrganizationError:
+        except (OrganizationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update organization {organization_id}: {str(e)}")
@@ -289,7 +296,7 @@ class OrganizationController:
             
             return {"message": "Organization deleted successfully"}
             
-        except OrganizationError:
+        except (OrganizationError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete organization {organization_id}: {str(e)}")
@@ -408,9 +415,13 @@ async def get_organization_controller() -> OrganizationController:
     """Factory function for organization controller."""
     org_service = OrganizationService()
     auth_service = AuthorizationService()
+    # Per-minute budget for a read-heavy endpoint group: the org list feeds
+    # dropdowns on many pages. The previous 100-per-HOUR shared bucket made
+    # dropdowns 429 after normal browsing activity.
     rate_limiter = RateLimiter(
-        requests_per_minute=100,
-        window_seconds=3600
+        max_requests=120,
+        window_seconds=60,
+        scope="organizations",
     )
     audit_logger = AuditLogger()
     

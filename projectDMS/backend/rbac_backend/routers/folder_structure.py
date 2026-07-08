@@ -381,8 +381,9 @@ async def get_folder_controller() -> FolderController:
     s3_service = S3Service()
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(
-        requests_per_minute=settings.USER_RATE_LIMIT_REQUESTS,
+        max_requests=settings.USER_RATE_LIMIT_REQUESTS,
         window_seconds=settings.USER_RATE_LIMIT_WINDOW,
+        scope="folders",
     )
     return FolderController(folder_service, s3_service, auth_service, rate_limiter)
 
