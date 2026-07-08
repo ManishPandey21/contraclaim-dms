@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 import tempfile
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Header, HTTPException, Response, status
 from fastapi.responses import PlainTextResponse
@@ -19,6 +21,8 @@ from ..services.observability import observability_registry
 from ..services.operations_health import build_backup_health
 
 router = APIRouter(tags=["health"])
+
+_DEPENDENCY_CHECK_TIMEOUT_S = 2.0
 
 
 def _status(ok: bool) -> str:
@@ -48,6 +52,88 @@ async def legacy_health() -> Dict[str, Any]:
     """Backward-compatible health endpoint used by existing Compose files."""
 
     return await liveness()
+
+
+async def _tcp_connect_ok(host: str, port: int) -> None:
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(host, port), timeout=_DEPENDENCY_CHECK_TIMEOUT_S
+    )
+    writer.close()
+    try:
+        await writer.wait_closed()
+    except Exception:
+        pass
+
+
+async def _check_qdrant() -> Dict[str, Any]:
+    from ..config.document_processing_config import DocumentProcessingConfig
+
+    url = DocumentProcessingConfig().qdrant_url
+    if not url:
+        return {"status": "skipped", "reason": "not configured"}
+    parsed = urlparse(url if "//" in url else f"//{url}")
+    host = parsed.hostname or "localhost"
+    port = parsed.port or (443 if parsed.scheme == "https" else 6333)
+    await _tcp_connect_ok(host, port)
+    return {"status": "ok"}
+
+
+async def _check_falkordb() -> Dict[str, Any]:
+    if not settings.FALKORDB_ENABLED:
+        return {"status": "skipped", "reason": "disabled"}
+    redis = Redis.from_url(
+        settings.FALKORDB_URL,
+        password=settings.FALKORDB_PASSWORD or None,
+        socket_connect_timeout=_DEPENDENCY_CHECK_TIMEOUT_S,
+        socket_timeout=_DEPENDENCY_CHECK_TIMEOUT_S,
+        retry_on_timeout=False,
+    )
+    try:
+        await redis.ping()
+    finally:
+        await redis.aclose()
+    return {"status": "ok"}
+
+
+async def _check_clamav() -> Dict[str, Any]:
+    if not settings.ANTIVIRUS_ENABLED:
+        return {"status": "skipped", "reason": "disabled"}
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(settings.CLAMAV_HOST, settings.CLAMAV_PORT),
+        timeout=_DEPENDENCY_CHECK_TIMEOUT_S,
+    )
+    try:
+        writer.write(b"nPING\n")
+        await writer.drain()
+        reply = await asyncio.wait_for(reader.read(16), timeout=_DEPENDENCY_CHECK_TIMEOUT_S)
+        if b"PONG" not in reply:
+            raise RuntimeError(f"unexpected clamd reply: {reply!r}")
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+    return {"status": "ok"}
+
+
+async def _degraded_dependency_checks(include_details: bool) -> Dict[str, Dict[str, Any]]:
+    """Best-effort checks for dependencies the app can survive without.
+
+    Qdrant down degrades retrieval to the Mongo failsafe, FalkorDB down loses
+    graph augmentation, ClamAV down blocks uploads (fail-closed) — none should
+    take the pod out of rotation, but all must be visible to ops. Results are
+    reported in /health/ready and exported as contractdms_dependency_up.
+    """
+    results: Dict[str, Dict[str, Any]] = {}
+    for name, check in (("qdrant", _check_qdrant), ("falkordb", _check_falkordb), ("clamav", _check_clamav)):
+        try:
+            results[name] = await check()
+        except Exception as exc:
+            results[name] = {"status": "degraded", "error": _health_error(exc, include_details)}
+        healthy = results[name].get("status") in ("ok", "skipped")
+        await observability_registry.record_dependency_health(name=name, healthy=healthy)
+    return results
 
 
 @router.get("/health/ready")
@@ -153,6 +239,10 @@ async def readiness(
     else:
         checks["local_storage"] = {"status": "failed", "error": "No storage directory configured"}
 
+    # Non-blocking: AI/AV dependencies degrade features but must not take the
+    # pod out of rotation (core DMS keeps working via the Mongo failsafe).
+    degraded = await _degraded_dependency_checks(include_details)
+
     ready = mongo_ok and redis_ok and runtime_redis_ok and config_ok and storage_ok
     if not ready:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -162,6 +252,7 @@ async def readiness(
         "service": "backend",
         "timestamp": datetime.utcnow().isoformat(),
         "checks": checks,
+        "degraded_dependencies": degraded,
     }
 
 

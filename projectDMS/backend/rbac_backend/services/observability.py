@@ -40,6 +40,8 @@ class ObservabilityRegistry:
     _arbitration_bundle_exports_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _arbitration_readiness_score: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _arbitration_missing_evidence: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _vector_store_failures_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _dependency_health: Dict[str, float] = field(default_factory=dict)
 
     async def record_request(
         self,
@@ -118,6 +120,21 @@ class ObservabilityRegistry:
             self._arbitration_readiness_score[key] = float(score or 0)
             self._arbitration_missing_evidence[("readiness", str(status or "unknown"))] = int(missing_evidence_count or 0)
 
+    async def record_vector_store_failure(self, *, operation: str, namespace: str | None = None) -> None:
+        """Count a Qdrant operation that failed while the store was enabled.
+
+        This is the alerting signal for the silent-degradation class of incident
+        (vector outage presenting as "no results"): the failure is no longer
+        swallowed, and this counter makes it visible to a scraper.
+        """
+        key = (str(operation or "unknown"), str(namespace or "default"))
+        async with self._lock:
+            self._vector_store_failures_total[key] = self._vector_store_failures_total.get(key, 0) + 1
+
+    async def record_dependency_health(self, *, name: str, healthy: bool) -> None:
+        async with self._lock:
+            self._dependency_health[str(name)] = 1.0 if healthy else 0.0
+
     def snapshot(self) -> Dict[str, object]:
         total_requests = sum(self._request_total.values())
         total_errors = sum(self._errors_total.values())
@@ -130,6 +147,8 @@ class ObservabilityRegistry:
             "backup_health": dict(self._backup_health),
             "arbitration_agent_run_total": sum(self._arbitration_agent_runs_total.values()),
             "arbitration_bundle_export_total": sum(self._arbitration_bundle_exports_total.values()),
+            "vector_store_failure_total": sum(self._vector_store_failures_total.values()),
+            "dependency_health": dict(self._dependency_health),
         }
 
     def render_prometheus(self) -> str:
@@ -244,6 +263,25 @@ class ObservabilityRegistry:
         for (signal, signal_status), value in sorted(self._arbitration_missing_evidence.items()):
             labels = _labels((("signal", signal), ("status", signal_status)))
             lines.append(f"contractdms_arbitration_missing_evidence{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_vector_store_failures_total Qdrant operations that failed while the vector store was enabled.",
+                "# TYPE contractdms_vector_store_failures_total counter",
+            ]
+        )
+        for (operation, namespace), value in sorted(self._vector_store_failures_total.items()):
+            labels = _labels((("operation", operation), ("namespace", namespace)))
+            lines.append(f"contractdms_vector_store_failures_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_dependency_up Last observed dependency health, 1 up / 0 down.",
+                "# TYPE contractdms_dependency_up gauge",
+            ]
+        )
+        for name, value in sorted(self._dependency_health.items()):
+            lines.append(f"contractdms_dependency_up{_labels((('dependency', name),))} {value:.0f}")
 
         return "\n".join(lines) + "\n"
 

@@ -833,6 +833,10 @@ class ContractService:
                 query_vector,
                 filters=filters,
                 limit=candidate_limit,
+                # _resolve_scope only leaves effective_org None for roles with
+                # legitimate global access (superadmin); everyone else is pinned
+                # to their org and must not search cross-tenant.
+                allow_global=effective_org is None,
             )
             return [item for item in results if self._payload_matches_structured_filters(item.get("payload") or {}, request)]
         except Exception as exc:

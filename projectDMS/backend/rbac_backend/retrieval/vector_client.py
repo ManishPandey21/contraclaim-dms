@@ -11,6 +11,26 @@ from .source_metadata import normalize_source_payload
 logger = logging.getLogger(__name__)
 
 
+class VectorStoreUnavailableError(RuntimeError):
+    """Qdrant is configured but an operation failed.
+
+    Callers must treat this as an outage (engage their Mongo/lexical failsafe
+    or surface an error), never as "no results". Historically these failures
+    fell back to the in-process memory index — which is empty in production —
+    so vector outages presented as silent empty result sets.
+    """
+
+
+class VectorScopeError(ValueError):
+    """Refused a vector query without a tenant (org_id) filter.
+
+    Every payload is tenant-tagged and every legitimate caller scopes by
+    org_id; requiring it here means one forgotten filter cannot become a
+    cross-organization data leak. Admin/ops tooling that genuinely needs a
+    global view must opt in with allow_global=True.
+    """
+
+
 def _cosine(a: List[float], b: List[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0
@@ -254,15 +274,45 @@ class VectorClient:
                     wait=True,
                 )
                 removed = len(chunk_ids)
-            except Exception as exc:  # pragma: no cover - external dependency
+            except Exception as exc:
+                # Deletion failure leaves stale vectors (reconciliation catches
+                # the drift later); keep going but make the failure countable.
                 logger.warning("Failed to delete points from Qdrant: %s", exc)
+                await self._record_failure("delete", collection)
 
         before = len(self._memory_index)
         self._memory_index = [entry for entry in self._memory_index if entry["payload"].get("chunk_id") not in chunk_ids]
         removed = max(removed, before - len(self._memory_index))
         return removed
 
-    async def list_chunk_ids(self, filters: Dict[str, Any], namespace: Optional[str] = None, limit: int = 1000) -> List[str]:
+    @staticmethod
+    def _require_tenant_scope(filters: Dict[str, Any], allow_global: bool) -> None:
+        if allow_global:
+            return
+        if not (filters or {}).get("org_id"):
+            raise VectorScopeError(
+                "vector query requires an org_id filter; pass allow_global=True only "
+                "for admin/ops tooling that intentionally spans organizations"
+            )
+
+    async def _record_failure(self, operation: str, namespace: Optional[str]) -> None:
+        try:
+            from ..services.observability import observability_registry
+
+            await observability_registry.record_vector_store_failure(
+                operation=operation, namespace=namespace
+            )
+        except Exception:  # metrics must never break the failure path itself
+            logger.debug("Failed to record vector store failure metric", exc_info=True)
+
+    async def list_chunk_ids(
+        self,
+        filters: Dict[str, Any],
+        namespace: Optional[str] = None,
+        limit: int = 1000,
+        allow_global: bool = False,
+    ) -> List[str]:
+        self._require_tenant_scope(filters, allow_global)
         collection = namespace or self.collection_name or self.config.qdrant_collection
         if self.enabled and self._client and self._qmodels:
             qfilter = self._build_filter(filters)
@@ -276,8 +326,11 @@ class VectorClient:
                     with_vectors=False,
                 )
                 return [str(point.id) for point in res]
-            except Exception as exc:  # pragma: no cover
-                logger.warning("Qdrant scroll failed, falling back to in-memory: %s", exc)
+            except Exception as exc:
+                # Enabled-but-failing is an outage: a silent empty list here
+                # would make reconciliation believe every vector is missing.
+                await self._record_failure("list_chunk_ids", collection)
+                raise VectorStoreUnavailableError(f"Qdrant scroll failed: {exc}") from exc
         ids: List[str] = []
         for entry in self._memory_index:
             if entry.get("namespace") != collection:
@@ -294,9 +347,11 @@ class VectorClient:
         filters: Dict[str, Any],
         limit: int = 5,
         namespace: Optional[str] = None,
+        allow_global: bool = False,
     ) -> List[Dict[str, Any]]:
         if not query_vector:
             return []
+        self._require_tenant_scope(filters, allow_global)
         collection = namespace or self.collection_name or self.config.qdrant_collection
         if self.enabled and self._client and self._qmodels:
             qfilter = self._build_filter(filters)
@@ -323,8 +378,13 @@ class VectorClient:
                     }
                     for item in results
                 ]
-            except Exception as exc:  # pragma: no cover - network interaction
-                logger.warning("Vector search failed; falling back to in-memory index: %s", exc)
+            except Exception as exc:
+                # The in-memory index is only a stand-in for a *disabled* Qdrant
+                # (dev/tests). When Qdrant is enabled and fails, raising lets the
+                # retrieval service engage its Mongo failsafe instead of showing
+                # users a confident empty result set.
+                await self._record_failure("search", collection)
+                raise VectorStoreUnavailableError(f"Qdrant search failed: {exc}") from exc
 
         candidates = [
             entry
