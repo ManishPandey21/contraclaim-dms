@@ -11,6 +11,69 @@ ReferenceValue = Union[str, Dict[str, Any]]
 
 NULLISH_VALUES = {"", "null", "'null'", '"null"', "not found", "none", "n/a", "na", "not applicable", "-", "--"}
 
+EXTRACTED_TAG_OPTIONS: tuple[str, ...] = (
+    "Design & Drawings",
+    "Safety",
+    "Quality",
+    "Variations",
+    "Contractual",
+    "Payment",
+    "Schedule",
+    "Hindrances",
+    "EOT",
+    "Delay",
+    "Counterclaim",
+    "Responsibility",
+    "Notice Compliance",
+    "Status",
+    "Priority",
+)
+
+EXTRACTED_SUBTAG_OPTIONS: tuple[str, ...] = (
+    "Unforeseen Delay",
+    "Employer's Delay",
+    "Contractor's Delay",
+    "GFC",
+    "CRD",
+    "Design Approvals",
+    "As-Built Drawings",
+    "Shop Drawings",
+    "Safety Training",
+    "Inspections",
+    "Safety Incidents",
+    "Penalty",
+    "Vendor/Source Approval",
+    "Material Testing",
+    "Quality Assurance",
+    "Quality",
+    "NCN",
+    "Additional Work",
+    "Extra Items",
+    "Quantity Variations",
+    "Release of Performance Bank Guarantee",
+    "Taking Over Certificate",
+    "Price Variation/Escalation",
+    "Excise Duty",
+    "Advance",
+    "Retention",
+    "GST Reimbursement",
+    "Resources Planning",
+    "Key Dates",
+    "Schedule Updates",
+    "Baseline Schedule",
+    "DWP",
+    "Hindrances",
+    "Force Majeure",
+    "Local Restrictions",
+    "Adverse Weather",
+    "Site Access",
+    "Restrictions",
+    "Utility Relocation",
+    "Tree Cutting",
+    "Land Acquisition",
+    "EOT Programme",
+)
+
 
 def _clean_scalar(value: Any) -> Optional[str]:
     if value is None:
@@ -67,6 +130,24 @@ class ParsedDocumentMetadata(BaseModel):
     sub_tags: List[str] = Field(default_factory=list, alias="subTags")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_extracted_aliases(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        normalized = dict(values)
+        if "tags" not in normalized and "extracted_tags" in normalized:
+            normalized["tags"] = normalized.get("extracted_tags")
+        if (
+            "subTags" not in normalized
+            and "sub_tags" not in normalized
+        ):
+            if "extracted_subTags" in normalized:
+                normalized["subTags"] = normalized.get("extracted_subTags")
+            elif "extracted_sub_tags" in normalized:
+                normalized["subTags"] = normalized.get("extracted_sub_tags")
+        return normalized
 
     @model_validator(mode="after")
     def _normalize_nullish_values(self):
@@ -125,6 +206,8 @@ __all__ = [
     "ParsedDocumentMetadata",
     "ProcessingResult",
     "ReferenceValue",
+    "EXTRACTED_TAG_OPTIONS",
+    "EXTRACTED_SUBTAG_OPTIONS",
     "EXTRACTED_METADATA_FIELDS",
     "parsed_metadata_snapshot",
     "extracted_metadata_updates",
@@ -174,7 +257,17 @@ def extracted_metadata_updates(metadata: Any) -> Dict[str, Any]:
 
     for field in EXTRACTED_METADATA_FIELDS:
         if isinstance(metadata, dict):
-            value = metadata.get("subTags") if field == "sub_tags" else metadata.get(field)
+            if field == "tags":
+                value = metadata.get("extracted_tags") or metadata.get("tags")
+            elif field == "sub_tags":
+                value = (
+                    metadata.get("extracted_subTags")
+                    or metadata.get("extracted_sub_tags")
+                    or metadata.get("subTags")
+                    or metadata.get("sub_tags")
+                )
+            else:
+                value = metadata.get(field)
         else:
             value = getattr(metadata, field, None) if metadata is not None else None
         if value in (None, "", [], {}):

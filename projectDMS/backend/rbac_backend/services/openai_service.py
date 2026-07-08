@@ -9,6 +9,7 @@ from typing import Any, Iterable, List, Optional
 from openai import AsyncOpenAI
 
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..models.document_metadata import EXTRACTED_SUBTAG_OPTIONS, EXTRACTED_TAG_OPTIONS
 from ..utils.exceptions import DocumentProcessingError
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,8 @@ class OpenAIService:
 
     def _expanded_extraction_prompt(self) -> str:
         """Expanded contract letter metadata extraction prompt."""
+        tag_options = ", ".join(EXTRACTED_TAG_OPTIONS)
+        subtag_options = ", ".join(EXTRACTED_SUBTAG_OPTIONS)
         return (
             "You are a Contract expert extracting structured metadata from letters. "
             "Extract the following fields from the contract letter (attached PDF) and return them in this exact format. "
@@ -204,7 +207,7 @@ class OpenAIService:
             "1) Date: [extracted date or 'null' formatted as DD-MM-YYYY]\n"
             "2) Letter No.: [extracted letter number or 'null']\n"
             "3) From (Company): [sender company or 'null']\n"
-            "4) To (Company): [recipient company or 'null']\n"
+            "4) To (Company): [recipient company or company or 'null']\n"
             "5) Subject: [document subject or 'null']\n"
             "6) References: [list each reference letter no./date on a new line with - prefix or 'null']\n"
             "7) Asset Type: [Station/Tunnel/Ramp/Shaft/Road/Flyover/Bridge/Vehicular Underpass/Pedestrian Subway/Depot/Viaduct/Track/Utility/Restoration/Rework/General Contractual/Other or 'null']\n"
@@ -225,23 +228,8 @@ class OpenAIService:
             "23) Contractual Clauses: [comma-separated list of clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon; write 'null' if absent]\n"
             "24) Key Reply Points - Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response - one point per line with a - prefix, or 'null']\n"
             "25) Full Content: [cleaned text of the full letter]\n"
-            "26) tags: [select from table tags or null]\n"
-            "27) subTags: [select from table subtags based on tags or null]\n"
-        )
-        return (
-            "You are a Contract expert extracting structured metadata from letters. "
-            "Extract the following fields from the attached PDF and return them in this exact format:\n\n"
-            "1) Date: [extracted date or 'Not found' formatted as DD-MM-YYYY]\n"
-            "2) Letter No.: [extracted letter number or 'Not found']\n"
-            "3) From (Company): [sender company or 'Not found']\n"
-            "4) To (Company): [recipient company or 'Not found']\n"
-            "5) Subject: [document subject or 'Not found']\n"
-            "6) References: [list each reference Letter no. on a new line with - prefix or 'Not found']\n"
-            "7) Summary: [Write a 4-6 line Contractual/legal summary/Fact of the matter suitable for vector search/RAG.]\n"
-            "8) Key Words: [comma-separated list of key contractual words mentioned,Tags,Topic,Claim Type]\n"
-            "9) Contractual Clauses: [comma-separated list of clauses, Employer’s Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records are relied upon]\n"
-            "10) Key Reply Points — Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response — one point per line with a - prefix, or 'Not found']\n"
-            "11) Full content: [cleaned text of the full letter]\n"
+            f"26) extracted_tags: [select one or more from: {tag_options}; write 'null' if none]\n"
+            f"27) extracted_subTags: [select one or more from: {subtag_options}; write 'null' if none]\n"
         )
     
     def _get_model_name(self) -> str:

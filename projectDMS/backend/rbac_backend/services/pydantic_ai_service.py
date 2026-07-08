@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, List
 
 from ..config.document_processing_config import DocumentProcessingConfig
-from ..models.document_metadata import ParsedDocumentMetadata
+from ..models.document_metadata import (
+    EXTRACTED_SUBTAG_OPTIONS,
+    EXTRACTED_TAG_OPTIONS,
+    ParsedDocumentMetadata,
+)
 from ..utils.date_parser import format_date_ddmmyyyy
 from ..utils.exceptions import DocumentProcessingError
 
@@ -24,7 +28,8 @@ class PydanticAIService:
     """Wrapper around a PydanticAI agent for metadata extraction."""
 
     _SYSTEM_PROMPT = (
-        "You are an expert contract analyst. Return the requested metadata as structured data. "
+        "You are a Contract expert extracting structured metadata from letters. "
+        "Return the requested metadata as structured data. "
         "Only rely on the provided document text. If a field is not explicitly present, return null. "
         "When returning any date, format it as DD-MM-YYYY."
     )
@@ -51,7 +56,7 @@ class PydanticAIService:
         os.environ["OPENAI_API_KEY"] = api_key
 
         try:
-            from pydantic import BaseModel, Field, ConfigDict
+            from pydantic import BaseModel, Field, ConfigDict, model_validator
             from pydantic_ai import Agent, AgentRunError, UnexpectedModelBehavior, UserError
             from pydantic_ai.models.openai import OpenAIModel
             from pydantic_ai.settings import ModelSettings
@@ -101,10 +106,35 @@ class PydanticAIService:
             contractual_clauses: List[str] = Field(default_factory=list, alias="clauses")
             key_reply_points: List[str] = Field(default_factory=list, alias="keyReplyPoints")
             full_content: Optional[str] = Field(default=None, alias="fullContent")
-            tags: List[str] = Field(default_factory=list)
-            sub_tags: List[str] = Field(default_factory=list, alias="subTags")
+            tags: List[str] = Field(
+                default_factory=list,
+                alias="extracted_tags",
+                description="AI-extracted classification tags selected only from the allowed extracted_tags list.",
+            )
+            sub_tags: List[str] = Field(
+                default_factory=list,
+                alias="extracted_subTags",
+                description="AI-extracted classification subtags selected only from the allowed extracted_subTags list.",
+            )
 
             model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+            @model_validator(mode="before")
+            @classmethod
+            def _normalize_tag_aliases(cls, values: Any) -> Any:
+                if not isinstance(values, dict):
+                    return values
+                normalized = dict(values)
+                if "extracted_tags" not in normalized and "tags" in normalized:
+                    normalized["extracted_tags"] = normalized.get("tags")
+                if "extracted_subTags" not in normalized:
+                    if "extracted_sub_tags" in normalized:
+                        normalized["extracted_subTags"] = normalized.get("extracted_sub_tags")
+                    elif "subTags" in normalized:
+                        normalized["extracted_subTags"] = normalized.get("subTags")
+                    elif "sub_tags" in normalized:
+                        normalized["extracted_subTags"] = normalized.get("sub_tags")
+                return normalized
 
         model_name = config.pydantic_ai_model or config.openai_model
         model_settings: ModelSettings = {
@@ -202,14 +232,17 @@ class PydanticAIService:
         return self._build_expanded_prompt(text, context)
 
     def _build_expanded_prompt(self, text: str, context: Dict[str, Any]) -> str:
+        tag_options = ", ".join(EXTRACTED_TAG_OPTIONS)
+        subtag_options = ", ".join(EXTRACTED_SUBTAG_OPTIONS)
         parts = [
-            "Extract the following fields from the contract letter text.",
-            "Return null/empty values for absent fields and format all dates as DD-MM-YYYY.",
+            "You are a Contract expert extracting structured metadata from letters.",
+            "Extract the following fields from the contract letter text and return them as structured data.",
+            "Use null/empty values for absent fields and format all dates as DD-MM-YYYY.",
             "Fields:",
             "1) Date",
             "2) Letter No.",
             "3) From (Company)",
-            "4) To (Company)",
+            "4) To (Company): recipient company or company",
             "5) Subject",
             "6) References: each referenced letter/document number with date where available",
             "7) Asset Type: Station/Tunnel/Ramp/Shaft/Road/Flyover/Bridge/Vehicular Underpass/Pedestrian Subway/Depot/Viaduct/Track/Utility/Restoration/Rework/General Contractual/Other",
@@ -230,34 +263,8 @@ class PydanticAIService:
             "23) Contractual Clauses: clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon",
             "24) Key Reply Points: concise contractual/legal points that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response",
             "25) Full Content: cleaned text of the full letter",
-            "26) tags: selected table tags if clear, otherwise empty",
-            "27) subTags: selected table subtags based on tags if clear, otherwise empty",
-        ]
-
-        if context:
-            context_lines = [f"{key}: {value}" for key, value in context.items() if value]
-            if context_lines:
-                parts.append("Context:")
-                parts.extend(context_lines)
-
-        parts.append("\nDocument text:\n" + text)
-        return "\n".join(parts)
-
-        parts = [
-            "Extract the following metadata fields from the contract letter:",
-            "- date [dd-mm-yyyy]",
-            "- subject",
-            "- letter number",
-            "- sender company",
-            "- recipient company",
-            "- references - List all referenced letters/documents with dates",
-            "- summary - Write a 4-6 line Contractual/legal summary/Fact of the matter suitable for vector search/RAG.",
-            "- keywords - keywords, Tags,Topic,Claim Type",
-            "- contractual clauses - What clauses, Employer’s Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records are relied upon",
-            "- key reply points - concise contractual/legal points that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response",
-            "- cleaned full content if feasible",
-            "Return null for any field that is absent.",
-            "Format all dates as DD-MM-YYYY (example: 07-03-2025).",
+            f"26) extracted_tags: select one or more from: {tag_options}; otherwise empty",
+            f"27) extracted_subTags: select one or more from: {subtag_options}; otherwise empty",
         ]
 
         if context:

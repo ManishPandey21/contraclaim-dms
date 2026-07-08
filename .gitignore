@@ -3,3 +3,6 @@
 **/.env
 **/dist/
 **/build/
+
+# Contains VPS IPs + plaintext SSH credentials — must never be tracked.
+projectDMS/installation.txt

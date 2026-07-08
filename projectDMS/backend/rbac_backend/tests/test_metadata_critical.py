@@ -121,6 +121,14 @@ def _sample_expanded_report() -> str:
 """.strip()
 
 
+def _sample_extracted_tag_report() -> str:
+    return _sample_expanded_report().replace(
+        "26) tags:", "26) extracted_tags:"
+    ).replace(
+        "27) subTags:", "27) extracted_subTags:"
+    )
+
+
 def test_legacy_reference_parser_extracts_letter_no_date_and_raw() -> None:
     parsed = parse_legacy_reference_text(
         "LOA no. 378/LMRC/CE-Contract/KNPCC-06/2021-22 dated 14.03.2022"
@@ -216,6 +224,15 @@ def test_parse_extraction_report_extracts_expanded_contract_metadata() -> None:
         "Confirm critical path impact and mitigation steps",
     ]
     assert parsed.full_content == "Cleaned full letter body here."
+    assert parsed.tags == ["Claims", "Delay"]
+    assert parsed.sub_tags == ["EOT", "Access Constraint"]
+
+
+def test_parse_extraction_report_accepts_extracted_tag_labels() -> None:
+    service = TextProcessingService(DocumentProcessingConfig())
+
+    parsed = service.parse_extraction_report(_sample_extracted_tag_report())
+
     assert parsed.tags == ["Claims", "Delay"]
     assert parsed.sub_tags == ["EOT", "Access Constraint"]
 

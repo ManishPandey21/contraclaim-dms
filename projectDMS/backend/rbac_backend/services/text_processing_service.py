@@ -265,10 +265,13 @@ class TextProcessingService:
             ])
 
             tags = self._list_from_block(
-                self._first_block(numbered_blocks, [(26, r"tags")])
+                self._first_block(numbered_blocks, [(26, r"(?:extracted[_\s-]*)?tags")])
             )
             sub_tags = self._list_from_block(
-                self._first_block(numbered_blocks, [(27, r"subTags|sub\s*tags")])
+                self._first_block(
+                    numbered_blocks,
+                    [(27, r"(?:extracted[_\s-]*)?sub\s*tags|extracted_subTags|subTags")],
+                )
             )
 
             metadata = ParsedDocumentMetadata(
