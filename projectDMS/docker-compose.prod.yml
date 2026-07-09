@@ -74,6 +74,12 @@ x-backend-env: &backend-env
   GENERAL_UPLOAD_MAX_FILE_SIZE_MB: "${GENERAL_UPLOAD_MAX_FILE_SIZE_MB:-100}"
   UPLOAD_MAX_CONCURRENT_PER_USER: "${UPLOAD_MAX_CONCURRENT_PER_USER:-3}"
   UPLOAD_MAX_CONCURRENT_PER_ORG: "${UPLOAD_MAX_CONCURRENT_PER_ORG:-20}"
+  ANTIVIRUS_ENABLED: "${ANTIVIRUS_ENABLED:-true}"
+  ANTIVIRUS_REQUIRED_IN_PRODUCTION: "${ANTIVIRUS_REQUIRED_IN_PRODUCTION:-true}"
+  CLAMAV_HOST: "${CLAMAV_HOST:-clamav}"
+  CLAMAV_PORT: "${CLAMAV_PORT:-3310}"
+  CLAMAV_TIMEOUT: "${CLAMAV_TIMEOUT:-30}"
+  CLAMAV_FAIL_OPEN: "${CLAMAV_FAIL_OPEN:-false}"
 
 services:
   backend:
@@ -276,7 +282,7 @@ services:
         limits:
           memory: 2g
     healthcheck:
-      test: ["CMD-SHELL", "clamdscan --ping || exit 1"]
+      test: ["CMD-SHELL", "clamdscan --ping=1 || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -308,7 +314,10 @@ services:
       - edge-net
       - service-net
     healthcheck:
-      test: ["CMD-SHELL", "test \"$$(wget -qO- http://localhost/health)\" = ok"]
+      # Real HTTP probe over /dev/tcp (the httpd image ships no curl/wget):
+      # proves Apache is serving /health with a 200, not merely that the
+      # health file exists on disk.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/80 && printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q \" 200 \" <&3'"]
       interval: 30s
       timeout: 5s
       retries: 5

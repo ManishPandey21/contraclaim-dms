@@ -21,4 +21,11 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "rbac_backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# --proxy-headers: derive request.client.host from X-Forwarded-For so per-IP
+# rate limiting and audit logs see the real client, not the Apache gateway
+# (without it, every login shares one IP bucket and attempt 61/15min locks
+# everyone out). Trusting "*" is safe only because this port is never
+# published: the backend sits on internal compose networks behind the gateway,
+# and the host nginx overwrites X-Forwarded-For with $remote_addr so a client
+# cannot spoof the leftmost entry.
+CMD ["uvicorn", "rbac_backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
