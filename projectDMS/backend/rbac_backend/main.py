@@ -125,6 +125,7 @@ app.add_middleware(
         "X-CSRF-Token",
         "X-Request-ID",
         "X-Requested-With",
+        "X-Step-Up-Token",
     ],
     expose_headers=["X-Request-ID", "Content-Disposition"],
 )
