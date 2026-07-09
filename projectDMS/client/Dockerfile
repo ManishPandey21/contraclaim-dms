@@ -1,15 +1,20 @@
-FROM node:20-alpine AS builder
+FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm ci && npm install --no-save @rollup/rollup-linux-x64-gnu
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine
+FROM node:20-bookworm-slim
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm install -g serve
 COPY --from=builder /app/dist ./dist
-RUN addgroup -S app && adduser -S app -G app && chown -R app:app /app
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
+    && chown -R app:app /app
 USER app
 EXPOSE 5173
 CMD ["serve", "-s", "dist", "-l", "5173"]
