@@ -2,19 +2,32 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TMPDIR=/app/tmp
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev curl libmagic1 \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        ghostscript \
+        libmagic1 \
+        libpq-dev \
+        pngquant \
+        poppler-utils \
+        qpdf \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-osd \
+        unpaper \
     && rm -rf /var/lib/apt/lists/*
 
 COPY rbac_backend/requirements.txt ./rbac_backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r rbac_backend/requirements.txt
 
 COPY . .
-RUN mkdir -p /app/uploads /app/logs
+RUN mkdir -p /app/uploads /app/logs /app/tmp
 RUN adduser --disabled-password --gecos "" appuser \
     && chown -R appuser:appuser /app
 USER appuser
