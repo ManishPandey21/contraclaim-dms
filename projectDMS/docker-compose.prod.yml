@@ -9,6 +9,7 @@ x-backend-env: &backend-env
   ENABLE_API_DOCS: "false"
   ALLOW_DEV_HEADERS: "false"
   DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must point to the production MongoDB replica set}"
+  MONGODB_URI: "${DATABASE_URL:?DATABASE_URL must point to the production MongoDB replica set}"
   MONGODB_DATABASE: "${MONGODB_DATABASE:-contraclaim}"
   MONGODB_REPLICA_SET: "${MONGODB_REPLICA_SET:?MONGODB_REPLICA_SET is required in production}"
   MONGODB_RETRY_WRITES: "${MONGODB_RETRY_WRITES:-true}"
@@ -105,6 +106,7 @@ services:
     networks:
       - service-net
       - data-net
+      - egress-net
     expose:
       - "8000"
     volumes:
@@ -162,6 +164,7 @@ services:
     networks:
       - service-net
       - data-net
+      - egress-net
     volumes:
       - backend_uploads:/app/uploads
       - backend_logs:/app/logs
@@ -340,4 +343,6 @@ networks:
     driver: bridge
     internal: true
   edge-net:
+    driver: bridge
+  egress-net:
     driver: bridge
