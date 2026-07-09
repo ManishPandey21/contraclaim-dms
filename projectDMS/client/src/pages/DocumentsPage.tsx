@@ -67,6 +67,7 @@ import {
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import useHasPermission from "@/hooks/useHasPermission";
+import { useStepUp } from "@/hooks/useStepUp";
 import { AlertCircle } from "lucide-react";
 // import { api, Project as ApiProject } from "@/services/api";
 import LetterInitiationForm from "@/components/letter-workflow/LetterInitiationForm";
@@ -1031,6 +1032,7 @@ const DocumentsPage = () => {
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const canDeleteDocuments = useHasPermission("dms.document.delete");
+  const { requestToken, StepUpDialog } = useStepUp();
 
   const handleViewDocument = (docId: string) => {
     // navigate(`api/documents/${docId}`);
@@ -1050,8 +1052,23 @@ const DocumentsPage = () => {
         return;
       }
 
+      // DELETE /documents/{id} is step-up gated server-side (documents.delete).
+      let stepUpToken: string;
       try {
-        const headers = buildAuthHeaders();
+        stepUpToken = await requestToken(
+          "documents.delete",
+          "Confirm document deletion",
+          "Enter your password to permanently delete this document."
+        );
+      } catch {
+        return; // user cancelled step-up verification
+      }
+
+      try {
+        const headers = {
+          ...buildAuthHeaders(),
+          "X-Step-Up-Token": stepUpToken,
+        };
         const response = await authenticatedFetch(joinApiUrl(`/documents/${docId}`), {
           method: "DELETE",
           headers,
@@ -1074,7 +1091,7 @@ const DocumentsPage = () => {
         });
       }
     },
-    [documents, setDocuments, buildAuthHeaders, canDeleteDocuments]
+    [documents, setDocuments, buildAuthHeaders, canDeleteDocuments, requestToken]
   );
 
   const handleExportExcel = useCallback(async () => {
@@ -2143,6 +2160,7 @@ const DocumentsPage = () => {
           )}
         </DialogContent>
       </Dialog>
+      {StepUpDialog}
     </div>
   );
 };

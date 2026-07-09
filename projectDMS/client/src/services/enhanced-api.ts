@@ -1070,9 +1070,16 @@ class EnhancedApiService {
     });
   }
 
-  async deleteDocument(id: string): Promise<{ message: string }> {
+  // Document deletion is step-up gated server-side (documents.delete).
+  async deleteDocument(
+    id: string,
+    options?: { stepUpToken?: string },
+  ): Promise<{ message: string }> {
     return this.request<{ message: string }>(`/documents/${id}`, {
       method: "DELETE",
+      headers: options?.stepUpToken
+        ? { "X-Step-Up-Token": options.stepUpToken }
+        : undefined,
     });
   }
 
