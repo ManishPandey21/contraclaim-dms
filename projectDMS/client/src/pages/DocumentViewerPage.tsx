@@ -18,6 +18,7 @@ import {
 } from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
+import { listSubTags, listTags } from "@/services/tags-api";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
 
 // Import our new components
@@ -381,36 +382,20 @@ const DocumentViewerPage: React.FC = () => {
 
     setIsLoadingSubtags(true);
     try {
-      const response = await authenticatedFetch(joinApiUrl(`/tags/${tagId}/subtags`));
-      if (!response.ok) {
-        throw new Error("Failed to fetch subtags");
-      }
-      const subtagData = await response.json();
-
-      // Handle different response formats from the backend
-      let subtagArray: any[] = [];
-      if (Array.isArray(subtagData)) {
-        subtagArray = subtagData;
-      } else if (subtagData && Array.isArray(subtagData.subtags)) {
-        subtagArray = subtagData.subtags;
-      } else if (subtagData && typeof subtagData === "object") {
-        // If it's an object but not an array, try to extract subtags
-        subtagArray = Object.values(subtagData).filter(Array.isArray).flat();
-      } else {
-        console.warn("Unexpected subtag data format:", subtagData);
-        subtagArray = [];
-      }
+      const subtagArray = await listSubTags(tagId, { limit: 200 });
 
       setAvailableSubtags((prevSubtags) => {
         // Filter out subtags belonging to this tagId before adding new ones
         const otherSubtags = prevSubtags.filter(
           (subtag) => subtag.tagId !== tagId
         );
-        const newSubtags = subtagArray.map((subtag: any) => ({
-          value: subtag._id || subtag.id || "",
-          label: subtag.name || "",
-          tagId: tagId,
-        }));
+        const newSubtags = subtagArray
+          .map((subtag) => ({
+            value: subtag._id,
+            label: subtag.name,
+            tagId: tagId,
+          }))
+          .filter((subtag) => subtag.value && subtag.label);
         return [...otherSubtags, ...newSubtags];
       });
     } catch (error) {
@@ -494,22 +479,13 @@ const DocumentViewerPage: React.FC = () => {
   useEffect(() => {
     const fetchTags = async () => {
       try {
-        const tagsResponse = await authenticatedFetch(joinApiUrl("/tags"));
-        if (!tagsResponse.ok) {
-          throw new Error("Failed to fetch tags");
-        }
-        const tagsData = await tagsResponse.json();
-        const formattedTags = Array.isArray(tagsData)
-          ? tagsData.map((tag: any) => ({
-              value: tag._id,
-              label: tag.name,
-            }))
-          : Array.isArray(tagsData.tags)
-          ? tagsData.tags.map((tag: any) => ({
-              value: tag._id,
-              label: tag.name,
-            }))
-          : [];
+        const tagsData = await listTags({ limit: 200 });
+        const formattedTags = tagsData.tags
+          .map((tag) => ({
+            value: tag._id,
+            label: tag.name,
+          }))
+          .filter((tag) => tag.value && tag.label);
         setAvailableTags(formattedTags);
       } catch (error) {
         console.error("Error fetching tags:", error);
