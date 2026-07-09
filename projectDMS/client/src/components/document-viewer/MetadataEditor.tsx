@@ -206,11 +206,17 @@ const MetadataEditor: React.FC<MetadataEditorProps> = ({
                       </SelectTrigger>
                       <SelectContent>
                         {field.id === "tag"
-                          ? availableTags.map((tag) => (
-                              <SelectItem key={tag.value} value={tag.value}>
-                                {tag.label}
-                              </SelectItem>
-                            ))
+                          ? availableTags.length > 0
+                            ? availableTags.map((tag) => (
+                                <SelectItem key={tag.value} value={tag.value}>
+                                  {tag.label}
+                                </SelectItem>
+                              ))
+                            : (
+                                <SelectItem value="__no-tags" disabled>
+                                  No tags available
+                                </SelectItem>
+                              )
                           : field.id === "subTag"
                           ? filteredSubtags.map((subtag) => (
                               <SelectItem
