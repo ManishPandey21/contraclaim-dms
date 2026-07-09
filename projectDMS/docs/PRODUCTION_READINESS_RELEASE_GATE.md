@@ -232,6 +232,179 @@ Owner:
 Follow-up issue:
 ```
 
+## Production Update Evidence - 2026-07-09
+
+Date: 2026-07-09, 17:28-17:44 IST.
+Environment: production Ubuntu server reached through SSH alias `contraclaim`.
+Source repo: `ManishPandey21/contraclaim-dms`, branch `main`.
+Deployed source commit: `8a2069878d08e5b31eaab1a5775648cc76c8a81b`.
+Deployment working directory: `/opt/contraclaim-dms/projectDMS` because the GitHub repository root contains the app under `projectDMS/`.
+
+Release preparation:
+
+- GitHub CLI on the server was authenticated as `ManishPandey21`; `git ls-remote` resolved `main` to `8a2069878d08e5b31eaab1a5775648cc76c8a81b`.
+- Pre-update production backup completed with stamp `20260709-172824`.
+- Backup artifacts:
+  - Mongo archive: `/var/backups/contractdms/mongo/contraclaim-20260709-172824.archive.gz`.
+  - Manifest: `/var/backups/contractdms/manifests/backup-20260709-172824.json`.
+  - Checksums: `/var/backups/contractdms/manifests/checksums-20260709-172824.sha256`.
+  - Volume archives under `/var/backups/contractdms/volumes/` for backend uploads, Qdrant data, Qdrant snapshots, FalkorDB data, and Redis data.
+- Previous deployment directory preserved at `/opt/contraclaim-dms.preupdate-20260709-172824`.
+- Previous deployment archive preserved at `/var/backups/contractdms/release-updates/20260709-172824/deploy-dir-preupdate-20260709-172824.tar.gz`.
+
+Redeploy result:
+
+- Production runtime files were copied into `/opt/contraclaim-dms/projectDMS`: `.env`, `backend/.env`, `client/.env.production`, and `config/secrets/`.
+- PDF viewer CSP fix applied and verified in `config/httpd.conf`: `frame-src 'self' https: blob: data:;`.
+- Docker build command from `/opt/contraclaim-dms/projectDMS` completed successfully:
+  `docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build --pull`.
+- Migration dry-run and apply completed successfully with all listed migrations skipped as already applied.
+- Redeploy command completed successfully:
+  `docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --build --remove-orphans`.
+- Final service state: backend, client, gateway, ClamAV, MongoDB replica set members, Redis, Qdrant, and FalkorDB healthy; contract worker running.
+
+Host Nginx evidence:
+
+- Active enabled hosts proxy to the Docker gateway:
+  - `/etc/nginx/sites-enabled/web.contraclaim.com: proxy_pass http://127.0.0.1:8080;`
+  - `/etc/nginx/sites-enabled/api.contraclaim.com: proxy_pass http://127.0.0.1:8080;`
+- `sudo nginx -t` result: syntax OK and test successful.
+- Note: `/etc/nginx/sites-available/contraclaim` still contains an older `127.0.0.1:8000` proxy line, but the active enabled production hosts above point at `8080`.
+
+Gateway and PDF/CSP evidence:
+
+- `https://web.contraclaim.com/health` returned `HTTP/1.1 200 OK`.
+- `http://127.0.0.1:8080/health` returned `HTTP/1.1 200 OK` with body `ok`.
+- Live public `Content-Security-Policy` included `frame-src 'self' https: blob: data:;`, which is the required allowance for browser-native PDF iframe/blob/data rendering in the document viewer.
+
+Restore drill:
+
+- Result: pass.
+- Restore archive: `/var/backups/contractdms/mongo/contraclaim-20260709-172824.archive.gz`.
+- Drill log directory: `/var/backups/contractdms/restore-drills/20260709-174048`.
+- Drill restored into a disposable MongoDB container and removed the temporary container, volume, and internal network afterward.
+- Restored collection counts:
+  - `users`: 8
+  - `roles`: 12
+  - `permissions`: 234
+  - `organizations`: 6
+  - `projects`: 5
+  - `documents`: 1
+  - `contract_files`: 0
+
+Post-deploy verification:
+
+- Command run: `scripts/post_deploy_verify.sh` through a Docker-aware wrapper that set `BACKEND_BASE_URL` to the backend container IP and `PUBLIC_BASE_URL=https://web.contraclaim.com`.
+- Result: `0` failures, `1` warning.
+- Passing checks included Docker service listing, backend `/health/live`, backend `/health/ready`, observability health, operations health, backup freshness, metrics endpoint, public gateway health, Redis ping, and recent backend log scan.
+- Warning: host `mongosh` was intentionally unavailable to the script wrapper because the production `DATABASE_URL` uses Docker service DNS; MongoDB readiness was verified through backend `/health/ready`, which reported `mongo: ok`.
+
+Manual browser note:
+
+- Application-level login and opening a specific protected document viewer route were not manually completed in this session because no application credentials were provided. The deployed CSP/header state that caused the browser PDF block was verified live at the public gateway.
+
+## Future Production Update Method
+
+Use this procedure for future GitHub-to-production updates.
+
+1. Confirm GitHub and current source state.
+
+```bash
+ssh contraclaim
+gh auth status
+cd /opt/contraclaim-dms
+git fetch origin main
+git status --short --branch
+git rev-parse HEAD
+git rev-parse origin/main
+```
+
+2. Create a pre-update backup before pulling code. In this Docker layout, run Mongo backup from inside `mongo1` so Docker service DNS is not required on the host.
+
+```bash
+cd /opt/contraclaim-dms/projectDMS
+set -a
+source .env
+set +a
+stamp="$(date '+%Y%m%d-%H%M%S')"
+backup_root="/var/backups/contractdms"
+mkdir -p "$backup_root/mongo" "$backup_root/volumes" "$backup_root/manifests"
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml ps >"$backup_root/manifests/deployment-$stamp.txt"
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml exec -T mongo1 mongodump --archive --gzip --db "${MONGODB_DATABASE:-contraclaim}" >"$backup_root/mongo/${MONGODB_DATABASE:-contraclaim}-$stamp.archive.gz"
+test -s "$backup_root/mongo/${MONGODB_DATABASE:-contraclaim}-$stamp.archive.gz"
+gzip -t "$backup_root/mongo/${MONGODB_DATABASE:-contraclaim}-$stamp.archive.gz"
+```
+
+Then archive the required Docker volumes using a read-only BusyBox container: `${COMPOSE_PROJECT_NAME:-contraclaim}_backend_uploads`, `${COMPOSE_PROJECT_NAME:-contraclaim}_qdrant_data`, `${COMPOSE_PROJECT_NAME:-contraclaim}_qdrant_snapshots`, `${COMPOSE_PROJECT_NAME:-contraclaim}_falkordb_data`, and `${COMPOSE_PROJECT_NAME:-contraclaim}_redis_data`. Write checksums and a `backup-$stamp.json` manifest under `$backup_root/manifests/`.
+
+3. Preserve a rollback copy of the current deployment directory.
+
+```bash
+cd /opt
+mkdir -p "/var/backups/contractdms/release-updates/$stamp"
+tar -czf "/var/backups/contractdms/release-updates/$stamp/deploy-dir-preupdate-$stamp.tar.gz" contraclaim-dms
+```
+
+4. Pull the GitHub update.
+
+```bash
+cd /opt/contraclaim-dms
+git pull --ff-only origin main
+cd /opt/contraclaim-dms/projectDMS
+```
+
+5. Confirm runtime files are present and not tracked.
+
+```bash
+ls -la .env backend/.env client/.env.production config/secrets
+git status --short -- .env backend/.env client/.env.production config/secrets
+```
+
+6. Confirm the PDF viewer CSP and host gateway line before rebuilding.
+
+```bash
+grep -n "frame-src 'self' https: blob: data:" config/httpd.conf
+sudo grep -R "proxy_pass http://127.0.0.1:8080" -n /etc/nginx/sites-enabled
+sudo nginx -t
+```
+
+7. Build, migrate, and redeploy.
+
+```bash
+cd /opt/contraclaim-dms/projectDMS
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build --pull
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml run --rm backend python -m rbac_backend.scripts.migrate_database --fail-on-warning
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml run --rm backend python -m rbac_backend.scripts.migrate_database --apply --fail-on-warning
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --build --remove-orphans
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml ps
+```
+
+8. Verify gateway and CSP.
+
+```bash
+curl -ksSI https://web.contraclaim.com/health
+curl -sS -i http://127.0.0.1:8080/health
+curl -ksSI https://web.contraclaim.com/ | grep -i "content-security-policy"
+```
+
+9. Run an isolated restore drill against the new backup. Restore into a temporary MongoDB container or staging environment only; do not restore into production.
+
+10. Run `scripts/post_deploy_verify.sh` with Docker-aware settings.
+
+```bash
+cd /opt/contraclaim-dms/projectDMS
+backend_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}' contraclaim-backend-1 | sed -n '1p')"
+COMPOSE_FILES="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml" \
+BACKEND_BASE_URL="http://$backend_ip:8000" \
+PUBLIC_BASE_URL="https://web.contraclaim.com" \
+REQUIRE_FRESH_BACKUP=true \
+bash scripts/post_deploy_verify.sh
+```
+
+If host `mongosh` is installed but cannot resolve Docker service names from `DATABASE_URL`, use a constrained PATH for the verification run and rely on `/health/ready` for MongoDB readiness, as recorded in the 2026-07-09 evidence above.
+
+11. Record the release evidence in this file: commit SHA, backup paths, image/build result, migration result, service health, Nginx line, CSP header, restore drill result, post-deploy verification result, warnings, and rollback path.
+
 ## Phase 0 Acceptance Status
 
 - [x] Production-readiness branch created.
