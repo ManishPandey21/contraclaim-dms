@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,6 +19,17 @@ class DocumentProcessingError(Exception):
 
 class OCRService:
     """Service for OCR operations with proper error handling"""
+
+    REQUIRED_BINARIES = (
+        "ocrmypdf",
+        "tesseract",
+        "gs",
+        "qpdf",
+        "unpaper",
+        "pngquant",
+        "pdfinfo",
+        "pdftotext",
+    )
     
     def __init__(self, config: DocumentProcessingConfig):
         self.config = config
@@ -27,10 +39,27 @@ class OCRService:
         """Check if OCR dependencies are available"""
         try:
             import ocrmypdf
-            return True
         except ImportError:
             logger.warning("OCRmyPDF not available - scanned PDFs may not be processed correctly")
             return False
+
+        missing = [binary for binary in self.REQUIRED_BINARIES if shutil.which(binary) is None]
+        if missing:
+            logger.warning(
+                "OCRmyPDF system dependencies missing from PATH: %s. PATH=%s",
+                ", ".join(missing),
+                os.environ.get("PATH", ""),
+            )
+            return False
+
+        logger.info(
+            "OCR dependencies available: ocrmypdf=%s, tesseract=%s, gs=%s, qpdf=%s",
+            getattr(ocrmypdf, "__version__", "unknown"),
+            shutil.which("tesseract"),
+            shutil.which("gs"),
+            shutil.which("qpdf"),
+        )
+        return True
     
     def is_pdf_textual(self, pdf_path: Path, max_pages: int = 5) -> bool:
         """Check if PDF has extractable text"""
