@@ -235,4 +235,53 @@ describe("ReferencePage - Parsed References integration", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("renders legacy dtd and prefixed references as separate date and letter number fields", async () => {
+    const row3 =
+      "UPMRC/CPM-1/KANPUR/KNPCC-06/2024-25/Vol-2/1 17/104 dtd. 05.09.2024";
+    const row4 =
+      "Engineer's letter no. Kanpur-LET-JVTI-TBM-00371-E01 - dated 06.09.2024";
+    const row6 =
+      "Engineer\u2019s letter no. Kanpur-LET-JVTI-TBM-00395-E01 - dated 07.11.2024";
+
+    currentDoc = {
+      id: "doc-4",
+      letterNo: "AFC/PM/KNPCC-06/4930",
+      date: "2025-11-06",
+      subject: "Borewell reminder",
+      from_: "Afcons",
+      to: "Engineer",
+      reference: [
+        { raw: row3, text: row3 },
+        { raw: row4, text: row4 },
+        { raw: row6, text: row6 },
+      ],
+      keywords: [],
+      clauses: [],
+    };
+    referencesResponse = { parsed: [], linked: [] };
+
+    renderAt("doc-4");
+
+    await waitFor(() => {
+      expect(screen.getByText("Borewell reminder")).toBeInTheDocument();
+    });
+
+    const parsedTab = screen.getByRole("tab", { name: /parsed references/i });
+    await userEvent.click(parsedTab);
+
+    await waitFor(() => {
+      expect(screen.getByText("05-09-2024")).toBeInTheDocument();
+      expect(
+        screen.getByText("UPMRC/CPM-1/KANPUR/KNPCC-06/2024-25/Vol-2/1 17/104")
+      ).toBeInTheDocument();
+      expect(screen.getByText("06-09-2024")).toBeInTheDocument();
+      expect(screen.getByText("Kanpur-LET-JVTI-TBM-00371-E01")).toBeInTheDocument();
+      expect(screen.getByText("07-11-2024")).toBeInTheDocument();
+      expect(screen.getByText("Kanpur-LET-JVTI-TBM-00395-E01")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText(row4)).not.toBeInTheDocument();
+    expect(screen.queryByText(row6)).not.toBeInTheDocument();
+  });
 });
