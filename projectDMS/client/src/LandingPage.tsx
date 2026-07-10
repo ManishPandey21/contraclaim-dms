@@ -38,52 +38,26 @@ const trustSignals = [
   "Contractual time-bar tracking",
 ];
 
-const matterTabs = ["Correspondence", "Clauses", "Evidence", "Claims & notices"];
-
-const matterItems = [
-  {
-    tag: "Notice of Delay · Cl. 20.1",
-    title: "RE: EOT — Foundation works, Grid B",
-    note: "Contractor asserts entitlement under Sub-Clause 8.4…",
-    due: "2 days left",
-    urgent: true,
-  },
-  {
-    tag: "Payment · Cl. 14.6",
-    title: "IPC-11 — Engineer's certificate",
-    note: "Certified sum disputed; retention release query…",
-    due: "This week",
-    urgent: false,
-  },
-  {
-    tag: "Variation · Cl. 13.3",
-    title: "VO-42 — Cladding specification change",
-    note: "Instruction pending valuation and acceptance…",
-    due: "Open",
-    urgent: false,
-  },
-];
-
 const features = [
   {
     icon: FileSearch,
     title: "Clause & evidence retrieval",
     description:
-      "Ask in plain language and surface the exact clause, letter or exhibit — every answer cited back to its source document and page.",
+      "Ask in plain language and pull the exact clause, letter or exhibit in seconds — every answer cited back to its source document and page, so your position is always defensible.",
     points: ["Semantic clause search", "Cited contract Q&A", "Source-linked evidence"],
   },
   {
     icon: PenLine,
     title: "Grounded reply drafting",
     description:
-      "Draft contractual correspondence backed by cited clauses and precedent, through a governed input → draft → review → approval workflow.",
+      "Draft sharp, contractual correspondence backed by cited clauses and precedent, through a governed input → draft → review → approval workflow — never an ungrounded word goes out the door.",
     points: ["Governed drafting service", "Cited, never ungrounded", "Templates & quality tracking"],
   },
   {
     icon: Scale,
     title: "Claim & deadline tracking",
     description:
-      "Track every notice, time-bar and claim status across projects so nothing slips past a contractual deadline.",
+      "Stay ahead of every notice, time-bar and claim across projects — so you never surrender an entitlement to a missed date.",
     points: ["EOT, variation & payment claims", "Time-bar & SLA tracking", "Notice & evidence alignment"],
   },
 ];
@@ -234,7 +208,6 @@ const LandingPage = () => {
     message: "",
   });
   const [submittingContact, setSubmittingContact] = useState(false);
-  const [activeTab, setActiveTab] = useState(0);
 
   const handleContactSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -297,7 +270,7 @@ const LandingPage = () => {
               className="h-9 w-auto"
             />
           </Link>
-          <nav className="hidden items-center gap-8 text-sm font-semibold text-ink/70 lg:flex">
+          <nav className="hidden items-center gap-8 text-sm font-semibold text-ink/75 lg:flex">
             <a href="#platform" className="transition hover:text-brand">
               Platform
             </a>
@@ -341,10 +314,10 @@ const LandingPage = () => {
               image reads through while white text stays legible. */}
           <div
             className="pointer-events-none absolute inset-0 bg-cover bg-center"
-            style={{ backgroundImage: "url('/4.jpg')" }}
+            style={{ backgroundImage: "url('/contract-intelligence-hero.jpg')" }}
             aria-hidden="true"
           />
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-ink/95 via-ink/85 to-ink/70" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-ink/85 via-ink/70 to-ink/50" />
           <div className="pointer-events-none absolute -right-32 -top-24 h-96 w-96 rounded-full bg-brand/25 blur-3xl" />
           <div className="pointer-events-none absolute -left-20 bottom-0 h-80 w-80 rounded-full bg-brand/10 blur-3xl" />
           <div className="container relative grid gap-12 py-16 md:py-24 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
@@ -384,81 +357,18 @@ const LandingPage = () => {
               </p>
             </div>
 
-            {/* Product mockup: Matter view */}
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-2 shadow-[0_30px_70px_-28px_rgba(13,27,46,.6)] backdrop-blur">
-              <div className="overflow-hidden rounded-xl bg-paper text-ink">
-                <div className="flex items-center justify-between border-b border-ink/10 bg-white px-4 py-3">
-                  <div className="flex items-center gap-2 text-xs font-medium text-ink/50">
-                    <span className="h-2.5 w-2.5 rounded-full bg-coral/70" />
-                    <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
-                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
-                    <span className="ml-2">app.contraclaim.com/matter/A-217</span>
-                  </div>
-                </div>
-                <div className="px-5 py-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-brand">
-                        Matter A-217
-                      </p>
-                      <p className="font-serif text-lg font-semibold text-ink">
-                        Grid B foundation delay
-                      </p>
-                    </div>
-                    <span className="rounded-full bg-brand-soft px-3 py-1 text-xs font-bold text-brand">
-                      14 time-bars · 3 due
-                    </span>
-                  </div>
-
-                  <div className="mt-4 flex gap-1 overflow-x-auto rounded-lg bg-ink/5 p-1 text-xs font-semibold">
-                    {matterTabs.map((tab, i) => (
-                      <button
-                        key={tab}
-                        type="button"
-                        onClick={() => setActiveTab(i)}
-                        className={`whitespace-nowrap rounded-md px-3 py-1.5 transition ${
-                          activeTab === i
-                            ? "bg-white text-brand shadow-sm"
-                            : "text-ink/55 hover:text-ink"
-                        }`}
-                      >
-                        {tab}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className="mt-4 space-y-3">
-                    {matterItems.map((item) => (
-                      <div
-                        key={item.title}
-                        className="rounded-lg border border-ink/10 bg-white p-4 shadow-sm"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <span className="text-[11px] font-bold uppercase tracking-wide text-brand">
-                            {item.tag}
-                          </span>
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
-                              item.urgent
-                                ? "bg-coral/15 text-[#c0392b]"
-                                : "bg-ink/5 text-ink/55"
-                            }`}
-                          >
-                            {item.due}
-                          </span>
-                        </div>
-                        <p className="mt-1.5 text-sm font-semibold text-ink">
-                          {item.title}
-                        </p>
-                        <p className="mt-1 text-xs leading-5 text-ink/55">
-                          {item.note}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
+            {/* Product visual: the real dashboard as a transparent, pre-tilted
+                floating panel (background removed). drop-shadow follows the
+                alpha silhouette so it reads as a clean product shot on the navy
+                hero — dashboard only, no device frame or decorative elements. */}
+            <img
+              src="/dashboard-hero.png"
+              alt="ContraClaim Document Management System dashboard — document totals, status breakdown and recent activity"
+              width={621}
+              height={402}
+              loading="eager"
+              className="h-auto w-full [filter:drop-shadow(0_30px_45px_rgba(0,0,0,.5))] transition-transform duration-500 ease-out hover:scale-[1.02]"
+            />
           </div>
 
           {/* Trust strip */}
@@ -479,15 +389,16 @@ const LandingPage = () => {
           <div className="container">
             <div className="mx-auto max-w-3xl text-center">
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
-                The platform
+                Argue from strength
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                A single source of truth for the whole dispute
+                Win every dispute from one source of truth
               </h2>
               <p className="mt-5 text-lg leading-8 text-ink/60">
-                Instead of scattering claims intelligence across folders,
-                inboxes, spreadsheets and disconnected PDFs, ContraClaim keeps
-                correspondence, clauses and evidence connected and audit-ready.
+                Stop losing entitlements to scattered folders, inboxes and
+                disconnected PDFs. ContraClaim locks correspondence, clauses and
+                evidence into one connected, audit-ready record — so every
+                position you take is backed by the document.
               </p>
             </div>
 
@@ -526,8 +437,26 @@ const LandingPage = () => {
         </section>
 
         {/* How it works */}
-        <section id="how" className="bg-paper py-20 md:py-28">
-          <div className="container">
+        <section
+          id="how"
+          className="relative isolate overflow-hidden border-y border-brand/10 bg-[#dcecff] py-20 md:py-28"
+        >
+          {/* Pale construction / infrastructure artwork gives this section its "relative isolate overflow-hidden bg-white py-20 md:py-28"
+              own identity while the white fades keep the transition into the
+              surrounding white sections seamless. Place the accompanying infra.png
+              how-it-works-blueprint.webp file in the public directory. */}
+          <div className="pointer-events-none absolute inset-0 -z-20" aria-hidden="true">
+            <div
+			className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-100"
+			style={{
+                backgroundImage: "url('/Infrastructure.png')",
+              }}
+            />
+            <div className="absolute inset-0 bg-gradient-to-b from-white via-white/25 to-white" />
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(255,255,255,0)_0%,rgba(255,255,255,0.18)_46%,rgba(255,255,255,0.82)_100%)]" />
+          </div>
+
+          <div className="container relative z-10">
             <div className="mx-auto max-w-3xl text-center">
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
                 How it works
@@ -541,12 +470,13 @@ const LandingPage = () => {
               {steps.map((step, index) => (
                 <div
                   key={step.title}
-                  className="relative rounded-2xl border border-ink/10 bg-white p-7 shadow-sm"
+                  className="group relative overflow-hidden rounded-2xl border border-brand/15 bg-white/85 p-7 shadow-[0_22px_55px_-38px_rgba(20,102,196,0.58)] backdrop-blur-[2px] transition duration-300 hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-38px_rgba(20,102,196,0.62)]"
                 >
-                  <span className="font-serif text-5xl font-semibold text-brand/15">
+                  <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand/35 to-transparent" />
+                  <span className="font-serif text-5xl font-semibold text-brand/20 transition-colors duration-300 group-hover:text-brand/30">
                     {String(index + 1).padStart(2, "0")}
                   </span>
-                  <div className="mt-3 flex h-11 w-11 items-center justify-center rounded-xl bg-ink text-white">
+                  <div className="mt-3 flex h-11 w-11 items-center justify-center rounded-xl bg-brand text-white shadow-[0_10px_24px_-10px_rgba(20,102,196,0.9)] transition duration-300 group-hover:-translate-y-0.5 group-hover:bg-[#1157a8]">
                     <step.icon className="h-5 w-5" />
                   </div>
                   <h3 className="mt-5 font-serif text-xl font-semibold text-ink">
@@ -569,11 +499,12 @@ const LandingPage = () => {
                 Modules
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                Everything the workspace includes
+                Everything you need to win — in one workspace
               </h2>
               <p className="mt-5 text-lg leading-8 text-ink/60">
-                A connected set of modules across contracts, correspondence,
+                One connected set of modules across contracts, correspondence,
                 claims, documents, stakeholders, access control and reporting.
+                No bolt-ons, no blind spots.
               </p>
             </div>
 
@@ -601,13 +532,28 @@ const LandingPage = () => {
         </section>
 
         {/* Governance / Security */}
-        <section id="governance" className="bg-ink py-20 text-white md:py-28">
-          <div className="container grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+        <section
+          id="governance"
+          aria-labelledby="governance-heading"
+          className="relative overflow-hidden bg-ink py-20 text-white md:py-28"
+        >
+          {/* Relevant security/contract photo behind a navy wash so the six
+              cards stay readable while the image reads through. */}
+          <div
+            className="pointer-events-none absolute inset-0 bg-cover bg-center"
+            style={{ backgroundImage: "url('/contract-security-governance.jpg')" }}
+            aria-hidden="true"
+          />
+          <div className="pointer-events-none absolute inset-0 bg-ink/75" />
+          <div className="container relative z-10 grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
             <div className="lg:sticky lg:top-24">
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand-soft">
                 Security & governance
               </p>
-              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-white md:text-5xl">
+              <h2
+                id="governance-heading"
+                className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-white md:text-5xl"
+              >
                 Enterprise controls, built in
               </h2>
               <p className="mt-5 text-lg leading-8 text-white/65">
@@ -648,7 +594,7 @@ const LandingPage = () => {
                 FAQ
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                Questions teams ask first
+                Straight answers, up front
               </h2>
             </div>
             <div className="mt-12 grid gap-5 md:grid-cols-2">
@@ -673,32 +619,55 @@ const LandingPage = () => {
           </div>
         </section>
 
-        {/* Contact */}
-        <section id="contact" className="bg-paper py-20 md:py-28">
-          <div className="container grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
-            <div>
-              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
-                Book a demo
-              </p>
-              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                See ContraClaim on your own record
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-ink/60">
-                Book a 30-minute walkthrough with our contracts team and see
-                grounded retrieval on a live matter. Send a message and it will
-                reach the ContraClaim contact mailbox directly.
-              </p>
-              <div className="mt-6 rounded-xl border border-ink/10 bg-white p-5 shadow-sm">
-                <div className="flex items-start gap-3">
-                  <FileSearch className="mt-1 h-5 w-5 text-brand" />
-                  <p className="text-sm leading-6 text-ink/60">
-                    Use this for product enquiries, onboarding support and
-                    workspace access questions. Please don't include passwords or
-                    confidential claim details in the form.
-                  </p>
-                </div>
-              </div>
-            </div>
+{/* Contact */}
+<section
+  id="contact"
+  className="relative isolate overflow-hidden bg-paper py-20 md:py-28"
+>
+  {/* Background image */}
+  <div
+    className="pointer-events-none absolute inset-0 -z-20 bg-cover bg-center bg-no-repeat"
+    style={{
+      backgroundImage: "url('/contraclaim-book-demo.png.png')",
+    }}
+    aria-hidden="true"
+  />
+
+  {/* Light overlay for readability */}
+  <div
+    className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-r from-[#eef6ff]/95 via-[#eef6ff]/88 to-[#eef6ff]/72"
+    aria-hidden="true"
+  />
+
+  <div className="container relative z-10 grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+    <div>
+      <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+        Book a demo
+      </p>
+
+      <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+        See ContraClaim on your own record
+      </h2>
+
+      <p className="mt-5 text-lg leading-8 text-ink/70">
+        Book a 30-minute walkthrough with our contracts team and see
+        grounded retrieval on a live matter. Send a message and it will
+        reach the ContraClaim contact mailbox directly.
+      </p>
+
+      <div className="mt-6 rounded-xl border border-white/60 bg-white/85 p-5 shadow-sm backdrop-blur-sm">
+        <div className="flex items-start gap-3">
+          <FileSearch className="mt-1 h-5 w-5 text-brand" />
+          <p className="text-sm leading-6 text-ink/65">
+            Use this for product enquiries, onboarding support and
+            workspace access questions. Please don't include passwords or
+            confidential claim details in the form.
+          </p>
+        </div>
+      </div>
+    </div>
+	
+
 
             <Card className="border-ink/10 bg-white shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]">
               <CardContent className="p-7">
