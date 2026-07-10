@@ -19,7 +19,22 @@ export default {
 			}
 		},
 		extend: {
+			fontFamily: {
+				// Landing-page brand type. Scope via `font-franklin` / `font-serif`
+				// on the landing subtree; the rest of the app keeps Inter (index.css).
+				franklin: ['"Libre Franklin"', 'system-ui', 'sans-serif'],
+				serif: ['"Source Serif 4"', 'Georgia', 'serif'],
+			},
 			colors: {
+				// ContraClaim brand palette (from the reference landing design).
+				ink: '#0d1b2e',
+				brand: {
+					DEFAULT: '#1466c4',
+					soft: '#eaf2fc',
+					tint: '#f4f8fd',
+				},
+				paper: '#fbfbf9',
+				coral: '#ff8a80',
 				border: 'hsl(var(--border))',
 				input: 'hsl(var(--input))',
 				ring: 'hsl(var(--ring))',
