@@ -151,6 +151,73 @@ const prettifyDate = (value?: string) => {
   return parsedDate ? format(parsedDate, "dd-MM-yyyy") : trimmed;
 };
 
+const firstText = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value === undefined || value === null) continue;
+    const text = String(value).trim();
+    if (text) return text;
+  }
+  return "";
+};
+
+const cleanReferenceLetterNo = (value: string) => {
+  const labelPattern =
+    /\b(?:LOA|letter|ltr|reference|ref)\s*(?:no|number|#)\.?\s*[:\-]?/gi;
+  let candidate = value.trim();
+  let match: RegExpExecArray | null;
+  let lastLabelEnd = -1;
+
+  while ((match = labelPattern.exec(candidate)) !== null) {
+    lastLabelEnd = match.index + match[0].length;
+  }
+
+  if (lastLabelEnd >= 0) {
+    candidate = candidate.slice(lastLabelEnd);
+  }
+
+  return candidate
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[\s:;,.()[\]#\-\u2013\u2014]+/, "")
+    .replace(/[\s:;,.#\-\u2013\u2014]+$/, "")
+    .trim();
+};
+
+const parseLegacyReferenceText = (value?: string): RefParsed | null => {
+  const raw = firstText(value);
+  if (!raw) return null;
+
+  const match = raw.match(
+    /^(.*?)\s*(?:[-\u2013\u2014]?\s*\b(?:dated|dtd|dt)\.?(?!\w))\s*[:\-]?\s*(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{2,4})/i
+  );
+  if (!match) return null;
+
+  const letterNo = cleanReferenceLetterNo(match[1] ?? "");
+  if (!letterNo) return null;
+
+  return {
+    raw,
+    letterNo,
+    date: prettifyDate(match[2]),
+  };
+};
+
+const parsedReferenceKey = (ref: RefParsed) => {
+  const raw = firstText(ref.raw);
+  if (raw) return `raw:${raw.toLowerCase()}`;
+  return [
+    firstText(ref.letterNo).toLowerCase(),
+    firstText(ref.date).toLowerCase(),
+  ].join("|");
+};
+
+const parsedReferenceScore = (ref: RefParsed) => {
+  const raw = firstText(ref.raw);
+  const letterNo = firstText(ref.letterNo);
+  const hasCleanLetter = letterNo && letterNo.toLowerCase() !== raw.toLowerCase();
+  return (firstText(ref.date) ? 2 : 0) + (hasCleanLetter ? 3 : 0) + (raw ? 1 : 0);
+};
+
 const buildAuthHeaders = (): Record<string, string> => {
   return {};
 };
@@ -161,27 +228,45 @@ const normalizeParsedReferences = (refData: any): RefParsed[] => {
     for (const ref of refData) {
       if (typeof ref === "string") {
         const raw = ref.trim();
-        if (raw) refs.push({ raw });
+        if (raw) refs.push(parseLegacyReferenceText(raw) ?? { raw });
       } else if (typeof ref === "object" && ref !== null) {
-        const letterNoValue =
-          ref.letter_no ?? ref.letterNo ?? ref.reference ?? ref.text ?? "";
-        const dateValue = ref.date ?? ref.date_value ?? "";
-        const rawText = ref.raw ?? ref.reference ?? ref.text ?? "";
+        const explicitLetter = firstText(
+          ref.letter_no,
+          ref.letterNo,
+          ref.reference_number,
+          ref.referenceNumber
+        );
+        const dateValue = firstText(ref.date, ref.date_value);
+        const rawText = firstText(ref.raw, ref.text, ref.reference, explicitLetter);
+        const parsed = parseLegacyReferenceText(rawText || explicitLetter);
+        const letterNoValue = explicitLetter || parsed?.letterNo || "";
+        const normalizedDate = dateValue || parsed?.date || "";
         refs.push({
-          raw: rawText || letterNoValue || JSON.stringify(ref),
+          raw: rawText || parsed?.raw || letterNoValue || JSON.stringify(ref),
           letterNo: letterNoValue || undefined,
-          date: dateValue || undefined,
+          date: normalizedDate || undefined,
         });
       }
     }
   } else if (typeof refData === "string") {
-    parseBulletString(refData).forEach((raw) => refs.push({ raw }));
+    parseBulletString(refData).forEach((raw) =>
+      refs.push(parseLegacyReferenceText(raw) ?? { raw })
+    );
   } else if (typeof refData === "object" && refData !== null) {
     const r = refData;
+    const explicitLetter = firstText(
+      r.letter_no,
+      r.letterNo,
+      r.reference_number,
+      r.referenceNumber
+    );
+    const dateValue = firstText(r.date, r.date_value);
+    const rawText = firstText(r.raw, r.text, r.reference, explicitLetter);
+    const parsed = parseLegacyReferenceText(rawText || explicitLetter);
     refs.push({
-      raw: r.raw ?? r.reference ?? r.text ?? "",
-      letterNo: r.letter_no ?? r.letterNo ?? r.reference ?? r.text ?? undefined,
-      date: r.date ?? r.date_value ?? undefined,
+      raw: rawText || parsed?.raw || explicitLetter,
+      letterNo: explicitLetter || parsed?.letterNo || undefined,
+      date: dateValue || parsed?.date || undefined,
     });
   }
   return refs;
@@ -278,12 +363,20 @@ const ReferencePage: React.FC = () => {
             return { raw: x } as RefParsed;
           }
           if (x && typeof x === "object") {
-            const raw =
-              x.letter_no ?? x.letterNo ?? x.raw ?? x.documentId ?? x.id ?? "";
+            const raw = firstText(
+              x.raw,
+              x.reference,
+              x.text,
+              x.letter_no,
+              x.letterNo,
+              x.documentId,
+              x.id
+            );
+            const parsedLegacy = parseLegacyReferenceText(raw);
             return {
-              raw: String(raw),
-              letterNo: x.letter_no ?? x.letterNo,
-              date: x.date,
+              raw,
+              letterNo: firstText(x.letter_no, x.letterNo, parsedLegacy?.letterNo) || undefined,
+              date: firstText(x.date, x.date_value, parsedLegacy?.date) || undefined,
               linkedId: x.documentId ?? x.id ?? null,
             } as RefParsed;
           }
@@ -324,11 +417,10 @@ const ReferencePage: React.FC = () => {
         const merged = [...existingParsed, ...parsed];
         const seen = new Map<string, RefParsed>();
         for (const r of merged) {
-          const key = String(r.raw ?? "")
-            .toLowerCase()
-            .trim();
+          const key = parsedReferenceKey(r);
           if (!key) continue;
-          if (!seen.has(key)) {
+          const existing = seen.get(key);
+          if (!existing || parsedReferenceScore(r) > parsedReferenceScore(existing)) {
             seen.set(key, r);
           }
         }
