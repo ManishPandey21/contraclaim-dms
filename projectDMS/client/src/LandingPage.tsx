@@ -4,8 +4,6 @@ import {
   ArrowRight,
   BarChart3,
   BellRing,
-  Bot,
-  BrainCircuit,
   Building2,
   CheckCircle2,
   ClipboardCheck,
@@ -15,15 +13,12 @@ import {
   HelpCircle,
   KeyRound,
   LockKeyhole,
-  Network,
   PenLine,
   Scale,
   Search,
   ShieldCheck,
-  Sparkles,
   UploadCloud,
   Users,
-  Zap,
 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -33,56 +28,81 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { publicApi } from "@/services/http";
 
-const proofMetrics = [
-  { value: "360°", label: "contract, claim & correspondence visibility" },
-  { value: "Cited", label: "answers linked to clause & page" },
-  { value: "RBAC", label: "permission-aware, multi-project" },
-  { value: "SLA", label: "time-bar & deadline tracking" },
+// Honest capability strip — the reference mockup used fictional customer
+// logos and uncertified compliance badges; those are deliberately not
+// reproduced on the real product site.
+const trustSignals = [
+  "Built for construction & infrastructure disputes",
+  "Answers cited to clause & page",
+  "Permission-aware, multi-project",
+  "Contractual time-bar tracking",
 ];
 
-const platformSignals = [
-  { icon: FolderTree, label: "Project folder structure" },
-  { icon: Search, label: "Semantic search and filters" },
-  { icon: UploadCloud, label: "Document and contract upload" },
-  { icon: ShieldCheck, label: "Governed access control" },
-];
+const matterTabs = ["Correspondence", "Clauses", "Evidence", "Claims & notices"];
 
-const workflows = [
+const matterItems = [
   {
-    icon: BrainCircuit,
-    title: "Contract intelligence & appraisal",
+    tag: "Notice of Delay · Cl. 20.1",
+    title: "RE: EOT — Foundation works, Grid B",
+    note: "Contractor asserts entitlement under Sub-Clause 8.4…",
+    due: "2 days left",
+    urgent: true,
+  },
+  {
+    tag: "Payment · Cl. 14.6",
+    title: "IPC-11 — Engineer's certificate",
+    note: "Certified sum disputed; retention release query…",
+    due: "This week",
+    urgent: false,
+  },
+  {
+    tag: "Variation · Cl. 13.3",
+    title: "VO-42 — Cladding specification change",
+    note: "Instruction pending valuation and acceptance…",
+    due: "Open",
+    urgent: false,
+  },
+];
+
+const features = [
+  {
+    icon: FileSearch,
+    title: "Clause & evidence retrieval",
     description:
-      "Search clauses, ask questions with answers cited to document, clause and page, and generate a structured contract appraisal report.",
-    points: [
-      "Semantic clause search",
-      "Cited contract Q&A",
-      "Structured appraisal report",
-    ],
-    accent: "from-cyan-400 to-blue-500",
+      "Ask in plain language and surface the exact clause, letter or exhibit — every answer cited back to its source document and page.",
+    points: ["Semantic clause search", "Cited contract Q&A", "Source-linked evidence"],
   },
   {
     icon: PenLine,
-    title: "Correspondence drafting as a service",
+    title: "Grounded reply drafting",
     description:
-      "Produce contractual letters through a governed, end-to-end drafting service with built-in review, approval and quality tracking.",
-    points: [
-      "Input → strategy → draft",
-      "Review → approval → completed",
-      "Templates & quality dashboard",
-    ],
-    accent: "from-indigo-400 to-blue-500",
+      "Draft contractual correspondence backed by cited clauses and precedent, through a governed input → draft → review → approval workflow.",
+    points: ["Governed drafting service", "Cited, never ungrounded", "Templates & quality tracking"],
   },
   {
     icon: Scale,
-    title: "Claims & SLA readiness",
+    title: "Claim & deadline tracking",
     description:
-      "Register EOT, variation, payment and loss/expense claims, and keep notices, evidence and time-bars aligned before deadlines compress.",
-    points: [
-      "Claims register",
-      "Time-bar & SLA tracking",
-      "Notice & evidence alignment",
-    ],
-    accent: "from-sky-400 to-cyan-500",
+      "Track every notice, time-bar and claim status across projects so nothing slips past a contractual deadline.",
+    points: ["EOT, variation & payment claims", "Time-bar & SLA tracking", "Notice & evidence alignment"],
+  },
+];
+
+const steps = [
+  {
+    icon: UploadCloud,
+    title: "Ingest your record",
+    text: "Upload contracts, correspondence and exhibits. ContraClaim scans, indexes and links them automatically.",
+  },
+  {
+    icon: Search,
+    title: "Ask & retrieve",
+    text: "Find the governing clause and supporting evidence in seconds — each answer cited to its source document and page.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Respond & defend",
+    text: "Draft grounded replies and export a defensible, audit-ready trail for any review, negotiation or tribunal.",
   },
 ];
 
@@ -110,12 +130,6 @@ const moduleCatalog = [
     title: "Document management",
     description:
       "Upload, classify, tag, view, share and download project documents with rich metadata, references and structured folder browsing.",
-  },
-  {
-    icon: Search,
-    title: "Search & retrieval",
-    description:
-      "Semantic and filtered search across documents and contracts, with metadata-rich results and traceable source references.",
   },
   {
     icon: Building2,
@@ -149,51 +163,6 @@ const moduleCatalog = [
   },
 ];
 
-const lifecycleSteps = [
-  {
-    title: "Set up",
-    text: "Create organizations, projects, users, roles, parties and email groups so work is correctly scoped.",
-    icon: Building2,
-    accent: "from-blue-500 to-cyan-400",
-    glow: "group-hover:shadow-cyan-200/70",
-  },
-  {
-    title: "Ingest",
-    text: "Upload contracts, letters, references and supporting records; files are scanned and indexed with metadata.",
-    icon: UploadCloud,
-    accent: "from-cyan-500 to-teal-400",
-    glow: "group-hover:shadow-teal-200/70",
-  },
-  {
-    title: "Understand",
-    text: "Search clauses, ask cited contract questions, and generate appraisal reports with obligations, risks and key dates.",
-    icon: BrainCircuit,
-    accent: "from-sky-500 to-blue-400",
-    glow: "group-hover:shadow-sky-200/70",
-  },
-  {
-    title: "Draft",
-    text: "Produce contractual correspondence as a service through a governed review-and-approval workflow.",
-    icon: PenLine,
-    accent: "from-indigo-500 to-blue-400",
-    glow: "group-hover:shadow-indigo-200/70",
-  },
-  {
-    title: "Protect",
-    text: "Register claims and track notices, deadlines and time-bars so entitlements are never lost to a missed date.",
-    icon: ShieldCheck,
-    accent: "from-cyan-500 to-sky-400",
-    glow: "group-hover:shadow-cyan-200/70",
-  },
-  {
-    title: "Report",
-    text: "Monitor status, analytics and system health from dedicated dashboards.",
-    icon: BarChart3,
-    accent: "from-blue-500 to-indigo-400",
-    glow: "group-hover:shadow-blue-200/70",
-  },
-];
-
 const governanceDetails = [
   {
     icon: Building2,
@@ -213,7 +182,7 @@ const governanceDetails = [
   {
     icon: ShieldCheck,
     title: "Safe uploads",
-    text: "Uploaded files can be virus-scanned before they are stored or processed.",
+    text: "Uploaded files are virus-scanned before they are stored or processed.",
   },
   {
     icon: LockKeyhole,
@@ -221,7 +190,7 @@ const governanceDetails = [
     text: "Files are served through permission checks and time-limited, signed access links.",
   },
   {
-    icon: BrainCircuit,
+    icon: FileSearch,
     title: "Grounded answers",
     text: "Contract answers and appraisals cite the source document, clause and page — or state when information is not found.",
   },
@@ -230,7 +199,7 @@ const governanceDetails = [
 const faqs = [
   {
     q: "What is ContraClaim DMS?",
-    a: "A document management and contract-claims workspace that unites contract intelligence, correspondence drafting, claims and deadline tracking, and governed document management for infrastructure and construction teams.",
+    a: "A contract-disputes workspace that unites contract intelligence, grounded correspondence drafting, claim and deadline tracking, and governed document management for construction and infrastructure teams.",
   },
   {
     q: "How does contract Q&A stay accurate?",
@@ -265,6 +234,7 @@ const LandingPage = () => {
     message: "",
   });
   const [submittingContact, setSubmittingContact] = useState(false);
+  const [activeTab, setActiveTab] = useState(0);
 
   const handleContactSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -313,8 +283,8 @@ const LandingPage = () => {
   };
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-[#f8fbff] text-slate-950">
-      <header className="sticky top-0 z-50 border-b border-white/20 bg-slate-950/85 text-white backdrop-blur-xl">
+    <div className="min-h-screen overflow-x-hidden bg-paper font-franklin text-ink antialiased">
+      <header className="sticky top-0 z-50 border-b border-ink/10 bg-paper/85 backdrop-blur-xl">
         <div className="container flex h-16 items-center justify-between gap-6">
           <Link
             to="/"
@@ -327,40 +297,37 @@ const LandingPage = () => {
               className="h-9 w-auto"
             />
           </Link>
-          <nav className="hidden items-center gap-6 text-sm font-semibold text-white/75 lg:flex">
-            <a href="#platform" className="transition hover:text-cyan-200">
+          <nav className="hidden items-center gap-8 text-sm font-semibold text-ink/70 lg:flex">
+            <a href="#platform" className="transition hover:text-brand">
               Platform
             </a>
-            <a href="#workflows" className="transition hover:text-cyan-200">
-              Workflows
+            <a href="#how" className="transition hover:text-brand">
+              How it works
             </a>
-            <a href="#modules" className="transition hover:text-cyan-200">
+            <a href="#governance" className="transition hover:text-brand">
+              Security
+            </a>
+            <a href="#modules" className="transition hover:text-brand">
               Modules
             </a>
-            <a href="#governance" className="transition hover:text-cyan-200">
-              Governance
-            </a>
-            <a href="#faq" className="transition hover:text-cyan-200">
+            <a href="#faq" className="transition hover:text-brand">
               FAQ
-            </a>
-            <a href="#contact" className="transition hover:text-cyan-200">
-              Contact
             </a>
           </nav>
           <div className="flex items-center gap-3">
             <Button
               asChild
               variant="ghost"
-              className="hidden text-white hover:bg-white/10 hover:text-white sm:inline-flex"
+              className="hidden text-ink hover:bg-ink/5 hover:text-brand sm:inline-flex"
             >
-              <Link to="/login">Login</Link>
+              <Link to="/login">Sign in</Link>
             </Button>
             <Button
               asChild
-              className="hidden gap-2 bg-cyan-300 text-slate-950 hover:bg-cyan-200 sm:inline-flex"
+              className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
             >
               <a href="#contact">
-                Book a walkthrough <ArrowRight className="h-4 w-4" />
+                Book a demo <ArrowRight className="h-4 w-4" />
               </a>
             </Button>
           </div>
@@ -368,194 +335,124 @@ const LandingPage = () => {
       </header>
 
       <main>
-        <section
-          className="relative min-h-[72vh] overflow-hidden bg-cover bg-center text-white"
-          style={{
-            backgroundImage:
-              "linear-gradient(105deg, rgba(2, 6, 23, 0.98), rgba(30, 41, 59, 0.84), rgba(12, 74, 110, 0.48)), url('/New%20folder/automated-contracts.jpg')",
-          }}
-        >
-          <div className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-[#f8fbff] to-transparent" />
-          <div className="container relative py-16 md:py-24">
-            <div
-              className="max-w-5xl"
-              style={{ maxWidth: "min(64rem, calc(100vw - 4rem))" }}
-            >
-              <div className="flex w-full max-w-[calc(100vw-4rem)] items-start gap-2 rounded-md border border-cyan-200/30 bg-cyan-200/10 px-3 py-2 text-sm font-semibold text-cyan-100 sm:inline-flex sm:w-auto sm:max-w-full">
-                <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
-                <span className="min-w-0 whitespace-normal break-words sm:hidden">
-                  Contract & claim workspace
-                </span>
-                <span className="hidden sm:inline">
-                  Contract intelligence, drafting service & claim command center
-                </span>
-              </div>
-              <h1 className="mt-6 max-w-5xl text-4xl font-black leading-[1.04] text-white md:text-6xl">
-                Turn every project record into a searchable claim advantage.
+        {/* Hero */}
+        <section className="relative overflow-hidden bg-ink text-white">
+          {/* Relevant contract photo, dimmed by a translucent navy wash so the
+              image reads through while white text stays legible. */}
+          <div
+            className="pointer-events-none absolute inset-0 bg-cover bg-center"
+            style={{ backgroundImage: "url('/4.jpg')" }}
+            aria-hidden="true"
+          />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-ink/95 via-ink/85 to-ink/70" />
+          <div className="pointer-events-none absolute -right-32 -top-24 h-96 w-96 rounded-full bg-brand/25 blur-3xl" />
+          <div className="pointer-events-none absolute -left-20 bottom-0 h-80 w-80 rounded-full bg-brand/10 blur-3xl" />
+          <div className="container relative grid gap-12 py-16 md:py-24 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
+            <div>
+              <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-brand-soft">
+                Contract intelligence for disputes
+              </span>
+              <h1 className="mt-6 font-serif text-4xl font-semibold leading-[1.06] tracking-[-0.015em] text-white md:text-6xl">
+                Command every contract, correspondence&nbsp;and claim.
               </h1>
-              <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-100 md:text-xl">
-                ContraClaim DMS unites contract intelligence, correspondence
-                drafting delivered as a service, claims and deadline tracking,
-                and governed document management — in one workspace for
-                infrastructure and construction teams.
+              <p className="mt-6 max-w-xl text-lg leading-8 text-white/70">
+                From first notice to final award, ContraClaim keeps clauses,
+                correspondence and evidence connected, cited and audit-ready —
+                one source of truth for the whole dispute.
               </p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Button
                   asChild
                   size="lg"
-                  className="gap-2 bg-cyan-300 text-slate-950 hover:bg-cyan-200"
+                  className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
                 >
-                  <Link to="/login">
-                    Launch workspace <ArrowRight className="h-5 w-5" />
-                  </Link>
+                  <a href="#contact">
+                    Book a demo <ArrowRight className="h-5 w-5" />
+                  </a>
                 </Button>
                 <Button
                   asChild
                   size="lg"
                   variant="outline"
-                  className="border-white/50 bg-white/10 text-white hover:bg-white hover:text-slate-950"
+                  className="rounded-full border-white/25 bg-transparent text-white hover:bg-white hover:text-ink"
                 >
-                  <a href="#workflows">Explore workflows</a>
+                  <a href="#how">See how it works</a>
                 </Button>
               </div>
-            </div>
-
-            <div
-              className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
-              style={{ maxWidth: "calc(100vw - 4rem)" }}
-            >
-              {proofMetrics.map((metric) => (
-                <div
-                  key={metric.label}
-                  className="rounded-lg border border-white/15 bg-white/10 p-4 backdrop-blur-md"
-                >
-                  <p className="text-3xl font-black text-cyan-200">
-                    {metric.value}
-                  </p>
-                  <p className="mt-1 text-sm font-medium text-slate-100">
-                    {metric.label}
-                  </p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section className="relative -mt-8 pb-12">
-          <div className="container">
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              {platformSignals.map((item) => (
-                <div
-                  key={item.label}
-                  className="rounded-lg border border-slate-200 bg-white p-5 shadow-lg shadow-slate-200/70"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-md bg-gradient-to-br from-sky-400 via-blue-500 to-indigo-500 text-white">
-                      <item.icon className="h-5 w-5" />
-                    </div>
-                    <p className="text-sm font-bold text-slate-800">
-                      {item.label}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        <section
-          id="platform"
-          className="relative overflow-hidden bg-gradient-to-br from-sky-50 via-blue-50/60 to-cyan-50 py-16 md:py-24"
-        >
-          <div className="pointer-events-none absolute -left-24 top-0 h-72 w-72 rounded-full bg-sky-300/30 blur-3xl" />
-          <div className="pointer-events-none absolute -right-20 bottom-0 h-80 w-80 rounded-full bg-cyan-300/30 blur-3xl" />
-          <div className="container relative grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
-            <div>
-              <p className="text-sm font-bold text-blue-600">Platform</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight text-slate-950 md:text-5xl">
-                A live operating layer for contracts, evidence, and project
-                correspondence.
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-600">
-                Instead of spreading claims intelligence across folders, inboxes,
-                spreadsheets, and disconnected PDFs, ContraClaim gives teams a
-                unified contract memory with workflow control.
+              <p className="mt-8 text-sm text-white/45">
+                Grounded retrieval · governed drafting · data residency you control
               </p>
             </div>
 
-            <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl shadow-blue-100/70">
-              <div className="border-b border-slate-200 bg-slate-950 px-5 py-4 text-white">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="flex items-center gap-3">
-                    <Bot className="h-5 w-5 text-cyan-300" />
-                    <span className="text-sm font-bold">
-                      ContraClaim intelligence desk
+            {/* Product mockup: Matter view */}
+            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-2 shadow-[0_30px_70px_-28px_rgba(13,27,46,.6)] backdrop-blur">
+              <div className="overflow-hidden rounded-xl bg-paper text-ink">
+                <div className="flex items-center justify-between border-b border-ink/10 bg-white px-4 py-3">
+                  <div className="flex items-center gap-2 text-xs font-medium text-ink/50">
+                    <span className="h-2.5 w-2.5 rounded-full bg-coral/70" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
+                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
+                    <span className="ml-2">app.contraclaim.com/matter/A-217</span>
+                  </div>
+                </div>
+                <div className="px-5 py-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-brand">
+                        Matter A-217
+                      </p>
+                      <p className="font-serif text-lg font-semibold text-ink">
+                        Grid B foundation delay
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-brand-soft px-3 py-1 text-xs font-bold text-brand">
+                      14 time-bars · 3 due
                     </span>
                   </div>
-                  <span className="rounded-md bg-emerald-300 px-2 py-1 text-xs font-bold text-slate-950">
-                    Live
-                  </span>
-                </div>
-              </div>
-              <div className="grid gap-0 md:grid-cols-[0.85fr_1.15fr]">
-                <div className="border-b border-slate-200 bg-gradient-to-br from-sky-50 via-white to-blue-50 p-5 md:border-b-0 md:border-r">
-                  <p className="text-sm font-bold text-slate-700">
-                    Ask across project memory
-                  </p>
-                  <div className="mt-4 rounded-lg bg-slate-950 p-4 text-white">
-                    <p className="text-sm leading-6 text-slate-200">
-                      “Show open notices tied to delayed drawings and list
-                      evidence gaps before the next review.”
-                    </p>
+
+                  <div className="mt-4 flex gap-1 overflow-x-auto rounded-lg bg-ink/5 p-1 text-xs font-semibold">
+                    {matterTabs.map((tab, i) => (
+                      <button
+                        key={tab}
+                        type="button"
+                        onClick={() => setActiveTab(i)}
+                        className={`whitespace-nowrap rounded-md px-3 py-1.5 transition ${
+                          activeTab === i
+                            ? "bg-white text-brand shadow-sm"
+                            : "text-ink/55 hover:text-ink"
+                        }`}
+                      >
+                        {tab}
+                      </button>
+                    ))}
                   </div>
-                  <div className="mt-4 grid gap-3">
-                    {["Contracts", "Letters", "References", "Parties"].map(
-                      (source) => (
-                        <div
-                          key={source}
-                          className="flex items-center justify-between rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm"
-                        >
-                          {source}
-                          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+
+                  <div className="mt-4 space-y-3">
+                    {matterItems.map((item) => (
+                      <div
+                        key={item.title}
+                        className="rounded-lg border border-ink/10 bg-white p-4 shadow-sm"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[11px] font-bold uppercase tracking-wide text-brand">
+                            {item.tag}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                              item.urgent
+                                ? "bg-coral/15 text-[#c0392b]"
+                                : "bg-ink/5 text-ink/55"
+                            }`}
+                          >
+                            {item.due}
+                          </span>
                         </div>
-                      ),
-                    )}
-                  </div>
-                </div>
-                <div className="p-5">
-                  <div className="grid gap-4">
-                    {[
-                      {
-                        label: "Related contractual clauses",
-                        color: "bg-cyan-500",
-                        width: "w-10/12",
-                      },
-                      {
-                        label: "Linked correspondence trail",
-                        color: "bg-indigo-500",
-                        width: "w-8/12",
-                      },
-                      {
-                        label: "Review-ready evidence pack",
-                        color: "bg-sky-500",
-                        width: "w-9/12",
-                      },
-                      {
-                        label: "Role-gated download history",
-                        color: "bg-blue-400",
-                        width: "w-7/12",
-                      },
-                    ].map((row) => (
-                      <div key={row.label}>
-                        <div className="mb-2 flex items-center justify-between text-sm font-semibold text-slate-700">
-                          <span>{row.label}</span>
-                          <Zap className="h-4 w-4 text-blue-500" />
-                        </div>
-                        <div className="h-3 rounded-full bg-slate-100">
-                          <div
-                            className={`h-3 rounded-full ${row.color} ${row.width}`}
-                          />
-                        </div>
+                        <p className="mt-1.5 text-sm font-semibold text-ink">
+                          {item.title}
+                        </p>
+                        <p className="mt-1 text-xs leading-5 text-ink/55">
+                          {item.note}
+                        </p>
                       </div>
                     ))}
                   </div>
@@ -563,52 +460,60 @@ const LandingPage = () => {
               </div>
             </div>
           </div>
+
+          {/* Trust strip */}
+          <div className="border-t border-white/10 bg-ink/40">
+            <div className="container flex flex-wrap items-center justify-center gap-x-8 gap-y-3 py-5 text-center text-sm font-medium text-white/60">
+              {trustSignals.map((signal) => (
+                <span key={signal} className="inline-flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-brand-soft" />
+                  {signal}
+                </span>
+              ))}
+            </div>
+          </div>
         </section>
 
-        <section
-          id="workflows"
-          className="relative overflow-hidden bg-gradient-to-br from-blue-950 via-blue-900 to-cyan-900 py-16 text-white md:py-24"
-        >
-          <div className="pointer-events-none absolute right-0 top-0 h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" />
-          <div className="pointer-events-none absolute -left-20 bottom-0 h-80 w-80 rounded-full bg-blue-400/10 blur-3xl" />
-          <div className="container relative">
-            <div className="max-w-3xl">
-              <p className="text-sm font-bold text-cyan-200">Workflows</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight md:text-5xl">
-                Built around how contract and claims teams actually work.
+        {/* Platform */}
+        <section id="platform" className="bg-white py-20 md:py-28">
+          <div className="container">
+            <div className="mx-auto max-w-3xl text-center">
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+                The platform
+              </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+                A single source of truth for the whole dispute
               </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-300">
-                Each workflow connects document memory, contract context, and
-                operational governance so teams can move faster without losing
-                control.
+              <p className="mt-5 text-lg leading-8 text-ink/60">
+                Instead of scattering claims intelligence across folders,
+                inboxes, spreadsheets and disconnected PDFs, ContraClaim keeps
+                correspondence, clauses and evidence connected and audit-ready.
               </p>
             </div>
 
-            <div className="mt-10 grid gap-5 lg:grid-cols-3">
-              {workflows.map((workflow) => (
+            <div className="mt-14 grid gap-6 lg:grid-cols-3">
+              {features.map((feature) => (
                 <Card
-                  key={workflow.title}
-                  className="border-white/10 bg-white/[0.04] text-white shadow-none"
+                  key={feature.title}
+                  className="border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
                 >
-                  <CardContent className="p-6">
-                    <div
-                      className={`flex h-12 w-12 items-center justify-center rounded-md bg-gradient-to-br ${workflow.accent} text-white`}
-                    >
-                      <workflow.icon className="h-6 w-6" />
+                  <CardContent className="p-7">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand-soft text-brand">
+                      <feature.icon className="h-6 w-6" />
                     </div>
-                    <h3 className="mt-5 text-xl font-black text-white">
-                      {workflow.title}
+                    <h3 className="mt-5 font-serif text-xl font-semibold text-ink">
+                      {feature.title}
                     </h3>
-                    <p className="mt-3 text-sm leading-6 text-slate-300">
-                      {workflow.description}
+                    <p className="mt-3 text-sm leading-6 text-ink/60">
+                      {feature.description}
                     </p>
                     <ul className="mt-5 space-y-2">
-                      {workflow.points.map((point) => (
+                      {feature.points.map((point) => (
                         <li
                           key={point}
-                          className="flex items-center gap-2 text-sm font-semibold text-slate-200"
+                          className="flex items-center gap-2 text-sm font-semibold text-ink/75"
                         >
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-cyan-300" />
+                          <CheckCircle2 className="h-4 w-4 shrink-0 text-brand" />
                           {point}
                         </li>
                       ))}
@@ -620,86 +525,72 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="relative overflow-hidden bg-gradient-to-br from-sky-50 via-white to-blue-50 py-16 md:py-24">
-          <div className="pointer-events-none absolute -left-24 top-10 h-72 w-72 rounded-full bg-sky-300/40 blur-3xl" />
-          <div className="pointer-events-none absolute -right-24 bottom-0 h-80 w-80 rounded-full bg-blue-300/40 blur-3xl" />
-          <div className="container relative grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
-            <div className="lg:sticky lg:top-24">
-              <span className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-white/70 px-3 py-1 text-sm font-bold text-blue-600 shadow-sm backdrop-blur">
-                <Sparkles className="h-4 w-4" />
+        {/* How it works */}
+        <section id="how" className="bg-paper py-20 md:py-28">
+          <div className="container">
+            <div className="mx-auto max-w-3xl text-center">
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
                 How it works
-              </span>
-              <h2 className="mt-4 text-3xl font-black leading-tight md:text-5xl">
-                <span className="bg-gradient-to-r from-sky-600 via-blue-600 to-indigo-600 bg-clip-text text-transparent">
-                  From setup to protected entitlement.
-                </span>
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-600">
-                One connected lifecycle moves a project from structure and
-                ingestion, through understanding and drafting, to claim
-                protection and reporting.
               </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+                Live in days, defensible from day one
+              </h2>
             </div>
 
-            <ol className="relative space-y-4 before:absolute before:left-[47px] before:top-6 before:bottom-6 before:w-0.5 before:bg-gradient-to-b before:from-sky-300 before:via-blue-300 before:to-indigo-300">
-              {lifecycleSteps.map((step, index) => (
-                <li
+            <div className="mt-14 grid gap-6 md:grid-cols-3">
+              {steps.map((step, index) => (
+                <div
                   key={step.title}
-                  className={`group relative flex gap-4 rounded-2xl border border-white/80 bg-white/80 p-5 shadow-md shadow-slate-200/60 backdrop-blur transition-all duration-300 hover:-translate-y-1 hover:shadow-xl ${step.glow} sm:gap-5`}
+                  className="relative rounded-2xl border border-ink/10 bg-white p-7 shadow-sm"
                 >
-                  <div className="relative shrink-0">
-                    <div
-                      className={`flex h-14 w-14 items-center justify-center rounded-xl bg-gradient-to-br ${step.accent} text-white shadow-lg transition-transform duration-300 group-hover:scale-110`}
-                    >
-                      <step.icon className="h-6 w-6" />
-                    </div>
-                    <span
-                      className={`absolute -right-1.5 -top-1.5 flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-black text-slate-900 shadow ring-2 ring-white`}
-                    >
-                      {index + 1}
-                    </span>
+                  <span className="font-serif text-5xl font-semibold text-brand/15">
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+                  <div className="mt-3 flex h-11 w-11 items-center justify-center rounded-xl bg-ink text-white">
+                    <step.icon className="h-5 w-5" />
                   </div>
-                  <div className="pt-1">
-                    <h3 className="text-base font-black text-slate-900 md:text-lg">
-                      {step.title}
-                    </h3>
-                    <p className="mt-1.5 text-sm font-medium leading-6 text-slate-600">
-                      {step.text}
-                    </p>
-                  </div>
-                </li>
+                  <h3 className="mt-5 font-serif text-xl font-semibold text-ink">
+                    {step.title}
+                  </h3>
+                  <p className="mt-2.5 text-sm leading-6 text-ink/60">
+                    {step.text}
+                  </p>
+                </div>
               ))}
-            </ol>
+            </div>
           </div>
         </section>
 
-        <section id="modules" className="bg-white py-16 md:py-24">
+        {/* Modules */}
+        <section id="modules" className="bg-white py-20 md:py-28">
           <div className="container">
             <div className="max-w-3xl">
-              <p className="text-sm font-bold text-sky-600">Modules</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight text-slate-950 md:text-5xl">
-                Everything the workspace includes.
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+                Modules
+              </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+                Everything the workspace includes
               </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-600">
+              <p className="mt-5 text-lg leading-8 text-ink/60">
                 A connected set of modules across contracts, correspondence,
                 claims, documents, stakeholders, access control and reporting.
               </p>
             </div>
 
-            <div className="mt-10 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            <div className="mt-12 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {moduleCatalog.map((feature) => (
                 <Card
                   key={feature.title}
-                  className="border-slate-200 bg-white shadow-sm transition hover:-translate-y-1 hover:shadow-xl hover:shadow-blue-100"
+                  className="border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
                 >
                   <CardContent className="p-6">
-                    <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-md bg-gradient-to-br from-blue-500 to-cyan-300 text-white">
+                    <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-xl bg-brand-soft text-brand">
                       <feature.icon className="h-6 w-6" />
                     </div>
-                    <h3 className="text-lg font-black text-slate-950">
+                    <h3 className="font-serif text-lg font-semibold text-ink">
                       {feature.title}
                     </h3>
-                    <p className="mt-3 text-sm leading-6 text-slate-600">
+                    <p className="mt-3 text-sm leading-6 text-ink/60">
                       {feature.description}
                     </p>
                   </CardContent>
@@ -709,40 +600,38 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section
-          id="governance"
-          className="relative overflow-hidden bg-gradient-to-br from-blue-50 via-sky-50 to-cyan-50 py-16 md:py-24"
-        >
-          <div className="pointer-events-none absolute -right-24 top-10 h-72 w-72 rounded-full bg-blue-300/30 blur-3xl" />
-          <div className="pointer-events-none absolute -left-20 bottom-0 h-72 w-72 rounded-full bg-cyan-300/30 blur-3xl" />
-          <div className="container relative grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
-            <div>
-              <p className="text-sm font-bold text-blue-600">Governance</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight text-slate-950 md:text-5xl">
-                Enterprise controls without a dull enterprise experience.
+        {/* Governance / Security */}
+        <section id="governance" className="bg-ink py-20 text-white md:py-28">
+          <div className="container grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+            <div className="lg:sticky lg:top-24">
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand-soft">
+                Security & governance
+              </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-white md:text-5xl">
+                Enterprise controls, built in
               </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-600">
-                Tenant isolation, role permissions, audit-oriented activity,
-                safe uploads, and controlled downloads are built into the
-                workspace — and contract answers stay grounded in your
-                documents.
+              <p className="mt-5 text-lg leading-8 text-white/65">
+                Tenant isolation, role-based permissions, audit-oriented
+                activity, virus-scanned uploads and signed downloads are part of
+                the workspace — and every contract answer stays grounded in your
+                own documents.
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               {governanceDetails.map((item) => (
                 <div
                   key={item.title}
-                  className="rounded-lg border border-sky-100 bg-white/80 p-5 shadow-sm shadow-blue-100/60 backdrop-blur transition hover:-translate-y-1 hover:shadow-lg hover:shadow-blue-200/60"
+                  className="rounded-xl border border-white/10 bg-white/[0.04] p-5 transition hover:bg-white/[0.07]"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-md bg-gradient-to-br from-sky-500 to-blue-600 text-white">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-brand text-white">
                       <item.icon className="h-5 w-5" />
                     </div>
-                    <span className="text-sm font-black text-slate-900">
+                    <span className="text-sm font-bold text-white">
                       {item.title}
                     </span>
                   </div>
-                  <p className="mt-3 text-sm leading-6 text-slate-600">
+                  <p className="mt-3 text-sm leading-6 text-white/60">
                     {item.text}
                   </p>
                 </div>
@@ -751,28 +640,28 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section id="faq" className="bg-white py-16 md:py-24">
+        {/* FAQ */}
+        <section id="faq" className="bg-white py-20 md:py-28">
           <div className="container">
             <div className="max-w-3xl">
-              <p className="text-sm font-bold text-blue-600">FAQ</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight text-slate-950 md:text-5xl">
-                Questions teams ask first.
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+                FAQ
+              </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+                Questions teams ask first
               </h2>
             </div>
-            <div className="mt-10 grid gap-5 md:grid-cols-2">
+            <div className="mt-12 grid gap-5 md:grid-cols-2">
               {faqs.map((item) => (
-                <Card
-                  key={item.q}
-                  className="border-slate-200 bg-white shadow-sm"
-                >
+                <Card key={item.q} className="border-ink/10 bg-paper shadow-sm">
                   <CardContent className="p-6">
                     <div className="flex items-start gap-3">
-                      <HelpCircle className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
+                      <HelpCircle className="mt-0.5 h-5 w-5 shrink-0 text-brand" />
                       <div>
-                        <h3 className="text-base font-black text-slate-950">
+                        <h3 className="font-serif text-base font-semibold text-ink">
                           {item.q}
                         </h3>
-                        <p className="mt-2 text-sm leading-6 text-slate-600">
+                        <p className="mt-2 text-sm leading-6 text-ink/60">
                           {item.a}
                         </p>
                       </div>
@@ -784,37 +673,35 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section
-          id="contact"
-          className="relative overflow-hidden bg-gradient-to-br from-sky-50 via-white to-blue-50 py-16 md:py-24"
-        >
-          <div className="pointer-events-none absolute -left-24 top-10 h-72 w-72 rounded-full bg-sky-300/30 blur-3xl" />
-          <div className="pointer-events-none absolute -right-24 bottom-0 h-80 w-80 rounded-full bg-blue-300/30 blur-3xl" />
-          <div className="container relative z-10 grid gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+        {/* Contact */}
+        <section id="contact" className="bg-paper py-20 md:py-28">
+          <div className="container grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
             <div>
-              <p className="text-sm font-bold text-blue-600">Contact</p>
-              <h2 className="mt-3 text-3xl font-black leading-tight text-slate-950 md:text-5xl">
-                Build your contract command center.
-              </h2>
-              <p className="mt-5 text-lg leading-8 text-slate-600">
-                Send a message from this page and it will be delivered to the
-                configured ContraClaim contact mailbox. The recipient is managed
-                safely on the backend through environment configuration.
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+                Book a demo
               </p>
-              <div className="mt-6 rounded-lg border border-blue-100 bg-white p-5 shadow-sm">
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
+                See ContraClaim on your own record
+              </h2>
+              <p className="mt-5 text-lg leading-8 text-ink/60">
+                Book a 30-minute walkthrough with our contracts team and see
+                grounded retrieval on a live matter. Send a message and it will
+                reach the ContraClaim contact mailbox directly.
+              </p>
+              <div className="mt-6 rounded-xl border border-ink/10 bg-white p-5 shadow-sm">
                 <div className="flex items-start gap-3">
-                  <FileSearch className="mt-1 h-5 w-5 text-blue-600" />
-                  <p className="text-sm leading-6 text-slate-600">
-                    Use this for product enquiries, onboarding support, and
-                    workspace access questions. Do not include passwords or
-                    confidential claim details in the contact form.
+                  <FileSearch className="mt-1 h-5 w-5 text-brand" />
+                  <p className="text-sm leading-6 text-ink/60">
+                    Use this for product enquiries, onboarding support and
+                    workspace access questions. Please don't include passwords or
+                    confidential claim details in the form.
                   </p>
                 </div>
               </div>
             </div>
 
-            <Card className="border-slate-200 bg-white/95 shadow-xl shadow-blue-100/70">
-              <CardContent className="p-6">
+            <Card className="border-ink/10 bg-white shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]">
+              <CardContent className="p-7">
                 <form className="space-y-5" onSubmit={handleContactSubmit}>
                   {contactStatus.type !== "idle" && (
                     <Alert
@@ -889,10 +776,10 @@ const LandingPage = () => {
                   <Button
                     type="submit"
                     size="lg"
-                    className="w-full gap-2 bg-slate-950 text-white hover:bg-blue-700 sm:w-auto"
+                    className="w-full gap-2 rounded-full bg-brand text-white hover:bg-[#1157a8] sm:w-auto"
                     disabled={submittingContact}
                   >
-                    {submittingContact ? "Sending..." : "Send Message"}
+                    {submittingContact ? "Sending..." : "Send message"}
                     <ArrowRight className="h-5 w-5" />
                   </Button>
                 </form>
@@ -901,33 +788,27 @@ const LandingPage = () => {
           </div>
         </section>
 
-        <section className="relative overflow-hidden bg-gradient-to-r from-blue-950 via-blue-900 to-cyan-900 py-14 text-white">
-          <div className="pointer-events-none absolute right-10 top-0 h-64 w-64 rounded-full bg-cyan-400/15 blur-3xl" />
-          <div className="container relative flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
-            <div className="max-w-3xl">
-              <div className="mb-4 inline-flex items-center gap-2 rounded-md border border-white/15 bg-white/10 px-3 py-2 text-sm font-semibold text-cyan-100">
-                <Network className="h-4 w-4" />
-                Connected DMS intelligence
-              </div>
-              <h2 className="text-3xl font-black leading-tight md:text-4xl">
-                Access your secured ContraClaim DMS workspace.
-              </h2>
-            </div>
+        {/* Login CTA */}
+        <section className="bg-ink py-16 text-white">
+          <div className="container flex flex-col items-start justify-between gap-6 md:flex-row md:items-center">
+            <h2 className="max-w-2xl font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] md:text-4xl">
+              Access your secured ContraClaim workspace.
+            </h2>
             <Button
               asChild
               size="lg"
-              className="gap-2 bg-cyan-300 text-slate-950 hover:bg-cyan-200"
+              className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
             >
               <Link to="/login">
-                Login <ArrowRight className="h-5 w-5" />
+                Sign in <ArrowRight className="h-5 w-5" />
               </Link>
             </Button>
           </div>
         </section>
       </main>
 
-      <footer className="border-t border-slate-200 bg-white">
-        <div className="container flex flex-col gap-4 py-8 text-sm text-slate-500 md:flex-row md:items-center md:justify-between">
+      <footer className="border-t border-ink/10 bg-paper">
+        <div className="container flex flex-col gap-4 py-8 text-sm text-ink/55 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
             <img
               src="/page.png"
@@ -935,26 +816,27 @@ const LandingPage = () => {
               className="h-8 w-8 rounded-md object-cover"
               aria-hidden="true"
             />
-            <span className="font-bold text-slate-800">ContraClaim DMS</span>
+            <span className="font-bold text-ink">ContraClaim DMS</span>
+            <span className="text-ink/40">© 2026</span>
           </div>
           <div className="flex flex-wrap gap-5 font-semibold">
-            <a href="#platform" className="hover:text-blue-600">
+            <a href="#platform" className="hover:text-brand">
               Platform
             </a>
-            <a href="#workflows" className="hover:text-blue-600">
-              Workflows
+            <a href="#how" className="hover:text-brand">
+              How it works
             </a>
-            <a href="#modules" className="hover:text-blue-600">
+            <a href="#modules" className="hover:text-brand">
               Modules
             </a>
-            <a href="#faq" className="hover:text-blue-600">
+            <a href="#faq" className="hover:text-brand">
               FAQ
             </a>
-            <a href="#contact" className="hover:text-blue-600">
+            <a href="#contact" className="hover:text-brand">
               Contact
             </a>
-            <Link to="/login" className="hover:text-blue-600">
-              Login
+            <Link to="/login" className="hover:text-brand">
+              Sign in
             </Link>
           </div>
         </div>
