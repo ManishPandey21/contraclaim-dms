@@ -316,6 +316,120 @@ describe("ReferencePage - Parsed References integration", () => {
     expect(screen.queryByText(row6)).not.toBeInTheDocument();
   });
 
+  it("renders linked references even when the document response arrives last", async () => {
+    // Regression: the page used to fire the document and references requests
+    // independently; when the references response landed first its linked
+    // rows were dropped, and the late document response reset the list to
+    // empty — an empty Linked tab on every refresh.
+    currentDoc = {
+      id: "doc-race",
+      letterNo: "LET-9001",
+      date: "2025-01-01",
+      subject: "Race Subject",
+      from_: "Alice",
+      to: "Bob",
+      reference: ["LET-0042 dtd. 01.01.2025"],
+      keywords: [],
+      clauses: [],
+    };
+    referencesResponse = {
+      parsed: [],
+      linked: [
+        {
+          id: "linked-42",
+          letterNo: "LET-0042",
+          title: "Slow Doc Race Target",
+          date: "2025-01-02",
+        },
+      ],
+    };
+
+    const baseFetch = global.fetch;
+    global.fetch = vi.fn(async (input: RequestInfo | URL, init?: any) => {
+      const url = String(input);
+      if (/\/api\/documents\/[^/]+$/.test(url)) {
+        // Make the document endpoint strictly slower than /references.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return (baseFetch as any)(input, init);
+    }) as any;
+
+    try {
+      renderAt("doc-race");
+      await waitFor(() => {
+        expect(screen.getByText("Race Subject")).toBeInTheDocument();
+      });
+      await waitFor(() => {
+        expect(screen.getByText("LET-0042")).toBeInTheDocument();
+        expect(screen.getByText("Slow Doc Race Target")).toBeInTheDocument();
+      });
+    } finally {
+      global.fetch = baseFetch;
+    }
+  });
+
+  it("renders a single row when the backend returns duplicate linked entries", async () => {
+    currentDoc = {
+      id: "doc-dup",
+      letterNo: "LET-9002",
+      date: "2025-01-01",
+      subject: "Duplicate Subject",
+      reference: [],
+      keywords: [],
+      clauses: [],
+    };
+    referencesResponse = {
+      parsed: [],
+      linked: [
+        { id: "dup-1", letterNo: "LET-0100", title: "Dup Target", date: "2025-01-02" },
+        { id: "dup-1", letterNo: "LET-0100", title: "Dup Target", date: "2025-01-02" },
+      ],
+    };
+
+    renderAt("doc-dup");
+
+    await waitFor(() => {
+      expect(screen.getByText("Duplicate Subject")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("LET-0100")).toHaveLength(1);
+    });
+  });
+
+  it("does not count a linked reference as missing when letter numbers differ only by separators", async () => {
+    currentDoc = {
+      id: "doc-norm",
+      letterNo: "LET-9003",
+      date: "2025-01-01",
+      subject: "Normalization Subject",
+      reference: [{ letterNo: "AFC/PM/KNPCC-06/4905" }],
+      keywords: [],
+      clauses: [],
+    };
+    referencesResponse = {
+      parsed: [],
+      linked: [
+        {
+          id: "norm-1",
+          letterNo: "AFC-PM-KNPCC-06-4905",
+          title: "Same letter, different separators",
+          date: "2025-01-02",
+        },
+      ],
+    };
+
+    renderAt("doc-norm");
+
+    await waitFor(() => {
+      expect(screen.getByText("Normalization Subject")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("tab", { name: /missing references \(0\)/i })
+      ).toBeInTheDocument();
+    });
+  });
+
   it("shows a friendly load error and returns to the previous page", async () => {
     currentDoc = null;
     renderAtWithPrevious("missing-letter");

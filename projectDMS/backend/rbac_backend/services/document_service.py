@@ -1420,8 +1420,14 @@ class DocumentService:
             parsed_references = []
 
         linked: List[Dict[str, Any]] = []
+        seen_linked_ids: Set[str] = set()
 
         for ref in document.references or []:
+            ref_key = str(ref.documentId or "")
+            if ref_key and ref_key in seen_linked_ids:
+                continue
+            if ref_key:
+                seen_linked_ids.add(ref_key)
             target_data: Optional[Dict[str, Any]] = None
             try:
                 target_oid = self._validate_document_id(ref.documentId)

@@ -111,6 +111,7 @@ class ReferenceSyncService:
                 "missing": [],
                 "updated_targets": 0,
                 "removed_targets": removed_count,
+                "cross_source_skipped": 0,
             }
 
         resolved: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
@@ -130,15 +131,27 @@ class ReferenceSyncService:
                 missing.append(payload)
 
         now = datetime.utcnow()
+        all_existing_refs = self._coerce_reference_list(source_doc.get("references"))
         existing_source_refs = {
             ref.documentId: ref
-            for ref in self._coerce_reference_list(source_doc.get("references"))
+            for ref in all_existing_refs
             if (ref.source or "").lower() == source.lower()
+        }
+        # Targets already linked under a different source bucket (e.g. a manual
+        # link when running the parser sync, or vice versa). Writing them again
+        # in this bucket would duplicate the document link and its backlink, so
+        # they count as resolved but are not re-written.
+        cross_source_targets = {
+            ref.documentId
+            for ref in all_existing_refs
+            if ref.documentId and (ref.source or "").lower() != source.lower()
         }
         new_source_refs: Dict[str, DocumentReference] = {}
         target_backlinks: Dict[str, DocumentReference] = {}
 
         for target_id, (payload, target_doc) in resolved.items():
+            if target_id in cross_source_targets:
+                continue
             existing = existing_source_refs.get(target_id)
             link_type = payload.get("linkType") or default_link_type
             linked_by = (
@@ -226,6 +239,9 @@ class ReferenceSyncService:
             "missing": missing,
             "updated_targets": updated_targets,
             "removed_targets": removed_count,
+            "cross_source_skipped": len(
+                [tid for tid in resolved if tid in cross_source_targets]
+            ),
         }
 
     async def enqueue_missing(

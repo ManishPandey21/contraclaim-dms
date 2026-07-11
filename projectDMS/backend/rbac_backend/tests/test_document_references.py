@@ -554,6 +554,161 @@ async def test_manual_sync_with_empty_extracted_list_clears_stale_links_and_grap
 
 
 @pytest.mark.asyncio
+async def test_parser_sync_does_not_duplicate_manual_link(monkeypatch) -> None:
+    """Re-syncing parsed references must not re-write a target that is
+    already linked manually (idempotency across source buckets)."""
+    source_id = ObjectId()
+    target_id = ObjectId()
+    now = datetime.utcnow()
+    source_doc = _make_document_dict(
+        _id=source_id,
+        reference=[{"letterNo": "LTR-200"}],
+        references=[
+            {
+                "documentId": str(target_id),
+                "linkType": "direct",
+                "linkedAt": now,
+                "linkedBy": "user-123",
+                "letterNo": "LTR-200",
+                "source": "manual",
+            }
+        ],
+    )
+    target_doc = _make_document_dict(
+        _id=target_id,
+        letterNo="LTR-200",
+        letterNoNormalized="ltr-200",
+        referencedBy=[
+            {
+                "documentId": str(source_id),
+                "linkType": "direct",
+                "linkedAt": now,
+                "linkedBy": "user-123",
+                "letterNo": "LTR-001",
+                "source": "manual",
+            }
+        ],
+    )
+    fake_db = FakeDatabase([source_doc, target_doc])
+    controller = _make_controller(fake_db)
+    monkeypatch.setattr(
+        controller.document_service.graph_ingestion,
+        "sync_document_to_falkor",
+        lambda **kwargs: None,
+    )
+
+    first = await controller_sync_references(controller, str(source_id), _make_user())
+    second = await controller_sync_references(controller, str(source_id), _make_user())
+
+    stored_source = await controller.document_service.get_document(str(source_id))
+    stored_target = await controller.document_service.get_document(str(target_id))
+    assert first["sync"]["cross_source_skipped"] == 1
+    assert second["sync"]["cross_source_skipped"] == 1
+    assert stored_source is not None and len(stored_source.references) == 1
+    assert stored_source.references[0].source == "manual"
+    assert stored_target is not None and len(stored_target.referencedBy) == 1
+    assert stored_target.referencedBy[0].source == "manual"
+
+
+@pytest.mark.asyncio
+async def test_manual_add_does_not_duplicate_parser_link(monkeypatch) -> None:
+    """Manually linking a target the parser already linked must not create a
+    second reference entry or backlink."""
+    source_id = ObjectId()
+    target_id = ObjectId()
+    now = datetime.utcnow()
+    source_doc = _make_document_dict(
+        _id=source_id,
+        references=[
+            {
+                "documentId": str(target_id),
+                "linkType": "indirect",
+                "linkedAt": now,
+                "linkedBy": "parser",
+                "letterNo": "LTR-200",
+                "source": "parser",
+            }
+        ],
+    )
+    target_doc = _make_document_dict(
+        _id=target_id,
+        letterNo="LTR-200",
+        letterNoNormalized="ltr-200",
+        referencedBy=[
+            {
+                "documentId": str(source_id),
+                "linkType": "indirect",
+                "linkedAt": now,
+                "linkedBy": "parser",
+                "letterNo": "LTR-001",
+                "source": "parser",
+            }
+        ],
+    )
+    fake_db = FakeDatabase([source_doc, target_doc])
+    controller = _make_controller(fake_db)
+    user = _make_user()
+
+    updated = await controller_add_reference(
+        controller,
+        str(source_id),
+        ReferenceCreate(
+            referenced_document_id=str(target_id),
+            link_type="direct",
+            description="Manual duplicate attempt",
+        ),
+        user,
+    )
+
+    assert len(updated.references) == 1
+    assert updated.references[0].documentId == str(target_id)
+    target_after = await controller.document_service.get_document(str(target_id))
+    assert target_after is not None and len(target_after.referencedBy) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_references_deduplicates_legacy_cross_source_rows() -> None:
+    """Documents written before the cross-source guard may hold the same
+    target under both parser and manual sources; the API must render one row."""
+    source_id = ObjectId()
+    target_id = ObjectId()
+    now = datetime.utcnow()
+    source_doc = _make_document_dict(
+        _id=source_id,
+        references=[
+            {
+                "documentId": str(target_id),
+                "linkType": "indirect",
+                "linkedAt": now,
+                "linkedBy": "parser",
+                "letterNo": "LTR-200",
+                "source": "parser",
+            },
+            {
+                "documentId": str(target_id),
+                "linkType": "direct",
+                "linkedAt": now,
+                "linkedBy": "user-123",
+                "letterNo": "LTR-200",
+                "source": "manual",
+            },
+        ],
+    )
+    target_doc = _make_document_dict(
+        _id=target_id,
+        letterNo="LTR-200",
+        subject="Target letter",
+    )
+    fake_db = FakeDatabase([source_doc, target_doc])
+    controller = _make_controller(fake_db)
+
+    response = await controller_list_references(controller, str(source_id), _make_user())
+
+    assert len(response["linked"]) == 1
+    assert response["linked"][0]["documentId"] == str(target_id)
+
+
+@pytest.mark.asyncio
 async def test_add_and_remove_reference_round_trip(monkeypatch) -> None:
     source_id = ObjectId()
     target_id = ObjectId()

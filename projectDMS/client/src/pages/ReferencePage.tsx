@@ -204,6 +204,19 @@ const parseLegacyReferenceText = (value?: string): RefParsed | null => {
   };
 };
 
+// Mirror of the backend's normalize_letter_code (falkor_graph_service.py):
+// lowercase, collapse every non-alphanumeric run to "-", trim leading/trailing
+// "-". Letter numbers often differ only in separators ("AFC/PM-06" vs
+// "AFC-PM/06"), so missing/linked comparisons must use this canonical form.
+const normalizeLetterCode = (value?: string) => {
+  if (!value) return "";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^0-9a-z]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
+
 const parsedReferenceKey = (ref: RefParsed) => {
   const raw = firstText(ref.raw);
   if (raw) return `raw:${raw.toLowerCase()}`;
@@ -306,75 +319,6 @@ const ReferencePage: React.FC = () => {
   const [actionError, setActionError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
-  useEffect(() => {
-    if (!letterId) return;
-    setLoading(true);
-    setError(null);
-    (async () => {
-      try {
-        const headers = buildAuthHeaders();
-        const res = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), {
-          headers,
-        });
-        if (!res.ok) {
-          const fallback =
-            res.status === 404
-              ? "This letter could not be found or you no longer have access to it."
-              : res.status === 403
-              ? "You do not have permission to view this letter."
-              : "We couldn't load this letter. Please try again.";
-          throw new Error(await readApiError(res, fallback));
-        }
-        const d = await res.json();
-        // Normalize references extracted by metadata.py from DB (array or bullet string)
-        // const refsFromDoc: string[] = Array.isArray(d.reference)
-        //   ? (d.reference || [])
-        //      .filter((x: any) => typeof x === "string")
-        //     .map((s: string) => s.trim())
-        //     .filter(Boolean)
-        //  : typeof d.reference === "string"
-        //  ? parseBulletString(d.reference)
-        //  : [];
-
-        const refsFromDoc: RefParsed[] = normalizeParsedReferences(
-          d.reference
-        ).map((r) => ({
-          ...r,
-          linkedId: (r as any).linkedId ?? null,
-        }));
-
-        const l: Letter = {
-          id: String(letterId),
-          letterNo: d.letterNo ?? d.letter_no ?? undefined,
-          date: d.date,
-          subject: d.subject,
-          from_: d.from_ ?? d.from ?? undefined,
-          to: d.to,
-          summary: d.summary,
-          keywords: d.keywords ?? d.Key_words ?? [],
-          clauses: d.contractual_clauses ?? d.clauses ?? [],
-          referencesParsed: refsFromDoc, //.map((raw) => ({ raw })),
-          referencesLinked: [],
-          graphStatus: d.graph_status ?? d.graphStatus ?? undefined,
-          graphRunId: d.graph_run_id ?? d.graphRunId ?? undefined,
-          draftPlan: d.draft_plan ?? d.draftPlan ?? undefined,
-          thread: {
-            threadId: d.chain_id || d.chain_head_id || "",
-            ancestors: [],
-            descendants: [],
-            lastInThread: true,
-          },
-        };
-        setLetter(l);
-      } catch (e: any) {
-        setError(e.message);
-        console.error(e);
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [letterId]);
-
   const fetchAndSetReferences = useCallback(async (docId: string) => {
     try {
       const headers = buildAuthHeaders();
@@ -447,6 +391,16 @@ const ReferencePage: React.FC = () => {
         );
       }
 
+      // One row per target document: legacy data can hold the same link under
+      // both parser and manual sources, which also breaks React keys.
+      const seenLinkedIds = new Set<string>();
+      linked = linked.filter((ref) => {
+        const key = String(ref.id ?? "");
+        if (!key || seenLinkedIds.has(key)) return false;
+        seenLinkedIds.add(key);
+        return true;
+      });
+
       setLetter((prev) => {
         if (!prev) return prev;
         const existingParsed = prev.referencesParsed || [];
@@ -478,8 +432,76 @@ const ReferencePage: React.FC = () => {
 
   useEffect(() => {
     if (!letterId) return;
-    fetchAndSetReferences(letterId);
-  }, [fetchAndSetReferences, letterId]);
+    setLoading(true);
+    setError(null);
+    (async () => {
+      try {
+        const headers = buildAuthHeaders();
+        const res = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), {
+          headers,
+        });
+        if (!res.ok) {
+          const fallback =
+            res.status === 404
+              ? "This letter could not be found or you no longer have access to it."
+              : res.status === 403
+              ? "You do not have permission to view this letter."
+              : "We couldn't load this letter. Please try again.";
+          throw new Error(await readApiError(res, fallback));
+        }
+        const d = await res.json();
+        // Normalize references extracted by metadata.py from DB (array or bullet string)
+        // const refsFromDoc: string[] = Array.isArray(d.reference)
+        //   ? (d.reference || [])
+        //      .filter((x: any) => typeof x === "string")
+        //     .map((s: string) => s.trim())
+        //     .filter(Boolean)
+        //  : typeof d.reference === "string"
+        //  ? parseBulletString(d.reference)
+        //  : [];
+
+        const refsFromDoc: RefParsed[] = normalizeParsedReferences(
+          d.reference
+        ).map((r) => ({
+          ...r,
+          linkedId: (r as any).linkedId ?? null,
+        }));
+
+        const l: Letter = {
+          id: String(letterId),
+          letterNo: d.letterNo ?? d.letter_no ?? undefined,
+          date: d.date,
+          subject: d.subject,
+          from_: d.from_ ?? d.from ?? undefined,
+          to: d.to,
+          summary: d.summary,
+          keywords: d.keywords ?? d.Key_words ?? [],
+          clauses: d.contractual_clauses ?? d.clauses ?? [],
+          referencesParsed: refsFromDoc, //.map((raw) => ({ raw })),
+          referencesLinked: [],
+          graphStatus: d.graph_status ?? d.graphStatus ?? undefined,
+          graphRunId: d.graph_run_id ?? d.graphRunId ?? undefined,
+          draftPlan: d.draft_plan ?? d.draftPlan ?? undefined,
+          thread: {
+            threadId: d.chain_id || d.chain_head_id || "",
+            ancestors: [],
+            descendants: [],
+            lastInThread: true,
+          },
+        };
+        setLetter(l);
+        // Load linked references only after the letter state exists: firing
+        // both requests independently races, and whichever lands last used to
+        // wipe or drop the linked list (empty Linked tab after a refresh).
+        await fetchAndSetReferences(String(letterId));
+      } catch (e: any) {
+        setError(e.message);
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [letterId, fetchAndSetReferences]);
 
   const summaryLines = useMemo(
     () => parseBulletString(letter?.summary),
@@ -504,12 +526,10 @@ const ReferencePage: React.FC = () => {
     const parsed = letter?.referencesParsed || [];
     const linked = letter?.referencesLinked || [];
     const linkedNos = new Set(
-      linked
-        .map((l) => (l.letterNo ? String(l.letterNo).trim().toLowerCase() : ""))
-        .filter(Boolean)
+      linked.map((l) => normalizeLetterCode(l.letterNo)).filter(Boolean)
     );
     return parsed.filter((p) => {
-      const ln = p.letterNo ? String(p.letterNo).trim().toLowerCase() : "";
+      const ln = normalizeLetterCode(p.letterNo);
       const hasLinked = ln && linkedNos.has(ln);
       return !hasLinked && !p.linkedId;
     });
