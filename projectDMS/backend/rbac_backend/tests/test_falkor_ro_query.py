@@ -2,6 +2,7 @@
 writes stay on GRAPH.QUERY. Guards the read/write classifier."""
 
 import pytest
+from redis.exceptions import ResponseError
 
 from rbac_backend.services.falkor_graph_service import (
     FalkorGraphConfig,
@@ -21,6 +22,14 @@ class _FakeClient:
 
     def execute_command(self, command, *args):
         self.sink.append(command)
+        return []
+
+
+class _NoRoQueryClient(_FakeClient):
+    def execute_command(self, command, *args):
+        self.sink.append(command)
+        if command == "GRAPH.RO_QUERY":
+            raise ResponseError("unknown command 'GRAPH.RO_QUERY'")
         return []
 
 
@@ -55,6 +64,18 @@ def test_execute_explicit_read_only_override(monkeypatch):
     svc._execute("MATCH (n) RETURN n", read_only=False)
 
     assert captured == ["GRAPH.RO_QUERY", "GRAPH.QUERY"]
+
+
+def test_execute_falls_back_when_ro_query_is_unsupported(monkeypatch):
+    svc = _svc()
+    captured: list[str] = []
+    monkeypatch.setattr(svc, "_get_client", lambda: _NoRoQueryClient(captured))
+
+    svc._execute("MATCH (n) RETURN n")
+    svc._execute("MATCH (n:Letter) RETURN count(n)")
+
+    assert captured == ["GRAPH.RO_QUERY", "GRAPH.QUERY", "GRAPH.QUERY"]
+    assert svc._ro_query_supported is False
 
 
 def test_falkor_param_serialization_preserves_lists_for_cypher_in():

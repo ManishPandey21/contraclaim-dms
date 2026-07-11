@@ -74,6 +74,7 @@ class FalkorGraphService:
         self.config = config or FalkorGraphConfig.from_settings()
         self._client: Optional[Redis] = None
         self._schema_ensured: bool = False
+        self._ro_query_supported: Optional[bool] = None
 
     @property
     def enabled(self) -> bool:
@@ -512,14 +513,35 @@ class FalkorGraphService:
             # write path); writes use GRAPH.QUERY. Detection is based on the
             # original Cypher (the params header never adds write clauses).
             use_read_only = read_only if read_only is not None else _is_read_only_cypher(cypher_stripped)
-            command = "GRAPH.RO_QUERY" if use_read_only else "GRAPH.QUERY"
-            response = client.execute_command(
-                command,
-                self.config.graph_name,
-                query_to_execute,
-                "--compact",
+            command = (
+                "GRAPH.RO_QUERY"
+                if use_read_only and self._ro_query_supported is not False
+                else "GRAPH.QUERY"
             )
-            return response
+            try:
+                response = client.execute_command(
+                    command,
+                    self.config.graph_name,
+                    query_to_execute,
+                    "--compact",
+                )
+                if command == "GRAPH.RO_QUERY":
+                    self._ro_query_supported = True
+                return response
+            except RedisError as exc:
+                message = str(exc).lower()
+                if command == "GRAPH.RO_QUERY" and "unknown command" in message:
+                    self._ro_query_supported = False
+                    logger.warning(
+                        "FalkorDB does not support GRAPH.RO_QUERY; using GRAPH.QUERY for reads"
+                    )
+                    return client.execute_command(
+                        "GRAPH.QUERY",
+                        self.config.graph_name,
+                        query_to_execute,
+                        "--compact",
+                    )
+                raise
         except RedisError as exc:
             # Enhanced error logging for debugging
             log_params = serialized_params if serialized_params is not None else params
