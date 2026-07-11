@@ -530,6 +530,12 @@ class FalkorGraphService:
                 return response
             except RedisError as exc:
                 message = str(exc).lower()
+                if use_read_only and "invalid graph operation on empty key" in message:
+                    logger.debug(
+                        "FalkorDB graph '%s' is empty; returning no rows",
+                        self.config.graph_name,
+                    )
+                    return []
                 if command == "GRAPH.RO_QUERY" and "unknown command" in message:
                     self._ro_query_supported = False
                     logger.warning(

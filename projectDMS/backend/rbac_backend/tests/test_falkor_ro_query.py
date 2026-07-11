@@ -33,6 +33,12 @@ class _NoRoQueryClient(_FakeClient):
         return []
 
 
+class _EmptyGraphClient(_FakeClient):
+    def execute_command(self, command, *args):
+        self.sink.append(command)
+        raise ResponseError("Invalid graph operation on empty key")
+
+
 def test_is_read_only_cypher_classifies_reads_and_writes():
     assert _is_read_only_cypher("MATCH (n:Letter) RETURN count(n)") is True
     # A property named createdAt must not be mistaken for a CREATE clause.
@@ -76,6 +82,15 @@ def test_execute_falls_back_when_ro_query_is_unsupported(monkeypatch):
 
     assert captured == ["GRAPH.RO_QUERY", "GRAPH.QUERY", "GRAPH.QUERY"]
     assert svc._ro_query_supported is False
+
+
+def test_read_from_empty_graph_returns_no_rows(monkeypatch):
+    svc = _svc()
+    captured: list[str] = []
+    monkeypatch.setattr(svc, "_get_client", lambda: _EmptyGraphClient(captured))
+
+    assert svc._execute("MATCH (n:Letter) RETURN n") == []
+    assert captured == ["GRAPH.RO_QUERY"]
 
 
 def test_falkor_param_serialization_preserves_lists_for_cypher_in():
