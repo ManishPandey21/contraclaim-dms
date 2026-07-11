@@ -31,8 +31,18 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { AlertCircle, ExternalLink } from "lucide-react";
+import { Progress } from "@/components/ui/progress";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import enhancedApi, {
   BulkUploadStatus,
+  DocumentProcessingResult,
   Organization as OrgModel,
 } from "@/services/enhanced-api";
 
@@ -42,6 +52,89 @@ interface DuplicateBlock {
   existingLetterNo?: string;
   fileName?: string;
 }
+
+// Human labels for the document-processing job stages reported by the
+// backend (document_processing_jobs.stage), in pipeline order.
+const PROCESSING_STAGE_LABELS: Record<string, string> = {
+  queued: "Queued for processing",
+  started: "Preparing",
+  materializing: "Preparing file",
+  extracting: "Extracting text (OCR)",
+  metadata_updated: "Metadata extracted",
+  syncing_references: "Linking references",
+  duplicate_classification: "Duplicate check",
+  duplicate_detected: "Duplicate detected",
+  syncing_falkor: "Updating knowledge graph",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+const PROCESSING_STATUS_LABELS: Record<string, string> = {
+  queued: "Queued for processing",
+  processing: "Processing",
+  metadata_extracted: "Metadata extracted",
+  retrying: "Retrying",
+  completed: "Completed",
+  failed: "Failed",
+};
+
+type ProcessingTone = "pending" | "active" | "success" | "warning" | "error";
+
+const PROCESSING_TONE_CLASSES: Record<ProcessingTone, string> = {
+  pending: "bg-muted text-muted-foreground",
+  active: "bg-amber-100 text-amber-900",
+  success: "bg-green-100 text-green-800",
+  warning: "bg-orange-100 text-orange-900",
+  error: "bg-red-100 text-red-800",
+};
+
+const describeDocumentProgress = (
+  result: DocumentProcessingResult,
+  jobFinished: boolean
+): { label: string; tone: ProcessingTone } => {
+  if (!result.success) {
+    return { label: "Upload failed", tone: "error" };
+  }
+  if (result.duplicate_status === "duplicate") {
+    return { label: "Duplicate detected (not published)", tone: "warning" };
+  }
+  const status = (result.processing_status || "").toLowerCase();
+  if (!status) {
+    // No processing job was scheduled for this document (OCR not requested).
+    return jobFinished
+      ? { label: "Uploaded (no OCR requested)", tone: "success" }
+      : { label: "Uploaded", tone: "pending" };
+  }
+  if (status === "failed" || status === "dead_lettered") {
+    return { label: "Processing failed", tone: "error" };
+  }
+  if (status === "completed") {
+    return result.duplicate_status === "revision"
+      ? { label: "Completed (revision of existing letter)", tone: "success" }
+      : { label: "Completed", tone: "success" };
+  }
+  if (status === "retrying") {
+    return { label: "Retrying", tone: "warning" };
+  }
+  const stage = (result.processing_stage || "").toLowerCase();
+  return {
+    label:
+      PROCESSING_STAGE_LABELS[stage] ||
+      PROCESSING_STATUS_LABELS[status] ||
+      "Processing",
+    tone: "active",
+  };
+};
+
+// A row needs no further polling once its pipeline reached a terminal state.
+// Missing processing_status means no OCR job exists (it is set to "queued"
+// synchronously at upload time when OCR is requested).
+const isDocumentProgressSettled = (result: DocumentProcessingResult): boolean => {
+  if (!result.success || !result.document_id) return true;
+  const status = (result.processing_status || "").toLowerCase();
+  if (!status) return true;
+  return ["completed", "failed", "dead_lettered"].includes(status);
+};
 
 interface UploadFile {
   id: string;
@@ -112,7 +205,28 @@ const UploadPage: React.FC = () => {
   const [bulkStatus, setBulkStatus] = useState<BulkUploadStatus | null>(null);
   const [bulkUploading, setBulkUploading] = useState<boolean>(false);
   const pollRef = useRef<number | null>(null);
+  const bulkToastShownRef = useRef(false);
+  const bulkPostJobPollsRef = useRef(0);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Stop polling when the page unmounts.
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
+
+  const bulkJobFinished =
+    !!bulkStatus &&
+    ["completed", "completed_with_errors", "failed"].includes(bulkStatus.status);
+  const bulkDocsStillProcessing =
+    !!bulkStatus &&
+    (bulkStatus.results || []).some(
+      (result) => !isDocumentProgressSettled(result)
+    );
 
   // Normalize date for API (YYYY-MM-DD)
   const formatDateForApi = (d: string) => {
@@ -1351,6 +1465,8 @@ const UploadPage: React.FC = () => {
                       description: `Job ID: ${response.job_id}`,
                     });
 
+                    bulkToastShownRef.current = false;
+                    bulkPostJobPollsRef.current = 0;
                     if (pollRef.current) {
                       clearInterval(pollRef.current);
                     }
@@ -1361,13 +1477,14 @@ const UploadPage: React.FC = () => {
                           response.job_id
                         );
                         setBulkStatus(status);
-                        if (
+                        const jobFinished =
                           status.status === "completed" ||
                           status.status === "completed_with_errors" ||
-                          status.status === "failed"
-                        ) {
-                          clearInterval(pollRef.current!);
-                          pollRef.current = null;
+                          status.status === "failed";
+                        if (!jobFinished) return;
+
+                        if (!bulkToastShownRef.current) {
+                          bulkToastShownRef.current = true;
                           setBulkUploading(false);
                           toast({
                             title: "Bulk Upload Completed",
@@ -1377,6 +1494,21 @@ const UploadPage: React.FC = () => {
                                 ? "destructive"
                                 : "default",
                           });
+                        }
+
+                        // The upload job is done, but OCR/metadata processing
+                        // continues per document. Keep the tracker live until
+                        // every row settles, with a safety cap (~10 minutes).
+                        bulkPostJobPollsRef.current += 1;
+                        const stillProcessing = (status.results || []).some(
+                          (result) => !isDocumentProgressSettled(result)
+                        );
+                        if (
+                          !stillProcessing ||
+                          bulkPostJobPollsRef.current > 200
+                        ) {
+                          clearInterval(pollRef.current!);
+                          pollRef.current = null;
                         }
                       } catch (error: any) {
                         clearInterval(pollRef.current!);
@@ -1427,22 +1559,121 @@ const UploadPage: React.FC = () => {
             </CardFooter>
 
             {bulkStatus && (
-              <CardContent className="mt-4">
-                <p>
-                  Status: <strong>{bulkStatus.status}</strong>
-                </p>
-                <p>
-                  Processed: {bulkStatus.processed_files} /{" "}
-                  {bulkStatus.total_files}
-                </p>
-                <p>
-                  Successful: {bulkStatus.successful_uploads} | Failed:{" "}
-                  {bulkStatus.failed_uploads}
-                </p>
-                {bulkStatus.error_message && (
-                  <p className="text-red-600">
-                    Error: {bulkStatus.error_message}
-                  </p>
+              <CardContent className="mt-4 space-y-4">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                    <span>
+                      Upload status: <strong>{bulkStatus.status}</strong>
+                    </span>
+                    <span className="text-muted-foreground">
+                      {bulkStatus.processed_files} / {bulkStatus.total_files}{" "}
+                      files · {bulkStatus.successful_uploads} succeeded,{" "}
+                      {bulkStatus.failed_uploads} failed
+                    </span>
+                  </div>
+                  <Progress
+                    value={
+                      bulkStatus.total_files > 0
+                        ? (bulkStatus.processed_files /
+                            bulkStatus.total_files) *
+                          100
+                        : 0
+                    }
+                  />
+                  {bulkStatus.error_message && (
+                    <p className="text-sm text-red-600">
+                      Error: {bulkStatus.error_message}
+                    </p>
+                  )}
+                  {bulkJobFinished && bulkDocsStillProcessing && (
+                    <p className="text-xs text-muted-foreground">
+                      Files uploaded — tracking OCR and metadata processing
+                      live. This updates every few seconds.
+                    </p>
+                  )}
+                </div>
+
+                {(bulkStatus.results || []).length > 0 && (
+                  <div className="rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>File</TableHead>
+                          <TableHead>Upload</TableHead>
+                          <TableHead>Processing</TableHead>
+                          <TableHead className="text-right">Open</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {(bulkStatus.results || []).map((result, index) => {
+                          const progress = describeDocumentProgress(
+                            result,
+                            bulkJobFinished
+                          );
+                          return (
+                            <TableRow
+                              key={`${result.filename}-${
+                                result.row_number ?? index
+                              }`}
+                            >
+                              <TableCell className="max-w-[280px]">
+                                <p
+                                  className="truncate font-medium"
+                                  title={result.filename}
+                                >
+                                  {result.filename}
+                                </p>
+                                {result.error && (
+                                  <p
+                                    className="truncate text-xs text-red-600"
+                                    title={result.error}
+                                  >
+                                    {result.error}
+                                  </p>
+                                )}
+                              </TableCell>
+                              <TableCell>
+                                <span
+                                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                                    result.success
+                                      ? PROCESSING_TONE_CLASSES.success
+                                      : PROCESSING_TONE_CLASSES.error
+                                  }`}
+                                >
+                                  {result.success ? "Uploaded" : "Failed"}
+                                </span>
+                              </TableCell>
+                              <TableCell>
+                                <span
+                                  className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${
+                                    PROCESSING_TONE_CLASSES[progress.tone]
+                                  }`}
+                                >
+                                  {progress.label}
+                                </span>
+                              </TableCell>
+                              <TableCell className="text-right">
+                                {result.document_id && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() =>
+                                      window.open(
+                                        `/documentviewer/${result.document_id}`,
+                                        "_blank"
+                                      )
+                                    }
+                                  >
+                                    <ExternalLink className="h-4 w-4" />
+                                  </Button>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
                 )}
               </CardContent>
             )}

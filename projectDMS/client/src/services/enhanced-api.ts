@@ -155,6 +155,10 @@ export interface DocumentProcessingResult {
   status?: string;
   job_id?: string;
   message?: string;
+  // Live pipeline state attached by the bulk status endpoint at read time.
+  processing_status?: string | null;
+  processing_stage?: string | null;
+  duplicate_status?: string | null;
 }
 
 export interface BulkUploadResponse {

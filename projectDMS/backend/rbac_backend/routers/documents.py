@@ -1333,7 +1333,7 @@ class DocumentController:
             # Verify user has access (basic security check)
             # In production, you might want more sophisticated access control
 
-            return job_status
+            return await self._enrich_bulk_results_with_processing_state(job_status)
 
         except (DocumentError, HTTPException):
             raise
@@ -1343,6 +1343,78 @@ class DocumentController:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Bulk upload status service temporarily unavailable"
             )
+
+    async def _enrich_bulk_results_with_processing_state(
+        self,
+        job_status: BulkUploadStatus,
+    ) -> BulkUploadStatus:
+        """Attach live per-document pipeline state to bulk upload results.
+
+        The stored bulk results only say whether each file was uploaded; the
+        OCR/metadata pipeline keeps running afterwards. This reads the current
+        document processing_status, the processing job's stage, and the
+        duplicate-check state in two batched queries so the frontend tracker
+        can show real-time progress per document. Enrichment is best-effort:
+        a failure here must never break the status endpoint.
+        """
+        results = list(job_status.results or [])
+        doc_ids = [r.document_id for r in results if r.document_id]
+        if not doc_ids:
+            return job_status
+
+        try:
+            db = await get_database()
+            object_ids = []
+            for doc_id in doc_ids:
+                try:
+                    object_ids.append(ObjectId(doc_id))
+                except Exception:
+                    continue
+
+            documents: Dict[str, Dict[str, Any]] = {}
+            if object_ids:
+                cursor = db.documents.find(
+                    {"_id": {"$in": object_ids}},
+                    {"processing_status": 1, "processing_job_id": 1, "duplicate_status": 1},
+                )
+                async for doc in cursor:
+                    documents[str(doc["_id"])] = doc
+
+            processing_job_ids = [
+                doc.get("processing_job_id")
+                for doc in documents.values()
+                if doc.get("processing_job_id")
+            ]
+            job_stages: Dict[Any, Dict[str, Any]] = {}
+            if processing_job_ids:
+                cursor = db.document_processing_jobs.find(
+                    {"_id": {"$in": processing_job_ids}},
+                    {"stage": 1, "status": 1},
+                )
+                async for job in cursor:
+                    job_stages[job["_id"]] = job
+
+            enriched = []
+            for result in results:
+                doc = documents.get(result.document_id or "")
+                if doc:
+                    job = job_stages.get(doc.get("processing_job_id")) or {}
+                    result = result.model_copy(
+                        update={
+                            "processing_status": doc.get("processing_status"),
+                            "processing_stage": job.get("stage"),
+                            "duplicate_status": doc.get("duplicate_status"),
+                        }
+                    )
+                enriched.append(result)
+            return job_status.model_copy(update={"results": enriched})
+        except Exception:
+            logger.warning(
+                "Failed to enrich bulk upload status %s with processing state",
+                job_status.job_id,
+                exc_info=True,
+            )
+            return job_status
 
     # ... (keep all existing methods from the original file)
     

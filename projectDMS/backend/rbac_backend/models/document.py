@@ -230,6 +230,11 @@ class DocumentProcessingResult(BaseModel):
     status: Optional[str] = Field(default=None)
     job_id: Optional[str] = Field(default=None)
     message: Optional[str] = Field(default=None)
+    # Live post-upload pipeline state, filled in by the bulk status endpoint
+    # from the document record and its processing job at read time.
+    processing_status: Optional[str] = Field(default=None)
+    processing_stage: Optional[str] = Field(default=None)
+    duplicate_status: Optional[str] = Field(default=None)
 
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
 
