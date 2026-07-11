@@ -172,6 +172,16 @@ async def ensure_indexes(db):
         [("organization_id", 1), ("project_id", 1), ("letterNoNormalized", 1)],
         background=True,
     )
+    await db.reference_sync_queue.create_index(
+        [("document_id", 1), ("reference_key", 1), ("status", 1)],
+        name="uq_reference_sync_pending",
+        unique=True,
+        background=True,
+        partialFilterExpression={
+            "status": "pending",
+            "reference_key": {"$exists": True},
+        },
+    )
     await db.documents.create_index(
         [("organization_id", 1), ("project_id", 1), ("letterNo", 1)],
         background=True,

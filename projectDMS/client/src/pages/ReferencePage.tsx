@@ -49,6 +49,8 @@ import {
   Tag,
   BookOpen,
   RefreshCw,
+  AlertCircle,
+  ArrowLeft,
 } from "lucide-react";
 import { toast } from "sonner";
 import { format, parse, parseISO, isValid } from "date-fns";
@@ -222,6 +224,24 @@ const buildAuthHeaders = (): Record<string, string> => {
   return {};
 };
 
+const readApiError = async (response: Response, fallback: string) => {
+  try {
+    const body = await response.text();
+    if (!body) return fallback;
+    try {
+      const parsed = JSON.parse(body);
+      const detail = parsed?.detail ?? parsed?.message;
+      if (typeof detail === "string" && detail.trim()) return detail.trim();
+      return fallback;
+    } catch {
+      // Plain-text API errors are handled below.
+    }
+    return body.trim() || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 const normalizeParsedReferences = (refData: any): RefParsed[] => {
   const refs: RefParsed[] = [];
   if (Array.isArray(refData)) {
@@ -283,6 +303,7 @@ const ReferencePage: React.FC = () => {
   const [linking, setLinking] = useState(false);
   const [newRef, setNewRef] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
@@ -295,7 +316,15 @@ const ReferencePage: React.FC = () => {
         const res = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), {
           headers,
         });
-        if (!res.ok) throw new Error(`Failed to fetch letter: ${res.status}`);
+        if (!res.ok) {
+          const fallback =
+            res.status === 404
+              ? "This letter could not be found or you no longer have access to it."
+              : res.status === 403
+              ? "You do not have permission to view this letter."
+              : "We couldn't load this letter. Please try again.";
+          throw new Error(await readApiError(res, fallback));
+        }
         const d = await res.json();
         // Normalize references extracted by metadata.py from DB (array or bullet string)
         // const refsFromDoc: string[] = Array.isArray(d.reference)
@@ -346,13 +375,20 @@ const ReferencePage: React.FC = () => {
     })();
   }, [letterId]);
 
-  const fetchAndSetReferences = async (docId: string) => {
+  const fetchAndSetReferences = useCallback(async (docId: string) => {
     try {
       const headers = buildAuthHeaders();
       const res = await authenticatedFetch(joinApiUrl(`/documents/${docId}/references`), {
         headers,
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        throw new Error(
+          await readApiError(
+            res,
+            "We couldn't load the linked references for this letter."
+          )
+        );
+      }
       const data = await res.json();
       let parsed: RefParsed[] = [];
       let linked: RefLinked[] = [];
@@ -432,13 +468,18 @@ const ReferencePage: React.FC = () => {
       });
     } catch (err) {
       console.error("Failed to fetch references", err);
+      setActionError(
+        err instanceof Error
+          ? err.message
+          : "We couldn't load the linked references for this letter."
+      );
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (!letterId) return;
     fetchAndSetReferences(letterId);
-  }, [letterId]);
+  }, [fetchAndSetReferences, letterId]);
 
   const summaryLines = useMemo(
     () => parseBulletString(letter?.summary),
@@ -519,6 +560,7 @@ const ReferencePage: React.FC = () => {
   const runReferenceSync = useCallback(async () => {
     if (!letterId) return;
     setSyncing(true);
+    setActionError(null);
     try {
       const headers = buildAuthHeaders();
       const res = await authenticatedFetch(
@@ -529,10 +571,15 @@ const ReferencePage: React.FC = () => {
         }
       );
       if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(detail || `Sync failed (${res.status})`);
+        throw new Error(
+          await readApiError(
+            res,
+            "We couldn't sync this letter's references. Please try again."
+          )
+        );
       }
-      toast.success("Reference sync completed");
+      const result = await res.json();
+      toast.success(result?.message || "Reference sync completed");
       // Refresh data
       const r = await authenticatedFetch(joinApiUrl(`/documents/${letterId}`), { headers });
       if (r.ok) {
@@ -550,11 +597,18 @@ const ReferencePage: React.FC = () => {
       await fetchAndSetReferences(letterId);
     } catch (err) {
       console.error(err);
-      toast.error((err as Error)?.message || "Reference sync failed");
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : "We couldn't sync this letter's references. Please try again.";
+      setActionError(message);
+      toast.error("Reference sync could not be completed", {
+        description: message,
+      });
     } finally {
       setSyncing(false);
     }
-  }, [letterId]);
+  }, [fetchAndSetReferences, letterId]);
 
   const linkReference = async () => {
     if (!newRef.trim() || !letter) return;
@@ -600,7 +654,9 @@ const ReferencePage: React.FC = () => {
       await fetchAndSetReferences(letter.id);
     } catch (e: any) {
       console.error(e);
-      setError(e.message);
+      setActionError(
+        e?.message || "We couldn't link this reference. Please try again."
+      );
     } finally {
       setLinking(false);
     }
@@ -616,22 +672,66 @@ const ReferencePage: React.FC = () => {
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-full text-red-500">
-        Error: {error}
+      <div className="flex min-h-[60vh] items-center justify-center p-4">
+        <Card className="w-full max-w-lg border-destructive/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-destructive" />
+              Unable to open references
+            </CardTitle>
+            <CardDescription>{error}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="outline" onClick={() => navigate(-1)}>
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Return to previous page
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
   if (!letter) {
     return (
-      <div className="flex items-center justify-center h-full">
-        No letter found.
+      <div className="flex min-h-[60vh] items-center justify-center p-4">
+        <Card className="w-full max-w-lg">
+          <CardHeader>
+            <CardTitle>Letter not found</CardTitle>
+            <CardDescription>
+              This letter is unavailable or may have been removed.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="outline" onClick={() => navigate(-1)}>
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Return to previous page
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     );
   }
 
   return (
     <div className="p-4 space-y-4">
+      {actionError && (
+        <Card className="border-destructive/40 bg-destructive/5">
+          <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex gap-3">
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+              <div>
+                <p className="font-medium">Reference action could not be completed</p>
+                <p className="text-sm text-muted-foreground">{actionError}</p>
+              </div>
+            </div>
+            <Button variant="outline" onClick={() => navigate(-1)}>
+              <ArrowLeft className="mr-2 h-4 w-4" />
+              Return to previous page
+            </Button>
+          </CardContent>
+        </Card>
+      )}
       <Card>
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>

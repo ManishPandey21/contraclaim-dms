@@ -376,6 +376,8 @@ class GraphIngestionService:
         document: Dict[str, Any],
         metadata: Optional[ParsedDocumentMetadata],
         upload_type: Optional[str],
+        *,
+        raise_on_error: bool = False,
     ) -> None:
         if not self.falkor.enabled:
             return
@@ -384,9 +386,11 @@ class GraphIngestionService:
             if not payload:
                 return
             letter, references = payload
-            self.falkor.upsert_letter_with_refs(letter, references, cleanup=None)
+            self.falkor.upsert_letter_with_refs(letter, references, cleanup=True)
         except Exception:
             logger.exception("Failed to sync document %s with FalkorDB", document_id)
+            if raise_on_error:
+                raise
 
     def _build_falkor_payload(
         self,
@@ -447,15 +451,14 @@ class GraphIngestionService:
         }
 
         references: List[Dict[str, Any]] = []
+        # Falkor relationships represent links resolved to documents in MongoDB.
+        # Raw extracted metadata stays in `document.reference` for display and
+        # retry, but must not create placeholder graph nodes for unavailable
+        # letters.
         refs_source: List[Any] = []
-        doc_refs = document.get("reference")
-        if isinstance(doc_refs, Sequence):
-            refs_source.extend(doc_refs)
         doc_links = document.get("references")
-        if isinstance(doc_links, Sequence):
+        if isinstance(doc_links, Sequence) and not isinstance(doc_links, (str, bytes)):
             refs_source.extend(doc_links)
-        if metadata and getattr(metadata, "references", None):
-            refs_source.extend(metadata.references)
 
         for ref in refs_source:
             code = None
@@ -517,7 +520,6 @@ class GraphIngestionService:
 
 
 __all__ = ["GraphIngestionService"]
-
 
 
 

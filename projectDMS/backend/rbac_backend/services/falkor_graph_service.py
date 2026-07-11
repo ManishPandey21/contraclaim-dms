@@ -172,24 +172,6 @@ class FalkorGraphService:
             except Exception as e:
                 logger.debug("Schema creation had issues but continuing: %s", str(e))
 
-            # Cleanup old Mongo-owned references even when the current reference
-            # list is empty, so processed documents and manual removals do not
-            # leave stale parser/manual edges behind.
-            if (cleanup if cleanup is not None else self.cleanup_enabled):
-                try:
-                    # Preserve agent/other ad-hoc graph edges; Mongo owns parser,
-                    # legacy null, and manual document-reference edges.
-                    cleanup_params = {"normCode": norm_code}
-                    self._execute(
-                        (
-                            "MATCH (src:Letter {normCode: $normCode})-[e:CITES|REPLIES_TO]->(dst:Letter) "
-                            "WHERE e.source IS NULL OR e.source IN ['parser', 'manual'] DELETE e"
-                        ),
-                        cleanup_params,
-                    )
-                except FalkorGraphError as e:
-                    logger.warning("Cleanup operation failed: %s", str(e))
-
             # Use a simpler upsert query with explicit NULL handling
             upsert_query = """
             MERGE (src:Letter {normCode: $normCode})
@@ -270,6 +252,40 @@ class FalkorGraphService:
                     except FalkorGraphError as e:
                         logger.warning("Failed to process reference %s: %s", ref["normCode"], str(e))
                         continue
+
+            # Reconcile only stale Mongo-owned relationships. Keeping desired
+            # edges in place makes repeated syncs idempotent and preserves their
+            # original creation metadata instead of deleting/recreating them.
+            if (cleanup if cleanup is not None else self.cleanup_enabled):
+                desired_cites = [
+                    ref["normCode"] for ref in ref_list if ref["type"] != "REPLIES_TO"
+                ]
+                desired_replies = [
+                    ref["normCode"] for ref in ref_list if ref["type"] == "REPLIES_TO"
+                ]
+                for relationship, desired in (
+                    ("CITES", desired_cites),
+                    ("REPLIES_TO", desired_replies),
+                ):
+                    try:
+                        self._execute(
+                            (
+                                f"MATCH (src:Letter {{normCode: $normCode}})-[e:{relationship}]->"
+                                "(dst:Letter) "
+                                "WHERE (e.source IS NULL OR e.source IN ['parser', 'manual']) "
+                                "AND NOT (dst.normCode IN $desiredNormCodes) DELETE e"
+                            ),
+                            {
+                                "normCode": norm_code,
+                                "desiredNormCodes": desired,
+                            },
+                        )
+                    except FalkorGraphError as e:
+                        logger.warning(
+                            "Cleanup of stale %s relationships failed: %s",
+                            relationship,
+                            str(e),
+                        )
 
             logger.info(
                 "FalkorDB upsert successful for normCode=%s (references=%s)",

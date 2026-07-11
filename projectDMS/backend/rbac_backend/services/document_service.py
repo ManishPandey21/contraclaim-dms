@@ -85,11 +85,14 @@ class DocumentService:
         *,
         metadata: Any = None,
         upload_type: Optional[str] = None,
+        raise_on_error: bool = False,
     ) -> None:
         """Refresh the derived FalkorDB graph from the latest Mongo document."""
         try:
             current = await self.get_document(document_id)
             if not current:
+                if raise_on_error:
+                    raise DocumentNotFoundError("Document not found while refreshing reference graph")
                 return
             payload = current.model_dump(by_alias=True)
             self.graph_ingestion.sync_document_to_falkor(
@@ -97,9 +100,22 @@ class DocumentService:
                 document=payload,
                 metadata=metadata,
                 upload_type=upload_type or current.uploadType,
+                raise_on_error=raise_on_error,
             )
-        except Exception:
+        except Exception as exc:
             logger.debug("FalkorDB refresh failed for %s", document_id, exc_info=True)
+            if raise_on_error:
+                raise DocumentServiceError(
+                    "References were linked, but the reference graph could not be updated. "
+                    "Please try syncing again."
+                ) from exc
+
+    async def sync_reference_graph(self, document_id: str) -> None:
+        """Refresh the reference graph and surface failures to interactive callers."""
+        await self._sync_current_document_to_falkor(
+            document_id,
+            raise_on_error=True,
+        )
     
     def _validate_document_id(self, document_id: str) -> ObjectId:
         """
@@ -957,7 +973,19 @@ class DocumentService:
 
         latest = await db.document_processing_jobs.find_one({"_id": job_id})
         if latest and latest.get("status") not in {"failed", "retrying", "dead_lettered"}:
-            await self._mark_processing_failure(latest, "Document processing failed")
+            failure_message = "Document processing failed"
+            latest_error = latest.get("error")
+            if isinstance(latest_error, dict) and latest_error.get("message"):
+                failure_message = str(latest_error["message"])
+            else:
+                failed_document = await db.documents.find_one(
+                    {"_id": self._validate_document_id(document_id)},
+                    {"processing_error": 1},
+                )
+                document_error = (failed_document or {}).get("processing_error")
+                if isinstance(document_error, dict) and document_error.get("message"):
+                    failure_message = str(document_error["message"])
+            await self._mark_processing_failure(latest, failure_message)
         return False
 
     async def _mark_processing_failure(self, job: Dict[str, Any], message: str) -> None:
@@ -1034,6 +1062,8 @@ class DocumentService:
         metadata = None
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
+        db: Optional[Database] = None
+        doc_oid: Optional[ObjectId] = None
         try:
             db = await self._get_db()
             doc_oid = self._validate_document_id(document_id)
@@ -1153,11 +1183,13 @@ class DocumentService:
                     update_fields["keywords"] = metadata.keywords
                 if getattr(metadata, "contractual_clauses", None):
                     update_fields["contractual_clauses"] = metadata.contractual_clauses
-                if getattr(metadata, "references", None):
-                    normalized_refs = self._normalize_metadata_references(metadata.references)
-                    if normalized_refs:
-                        update_fields["reference"] = normalized_refs
-                        metadata_references = normalized_refs
+                metadata_reference_values = getattr(metadata, "references", None)
+                if metadata_reference_values is not None:
+                    normalized_refs = self._normalize_metadata_references(
+                        metadata_reference_values
+                    )
+                    update_fields["reference"] = normalized_refs
+                    metadata_references = normalized_refs
                 if getattr(metadata, "full_content", None):
                     update_fields["full_text"] = metadata.full_content
                 if getattr(metadata, "subject", None):
@@ -1242,30 +1274,66 @@ class DocumentService:
                         clear_existing=True,
                     )
                 except ReferenceSyncError as exc:
-                    logger.warning(
-                        "Reference synchronisation skipped for %s: %s",
-                        document_id,
-                        exc,
-                    )
-                except Exception:
+                    raise DocumentProcessingError(
+                        "Metadata was saved, but the extracted references could not be linked. "
+                        "Please retry document processing."
+                    ) from exc
+                except Exception as exc:
                     logger.exception(
                         "Unexpected error while synchronising references for %s",
                         document_id,
                     )
-                finally:
-                    if job_id:
-                        await db.document_processing_jobs.update_one(
-                            {"_id": job_id},
-                            {"$set": {"stage": "syncing_falkor", "updated_at": datetime.utcnow()}},
-                        )
-                    await self._sync_current_document_to_falkor(
-                        document_id,
-                        metadata=metadata,
-                        upload_type=upload,
+                    raise DocumentProcessingError(
+                        "Metadata was saved, but reference linking failed unexpectedly. "
+                        "Please retry document processing."
+                    ) from exc
+
+                if job_id:
+                    await db.document_processing_jobs.update_one(
+                        {"_id": job_id},
+                        {"$set": {"stage": "syncing_falkor", "updated_at": datetime.utcnow()}},
                     )
+                await self._sync_current_document_to_falkor(
+                    document_id,
+                    metadata=metadata,
+                    upload_type=upload,
+                    raise_on_error=True,
+                )
             return bool(result and getattr(result, "success", False) and metadata)
-        except Exception:
+        except Exception as exc:
             logger.exception("Unexpected error while processing document %s", document_id)
+            error = {
+                "message": str(exc) or "Document processing failed",
+                "timestamp": datetime.utcnow(),
+            }
+            try:
+                if db is not None and doc_oid is not None:
+                    await db.documents.update_one(
+                        {"_id": doc_oid},
+                        {
+                            "$set": {
+                                "processing_status": "failed",
+                                "processing_error": error,
+                                "updatedAt": datetime.utcnow(),
+                            }
+                        },
+                    )
+                if job_id and db is not None:
+                    await db.document_processing_jobs.update_one(
+                        {"_id": job_id},
+                        {
+                            "$set": {
+                                "stage": "failed",
+                                "error": error,
+                                "updated_at": datetime.utcnow(),
+                            }
+                        },
+                    )
+            except Exception:
+                logger.exception(
+                    "Unable to persist processing failure for document %s",
+                    document_id,
+                )
             return False
 
     async def list_enclosures(self, document_id: str) -> List[Enclosure]:
