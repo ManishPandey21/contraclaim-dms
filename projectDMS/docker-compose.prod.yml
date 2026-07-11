@@ -197,26 +197,21 @@ services:
     restart: unless-stopped
     environment:
       FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
-    command:
-      - "--save"
-      - "900"
-      - "1"
-      - "300"
-      - "10"
-      - "--appendonly"
-      - "yes"
-      - "--requirepass"
-      - "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
-      - "--maxmemory"
-      - "2gb"
-      - "--maxmemory-policy"
-      - "volatile-lru"
+      # The FalkorDB image entrypoint loads the graph module, then appends
+      # REDIS_ARGS. Overriding `command` starts plain Redis without FalkorDB.
+      REDIS_ARGS: >-
+        --save 900 1
+        --save 300 10
+        --appendonly yes
+        --requirepass ${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}
+        --maxmemory 2gb
+        --maxmemory-policy volatile-lru
     volumes:
       - falkordb_data:/data
     networks:
       - data-net
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -h localhost -a \"$${FALKORDB_PASSWORD}\" ping"]
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -h localhost -a \"$${FALKORDB_PASSWORD}\" ping >/dev/null && redis-cli --no-auth-warning -h localhost -a \"$${FALKORDB_PASSWORD}\" COMMAND INFO GRAPH.QUERY | grep -qi graph.query"]
       interval: 30s
       timeout: 5s
       retries: 5

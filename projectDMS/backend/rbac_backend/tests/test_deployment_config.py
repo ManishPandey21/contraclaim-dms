@@ -95,3 +95,19 @@ def test_gateway_healthcheck_probes_http() -> None:
         "gateway healthcheck must issue an HTTP request to /health so it "
         "proves Apache is serving, not merely that health.txt exists on disk"
     )
+
+
+def test_falkordb_entrypoint_loads_graph_module() -> None:
+    text = COMPOSE_PROD.read_text(encoding="utf-8")
+    falkor_block = text.split("\n  falkordb:", 1)[1].split("\n  redis:", 1)[0]
+
+    assert "REDIS_ARGS:" in falkor_block, (
+        "Redis options must be passed through REDIS_ARGS so the FalkorDB image "
+        "entrypoint still loads the graph module"
+    )
+    assert "\n    command:" not in falkor_block, (
+        "overriding the FalkorDB command starts plain Redis without falkordb.so"
+    )
+    assert "COMMAND INFO GRAPH.QUERY" in falkor_block, (
+        "FalkorDB health must verify graph-command availability, not only PING"
+    )
