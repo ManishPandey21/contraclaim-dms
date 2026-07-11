@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -12,6 +13,7 @@ from pymongo.database import Database
 from ..core.database import get_database
 from ..models.document import DocumentReference
 from .falkor_graph_service import normalize_letter_code
+from .reference_parser import parse_legacy_reference_text
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +69,21 @@ class ReferenceSyncService:
         source_scope = self._scope_filter(source_doc)
 
         normalized_references: List[Dict[str, Any]] = []
+        seen_reference_keys: set[str] = set()
         for item in references or []:
             payload = self._normalize_reference_payload(
                 item,
                 default_source=source,
                 default_link_type=default_link_type,
             )
-            if payload:
-                normalized_references.append(payload)
+            if not payload:
+                continue
+            reference_key = self._reference_key(payload)
+            if reference_key and reference_key in seen_reference_keys:
+                continue
+            if reference_key:
+                seen_reference_keys.add(reference_key)
+            normalized_references.append(payload)
 
         if not normalized_references:
             removed_count = 0
@@ -121,33 +130,54 @@ class ReferenceSyncService:
                 missing.append(payload)
 
         now = datetime.utcnow()
+        existing_source_refs = {
+            ref.documentId: ref
+            for ref in self._coerce_reference_list(source_doc.get("references"))
+            if (ref.source or "").lower() == source.lower()
+        }
         new_source_refs: Dict[str, DocumentReference] = {}
         target_backlinks: Dict[str, DocumentReference] = {}
 
         for target_id, (payload, target_doc) in resolved.items():
+            existing = existing_source_refs.get(target_id)
             link_type = payload.get("linkType") or default_link_type
-            linked_by = payload.get("linkedBy") or payload.get("linked_by") or source
-            linked_at = self._normalize_datetime(payload.get("linkedAt") or payload.get("linked_at") or now)
+            linked_by = (
+                payload.get("linkedBy")
+                or payload.get("linked_by")
+                or (existing.linkedBy if existing else None)
+                or source
+            )
+            linked_at = self._normalize_datetime(
+                payload.get("linkedAt")
+                or payload.get("linked_at")
+                or (existing.linkedAt if existing else None)
+                or now
+            )
+            description = (
+                payload.get("description")
+                or payload.get("text")
+                or (existing.description if existing else None)
+            )
 
             target_letter = target_doc.get("letterNo")
             new_source_refs[target_id] = DocumentReference(
                 documentId=target_id,
                 linkType=link_type,
-                description=payload.get("description") or payload.get("text"),
+                description=description,
                 linkedAt=linked_at or now,
                 linkedBy=linked_by,
                 letterNo=target_letter,
-                source=payload.get("source") or source,
+                source=source,
             )
 
             target_backlinks[target_id] = DocumentReference(
                 documentId=str(source_oid),
                 linkType=link_type,
-                description=payload.get("description") or payload.get("text"),
+                description=description,
                 linkedAt=linked_at or now,
                 linkedBy=linked_by,
                 letterNo=source_letter,
-                source=payload.get("source") or source,
+                source=source,
             )
 
         removed_targets = await self._upsert_source_references(
@@ -176,6 +206,21 @@ class ReferenceSyncService:
         if enqueue_missing and missing:
             await self.enqueue_missing(document_id, missing, scope=source_scope)
 
+        resolved_keys = [
+            key
+            for payload, _target in resolved.values()
+            if (key := self._reference_key(payload))
+        ]
+        if resolved_keys:
+            await db.reference_sync_queue.update_many(
+                {
+                    "document_id": document_id,
+                    "reference_key": {"$in": resolved_keys},
+                    "status": "pending",
+                },
+                {"$set": {"status": "resolved", "updatedAt": now}},
+            )
+
         return {
             "resolved": len(resolved),
             "missing": missing,
@@ -195,29 +240,42 @@ class ReferenceSyncService:
 
         Returns the number of queued entries.
         """
-        items: List[Dict[str, Any]] = []
+        items: Dict[str, Dict[str, Any]] = {}
         now = datetime.utcnow()
         for ref in references:
             if not ref:
                 continue
-            items.append(
-                {
-                    "document_id": document_id,
-                    "reference": ref,
-                    "organization_id": (scope or {}).get("organization_id"),
-                    "project_id": (scope or {}).get("project_id"),
-                    "status": "pending",
-                    "createdAt": now,
-                    "updatedAt": now,
-                }
-            )
+            reference_key = self._reference_key(ref)
+            if not reference_key:
+                continue
+            items[reference_key] = ref
 
         if not items:
             return 0
 
         db = await self._get_db()
         collection = db.reference_sync_queue
-        await collection.insert_many(items)
+        for reference_key, ref in items.items():
+            await collection.update_one(
+                {
+                    "document_id": document_id,
+                    "reference_key": reference_key,
+                    "status": "pending",
+                },
+                {
+                    "$set": {
+                        "reference": ref,
+                        "organization_id": (scope or {}).get("organization_id"),
+                        "project_id": (scope or {}).get("project_id"),
+                        "updatedAt": now,
+                    },
+                    "$setOnInsert": {
+                        "status": "pending",
+                        "createdAt": now,
+                    },
+                },
+                upsert=True,
+            )
         logger.info(
             "Queued %s missing references for document_id=%s",
             len(items),
@@ -395,6 +453,13 @@ class ReferenceSyncService:
             or data.get("code")
             or data.get("normCode")
         )
+        if not candidate_letter:
+            raw_text = data.get("raw") or data.get("text") or data.get("reference")
+            if raw_text:
+                parsed = parse_legacy_reference_text(str(raw_text))
+                candidate_letter = (
+                    parsed.get("letterNo") if parsed else str(raw_text).strip()
+                )
         if candidate_letter:
             data["letterNo"] = str(candidate_letter).strip()
 
@@ -407,6 +472,21 @@ class ReferenceSyncService:
             data["description"] = data.get("text")
 
         return data
+
+    def _reference_key(self, reference: Dict[str, Any]) -> str:
+        """Return a stable identity for queue and per-run de-duplication."""
+        document_id = reference.get("documentId") or reference.get("document_id")
+        if document_id:
+            return f"document:{str(document_id).strip()}"
+
+        letter_no = (
+            reference.get("letterNo")
+            or reference.get("letter_no")
+            or reference.get("code")
+            or reference.get("normCode")
+        )
+        normalized = normalize_letter_code(str(letter_no or ""))
+        return f"letter:{normalized}" if normalized else ""
 
     async def _resolve_target_document(
         self,
@@ -465,7 +545,10 @@ class ReferenceSyncService:
             return normalized_match
 
         regex_query: Dict[str, Any] = {
-            "letterNo": {"$regex": f"^{letter_no}$", "$options": "i"}
+            "letterNo": {
+                "$regex": f"^{re.escape(str(letter_no))}$",
+                "$options": "i",
+            }
         }
         regex_query.update(scoped)
         cursor = (
@@ -576,11 +659,15 @@ class ReferenceSyncService:
             existing_refs = self._coerce_reference_list(target_doc.get("referencedBy"))
             new_entries: List[DocumentReference] = []
             seen = False
+            changed = False
             for ref in existing_refs:
                 if ref.documentId == source_id and (ref.source or "").lower() == source_key.lower():
+                    if seen:
+                        changed = True
+                        continue
                     if ref.model_dump() != backlink.model_dump():
                         new_entries.append(backlink)
-                        updated += 1
+                        changed = True
                     else:
                         new_entries.append(ref)
                     seen = True
@@ -589,19 +676,22 @@ class ReferenceSyncService:
 
             if not seen:
                 new_entries.append(backlink)
-                updated += 1
+                changed = True
 
-            await db.documents.update_one(
-                {"_id": target_oid},
-                {
-                    "$set": {
-                        "referencedBy": [
-                            ref.model_dump(by_alias=True, exclude_none=True) for ref in new_entries
-                        ],
-                        "updatedAt": datetime.utcnow(),
+            if changed:
+                await db.documents.update_one(
+                    {"_id": target_oid},
+                    {
+                        "$set": {
+                            "referencedBy": [
+                                ref.model_dump(by_alias=True, exclude_none=True)
+                                for ref in new_entries
+                            ],
+                            "updatedAt": datetime.utcnow(),
+                        },
                     },
-                },
-            )
+                )
+                updated += 1
         return updated
 
     async def _remove_target_backlinks(

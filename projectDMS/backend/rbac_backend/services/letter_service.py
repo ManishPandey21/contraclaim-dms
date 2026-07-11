@@ -660,38 +660,97 @@ class LetterService:
     
     async def delete_letter(self, letter_id: str) -> bool:
         """
-        Delete a letter by ID.
-        
+        Delete a letter by ID, including its FalkorDB graph node.
+
+        The drafting pipeline creates Falkor Letter nodes for letters with a
+        letter number, so deletion must clean the graph too. The node is only
+        removed when no other live letter or document still owns the same
+        normalized letter code (Falkor nodes are keyed solely by normCode).
+
         Args:
             letter_id: Letter ID string
-            
+
         Returns:
             True if letter was deleted, False if not found
-            
+
         Raises:
             LetterServiceError: If deletion fails
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
-            
+
             logger.info(f"Deleting letter: {letter_id}")
-            
+
+            letter_doc = await self.db.letters.find_one({"_id": letter_oid}) or {}
             result = await self.db.letters.delete_one({"_id": letter_oid})
-            
+
             success = result.deleted_count > 0
             if success:
                 logger.info(f"Deleted letter: {letter_id}")
+                await self._cleanup_letter_graph_node(letter_oid, letter_doc)
             else:
                 logger.info(f"Letter not found for deletion: {letter_id}")
-            
+
             return success
-            
+
         except InvalidLetterIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete letter {letter_id}: {e}")
             raise LetterServiceError(f"Letter deletion failed: {str(e)}")
+
+    async def _cleanup_letter_graph_node(
+        self,
+        letter_oid: ObjectId,
+        letter_doc: Dict[str, Any],
+    ) -> None:
+        """Best-effort FalkorDB cleanup after a letter hard delete.
+
+        Failures are logged at WARNING and never mask the deletion itself —
+        the graph cleanup is repairable, the delete is already committed.
+        """
+        try:
+            from .falkor_graph_service import FalkorGraphService, normalize_letter_code
+
+            letter_no = letter_doc.get("letter_no") or (
+                (letter_doc.get("reference") or {}).get("reference_number")
+                if isinstance(letter_doc.get("reference"), dict)
+                else None
+            )
+            if not letter_no:
+                return
+            norm_code = normalize_letter_code(str(letter_no))
+            if not norm_code:
+                return
+
+            other_letter = await self.db.letters.find_one(
+                {"_id": {"$ne": letter_oid}, "letter_no": letter_no},
+                {"_id": 1},
+            )
+            other_document = await self.db.documents.find_one(
+                {
+                    "letterNoNormalized": norm_code,
+                    "lifecycle_state": {"$ne": "deleted"},
+                },
+                {"_id": 1},
+            )
+            if other_letter or other_document:
+                logger.info(
+                    "Skipping Falkor node deletion for letter %s: normCode %s "
+                    "still owned by another live record",
+                    letter_oid,
+                    norm_code,
+                )
+                return
+
+            FalkorGraphService().delete_letter(str(letter_no))
+        except Exception as exc:
+            logger.warning(
+                "Falkor graph cleanup failed after deleting letter %s: %s",
+                letter_oid,
+                exc,
+            )
     
     async def change_status(
         self,

@@ -35,6 +35,11 @@ Object.defineProperty(window, "localStorage", {
 let currentDoc: any = null;
 let referencesResponse: any = null;
 let documentLookup: Record<string, any> = {};
+let syncResponseStatus = 200;
+let syncResponseBody: any = {
+  message: "Reference synchronisation completed",
+  sync: { resolved: 0, missing: [] },
+};
 
 // Mock fetch for endpoints used by ReferencePage:
 // - GET /api/documents/:id
@@ -44,11 +49,23 @@ beforeEach(() => {
   currentDoc = null;
   referencesResponse = null;
   documentLookup = {};
+  syncResponseStatus = 200;
+  syncResponseBody = {
+    message: "Reference synchronisation completed",
+    sync: { resolved: 0, missing: [] },
+  };
   (window.localStorage as any).clear();
 });
 
 global.fetch = vi.fn(async (input: RequestInfo | URL) => {
   const url = String(input);
+
+  if (/\/api\/documents\/[^/]+\/sync-references$/.test(url)) {
+    return new Response(JSON.stringify(syncResponseBody), {
+      status: syncResponseStatus,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   // GET /api/documents/:id (details)
   const docMatch = url.match(/\/api\/documents\/([^/]+)$/);
@@ -94,6 +111,20 @@ function renderAt(letterId: string) {
   return render(
     <MemoryRouter initialEntries={[`/reference/${letterId}`]}>
       <Routes>
+        <Route path="/reference/:id" element={<ReferencePage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
+function renderAtWithPrevious(letterId: string) {
+  return render(
+    <MemoryRouter
+      initialEntries={["/documents", `/reference/${letterId}`]}
+      initialIndex={1}
+    >
+      <Routes>
+        <Route path="/documents" element={<div>Documents page</div>} />
         <Route path="/reference/:id" element={<ReferencePage />} />
       </Routes>
     </MemoryRouter>
@@ -283,5 +314,52 @@ describe("ReferencePage - Parsed References integration", () => {
 
     expect(screen.queryByText(row4)).not.toBeInTheDocument();
     expect(screen.queryByText(row6)).not.toBeInTheDocument();
+  });
+
+  it("shows a friendly load error and returns to the previous page", async () => {
+    currentDoc = null;
+    renderAtWithPrevious("missing-letter");
+
+    expect(
+      await screen.findByRole("heading", { name: /unable to open references/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/could not be found or you no longer have access/i)
+    ).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: /return to previous page/i })
+    );
+    expect(await screen.findByText("Documents page")).toBeInTheDocument();
+  });
+
+  it("surfaces sync failures with a clear message and back action", async () => {
+    currentDoc = {
+      id: "doc-sync-error",
+      letterNo: "LET-5001",
+      date: "2025-01-01",
+      subject: "Sync failure example",
+      reference: ["LET-4001"],
+      keywords: [],
+      clauses: [],
+    };
+    syncResponseStatus = 503;
+    syncResponseBody = {
+      detail:
+        "References were linked, but the reference graph could not be updated. Please try syncing again.",
+    };
+    renderAtWithPrevious("doc-sync-error");
+
+    await screen.findByText("Sync failure example");
+    await userEvent.click(
+      screen.getByRole("button", { name: /sync references/i })
+    );
+
+    expect(
+      await screen.findByText(/reference graph could not be updated/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /return to previous page/i })
+    ).toBeInTheDocument();
   });
 });

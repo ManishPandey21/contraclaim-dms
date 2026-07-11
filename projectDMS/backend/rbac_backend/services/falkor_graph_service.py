@@ -172,24 +172,6 @@ class FalkorGraphService:
             except Exception as e:
                 logger.debug("Schema creation had issues but continuing: %s", str(e))
 
-            # Cleanup old Mongo-owned references even when the current reference
-            # list is empty, so processed documents and manual removals do not
-            # leave stale parser/manual edges behind.
-            if (cleanup if cleanup is not None else self.cleanup_enabled):
-                try:
-                    # Preserve agent/other ad-hoc graph edges; Mongo owns parser,
-                    # legacy null, and manual document-reference edges.
-                    cleanup_params = {"normCode": norm_code}
-                    self._execute(
-                        (
-                            "MATCH (src:Letter {normCode: $normCode})-[e:CITES|REPLIES_TO]->(dst:Letter) "
-                            "WHERE e.source IS NULL OR e.source IN ['parser', 'manual'] DELETE e"
-                        ),
-                        cleanup_params,
-                    )
-                except FalkorGraphError as e:
-                    logger.warning("Cleanup operation failed: %s", str(e))
-
             # Use a simpler upsert query with explicit NULL handling
             upsert_query = """
             MERGE (src:Letter {normCode: $normCode})
@@ -271,6 +253,40 @@ class FalkorGraphService:
                         logger.warning("Failed to process reference %s: %s", ref["normCode"], str(e))
                         continue
 
+            # Reconcile only stale Mongo-owned relationships. Keeping desired
+            # edges in place makes repeated syncs idempotent and preserves their
+            # original creation metadata instead of deleting/recreating them.
+            if (cleanup if cleanup is not None else self.cleanup_enabled):
+                desired_cites = [
+                    ref["normCode"] for ref in ref_list if ref["type"] != "REPLIES_TO"
+                ]
+                desired_replies = [
+                    ref["normCode"] for ref in ref_list if ref["type"] == "REPLIES_TO"
+                ]
+                for relationship, desired in (
+                    ("CITES", desired_cites),
+                    ("REPLIES_TO", desired_replies),
+                ):
+                    try:
+                        self._execute(
+                            (
+                                f"MATCH (src:Letter {{normCode: $normCode}})-[e:{relationship}]->"
+                                "(dst:Letter) "
+                                "WHERE (e.source IS NULL OR e.source IN ['parser', 'manual']) "
+                                "AND NOT (dst.normCode IN $desiredNormCodes) DELETE e"
+                            ),
+                            {
+                                "normCode": norm_code,
+                                "desiredNormCodes": desired,
+                            },
+                        )
+                    except FalkorGraphError as e:
+                        logger.warning(
+                            "Cleanup of stale %s relationships failed: %s",
+                            relationship,
+                            str(e),
+                        )
+
             logger.info(
                 "FalkorDB upsert successful for normCode=%s (references=%s)",
                 norm_code,
@@ -280,6 +296,32 @@ class FalkorGraphService:
         except FalkorGraphError:
             logger.exception("Failed to upsert letter %s into FalkorDB", norm_code)
             raise
+
+    def delete_letter(self, code: str) -> bool:
+        """Delete a letter node and every edge attached to it (DETACH DELETE).
+
+        Mirrors the upsert key: letter nodes are merged solely on ``normCode``,
+        so deletion matches on ``normCode`` alone. Returns True when the
+        deletion was executed, False when FalkorDB is disabled or the code
+        cannot be normalized (both are config/no-op cases, not failures).
+        Raises FalkorGraphError when FalkorDB is enabled but the deletion
+        fails, so callers can surface the failure instead of losing it.
+        """
+        if not self.enabled:
+            logger.debug("FalkorDB disabled; skipping letter deletion for %s", code)
+            return False
+
+        norm_code = normalize_letter_code(code or "")
+        if not norm_code:
+            logger.debug("Skipping Falkor deletion without valid normCode: %r", code)
+            return False
+
+        self._execute(
+            "MATCH (l:Letter {normCode: $normCode}) DETACH DELETE l",
+            {"normCode": norm_code},
+        )
+        logger.info("FalkorDB deleted letter node normCode=%s and its edges", norm_code)
+        return True
 
     def get_letter(self, norm_code: str) -> Optional[Dict[str, Any]]:
         """Return a single letter node by its normalized code."""

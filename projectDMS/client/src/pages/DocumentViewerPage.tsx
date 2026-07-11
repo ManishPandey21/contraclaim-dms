@@ -859,18 +859,29 @@ const DocumentViewerPage: React.FC = () => {
                 </span>
               )}
             </div>
-            {(effectiveProcessingStatus === "failed" ||
-              effectiveProcessingStatus === "dead_lettered") && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void retryProcessing()}
-                disabled={isRetryingProcessing}
-              >
-                <RefreshCw className="mr-2 h-4 w-4" />
-                {isRetryingProcessing ? "Retrying..." : "Retry Processing"}
-              </Button>
-            )}
+            <div className="flex items-center gap-2">
+              {processingError && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => window.history.back()}
+                >
+                  Back
+                </Button>
+              )}
+              {(effectiveProcessingStatus === "failed" ||
+                effectiveProcessingStatus === "dead_lettered") && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void retryProcessing()}
+                  disabled={isRetryingProcessing}
+                >
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  {isRetryingProcessing ? "Retrying..." : "Retry Processing"}
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       )}

@@ -167,6 +167,62 @@ class LangChainVectorService:
                 vectors_config=vectors_config,
             )
 
+    async def delete_document(
+        self,
+        document_id: str,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> bool:
+        """Delete every vector point belonging to a document from Qdrant.
+
+        Returns True when the delete was executed, False when the service is
+        disabled or the client is unavailable (config/no-op cases). Raises on
+        Qdrant errors so callers can surface the failure.
+        """
+        document_id = str(document_id or "").strip()
+        if not document_id:
+            return False
+        if not self._enabled:
+            return False
+        if self._client is None or self._qdrant_models is None:
+            logger.warning(
+                "Qdrant client not initialized; cannot delete vectors for document_id=%s",
+                document_id,
+            )
+            return False
+
+        models = self._qdrant_models
+        conditions = [
+            models.FieldCondition(
+                key="document_id",
+                match=models.MatchValue(value=document_id),
+            )
+        ]
+        if organization_id:
+            conditions.append(
+                models.FieldCondition(
+                    key="organization_id",
+                    match=models.MatchValue(value=str(organization_id)),
+                )
+            )
+        if project_id:
+            conditions.append(
+                models.FieldCondition(
+                    key="project_id",
+                    match=models.MatchValue(value=str(project_id)),
+                )
+            )
+        qdrant_filter = models.Filter(must=conditions)
+
+        await asyncio.to_thread(
+            self._client.delete,
+            collection_name=self.config.qdrant_collection,
+            points_selector=models.FilterSelector(filter=qdrant_filter),
+        )
+        logger.info("Deleted Qdrant vectors for document_id=%s", document_id)
+        return True
+
     async def replace_document(self, payloads: List[Dict[str, Any]]) -> int:
         """Replace document vectors in Qdrant using LangChain with UUID-based point IDs."""
         if not self._enabled or not self._vector_store:
@@ -182,41 +238,16 @@ class LangChainVectorService:
 
         try:
             try:
-                if self._client is not None and self._qdrant_models is not None:
-                    models = self._qdrant_models
-                    base_metadata = dict(payloads[0].get("metadata") or {})
-                    conditions = [
-                        models.FieldCondition(
-                            key="document_id",
-                            match=models.MatchValue(value=document_id),
-                        )
-                    ]
-                    org_id = base_metadata.get("organization_id")
-                    project_id = base_metadata.get("project_id")
-                    if org_id:
-                        conditions.append(
-                            models.FieldCondition(
-                                key="organization_id",
-                                match=models.MatchValue(value=str(org_id)),
-                            )
-                        )
-                    if project_id:
-                        conditions.append(
-                            models.FieldCondition(
-                                key="project_id",
-                                match=models.MatchValue(value=str(project_id)),
-                            )
-                        )
-                    qdrant_filter = models.Filter(must=conditions)
-
-                    await asyncio.to_thread(
-                        self._client.delete,
-                        collection_name=self.config.qdrant_collection,
-                        points_selector=models.FilterSelector(filter=qdrant_filter),
-                    )
+                base_metadata = dict(payloads[0].get("metadata") or {})
+                org_id = base_metadata.get("organization_id")
+                project_id = base_metadata.get("project_id")
+                deleted = await self.delete_document(
+                    document_id,
+                    organization_id=str(org_id) if org_id else None,
+                    project_id=str(project_id) if project_id else None,
+                )
+                if deleted:
                     logger.debug("Deleted existing vectors for document_id=%s", document_id)
-                else:
-                    logger.warning("Qdrant client not initialized; skipping delete for document_id=%s", document_id)
             except Exception as fallback_exc:
                 logger.warning("Delete failed for document_id=%s: %s", document_id, fallback_exc)
 

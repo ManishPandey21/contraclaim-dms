@@ -11,6 +11,15 @@ ALLOW_PUBLIC_DATA_PORTS=${ALLOW_PUBLIC_DATA_PORTS:-false}
 REQUIRE_FRESH_BACKUP=${REQUIRE_FRESH_BACKUP:-false}
 RUN_MIGRATION_DRY_RUN=${RUN_MIGRATION_DRY_RUN:-false}
 REQUIRE_MIGRATION_DRY_RUN=${REQUIRE_MIGRATION_DRY_RUN:-false}
+PYTHON_BIN=${PYTHON_BIN:-}
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python3)
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=$(command -v python)
+  fi
+fi
 
 failures=0
 warnings=0
@@ -147,7 +156,7 @@ if [[ -n "$backup_bucket" ]]; then
 else
   fail "BACKUP_S3_BUCKET is required for offsite production backups"
 fi
-if python "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+if [[ -n "$PYTHON_BIN" ]] && "$PYTHON_BIN" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
   pass "Fresh local backup is present"
 else
   if [[ "$REQUIRE_FRESH_BACKUP" == "true" || "$REQUIRE_FRESH_BACKUP" == "True" ]]; then
@@ -170,7 +179,7 @@ else
 fi
 
 if [[ "$RUN_MIGRATION_DRY_RUN" == "true" || "$RUN_MIGRATION_DRY_RUN" == "True" ]]; then
-  if (cd "$ROOT_DIR/backend" && python -m rbac_backend.scripts.migrate_database --fail-on-warning); then
+  if [[ -n "$PYTHON_BIN" ]] && (cd "$ROOT_DIR/backend" && "$PYTHON_BIN" -m rbac_backend.scripts.migrate_database --fail-on-warning); then
     pass "Database migration dry-run passed"
   else
     fail "Database migration dry-run failed"

@@ -1,0 +1,8 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Daily local + offsite backup. flock prevents overlap with a slow prior run.
+30 1 * * * ubuntu flock -n /var/lock/contraclaim-backup.lock bash -lc 'cd /opt/contraclaim-dms/projectDMS && bash scripts/backup_offsite_s3.sh' >> /var/log/contraclaim/backup.log 2>&1
+
+# Independent freshness signal for operations review.
+45 1 * * * ubuntu bash -lc 'cd /opt/contraclaim-dms/projectDMS && python3 scripts/backup_status.py --root /var/backups/contractdms --max-age-hours 26' >> /var/log/contraclaim/backup-status.log 2>&1

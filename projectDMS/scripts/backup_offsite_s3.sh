@@ -16,6 +16,15 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+fi
+
 BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/contractdms}
 BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-contraclaim/backups}
 
@@ -26,7 +35,7 @@ log() { printf '[offsite-backup %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 
 # 1) Produce the local backup (Mongo dump + volume tarballs + manifest).
 log "running local backup"
-BACKUP_ROOT="$BACKUP_ROOT" "$ROOT_DIR/scripts/production_backup.sh"
+BACKUP_ROOT="$BACKUP_ROOT" bash "$ROOT_DIR/scripts/production_backup.sh"
 
 # 2) Mirror to S3. Remote retention is enforced by an S3 lifecycle rule
 #    (see docs/OPERATIONS.md); local retention is handled by production_backup.sh.

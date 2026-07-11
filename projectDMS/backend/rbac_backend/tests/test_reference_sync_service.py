@@ -74,14 +74,59 @@ class FakeDocumentsCollection:
 
     async def update_one(self, query: Dict[str, Any], update: Dict[str, Any], **kwargs):
         self.updates.append({"query": query, "update": update})
+        doc_id = query.get("_id")
+        for document in self._documents.values():
+            if document.get("_id") != doc_id:
+                continue
+            for key, value in update.get("$set", {}).items():
+                document[key] = value
+            return SimpleNamespace(modified_count=1)
+        return SimpleNamespace(modified_count=0)
 
 
 class FakeQueueCollection:
     def __init__(self):
         self.items: List[Dict[str, Any]] = []
 
-    async def insert_many(self, items: List[Dict[str, Any]]):
-        self.items.extend(items)
+    async def update_one(
+        self,
+        query: Dict[str, Any],
+        update: Dict[str, Any],
+        *,
+        upsert: bool = False,
+    ):
+        existing = next(
+            (
+                item
+                for item in self.items
+                if all(item.get(key) == value for key, value in query.items())
+            ),
+            None,
+        )
+        if existing is None and upsert:
+            existing = dict(query)
+            existing.update(update.get("$setOnInsert", {}))
+            self.items.append(existing)
+        if existing is not None:
+            existing.update(update.get("$set", {}))
+        return SimpleNamespace(modified_count=1 if existing is not None else 0)
+
+    async def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+        modified = 0
+        for item in self.items:
+            matches = True
+            for key, value in query.items():
+                if isinstance(value, dict) and "$in" in value:
+                    if item.get(key) not in value["$in"]:
+                        matches = False
+                        break
+                elif item.get(key) != value:
+                    matches = False
+                    break
+            if matches:
+                item.update(update.get("$set", {}))
+                modified += 1
+        return SimpleNamespace(modified_count=modified)
 
 
 def test_sync_bidirectional_updates_source_and_target_documents():
@@ -213,6 +258,125 @@ def test_sync_bidirectional_scopes_letter_resolution_to_source_project():
     assert result["resolved"] == 1
     source_refs = fake_documents.updates[0]["update"]["$set"]["references"]
     assert source_refs[0]["documentId"] == str(target_id)
+
+
+def test_sync_bidirectional_is_idempotent_for_existing_relationships():
+    source_id = ObjectId()
+    target_id = ObjectId()
+    documents = {
+        "source": {
+            "_id": source_id,
+            "letterNo": "DOC-001",
+            "letterNoNormalized": "doc-001",
+            "references": [],
+            "referencedBy": [],
+        },
+        "target": {
+            "_id": target_id,
+            "letterNo": "DOC-002",
+            "letterNoNormalized": "doc-002",
+            "references": [],
+            "referencedBy": [],
+        },
+    }
+    fake_documents = FakeDocumentsCollection(documents)
+    fake_db = SimpleNamespace(
+        documents=fake_documents,
+        reference_sync_queue=FakeQueueCollection(),
+    )
+    service = ReferenceSyncService(fake_db)
+
+    first = asyncio.run(
+        service.sync_bidirectional(
+            str(source_id),
+            [{"letterNo": "DOC-002"}],
+            source="parser",
+        )
+    )
+    stored_reference = dict(documents["source"]["references"][0])
+    fake_documents.updates.clear()
+
+    second = asyncio.run(
+        service.sync_bidirectional(
+            str(source_id),
+            [{"letterNo": "DOC-002"}, {"text": "DOC-002"}],
+            source="parser",
+        )
+    )
+
+    assert first["resolved"] == second["resolved"] == 1
+    assert second["updated_targets"] == 0
+    assert documents["source"]["references"] == [stored_reference]
+    assert len(documents["target"]["referencedBy"]) == 1
+    assert fake_documents.updates == []
+
+
+def test_sync_bidirectional_matches_plain_text_reference_payloads():
+    source_id = ObjectId()
+    target_id = ObjectId()
+    documents = {
+        "source": {
+            "_id": source_id,
+            "letterNo": "DOC-001",
+            "letterNoNormalized": "doc-001",
+            "references": [],
+            "referencedBy": [],
+        },
+        "target": {
+            "_id": target_id,
+            "letterNo": "DOC-002",
+            "letterNoNormalized": "doc-002",
+            "references": [],
+            "referencedBy": [],
+        },
+    }
+    fake_documents = FakeDocumentsCollection(documents)
+    fake_db = SimpleNamespace(
+        documents=fake_documents,
+        reference_sync_queue=FakeQueueCollection(),
+    )
+
+    result = asyncio.run(
+        ReferenceSyncService(fake_db).sync_bidirectional(
+            str(source_id),
+            [{"text": "DOC-002"}],
+            source="parser",
+        )
+    )
+
+    assert result["resolved"] == 1
+    assert documents["source"]["references"][0]["documentId"] == str(target_id)
+
+
+def test_sync_bidirectional_does_not_duplicate_missing_queue_entries():
+    source_id = ObjectId()
+    documents = {
+        "source": {
+            "_id": source_id,
+            "letterNo": "DOC-100",
+            "letterNoNormalized": "doc-100",
+            "references": [],
+            "referencedBy": [],
+        },
+    }
+    queue = FakeQueueCollection()
+    fake_db = SimpleNamespace(
+        documents=FakeDocumentsCollection(documents),
+        reference_sync_queue=queue,
+    )
+    service = ReferenceSyncService(fake_db)
+
+    for _ in range(2):
+        asyncio.run(
+            service.sync_bidirectional(
+                str(source_id),
+                [{"letterNo": "UNKNOWN-REF"}, {"text": "UNKNOWN-REF"}],
+                source="parser",
+            )
+        )
+
+    assert len(queue.items) == 1
+    assert queue.items[0]["reference_key"] == "letter:unknown-ref"
 
 
 

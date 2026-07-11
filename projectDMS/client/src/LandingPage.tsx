@@ -7,9 +7,9 @@ import {
   Building2,
   CheckCircle2,
   ClipboardCheck,
+  Clock3,
   FileSearch,
   FileText,
-  FolderTree,
   HelpCircle,
   KeyRound,
   LockKeyhole,
@@ -36,6 +36,24 @@ const trustSignals = [
   "Answers cited to clause & page",
   "Permission-aware, multi-project",
   "Contractual time-bar tracking",
+];
+
+const heroProofs = [
+  {
+    icon: FileSearch,
+    label: "Evidence-first",
+    detail: "Every answer traces to its source",
+  },
+  {
+    icon: Clock3,
+    label: "Deadline-aware",
+    detail: "Keep contractual dates in view",
+  },
+  {
+    icon: ShieldCheck,
+    label: "Governed by design",
+    detail: "Control access across every project",
+  },
 ];
 
 const features = [
@@ -257,8 +275,8 @@ const LandingPage = () => {
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-paper font-franklin text-ink antialiased">
-      <header className="sticky top-0 z-50 border-b border-ink/10 bg-paper/85 backdrop-blur-xl">
-        <div className="container flex h-16 items-center justify-between gap-6">
+      <header className="sticky top-0 z-50 border-b border-ink/10 bg-paper/90 backdrop-blur-xl">
+        <div className="container flex h-[4.5rem] items-center justify-between gap-6">
           <Link
             to="/"
             className="flex items-center gap-3"
@@ -270,18 +288,15 @@ const LandingPage = () => {
               className="h-9 w-auto"
             />
           </Link>
-          <nav className="hidden items-center gap-8 text-sm font-semibold text-ink/75 lg:flex">
+          <nav className="hidden items-center gap-4 text-[13px] font-semibold text-ink/70 md:flex xl:gap-7 xl:text-sm">
             <a href="#platform" className="transition hover:text-brand">
               Platform
             </a>
             <a href="#how" className="transition hover:text-brand">
-              How it works
+              Workflow
             </a>
             <a href="#governance" className="transition hover:text-brand">
-              Security
-            </a>
-            <a href="#modules" className="transition hover:text-brand">
-              Modules
+              Governance
             </a>
             <a href="#faq" className="transition hover:text-brand">
               FAQ
@@ -300,7 +315,7 @@ const LandingPage = () => {
               className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
             >
               <a href="#contact">
-                Book a demo <ArrowRight className="h-4 w-4" />
+                Request a demo <ArrowRight className="h-4 w-4" />
               </a>
             </Button>
           </div>
@@ -309,7 +324,7 @@ const LandingPage = () => {
 
       <main>
         {/* Hero */}
-        <section className="relative overflow-hidden bg-ink text-white">
+        <section className="relative isolate overflow-hidden bg-ink text-white">
           {/* Relevant contract photo, dimmed by a translucent navy wash so the
               image reads through while white text stays legible. */}
           <div
@@ -317,21 +332,20 @@ const LandingPage = () => {
             style={{ backgroundImage: "url('/contract-intelligence-hero.jpg')" }}
             aria-hidden="true"
           />
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-ink/85 via-ink/70 to-ink/50" />
-          <div className="pointer-events-none absolute -right-32 -top-24 h-96 w-96 rounded-full bg-brand/25 blur-3xl" />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-ink via-ink/90 to-ink/55" />
+          <div className="pointer-events-none absolute -right-32 -top-24 h-96 w-96 rounded-full bg-brand/20 blur-3xl" />
           <div className="pointer-events-none absolute -left-20 bottom-0 h-80 w-80 rounded-full bg-brand/10 blur-3xl" />
-          <div className="container relative grid gap-12 py-16 md:py-24 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
-            <div>
-              <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-brand-soft">
-                Contract intelligence for disputes
+          <div className="container relative grid gap-14 py-20 md:py-28 lg:grid-cols-2 lg:items-center">
+            <div className="min-w-0">
+              <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3.5 py-1.5 text-xs font-semibold uppercase tracking-[0.14em] text-brand-soft">
+                A governed workspace for contract teams
               </span>
-              <h1 className="mt-6 font-serif text-4xl font-semibold leading-[1.06] tracking-[-0.015em] text-white md:text-6xl">
-                Command every contract, correspondence&nbsp;and claim.
+              <h1 className="mt-6 max-w-3xl font-serif text-4xl font-semibold leading-[1.04] tracking-[-0.02em] text-white md:text-6xl">
+                Command every contract, correspondence and claim.
               </h1>
-              <p className="mt-6 max-w-xl text-lg leading-8 text-white/70">
-                From first notice to final award, ContraClaim keeps clauses,
-                correspondence and evidence connected, cited and audit-ready —
-                one source of truth for the whole dispute.
+              <p className="mt-6 max-w-xl text-lg leading-8 text-white/72">
+                Keep clauses, correspondence and evidence connected in one
+                defensible record — from first notice through final award.
               </p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Button
@@ -340,7 +354,7 @@ const LandingPage = () => {
                   className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
                 >
                   <a href="#contact">
-                    Book a demo <ArrowRight className="h-5 w-5" />
+                    Request a demo <ArrowRight className="h-5 w-5" />
                   </a>
                 </Button>
                 <Button
@@ -349,26 +363,43 @@ const LandingPage = () => {
                   variant="outline"
                   className="rounded-full border-white/25 bg-transparent text-white hover:bg-white hover:text-ink"
                 >
-                  <a href="#how">See how it works</a>
+                  <a href="#how">Explore the workflow</a>
                 </Button>
               </div>
-              <p className="mt-8 text-sm text-white/45">
-                Grounded retrieval · governed drafting · data residency you control
-              </p>
+              <div className="mt-10 grid max-w-2xl gap-4 sm:grid-cols-3">
+                {heroProofs.map((proof) => (
+                  <div key={proof.label} className="border-l border-white/20 pl-3">
+                    <proof.icon className="h-4 w-4 text-brand-soft" />
+                    <p className="mt-3 text-sm font-bold text-white">{proof.label}</p>
+                    <p className="mt-1 text-xs leading-5 text-white/55">{proof.detail}</p>
+                  </div>
+                ))}
+              </div>
             </div>
 
-            {/* Product visual: the real dashboard as a transparent, pre-tilted
-                floating panel (background removed). drop-shadow follows the
-                alpha silhouette so it reads as a clean product shot on the navy
-                hero — dashboard only, no device frame or decorative elements. */}
-            <img
-              src="/dashboard-hero.png"
-              alt="ContraClaim Document Management System dashboard — document totals, status breakdown and recent activity"
-              width={621}
-              height={402}
-              loading="eager"
-              className="h-auto w-full [filter:drop-shadow(0_30px_45px_rgba(0,0,0,.5))] transition-transform duration-500 ease-out hover:scale-[1.02]"
-            />
+            <div className="relative mx-auto min-w-0 w-full max-w-[660px]">
+              <div className="pointer-events-none absolute -inset-8 rounded-[2rem] bg-brand/15 blur-3xl" />
+              <div className="relative overflow-hidden rounded-2xl border border-white/15 bg-[#0a1424]/70 p-2 shadow-[0_34px_80px_-34px_rgba(0,0,0,.9)] backdrop-blur-sm">
+                <div className="flex items-center justify-between px-3 py-2.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white/55">
+                  <span>ContraClaim workspace</span>
+                  <span className="inline-flex items-center gap-1.5 text-brand-soft">
+                    <CheckCircle2 className="h-3.5 w-3.5" /> Source-linked
+                  </span>
+                </div>
+                <img
+                  src="/dashboard-hero.png"
+                  alt="ContraClaim Document Management System dashboard — document totals, status breakdown and recent activity"
+                  width={621}
+                  height={402}
+                  loading="eager"
+                  className="h-auto w-full rounded-xl border border-white/10 [filter:drop-shadow(0_24px_36px_rgba(0,0,0,.4))] transition-transform duration-500 ease-out hover:scale-[1.01]"
+                />
+              </div>
+              <div className="absolute -bottom-5 -left-4 hidden rounded-xl border border-white/15 bg-ink/90 px-4 py-3 shadow-xl backdrop-blur-md sm:block">
+                <p className="text-xs font-semibold text-white">Trace every position</p>
+                <p className="mt-1 text-xs text-white/55">Clause, page and evidence in context</p>
+              </div>
+            </div>
           </div>
 
           {/* Trust strip */}
@@ -389,16 +420,15 @@ const LandingPage = () => {
           <div className="container">
             <div className="mx-auto max-w-3xl text-center">
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
-                Argue from strength
+                Built for certainty
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                Win every dispute from one source of truth
+                Every position starts with the record
               </h2>
               <p className="mt-5 text-lg leading-8 text-ink/60">
-                Stop losing entitlements to scattered folders, inboxes and
-                disconnected PDFs. ContraClaim locks correspondence, clauses and
-                evidence into one connected, audit-ready record — so every
-                position you take is backed by the document.
+                Replace scattered folders, inboxes and disconnected PDFs with a
+                connected, audit-ready record — so every position is backed by
+                the document.
               </p>
             </div>
 
@@ -406,7 +436,7 @@ const LandingPage = () => {
               {features.map((feature) => (
                 <Card
                   key={feature.title}
-                  className="border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
+                  className="rounded-2xl border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:border-brand/25 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
                 >
                   <CardContent className="p-7">
                     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand-soft text-brand">
@@ -439,21 +469,18 @@ const LandingPage = () => {
         {/* How it works */}
         <section
           id="how"
-          className="relative isolate overflow-hidden border-y border-brand/10 bg-[#dcecff] py-20 md:py-28"
+          className="relative isolate overflow-hidden border-y border-brand/10 bg-[#f3f7fc] py-20 md:py-28"
         >
-          {/* Pale construction / infrastructure artwork gives this section its "relative isolate overflow-hidden bg-white py-20 md:py-28"
-              own identity while the white fades keep the transition into the
-              surrounding white sections seamless. Place the accompanying infra.png
-              how-it-works-blueprint.webp file in the public directory. */}
+          {/* Subtle project artwork keeps the workflow grounded in the sector
+              without competing with the steps themselves. */}
           <div className="pointer-events-none absolute inset-0 -z-20" aria-hidden="true">
             <div
-			className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-100"
-			style={{
+              className="absolute inset-0 bg-cover bg-center bg-no-repeat opacity-40"
+              style={{
                 backgroundImage: "url('/Infrastructure.png')",
               }}
             />
-            <div className="absolute inset-0 bg-gradient-to-b from-white via-white/25 to-white" />
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(255,255,255,0)_0%,rgba(255,255,255,0.18)_46%,rgba(255,255,255,0.82)_100%)]" />
+            <div className="absolute inset-0 bg-gradient-to-b from-[#f3f7fc]/95 via-[#f3f7fc]/75 to-[#f3f7fc]" />
           </div>
 
           <div className="container relative z-10">
@@ -462,15 +489,19 @@ const LandingPage = () => {
                 How it works
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                Live in days, defensible from day one
+                Move from record to response with confidence
               </h2>
+              <p className="mx-auto mt-5 max-w-2xl text-lg leading-8 text-ink/60">
+                A focused workflow keeps the right evidence, decision-makers and
+                contractual dates together at every stage.
+              </p>
             </div>
 
             <div className="mt-14 grid gap-6 md:grid-cols-3">
               {steps.map((step, index) => (
                 <div
                   key={step.title}
-                  className="group relative overflow-hidden rounded-2xl border border-brand/15 bg-white/85 p-7 shadow-[0_22px_55px_-38px_rgba(20,102,196,0.58)] backdrop-blur-[2px] transition duration-300 hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-38px_rgba(20,102,196,0.62)]"
+                  className="group relative overflow-hidden rounded-2xl border border-brand/15 bg-white/90 p-7 shadow-[0_22px_55px_-38px_rgba(20,102,196,0.5)] backdrop-blur-[2px] transition duration-300 hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-38px_rgba(20,102,196,0.62)]"
                 >
                   <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-brand/35 to-transparent" />
                   <span className="font-serif text-5xl font-semibold text-brand/20 transition-colors duration-300 group-hover:text-brand/30">
@@ -496,15 +527,15 @@ const LandingPage = () => {
           <div className="container">
             <div className="max-w-3xl">
               <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
-                Modules
+                One connected platform
               </p>
               <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-                Everything you need to win — in one workspace
+                The full record, without the fragmentation
               </h2>
               <p className="mt-5 text-lg leading-8 text-ink/60">
                 One connected set of modules across contracts, correspondence,
                 claims, documents, stakeholders, access control and reporting.
-                No bolt-ons, no blind spots.
+                The context stays intact wherever work happens.
               </p>
             </div>
 
@@ -512,7 +543,7 @@ const LandingPage = () => {
               {moduleCatalog.map((feature) => (
                 <Card
                   key={feature.title}
-                  className="border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
+                  className="rounded-2xl border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
                 >
                   <CardContent className="p-6">
                     <div className="mb-5 flex h-11 w-11 items-center justify-center rounded-xl bg-brand-soft text-brand">
@@ -554,13 +585,13 @@ const LandingPage = () => {
                 id="governance-heading"
                 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-white md:text-5xl"
               >
-                Enterprise controls, built in
+                Governance you can stand behind
               </h2>
               <p className="mt-5 text-lg leading-8 text-white/65">
                 Tenant isolation, role-based permissions, audit-oriented
                 activity, virus-scanned uploads and signed downloads are part of
-                the workspace — and every contract answer stays grounded in your
-                own documents.
+                the workspace. Every contract answer remains grounded in your
+                own record.
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
@@ -619,49 +650,39 @@ const LandingPage = () => {
           </div>
         </section>
 
-{/* Contact */}
-<section
-  id="contact"
-  className="relative isolate overflow-hidden bg-paper py-20 md:py-28"
->
-  {/* Background image */}
-  <div
-    className="pointer-events-none absolute inset-0 -z-20 bg-cover bg-center bg-no-repeat"
-    style={{
-      backgroundImage: "url('/contraclaim-book-demo.png.png')",
-    }}
-    aria-hidden="true"
-  />
+        {/* Contact */}
+        <section
+          id="contact"
+          className="relative isolate overflow-hidden bg-[#eff6ff] py-20 md:py-28"
+        >
+          <div
+            className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(circle_at_84%_16%,rgba(20,102,196,0.14),transparent_28%),radial-gradient(circle_at_8%_84%,rgba(13,27,46,0.08),transparent_28%)]"
+            aria-hidden="true"
+          />
 
-  {/* Light overlay for readability */}
-  <div
-    className="pointer-events-none absolute inset-0 -z-10 bg-gradient-to-r from-[#eef6ff]/95 via-[#eef6ff]/88 to-[#eef6ff]/72"
-    aria-hidden="true"
-  />
-
-  <div className="container relative z-10 grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
+          <div className="container relative grid gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
     <div>
       <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
-        Book a demo
+        Request a demo
       </p>
 
       <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.015em] text-ink md:text-5xl">
-        See ContraClaim on your own record
+        See the record behind every decision
       </h2>
 
       <p className="mt-5 text-lg leading-8 text-ink/70">
-        Book a 30-minute walkthrough with our contracts team and see
-        grounded retrieval on a live matter. Send a message and it will
-        reach the ContraClaim contact mailbox directly.
+        Book a 30-minute walkthrough with our contracts team. We will show how
+        ContraClaim brings retrieval, drafting and deadlines together in one
+        governed workspace.
       </p>
 
-      <div className="mt-6 rounded-xl border border-white/60 bg-white/85 p-5 shadow-sm backdrop-blur-sm">
+      <div className="mt-7 rounded-2xl border border-ink/10 bg-white/70 p-5 shadow-sm backdrop-blur-sm">
         <div className="flex items-start gap-3">
           <FileSearch className="mt-1 h-5 w-5 text-brand" />
           <p className="text-sm leading-6 text-ink/65">
-            Use this for product enquiries, onboarding support and
-            workspace access questions. Please don't include passwords or
-            confidential claim details in the form.
+            Use this form for product enquiries, onboarding support and
+            workspace access questions. Please do not include passwords or
+            confidential claim details.
           </p>
         </div>
       </div>
@@ -669,7 +690,7 @@ const LandingPage = () => {
 	
 
 
-            <Card className="border-ink/10 bg-white shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]">
+            <Card className="rounded-2xl border-ink/10 bg-white shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]">
               <CardContent className="p-7">
                 <form className="space-y-5" onSubmit={handleContactSubmit}>
                   {contactStatus.type !== "idle" && (

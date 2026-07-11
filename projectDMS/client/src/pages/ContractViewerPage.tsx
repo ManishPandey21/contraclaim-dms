@@ -171,7 +171,6 @@ const ContractViewerPage: React.FC = () => {
         // Metadata resolution is best-effort; the PDF still loads by id below.
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routeDocId]);
 
   const revokeBlobUrl = useCallback(() => {

@@ -28,12 +28,27 @@ echo "Writing deployment manifest..."
 } >"$BACKUP_ROOT/manifests/deployment-$STAMP.txt"
 
 echo "Backing up MongoDB..."
-MONGO_URI="${MONGO_URI:-${DATABASE_URL:-}}" \
-MONGO_DB="$MONGO_DB_NAME" \
-BACKUP_DIR="$BACKUP_ROOT/mongo" \
-RETENTION_DAYS="$RETENTION_DAYS" \
-STAMP="$STAMP" \
-"$ROOT_DIR/scripts/mongo_backup.sh"
+mongo_uri=${MONGO_URI:-${DATABASE_URL:-}}
+mongo_archive="$BACKUP_ROOT/mongo/${MONGO_DB_NAME}-${STAMP}.archive.gz"
+if [[ "$mongo_uri" == *"mongo1:"* ]]; then
+  # Docker-internal replica-set hostnames do not resolve on the host. Run the
+  # dump from a replica-set container and stream the archive to the host.
+  rm -f "$mongo_archive"
+  docker compose --env-file "$ENV_FILE" $COMPOSE_FILES \
+    -f docker-compose.mongo-replicaset.yml exec -T mongo1 \
+    mongodump --uri="$mongo_uri" --db="$MONGO_DB_NAME" --archive --gzip \
+    >"$mongo_archive"
+  find "$BACKUP_ROOT/mongo" -type f -name "${MONGO_DB_NAME}-*.archive.gz" \
+    -mtime "+$RETENTION_DAYS" -delete
+  echo "MongoDB backup written to $mongo_archive"
+else
+  MONGO_URI="$mongo_uri" \
+  MONGO_DB="$MONGO_DB_NAME" \
+  BACKUP_DIR="$BACKUP_ROOT/mongo" \
+  RETENTION_DAYS="$RETENTION_DAYS" \
+  STAMP="$STAMP" \
+  bash "$ROOT_DIR/scripts/mongo_backup.sh"
+fi
 
 project_name=${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]')}
 
@@ -62,7 +77,6 @@ backup_volume "${project_name}_redis_data" "redis-data"
 
 echo "Writing backup checksums and completion manifest..."
 checksum_file="$BACKUP_ROOT/manifests/checksums-$STAMP.sha256"
-mongo_archive="$BACKUP_ROOT/mongo/${MONGO_DB_NAME}-${STAMP}.archive.gz"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256sum "$mongo_archive" "$BACKUP_ROOT"/volumes/*-"$STAMP".tar.gz >"$checksum_file"
 else

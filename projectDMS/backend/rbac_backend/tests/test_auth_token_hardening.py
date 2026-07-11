@@ -64,6 +64,10 @@ class _FakeRuntime:
     def __init__(self, redis):
         self._redis = redis
 
+    @property
+    def redis_url(self):
+        return "redis://test-runtime"
+
     async def get_redis(self):
         return self._redis
 
@@ -168,7 +172,9 @@ async def test_non_access_type_token_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_valid_access_token_authenticates_without_redis():
+async def test_valid_access_token_authenticates_without_redis(monkeypatch):
+    runtime = SimpleNamespace(redis_url=None)
+    monkeypatch.setattr(runtime_mod, "get_runtime_state", lambda: runtime)
     token = create_access_token({"sub": "a@example.com", "user_id": "user-1", "roles": ["orguser"]})
     request = _FakeRequest(headers={"authorization": f"Bearer {token}"})
     # No Redis configured -> session/min_iat checks are skipped.
