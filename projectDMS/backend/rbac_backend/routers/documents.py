@@ -25,7 +25,11 @@ from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
-from ..services.document_service import DocumentConflictError, DocumentService
+from ..services.document_service import (
+    DocumentConflictError,
+    DocumentService,
+    DocumentServiceError,
+)
 from ..services.file_service import SecureFileService
 from ..services.export_service import ExportService
 from ..services.authorization_service import AuthorizationService
@@ -1783,52 +1787,23 @@ async def controller_sync_references(
                     {k: v for k, v in item.items() if v not in (None, "", [], {})}
                 )
 
-        for entry in document.references or []:
-            source_label = getattr(entry, "source", None)
-            if not isinstance(source_label, str) or source_label.lower() != "parser":
-                continue
-            if hasattr(entry, "model_dump"):
-                try:
-                    references_payload.append(entry.model_dump(by_alias=True, exclude_none=True))
-                except Exception:
-                    continue
-            elif isinstance(entry, dict):
-                entry_source = str(entry.get("source", "")).lower()
-                if entry_source != "parser":
-                    continue
-                references_payload.append(
-                    {k: v for k, v in entry.items() if v not in (None, "", [], {})}
-                )
-
-        if not references_payload:
-            return {
-                "message": "No references available for synchronisation",
-                "sync": {"resolved": 0, "missing": [], "updated_targets": 0, "removed_targets": 0},
-            }
-
         sync_result = await self.document_service.reference_sync_service.sync_bidirectional(
             document_id=document_id,
             references=references_payload,
             source="parser",
+            clear_existing=True,
         )
 
-        try:
-            document_payload = document.model_dump(by_alias=True, exclude_none=True)
-            self.document_service.graph_ingestion.sync_document_to_falkor(
-                document_id=document.id,
-                document=document_payload,
-                metadata=None,
-                upload_type=document.uploadType,
-            )
-        except Exception as exc:
-            logger.warning(
-                "FalkorDB synchronisation failed for document %s during reference sync: %s",
-                document_id,
-                exc,
-            )
+        # Reload inside the service so Falkor receives the relationships that
+        # were just reconciled, not the stale pre-sync document snapshot.
+        await self.document_service.sync_reference_graph(document_id)
 
         return {
-            "message": "Reference synchronisation completed",
+            "message": (
+                "Reference synchronisation completed"
+                if references_payload
+                else "No extracted references found; automatic links were cleared"
+            ),
             "sync": sync_result,
         }
     except (DocumentError, HTTPException):
@@ -1837,6 +1812,12 @@ async def controller_sync_references(
         logger.error("Reference sync error for %s: %s", document_id, exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+    except DocumentServiceError as exc:
+        logger.error("Reference graph sync error for %s: %s", document_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(exc),
         )
     except Exception as exc:

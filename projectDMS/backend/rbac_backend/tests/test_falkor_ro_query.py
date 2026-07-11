@@ -71,3 +71,38 @@ def test_falkor_param_serialization_preserves_lists_for_cypher_in():
     assert params["seed_clause_numbers"] == ["8.4", "20.1"]
     assert "seed_clause_numbers=[\"8.4\",\"20.1\"]" in header
     assert "nested={ids:[1,2]}" in header
+
+
+def test_reference_cleanup_preserves_desired_edges_and_removes_only_stale_ones(monkeypatch):
+    cfg = FalkorGraphConfig(
+        host="x",
+        port=6379,
+        graph_name="g",
+        password=None,
+        enabled=True,
+        cleanup=True,
+    )
+    svc = FalkorGraphService(cfg)
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(svc, "ensure_schema", lambda: None)
+    monkeypatch.setattr(
+        svc,
+        "_execute",
+        lambda query, params=None, **_kwargs: calls.append((query, params or {})),
+    )
+
+    svc.upsert_letter_with_refs(
+        {"code": "LTR-001", "normCode": "ltr-001"},
+        [{"code": "LTR-002", "type": "CITES", "source": "parser"}],
+        cleanup=True,
+    )
+
+    relationship_merges = [query for query, _params in calls if "MERGE (src)-[e:CITES]" in query]
+    cleanup_calls = [(query, params) for query, params in calls if "DELETE e" in query]
+    assert len(relationship_merges) == 1
+    assert len(cleanup_calls) == 2
+    assert all("NOT (dst.normCode IN $desiredNormCodes)" in query for query, _ in cleanup_calls)
+    cites_cleanup = next(params for query, params in cleanup_calls if "[e:CITES]" in query)
+    replies_cleanup = next(params for query, params in cleanup_calls if "[e:REPLIES_TO]" in query)
+    assert cites_cleanup["desiredNormCodes"] == ["ltr-002"]
+    assert replies_cleanup["desiredNormCodes"] == []
