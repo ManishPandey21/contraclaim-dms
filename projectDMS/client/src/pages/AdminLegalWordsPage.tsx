@@ -180,7 +180,9 @@ const AdminLegalWordsPage = () => {
 
   const displayedWords = useMemo(() => {
     if (activeTab === "all") return words;
-    if (activeTab === "user_requested") return words.filter((word) => word.source === "user_requested");
+    if (activeTab === "user_requested") {
+      return words.filter((word) => word.source === "user_requested" && word.status === "pending_review");
+    }
     if (activeTab !== "closed") return words.filter((word) => word.status === activeTab);
     return words.filter((word) => word.status === "rejected" || word.status === "inactive");
   }, [activeTab, words]);
@@ -197,7 +199,9 @@ const AdminLegalWordsPage = () => {
     };
     words.forEach((word) => {
       if (word.status in base) base[word.status as keyof typeof base] += 1;
-      if (word.source === "user_requested") base.user_requested += 1;
+      if (word.source === "user_requested" && word.status === "pending_review") {
+        base.user_requested += 1;
+      }
       if (word.status === "rejected" || word.status === "inactive") base.closed += 1;
     });
     return base;
@@ -727,9 +731,11 @@ const AISuggestionsTable = ({
           {suggestions.map((suggestion) => {
             const record = findRecord(suggestion);
             const eligible = suggestion.is_eligible_for_republish;
+            const recordComplete = !!record?.meaning && !!record?.example_sentence;
             const canApprove =
               !!record &&
               eligible &&
+              recordComplete &&
               record.status !== "approved" &&
               record.status !== "published";
             const canSchedule =

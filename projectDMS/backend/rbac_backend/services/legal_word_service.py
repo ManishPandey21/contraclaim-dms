@@ -194,6 +194,8 @@ class LegalWordService:
             query["status"] = status
         if source:
             query["source"] = source
+            if source == LegalWordSource.USER_REQUESTED.value and not status:
+                query["status"] = LegalWordStatus.PENDING_REVIEW.value
         if search:
             pattern = re.escape(search.strip())
             if pattern:
@@ -297,8 +299,15 @@ class LegalWordService:
     ) -> LegalWordAISuggestionResponse:
         """Generate AI-assisted legal word suggestions and evaluate publish eligibility."""
         target_date = today or date.today()
-        raw_candidates = await self._generate_ai_word_candidates()
-        candidates = self._prepare_ai_candidates(raw_candidates)
+        requested_docs = await self._pending_user_requested_docs(AI_SUGGESTION_COUNT)
+        requested_words = [str(doc.get("word") or "") for doc in requested_docs if doc.get("word")]
+        raw_candidates = await self._generate_ai_word_candidates(
+            preferred_words=requested_words
+        )
+        candidates = self._prepare_ai_candidates(
+            raw_candidates,
+            preferred_docs=requested_docs,
+        )
         suggestions: List[LegalWordAISuggestion] = []
         for candidate in candidates[:AI_SUGGESTION_COUNT]:
             suggestions.append(
@@ -540,14 +549,30 @@ class LegalWordService:
         payload["_id"] = str(result.inserted_id)
         return self._to_daily_set(payload)
 
-    async def _generate_ai_word_candidates(self) -> List[Dict[str, Any]]:
+    async def _generate_ai_word_candidates(
+        self,
+        preferred_words: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key or AsyncOpenAI is None:
             return list(AI_FALLBACK_WORDS)
 
+        preferred = [
+            " ".join(str(word or "").strip().split())
+            for word in preferred_words or []
+            if str(word or "").strip()
+        ]
+        preference_text = ""
+        if preferred:
+            preference_text = (
+                "Prioritize these user-requested words first and provide complete "
+                f"entries for them: {', '.join(preferred[:AI_SUGGESTION_COUNT])}. "
+            )
         prompt = (
             f"Suggest exactly {AI_SUGGESTION_COUNT} contractual/legal words useful for construction "
-            "contract correspondence. Avoid generic words and return only JSON "
+            "contract correspondence. "
+            f"{preference_text}"
+            "Avoid generic words and return only JSON "
             "with this shape: {\"words\":[{\"word\":\"...\",\"meaning\":\"...\","
             "\"synonyms\":[\"...\"],\"example_sentence\":\"...\"}]}. "
             "Examples must sound like contractual letters and must not cite any "
@@ -614,20 +639,29 @@ class LegalWordService:
         last_published = self._last_published_from_doc(existing_doc)
         eligible = self._is_republish_eligible(last_published, today)
         first_suggested = existing_doc.get("first_suggested_date") or today.isoformat()
+        update_fields: Dict[str, Any] = {
+            "first_suggested_date": first_suggested,
+            "is_eligible_for_republish": eligible,
+            "updated_at": datetime.utcnow(),
+            "updated_by": self._user_id(current_user),
+        }
+        update_fields.update(self._completion_fields_for_suggestion(existing_doc, candidate))
         await words.update_one(
             {"_id": existing_doc.get("_id")},
-            {
-                "$set": {
-                    "first_suggested_date": first_suggested,
-                    "is_eligible_for_republish": eligible,
-                    "updated_at": datetime.utcnow(),
-                    "updated_by": self._user_id(current_user),
-                }
-            },
+            {"$set": update_fields},
         )
         updated_doc = await words.find_one({"_id": existing_doc.get("_id")}) or existing_doc
         word_record = self._to_word(updated_doc)
-        if eligible:
+        if (
+            existing_doc.get("source") == LegalWordSource.USER_REQUESTED.value
+            and existing_doc.get("status") == LegalWordStatus.PENDING_REVIEW.value
+            and not last_published
+        ):
+            label = "User Requested Word"
+            previous_status = "User requested; never published"
+            status_value = LegalWordSuggestionEligibility.NEW_WORD
+            blocked_reason = None
+        elif eligible:
             label = (
                 "Eligible for Republishing - Last Published More Than 6 Months Ago"
                 if last_published
@@ -661,9 +695,54 @@ class LegalWordService:
             blocked_reason=blocked_reason,
         )
 
-    def _prepare_ai_candidates(self, raw_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def _pending_user_requested_docs(
+        self,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        words, _ = await self._get_handles()
+        docs = await words.find(
+            {
+                "source": LegalWordSource.USER_REQUESTED.value,
+                "status": LegalWordStatus.PENDING_REVIEW.value,
+            }
+        ).to_list(length=max(1, limit))
+        return sorted(
+            docs,
+            key=lambda doc: (
+                self._sort_value(doc.get("requested_at")),
+                self._sort_value(doc.get("created_at")),
+                self._id_sort_value(doc.get("_id")),
+            ),
+        )[:limit]
+
+    def _prepare_ai_candidates(
+        self,
+        raw_candidates: List[Dict[str, Any]],
+        *,
+        preferred_docs: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
         seen: set[str] = set()
+        raw_by_key: Dict[str, Dict[str, Any]] = {}
+        for raw in raw_candidates or []:
+            candidate = self._candidate_from_raw(raw)
+            if not candidate:
+                continue
+            raw_by_key.setdefault(self.normalize_word(candidate["word"]), candidate)
+
+        for doc in preferred_docs or []:
+            word = doc.get("word") or ""
+            key = self.normalize_word(str(word))
+            if not key or key in seen:
+                continue
+            candidate = raw_by_key.get(key) or self._candidate_from_existing_doc(doc)
+            if not candidate:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+            if len(candidates) >= AI_SUGGESTION_COUNT:
+                return candidates
+
         for raw in [*(raw_candidates or []), *AI_FALLBACK_WORDS]:
             candidate = self._candidate_from_raw(raw)
             if not candidate:
@@ -676,6 +755,34 @@ class LegalWordService:
             if len(candidates) >= AI_SUGGESTION_COUNT:
                 break
         return candidates
+
+    def _candidate_from_existing_doc(self, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        word = " ".join(str(doc.get("word") or "").strip().split())
+        if not word:
+            return None
+        return {
+            "word": word,
+            "meaning": doc.get("meaning") or "",
+            "synonyms": list(doc.get("synonyms") or []),
+            "example_sentence": doc.get("example_sentence") or "",
+        }
+
+    def _completion_fields_for_suggestion(
+        self,
+        existing_doc: Dict[str, Any],
+        candidate: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if existing_doc.get("source") != LegalWordSource.USER_REQUESTED.value:
+            return {}
+
+        fields: Dict[str, Any] = {}
+        if not existing_doc.get("meaning") and candidate.get("meaning"):
+            fields["meaning"] = candidate["meaning"]
+        if not existing_doc.get("example_sentence") and candidate.get("example_sentence"):
+            fields["example_sentence"] = candidate["example_sentence"]
+        if not existing_doc.get("synonyms") and candidate.get("synonyms"):
+            fields["synonyms"] = list(candidate.get("synonyms") or [])
+        return fields
 
     def _candidate_from_raw(self, raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(raw, dict):

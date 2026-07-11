@@ -11,6 +11,7 @@ from rbac_backend.models.legal_word import (
     LegalWordSource,
     LegalWordStatus,
     LegalWordSuggestionEligibility,
+    LegalWordUpdate,
 )
 from rbac_backend.services.legal_word_service import (
     DAILY_WORD_COUNT,
@@ -210,7 +211,8 @@ async def test_ai_suggestions_flag_new_recent_and_republish_eligible(fake_db, mo
         admin,
     )
 
-    async def _fake_candidates():
+    async def _fake_candidates(preferred_words=None):
+        assert preferred_words == []
         return [
             {
                 "word": "Condition Precedent",
@@ -268,6 +270,51 @@ async def test_ai_suggestions_flag_new_recent_and_republish_eligible(fake_db, mo
 
 
 @pytest.mark.asyncio
+async def test_ai_suggestions_prioritize_and_enrich_user_requested_words(fake_db, monkeypatch):
+    service = LegalWordService()
+    user = SimpleNamespace(id="user-1")
+    admin = SimpleNamespace(id="admin-1")
+
+    await service.search_or_request_word("  Delay Damages  ", user)
+    requested_id = next(iter(fake_db.legal_words.docs))
+
+    async def _fake_candidates(preferred_words=None):
+        assert preferred_words == ["Delay Damages"]
+        return [
+            {
+                "word": "Condition Precedent",
+                "meaning": "A requirement that must be satisfied before an obligation arises.",
+                "synonyms": ["precondition"],
+                "example_sentence": "Payment is subject to the condition precedent stated in the Contract.",
+            },
+            {
+                "word": "Delay Damages",
+                "meaning": "Damages recoverable for delay caused by a contractual default.",
+                "synonyms": ["delay compensation", "liquidated damages"],
+                "example_sentence": "The Employer's claim for delay damages is denied for the reasons stated below.",
+            },
+        ]
+
+    monkeypatch.setattr(service, "_generate_ai_word_candidates", _fake_candidates)
+
+    response = await service.suggest_words_with_ai(admin, today=date(2026, 7, 7))
+
+    first = response.suggestions[0]
+    assert first.word == "Delay Damages"
+    assert first.existing_word_id == requested_id
+    assert first.eligibility_status == LegalWordSuggestionEligibility.NEW_WORD
+    assert first.eligibility_label == "User Requested Word"
+    assert first.word_record.source == LegalWordSource.USER_REQUESTED
+    stored = fake_db.legal_words.docs[requested_id]
+    assert stored["meaning"] == "Damages recoverable for delay caused by a contractual default."
+    assert stored["synonyms"] == ["delay compensation", "liquidated damages"]
+    assert stored["example_sentence"] == (
+        "The Employer's claim for delay damages is denied for the reasons stated below."
+    )
+    assert stored["first_suggested_date"] == "2026-07-07"
+
+
+@pytest.mark.asyncio
 async def test_search_missing_word_creates_pending_user_request_once(fake_db):
     service = LegalWordService()
     current_user = SimpleNamespace(id="user-1")
@@ -284,6 +331,38 @@ async def test_search_missing_word_creates_pending_user_request_once(fake_db):
     assert requested["source"] == "user_requested"
     assert requested["status"] == LegalWordStatus.PENDING_REVIEW.value
     assert requested["requested_by_user_id"] == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_user_requested_list_only_returns_pending_requests_by_default(fake_db):
+    service = LegalWordService()
+    user = SimpleNamespace(id="user-1")
+    admin = SimpleNamespace(id="admin-1")
+
+    await service.search_or_request_word("Quantum Meruit", user)
+    requested_id = next(iter(fake_db.legal_words.docs))
+    await service.update_word(
+        requested_id,
+        LegalWordUpdate(
+            word="Quantum Meruit",
+            meaning="Reasonable payment for work performed where valuation is disputed.",
+            synonyms=["reasonable remuneration"],
+            example_sentence="The Contractor claims payment on a quantum meruit basis.",
+        ),
+        admin,
+    )
+    await service.approve_word(requested_id, admin)
+
+    pending_user_requests, total = await service.list_words(source=LegalWordSource.USER_REQUESTED.value)
+    approved_user_requests, approved_total = await service.list_words(
+        source=LegalWordSource.USER_REQUESTED.value,
+        status=LegalWordStatus.APPROVED.value,
+    )
+
+    assert pending_user_requests == []
+    assert total == 0
+    assert [word.id for word in approved_user_requests] == [requested_id]
+    assert approved_total == 1
 
 
 @pytest.mark.asyncio
