@@ -568,14 +568,28 @@ class EnhancedApiService {
 
     if (!response.ok) {
       const errorText = await response.text();
+      let parsedBody: any = null;
       try {
-        const errorData: ApiError = JSON.parse(errorText);
-        throw new Error(
-          errorData.detail || errorData.message || "An error occurred",
-        );
+        parsedBody = JSON.parse(errorText);
       } catch {
-        throw new Error(errorText || `HTTP error! status: ${response.status}`);
+        // Non-JSON error body; fall through to the raw text.
       }
+      const detail = parsedBody?.detail;
+      const message =
+        (typeof detail === "string" && detail) ||
+        (detail && typeof detail === "object" && (detail.message || detail.error)) ||
+        parsedBody?.message ||
+        errorText ||
+        `HTTP error! status: ${response.status}`;
+      const error = new Error(message) as Error & {
+        status?: number;
+        detail?: any;
+      };
+      error.status = response.status;
+      if (detail && typeof detail === "object") {
+        error.detail = detail;
+      }
+      throw error;
     }
 
     if (responseType === "blob") {

@@ -30,6 +30,10 @@ from ..utils.notification_service import NotificationService
 from ..models.notification import NotificationContext, NotificationType
 from ..utils.pipeline_logging import configure_pipeline_logger
 from .reference_sync_service import ReferenceSyncService, ReferenceSyncError
+from .duplicate_detection_service import (
+    CLASSIFICATION_DUPLICATE,
+    DuplicateDetectionService,
+)
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
 from .reference_parser import parse_legacy_reference_text
@@ -87,6 +91,7 @@ class DocumentService:
         self.graph_ingestion = GraphIngestionService()
         self.evidence_graph = EvidenceGraphService(db)
         self.reference_sync_service = ReferenceSyncService(db)
+        self.duplicate_detection = DuplicateDetectionService(db)
 
     async def _get_db(self) -> Database:
         if self.db is not None:
@@ -658,7 +663,12 @@ class DocumentService:
         limit = int(pagination.get("limit", 50) or 50)
         skip, limit = validate_pagination(skip, limit)
         query = dict(query or {})
-        query.setdefault("lifecycle_state", {"$ne": "deleted"})
+        # Deleted documents never list; documents held for duplicate review and
+        # confirmed duplicates are unpublished until/unless they are released.
+        query.setdefault(
+            "lifecycle_state",
+            {"$nin": ["deleted", "duplicate_review", "duplicate"]},
+        )
         raw_items, page = await fetch_paginated(
             db.documents,
             filter=query,
@@ -1092,6 +1102,11 @@ class DocumentService:
             org_id = organization_id or document.organization_id
             proj_id = project_id or document.project_id
             upload = upload_type or document.uploadType
+            # Stage-1 flagged this upload as a possible duplicate (same letter
+            # number, different file). OCR/metadata extraction proceeds, but
+            # vectors, reference links, graph nodes, and publication are all
+            # deferred until the stage-2 classification below clears it.
+            duplicate_pending = (stored.get("duplicate_status") == "pending")
             logger.info(
                 "[document_pipeline] Loaded document metadata for %s (org=%s, project=%s, upload_type=%s)",
                 document_id,
@@ -1154,6 +1169,7 @@ class DocumentService:
                     path_structure=f"{org_id}/{proj_id}",
                     upload_type=upload,
                     document_id=document_id,
+                    skip_embeddings=duplicate_pending,
                 )
             except DocumentProcessorError as exc:
                 logger.error("Document processor failed for %s: %s", document_id, exc)
@@ -1226,27 +1242,28 @@ class DocumentService:
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)
-                try:
-                    await self.graph_ingestion.ingest_document(
-                        document_id=document_id,
-                        document_data=graph_document_payload,
-                        metadata=metadata,
-                        metadata_source=metadata_source,
-                        upload_type=upload,
-                    )
-                except Exception:
-                    logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
+                if not duplicate_pending:
+                    try:
+                        await self.graph_ingestion.ingest_document(
+                            document_id=document_id,
+                            document_data=graph_document_payload,
+                            metadata=metadata,
+                            metadata_source=metadata_source,
+                            upload_type=upload,
+                        )
+                    except Exception:
+                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
 
-                try:
-                    await self.evidence_graph.ingest_document_metadata(
-                        document_id=document_id,
-                        document_data=graph_document_payload,
-                        metadata=metadata,
-                        metadata_source=metadata_source,
-                        upload_type=upload,
-                    )
-                except Exception:
-                    logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
+                    try:
+                        await self.evidence_graph.ingest_document_metadata(
+                            document_id=document_id,
+                            document_data=graph_document_payload,
+                            metadata=metadata,
+                            metadata_source=metadata_source,
+                            upload_type=upload,
+                        )
+                    except Exception:
+                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
 
                 if getattr(result, "processed_path", None):
                     update_fields["processed_path"] = result.processed_path
@@ -1274,6 +1291,59 @@ class DocumentService:
                         }
                     },
                 )
+
+            if metadata is not None and duplicate_pending:
+                # STAGE 2: compare the extracted metadata/content with the
+                # existing candidate and classify duplicate/revision/separate.
+                if job_id:
+                    await db.document_processing_jobs.update_one(
+                        {"_id": job_id},
+                        {"$set": {"stage": "duplicate_classification", "updated_at": datetime.utcnow()}},
+                    )
+                review = await self.duplicate_detection.classify_pending_document(document_id)
+                if review.get("classification") == CLASSIFICATION_DUPLICATE:
+                    # Confirmed duplicate: quarantined (not published) with no
+                    # vectors, reference links, backlinks, or graph nodes. The
+                    # classification itself emitted the audit record.
+                    logger.info(
+                        "Document %s classified as duplicate of %s; downstream artifacts skipped",
+                        document_id,
+                        review.get("existing_document_id"),
+                    )
+                    if job_id:
+                        await db.document_processing_jobs.update_one(
+                            {"_id": job_id},
+                            {"$set": {"stage": "duplicate_detected", "updated_at": datetime.utcnow()}},
+                        )
+                    return bool(result and getattr(result, "success", False) and metadata)
+
+                # Revision or separate document: released. Create everything
+                # that was deferred while the duplicate check was pending.
+                try:
+                    await processor.database_service.create_embeddings_for_document(document_id)
+                except Exception:
+                    logger.exception("Deferred embedding creation failed for %s", document_id)
+                if metadata:
+                    try:
+                        await self.graph_ingestion.ingest_document(
+                            document_id=document_id,
+                            document_data=graph_document_payload,
+                            metadata=metadata,
+                            metadata_source=metadata_source,
+                            upload_type=upload,
+                        )
+                    except Exception:
+                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
+                    try:
+                        await self.evidence_graph.ingest_document_metadata(
+                            document_id=document_id,
+                            document_data=graph_document_payload,
+                            metadata=metadata,
+                            metadata_source=metadata_source,
+                            upload_type=upload,
+                        )
+                    except Exception:
+                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
 
             if metadata is not None:
                 try:

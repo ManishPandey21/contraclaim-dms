@@ -172,6 +172,11 @@ async def ensure_indexes(db):
         [("organization_id", 1), ("project_id", 1), ("letterNoNormalized", 1)],
         background=True,
     )
+    # Stage-1 duplicate-upload precheck: exact file hash within org/project
+    await db.documents.create_index(
+        [("organization_id", 1), ("project_id", 1), ("sha256", 1)],
+        background=True,
+    )
     await db.reference_sync_queue.create_index(
         [("document_id", 1), ("reference_key", 1), ("status", 1)],
         name="uq_reference_sync_pending",

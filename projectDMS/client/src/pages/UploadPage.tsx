@@ -30,10 +30,18 @@ import {
   Link as LinkIcon,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { AlertCircle, ExternalLink } from "lucide-react";
 import enhancedApi, {
   BulkUploadStatus,
   Organization as OrgModel,
 } from "@/services/enhanced-api";
+
+interface DuplicateBlock {
+  message: string;
+  existingDocumentId?: string;
+  existingLetterNo?: string;
+  fileName?: string;
+}
 
 interface UploadFile {
   id: string;
@@ -93,6 +101,9 @@ const UploadPage: React.FC = () => {
 
   // Controls
   const [uploading, setUploading] = useState<boolean>(false);
+  const [duplicateBlock, setDuplicateBlock] = useState<DuplicateBlock | null>(
+    null
+  );
 
   // Bulk upload states
   const [bulkFiles, setBulkFiles] = useState<FileWithRelativePath[]>([]);
@@ -511,6 +522,7 @@ const UploadPage: React.FC = () => {
 
     try {
       setUploading(true);
+      setDuplicateBlock(null);
       let firstDocId: string | null = null;
 
       // Upload sequentially to match backend single-file contract
@@ -557,11 +569,33 @@ const UploadPage: React.FC = () => {
       setOcrEnabled(true);
       setCompressionEnabled(false);
     } catch (error: any) {
-      toast({
-        title: "Error",
-        description: error?.message || "Upload failed",
-        variant: "destructive",
-      });
+      if (
+        error?.status === 409 &&
+        (error?.detail?.code === "duplicate_document" ||
+          error?.detail?.error === "DuplicateDocumentError")
+      ) {
+        // Stage-1 exact file duplicate: the backend blocked the upload before
+        // OCR and created no record. Show the link to the existing document.
+        setDuplicateBlock({
+          message:
+            error?.detail?.message ||
+            "This document has already been uploaded under the same organisation and project. No duplicate record or downstream data has been created.",
+          existingDocumentId: error?.detail?.details?.existing_document_id,
+          existingLetterNo: error?.detail?.details?.existing_letter_no,
+        });
+        toast({
+          title: "Duplicate document",
+          description:
+            "This file already exists in the selected organisation and project.",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Error",
+          description: error?.message || "Upload failed",
+          variant: "destructive",
+        });
+      }
     } finally {
       setUploading(false);
     }
@@ -607,6 +641,38 @@ const UploadPage: React.FC = () => {
 
         {/* Single Upload */}
         <TabsContent value="upload" className="mt-6">
+          {duplicateBlock && (
+            <Card className="mb-6 border-destructive/40 bg-destructive/5">
+              <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex gap-3">
+                  <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
+                  <div>
+                    <p className="font-medium">Duplicate document detected</p>
+                    <p className="text-sm text-muted-foreground">
+                      {duplicateBlock.message}
+                    </p>
+                    {duplicateBlock.existingLetterNo && (
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Existing letter: {duplicateBlock.existingLetterNo}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {duplicateBlock.existingDocumentId && (
+                  <Button
+                    onClick={() =>
+                      navigate(
+                        `/documentviewer/${duplicateBlock.existingDocumentId}`
+                      )
+                    }
+                  >
+                    <ExternalLink className="mr-2 h-4 w-4" />
+                    Open Existing Document
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <Card className="md:col-span-2">
               <CardHeader>

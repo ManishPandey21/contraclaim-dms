@@ -47,20 +47,23 @@ class DocumentProcessor:
         pdf_path: str,
         path_structure: str,
         upload_type: str,
-        document_id: Optional[str] = None
+        document_id: Optional[str] = None,
+        skip_embeddings: bool = False,
     ) -> ProcessingResult:
         """
         Main entry point for document processing.
-        
+
         Args:
             pdf_path: Path to PDF file
             path_structure: Path structure for organization
             upload_type: Type of upload (incoming/outgoing)
             document_id: Optional document ID
-            
+            skip_embeddings: Defer vector creation (duplicate-check pending);
+                OCR and metadata extraction still run and are persisted.
+
         Returns:
             ProcessingResult object
-            
+
         Raises:
             DocumentProcessingError: If processing fails
         """
@@ -178,8 +181,9 @@ class DocumentProcessor:
             # Step 5: Save results
             logger.info("[document_pipeline] Persisting OCR, metadata, and embeddings for %s", input_path.name)
             chunks_created = await self._save_results(
-                extracted_content, raw_ocr_text, pdf_path, path_structure, 
-                upload_type, document_id, parsed_metadata
+                extracted_content, raw_ocr_text, pdf_path, path_structure,
+                upload_type, document_id, parsed_metadata,
+                skip_embeddings=skip_embeddings,
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 
@@ -342,7 +346,8 @@ class DocumentProcessor:
         path_structure: str,
         upload_type: str,
         document_id: Optional[str],
-        parsed_metadata: ParsedDocumentMetadata
+        parsed_metadata: ParsedDocumentMetadata,
+        skip_embeddings: bool = False,
     ) -> int:
         """Save processing results to file system and database"""
         try:
@@ -350,18 +355,19 @@ class DocumentProcessor:
             await self.file_service.save_summary(
                 extracted_content, original_path, path_structure, upload_type
             )
-            
+
             # Determine text to use for different purposes
             text_for_db = raw_ocr_text or extracted_content
             text_for_embedding = raw_ocr_text or parsed_metadata.full_content or extracted_content
-            
+
             # Save to database and create embeddings
             chunks_created = await self.database_service.save_document_data(
                 document_id=document_id,
                 file_path=original_path,
                 parsed_metadata=parsed_metadata,
                 full_text=text_for_db,
-                embedding_text=text_for_embedding
+                embedding_text=text_for_embedding,
+                skip_embeddings=skip_embeddings,
             )
             
             return chunks_created

@@ -607,6 +607,45 @@ class DocumentController:
                             )
                     # ------------------------------
 
+                    # --- STAGE-1 DUPLICATE PRECHECK (before OCR/processing) ---
+                    duplicate_precheck = await self.document_service.duplicate_detection.precheck_upload(
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        letter_no=letter_no,
+                        sha256=spooled.sha256,
+                    )
+                    if duplicate_precheck["verdict"] == "exact_file_duplicate":
+                        existing_id = duplicate_precheck.get("existing_document_id")
+                        await self.audit_service.emit(
+                            resource_type="document",
+                            resource_id=str(existing_id),
+                            event_type="document.duplicate_upload_blocked",
+                            actor_id=getattr(current_user, "id", None),
+                            organization_id=organization_id,
+                            project_id=project_id,
+                            metadata={
+                                "sha256": spooled.sha256,
+                                "letterNo": letter_no,
+                                "filename": file.filename,
+                                "existing_document_id": str(existing_id),
+                                "existing_letter_no": duplicate_precheck.get("existing_letter_no"),
+                            },
+                        )
+                        raise DocumentError(
+                            "This document has already been uploaded under the same "
+                            "organisation and project. No duplicate record or "
+                            "downstream data has been created.",
+                            status.HTTP_409_CONFLICT,
+                            error="DuplicateDocumentError",
+                            code="duplicate_document",
+                            details={
+                                "existing_document_id": str(existing_id),
+                                "existing_letter_no": duplicate_precheck.get("existing_letter_no"),
+                                "existing_subject": duplicate_precheck.get("existing_subject"),
+                            },
+                        )
+                    # -----------------------------------------------------------
+
                     # Parse date safely
                     parsed_date = parse_date_safely(date_str)
 
@@ -645,19 +684,29 @@ class DocumentController:
                 current_user=current_user,
                 reason="upload",
             )
+            # A letter-number match with a different file hash proceeds through
+            # OCR but is held back from publication and downstream artifacts
+            # until the stage-2 comparison classifies it. Without OCR there is
+            # no stage-2, so the flag is only applied when processing will run.
+            duplicate_pending = (
+                duplicate_precheck["verdict"] == "possible_document_duplicate"
+                and bool(kwargs.get("ocr_enabled", False))
+            )
             try:
                 db = await get_database()
+                attach_fields: Dict[str, Any] = {
+                    "file_object_id": store_result.get("file_object_id"),
+                    "current_version_id": version_id,
+                    "storage_key": store_result.get("storage_key"),
+                    "sha256": store_result.get("sha256"),
+                    "lifecycle_state": "duplicate_review" if duplicate_pending else "active",
+                }
+                if duplicate_pending:
+                    attach_fields["duplicate_status"] = "pending"
+                    attach_fields["duplicate_of"] = duplicate_precheck.get("existing_document_id")
                 await db.documents.update_one(
                     {"_id": ObjectId(document.id)},
-                    {
-                        "$set": {
-                            "file_object_id": store_result.get("file_object_id"),
-                            "current_version_id": version_id,
-                            "storage_key": store_result.get("storage_key"),
-                            "sha256": store_result.get("sha256"),
-                            "lifecycle_state": "active",
-                        }
-                    },
+                    {"$set": attach_fields},
                 )
             except Exception:
                 logger.warning("Failed to attach file object metadata to document %s", document.id, exc_info=True)
@@ -675,6 +724,10 @@ class DocumentController:
                     "sha256": store_result.get("sha256"),
                     "deduped": store_result.get("deduped", False),
                     "upload_streamed": True,
+                    "duplicate_check_pending": duplicate_pending,
+                    "duplicate_candidate_id": (
+                        duplicate_precheck.get("existing_document_id") if duplicate_pending else None
+                    ),
                 },
             )
 

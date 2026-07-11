@@ -1,6 +1,6 @@
 // DocumentViewerPage.tsx
 import React, { useState, useEffect, useCallback, useMemo, Suspense } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,9 @@ export interface LocalDocument extends Document {
   createdAt: string; // Make required to match base Document interface
   updatedAt?: string;
   createdBy: string; // Make required to match base Document interface
+  duplicate_status?: string | null;
+  duplicate_of?: string | null;
+  revision_of?: string | null;
 }
 
 type MetadataFieldName =
@@ -83,6 +86,7 @@ interface MetadataField {
 // Document Viewer Page Component
 const DocumentViewerPage: React.FC = () => {
   const { id: documentID } = useParams<{ id: string }>(); // Specify type for useParams
+  const navigate = useNavigate();
   const [showMetadata, setShowMetadata] = useState(true);
   const [searchParams] = useSearchParams();
   const allowedTabs = new Set([
@@ -882,6 +886,52 @@ const DocumentViewerPage: React.FC = () => {
                 </Button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+      {document?.duplicate_status === "pending" && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+          Duplicate check pending: another letter with this number already
+          exists in the selected organisation and project. This document is
+          not published yet; it will be released or flagged automatically once
+          the post-OCR comparison completes.
+        </div>
+      )}
+      {document?.duplicate_status === "duplicate" && (
+        <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              This document was classified as a duplicate of a letter already
+              uploaded under the same organisation and project. It is not
+              published, and no vectors, reference links, or graph data were
+              created for it.
+            </span>
+            {document?.duplicate_of && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => navigate(`/documentviewer/${document.duplicate_of}`)}
+              >
+                Open Existing Document
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {document?.duplicate_status === "revision" && document?.revision_of && (
+        <div className="border-b border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-900">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              This document was classified as a revised version of an existing
+              letter with the same letter number.
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => navigate(`/documentviewer/${document.revision_of}`)}
+            >
+              Open Original Document
+            </Button>
           </div>
         </div>
       )}

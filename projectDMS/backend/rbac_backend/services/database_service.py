@@ -164,6 +164,7 @@ class DatabaseService:
         parsed_metadata: Any,  # Assuming ParsedDocumentMetadata as dict or dataclass
         full_text: str,
         embedding_text: str,
+        skip_embeddings: bool = False,
     ) -> int:
         """
         Save document data to database and create embeddings.
@@ -183,6 +184,23 @@ class DatabaseService:
             doc = await self._upsert_document_metadata(
                 db, document_id, file_path, parsed_metadata, full_text
             )
+
+            # Deferred while a duplicate check is pending: metadata is saved,
+            # but no vectors exist until stage-2 releases the document.
+            if skip_embeddings:
+                await self._update_vector_sync_status(
+                    db,
+                    str(doc.get("_id")),
+                    status="deferred",
+                    mongo_chunks=0,
+                    qdrant_chunks=None,
+                    details="Embeddings deferred pending duplicate check",
+                )
+                logger.info(
+                    "[document_pipeline] Embeddings deferred for %s (duplicate check pending)",
+                    document_id or doc.get("_id"),
+                )
+                return 0
 
             # Create and store embeddings. Indexing failures must not hide a
             # successful OCR/metadata extraction; record them as partial failures.
@@ -210,6 +228,28 @@ class DatabaseService:
         except Exception as exc:
             logger.error("Failed to save document data: %s", exc)
             raise DocumentProcessingError(f"Database save failed: {exc}") from exc
+
+    async def create_embeddings_for_document(self, document_id: str) -> int:
+        """Create vectors for an already-persisted document.
+
+        Used when a duplicate-check hold is released: OCR text and metadata
+        were stored during processing, only the embeddings were deferred.
+        """
+        db = await self.get_database()
+        doc = None
+        try:
+            doc = await db.documents.find_one({"_id": ObjectId(str(document_id))})
+        except Exception:
+            doc = None
+        if not doc:
+            logger.warning("Cannot create deferred embeddings; document %s not found", document_id)
+            return 0
+
+        text = doc.get("full_text") or doc.get("ocrText") or ""
+        if not str(text).strip():
+            logger.warning("Cannot create deferred embeddings; document %s has no text", document_id)
+            return 0
+        return await self._create_and_store_embeddings(db, doc, str(text))
 
     async def _upsert_document_metadata(
         self,
