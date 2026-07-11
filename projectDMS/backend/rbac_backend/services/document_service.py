@@ -61,6 +61,21 @@ class DocumentConflictError(DocumentServiceError):
         super().__init__(message)
         self.current_revision = current_revision
 
+class DocumentDeletionResult:
+    """Outcome of a document deletion plus its cascading cleanup.
+
+    Truthiness mirrors the previous bool return (True when the document was
+    deleted), so existing ``if not deleted`` call sites keep working. The
+    ``cascade`` summary records what was cleaned up and any step failures.
+    """
+
+    def __init__(self, deleted: bool, cascade: Optional[Dict[str, Any]] = None) -> None:
+        self.deleted = deleted
+        self.cascade: Dict[str, Any] = cascade or {}
+
+    def __bool__(self) -> bool:
+        return self.deleted
+
 class DocumentService:
     """Async service for document CRUD operations with proper error handling"""
     
@@ -1853,25 +1868,31 @@ class DocumentService:
         document_id: str,
         *,
         expected_revision: Optional[int] = None,
-    ) -> bool:
+    ) -> DocumentDeletionResult:
         """
-        Delete a document by ID.
-        
+        Delete a document by ID and cascade-clean everything linked to it.
+
+        After a successful soft delete, removes every reference and backlink
+        pointing at the document from other documents, purges its pending
+        reference-sync queue entries, deletes its Letter node (and all edges)
+        from FalkorDB, and removes its vector records.
+
         Args:
             document_id: Document ID string
-            
+
         Returns:
-            True if document was deleted, False if not found
-            
+            DocumentDeletionResult — truthy if the document was deleted;
+            ``.cascade`` holds the cleanup summary (including any step errors)
+
         Raises:
             DocumentServiceError: If deletion fails
             InvalidDocumentIdError: If document ID is invalid
         """
         try:
             doc_oid = self._validate_document_id(document_id)
-            
+
             logger.info(f"Deleting document: {document_id}")
-            
+
             db = await self._get_db()
             query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
             if expected_revision is not None:
@@ -1887,7 +1908,7 @@ class DocumentService:
                     "$inc": {"_revision": 1},
                 },
             )
-            
+
             success = result.matched_count > 0
             if not success and expected_revision is not None:
                 current_revision = await self.get_document_revision(document_id)
@@ -1896,18 +1917,212 @@ class DocumentService:
                         "Document was modified by another user",
                         current_revision=current_revision,
                     )
+            cascade: Dict[str, Any] = {}
             if success:
                 logger.info(f"Deleted document: {document_id}")
+                cascade = await self.cascade_delete_cleanup(document_id)
             else:
                 logger.info(f"Document not found for deletion: {document_id}")
-            
-            return success
-            
+
+            return DocumentDeletionResult(success, cascade)
+
         except InvalidDocumentIdError:
+            raise
+        except DocumentConflictError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete document {document_id}: {e}")
             raise DocumentServiceError(f"Document deletion failed: {str(e)}")
+
+    async def cascade_delete_cleanup(self, document_id: str) -> Dict[str, Any]:
+        """
+        Remove every reference, backlink, queue entry, graph node and vector
+        record connected to a deleted document.
+
+        Idempotent and safe to re-run (e.g. as a repair pass after a partial
+        failure). Every step is individually guarded: a failing step is
+        recorded in the summary's ``errors`` list and logged at WARNING, and
+        the remaining steps still run — cleanup must not silently stop
+        halfway, and its failures must not mask the deletion itself.
+        """
+        doc_oid = self._validate_document_id(document_id)
+        doc_id = str(doc_oid)
+        now = datetime.utcnow()
+        db = await self._get_db()
+
+        summary: Dict[str, Any] = {
+            "inbound_references_removed": 0,
+            "backlinks_removed": 0,
+            "own_links_cleared": False,
+            "sync_queue_removed": 0,
+            "falkor_node_deleted": False,
+            "vector_chunks_removed": 0,
+            "qdrant_vectors_deleted": False,
+            "errors": [],
+        }
+
+        def _record_failure(step: str, exc: Exception) -> None:
+            summary["errors"].append(f"{step}: {exc}")
+            logger.warning(
+                "Cascade cleanup step %r failed for document %s: %s",
+                step,
+                doc_id,
+                exc,
+            )
+
+        raw_doc: Dict[str, Any] = {}
+        try:
+            raw_doc = await db.documents.find_one({"_id": doc_oid}) or {}
+        except Exception as exc:
+            _record_failure("load_document", exc)
+
+        # 1. Forward references on other documents that point at the deleted one
+        #    (these render as broken "Unknown Document" entries in the viewer).
+        try:
+            result = await db.documents.update_many(
+                {"_id": {"$ne": doc_oid}, "references.documentId": doc_id},
+                {
+                    "$pull": {"references": {"documentId": doc_id}},
+                    "$set": {"updatedAt": now},
+                },
+            )
+            summary["inbound_references_removed"] = result.modified_count
+        except Exception as exc:
+            _record_failure("inbound_references", exc)
+
+        # 2. Backlinks the deleted document left on its targets.
+        try:
+            result = await db.documents.update_many(
+                {"_id": {"$ne": doc_oid}, "referencedBy.documentId": doc_id},
+                {
+                    "$pull": {"referencedBy": {"documentId": doc_id}},
+                    "$set": {"updatedAt": now},
+                },
+            )
+            summary["backlinks_removed"] = result.modified_count
+        except Exception as exc:
+            _record_failure("target_backlinks", exc)
+
+        # 3. The deleted document's own link arrays (relationship records must
+        #    not survive deletion, even on a soft-deleted record).
+        try:
+            if raw_doc.get("references") or raw_doc.get("referencedBy"):
+                await db.documents.update_one(
+                    {"_id": doc_oid},
+                    {
+                        "$set": {
+                            "references": [],
+                            "referencedBy": [],
+                            "updatedAt": now,
+                        }
+                    },
+                )
+                summary["own_links_cleared"] = True
+        except Exception as exc:
+            _record_failure("own_links", exc)
+
+        # 4. Pending reference-sync queue entries: ones the deleted document
+        #    enqueued, and ones that can only ever resolve to it by id.
+        try:
+            result = await db.reference_sync_queue.delete_many(
+                {
+                    "$or": [
+                        {"document_id": doc_id},
+                        {"reference_key": f"document:{doc_id}"},
+                    ]
+                }
+            )
+            summary["sync_queue_removed"] = result.deleted_count
+        except Exception as exc:
+            _record_failure("reference_sync_queue", exc)
+
+        # 5. FalkorDB: the Letter node and every edge attached to it. Falkor
+        #    nodes are keyed solely by normCode, so a node can be shared by
+        #    another live document with the same letter number (re-uploads,
+        #    cross-project duplicates). Only delete the node when this
+        #    document was its sole owner; otherwise record the skip visibly.
+        try:
+            if raw_doc:
+                letter_code = (
+                    raw_doc.get("letterNo")
+                    or raw_doc.get("letter_no")
+                    or raw_doc.get("code")
+                    or doc_id
+                )
+                norm_code = normalize_letter_code(str(letter_code))
+                shared_owner = None
+                if norm_code:
+                    shared_owner = await db.documents.find_one(
+                        {
+                            "_id": {"$ne": doc_oid},
+                            "letterNoNormalized": norm_code,
+                            "lifecycle_state": {"$ne": "deleted"},
+                        },
+                        {"_id": 1},
+                    )
+                if shared_owner is not None:
+                    summary["falkor_node_deleted"] = "skipped_shared_code"
+                    logger.info(
+                        "Skipping Falkor node deletion for %s: normCode %s is "
+                        "still owned by live document %s",
+                        doc_id,
+                        norm_code,
+                        shared_owner.get("_id"),
+                    )
+                else:
+                    summary["falkor_node_deleted"] = (
+                        self.graph_ingestion.remove_document_from_falkor(
+                            doc_id,
+                            raw_doc,
+                            raise_on_error=True,
+                        )
+                    )
+        except Exception as exc:
+            _record_failure("falkor_graph", exc)
+
+        # 6. Vector records: Mongo chunk store, then Qdrant points.
+        try:
+            result = await db.document_vectors.delete_many({"document_id": doc_id})
+            summary["vector_chunks_removed"] = result.deleted_count
+        except Exception as exc:
+            _record_failure("document_vectors", exc)
+
+        try:
+            summary["qdrant_vectors_deleted"] = await self._delete_qdrant_vectors(raw_doc, doc_id)
+        except Exception as exc:
+            _record_failure("qdrant_vectors", exc)
+
+        if summary["errors"]:
+            logger.warning(
+                "Cascade cleanup for document %s completed with errors: %s",
+                doc_id,
+                summary,
+            )
+        else:
+            logger.info("Cascade cleanup for document %s: %s", doc_id, summary)
+        return summary
+
+    async def _delete_qdrant_vectors(self, raw_doc: Dict[str, Any], doc_id: str) -> bool:
+        """Delete the document's Qdrant points. Disabled Qdrant is a no-op."""
+        # Lazy import: vector deps are optional and must not break service import.
+        from ..config.document_processing_config import DocumentProcessingConfig
+        from .langchain_vector_service import LangChainVectorService
+
+        config = DocumentProcessingConfig()
+        if not config.qdrant_enabled:
+            return False
+        vector_service = LangChainVectorService(config)
+        if not vector_service.enabled:
+            raise DocumentServiceError(
+                "Qdrant is enabled but the vector service failed to initialize"
+            )
+        organization_id = raw_doc.get("organization_id") or raw_doc.get("organizationId")
+        project_id = raw_doc.get("project_id") or raw_doc.get("projectId")
+        return await vector_service.delete_document(
+            doc_id,
+            organization_id=str(organization_id) if organization_id else None,
+            project_id=str(project_id) if project_id else None,
+        )
     
     async def document_exists(self, document_id: str) -> bool:
         """

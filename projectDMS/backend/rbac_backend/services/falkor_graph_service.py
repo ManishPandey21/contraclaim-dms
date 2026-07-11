@@ -281,6 +281,32 @@ class FalkorGraphService:
             logger.exception("Failed to upsert letter %s into FalkorDB", norm_code)
             raise
 
+    def delete_letter(self, code: str) -> bool:
+        """Delete a letter node and every edge attached to it (DETACH DELETE).
+
+        Mirrors the upsert key: letter nodes are merged solely on ``normCode``,
+        so deletion matches on ``normCode`` alone. Returns True when the
+        deletion was executed, False when FalkorDB is disabled or the code
+        cannot be normalized (both are config/no-op cases, not failures).
+        Raises FalkorGraphError when FalkorDB is enabled but the deletion
+        fails, so callers can surface the failure instead of losing it.
+        """
+        if not self.enabled:
+            logger.debug("FalkorDB disabled; skipping letter deletion for %s", code)
+            return False
+
+        norm_code = normalize_letter_code(code or "")
+        if not norm_code:
+            logger.debug("Skipping Falkor deletion without valid normCode: %r", code)
+            return False
+
+        self._execute(
+            "MATCH (l:Letter {normCode: $normCode}) DETACH DELETE l",
+            {"normCode": norm_code},
+        )
+        logger.info("FalkorDB deleted letter node normCode=%s and its edges", norm_code)
+        return True
+
     def get_letter(self, norm_code: str) -> Optional[Dict[str, Any]]:
         """Return a single letter node by its normalized code."""
         entries = self.get_thread(norm_code, depth=0)

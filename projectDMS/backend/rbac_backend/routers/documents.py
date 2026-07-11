@@ -1470,6 +1470,7 @@ async def controller_delete_document(
                 "soft_delete": True,
                 "expected_revision": expected_revision,
                 "current_revision": await self.document_service.get_document_revision(document_id),
+                "cascade_cleanup": getattr(deleted, "cascade", {}),
             },
         )
 

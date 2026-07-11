@@ -388,6 +388,42 @@ class GraphIngestionService:
         except Exception:
             logger.exception("Failed to sync document %s with FalkorDB", document_id)
 
+    def remove_document_from_falkor(
+        self,
+        document_id: str,
+        document: Dict[str, Any],
+        *,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """Delete the document's Letter node and all its edges from FalkorDB.
+
+        Derives the letter code with the same fallback chain
+        `_build_falkor_payload` used at ingest time (letterNo -> letter_no ->
+        code -> document_id), so the deletion key matches the node the ingest
+        created. Returns True when a deletion was executed.
+        """
+        if not self.falkor.enabled:
+            return False
+        letter_code = self._coalesce(
+            document.get("letterNo"),
+            document.get("letter_no"),
+            document.get("code"),
+            document_id,
+        )
+        if not letter_code:
+            return False
+        try:
+            return self.falkor.delete_letter(str(letter_code))
+        except Exception:
+            logger.exception(
+                "Failed to delete document %s (letter %s) from FalkorDB",
+                document_id,
+                letter_code,
+            )
+            if raise_on_error:
+                raise
+            return False
+
     def _build_falkor_payload(
         self,
         document_id: str,
