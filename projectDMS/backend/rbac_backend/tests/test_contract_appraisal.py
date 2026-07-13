@@ -100,6 +100,13 @@ class _RetrievalNotFound:
         return _Resp("Information not found", [])
 
 
+class _RetrievalRaises:
+    """A retrieval backend that fails mid-generation (LLM/vector error)."""
+
+    async def contract_iterative_qa(self, request, current_user):
+        raise RuntimeError("LLM backend unavailable")
+
+
 @pytest.mark.asyncio
 async def test_generator_assembles_all_sections_with_citations():
     retrieval = _RetrievalSupported()
@@ -132,6 +139,42 @@ async def test_generator_flags_unsupported_sections():
     assert all(s["supported"] is False for s in result["sections"])
     assert result["confidence_score"] == 0.0
     assert result["citations"] == []
+
+
+@pytest.mark.asyncio
+async def test_unsupported_section_uses_selected_document_wording():
+    # Grounding: where the selected document does not address a section, the
+    # report must say exactly "Not found in the selected document." — never
+    # infer, and never the old "uploaded documents" phrasing.
+    gen = AppraisalGenerator(_RetrievalNotFound())
+    result = await gen.generate(
+        organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=SimpleNamespace(id="u1")
+    )
+    assert "Not found in the selected document." in result["full_report_markdown"]
+    for section in result["sections"]:
+        assert section["markdown"] == "Not found in the selected document."
+
+
+@pytest.mark.asyncio
+async def test_generator_propagates_section_error_no_placeholder():
+    # A real generation error must NOT be swallowed into a placeholder section;
+    # it propagates so the job fails and the user can retry.
+    gen = AppraisalGenerator(_RetrievalRaises())
+    with pytest.raises(RuntimeError, match="LLM backend unavailable"):
+        await gen.generate(
+            organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=SimpleNamespace(id="u1")
+        )
+
+
+def test_build_request_sets_grounding_document_ids():
+    # Hard-scope: the selected document set is carried as grounding_document_ids
+    # so retrieval can restrict evidence to it. Empty selection (whole-project
+    # mode) stays unrestricted.
+    gen = AppraisalGenerator(_RetrievalSupported())
+    req = gen._build_request("q", "org-A", "proj-A", ["d1", "d2"])
+    assert set(req.grounding_document_ids) == {"d1", "d2"}
+    req_empty = gen._build_request("q", "org-A", "proj-A", [])
+    assert req_empty.grounding_document_ids is None
 
 
 # --- job lifecycle + persistence ------------------------------------------
@@ -257,6 +300,25 @@ class _DB:
         self.contract_risks = _Coll()
         self.contract_key_dates = _Coll()
         self.documents = _Docs()
+
+
+@pytest.mark.asyncio
+async def test_section_error_fails_job_without_saving_placeholder_report():
+    # The core fix: a generation error must fail the job with the REAL error and
+    # save NO report — instead of silently persisting a report whose sections read
+    # "Requires Human Review (generation error)." and marking the job completed.
+    db = _DB()
+    svc = AppraisalService(db)
+    user = SimpleNamespace(id="u1", organization_id="org-A")
+    job = await svc.create_job(organization_id="org-A", project_id="proj-A", document_ids=["d1"], current_user=user)
+
+    result = await svc.run_job(job["_id"], user, retrieval_service=_RetrievalRaises())
+
+    assert result == {}
+    assert len(db.contract_appraisal_reports.docs) == 0  # no placeholder report saved
+    refreshed = await svc.get_job(job["_id"])
+    assert refreshed["status"] == "failed"
+    assert "LLM backend unavailable" in (refreshed.get("error_message") or "")
 
 
 @pytest.mark.asyncio

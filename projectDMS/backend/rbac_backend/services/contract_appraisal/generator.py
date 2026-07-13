@@ -15,7 +15,15 @@ from .prompts import APPRAISAL_PROMPT_VERSION, STANDARD_DISCLAIMER, section_ques
 
 logger = logging.getLogger(__name__)
 
-_NOT_FOUND_MARKERS = ("not found in uploaded documents", "information not found")
+# Exact wording the report uses where the selected document does not address a
+# section — the grounding contract: state this rather than infer or assume.
+NOT_FOUND_IN_SELECTED = "Not found in the selected document."
+
+_NOT_FOUND_MARKERS = (
+    "not found in the selected document",
+    "not found in uploaded documents",
+    "information not found",
+)
 
 
 def _is_unsupported(answer: str, citations: List[Any]) -> bool:
@@ -54,10 +62,15 @@ class AppraisalGenerator:
             project_id=str(project_id or ""),
             metadata={"uploadType": "contract", "document_type": "contract"},
         )
-        # Where exactly one contract document is selected, scope retrieval to it
-        # (SearchFilters only carries a single document_id).
+        # Where exactly one contract document is selected, scope the search to it
+        # (SearchFilters only carries a single document_id) for efficiency.
         if len(document_ids) == 1:
             filters.document_id = str(document_ids[0])
+        # Hard grounding: carry the full selected set so the retrieval engine
+        # restricts ALL evidence (vector, clause-expansion, graph) to exactly
+        # these documents and never leaks other uploads. Empty selection
+        # (whole-project appraisal) stays unrestricted.
+        grounding = [str(d) for d in document_ids if d] if document_ids else None
         # Retrieval breadth is configurable (M3) so large contracts can trade
         # latency for coverage. Clamp to the engine's own bounds (limit<=50,
         # iterations<=5) so an over-eager setting can't raise a validation error.
@@ -69,6 +82,7 @@ class AppraisalGenerator:
             require_citations=True,
             max_iterations=max_iterations,
             limit=limit,
+            grounding_document_ids=grounding,
         )
 
     async def generate(
@@ -88,18 +102,18 @@ class AppraisalGenerator:
         executive_summary = ""
 
         for idx, (key, title, question) in enumerate(sections_spec, start=1):
-            try:
-                request = self._build_request(question, organization_id, project_id, document_ids)
-                response = await self.retrieval_service.contract_iterative_qa(request, current_user)
-                answer = (getattr(response, "answer", "") or "").strip()
-                citations = _citation_dicts(getattr(response, "citations", None))
-            except Exception:  # pragma: no cover - one bad section must not abort the report
-                logger.exception("Appraisal section '%s' generation failed", key)
-                answer, citations = "Requires Human Review (generation error).", []
+            # A generation error must NOT be swallowed into a placeholder section
+            # and silently saved. Let it propagate: the service marks the job
+            # FAILED with the real error (logs preserved) and the user can retry.
+            request = self._build_request(question, organization_id, project_id, document_ids)
+            response = await self.retrieval_service.contract_iterative_qa(request, current_user)
+            answer = (getattr(response, "answer", "") or "").strip()
+            citations = _citation_dicts(getattr(response, "citations", None))
 
             unsupported = _is_unsupported(answer, citations)
-            if unsupported and not answer:
-                answer = "Not found in uploaded documents."
+            if unsupported:
+                # Grounded fallback: state it plainly rather than infer content.
+                answer = NOT_FOUND_IN_SELECTED
             supported = bool(citations) and not unsupported
 
             sections.append(
@@ -117,7 +131,7 @@ class AppraisalGenerator:
                 executive_summary = answer
 
             md_parts.append(f"## {idx}. {title}")
-            md_parts.append(answer or "Not found in uploaded documents.")
+            md_parts.append(answer or NOT_FOUND_IN_SELECTED)
             if citations:
                 refs = "; ".join(_human_citation(c) for c in citations)
                 md_parts.append(f"\n*Sources: {refs}*")

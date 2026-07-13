@@ -272,3 +272,20 @@ def test_require_scope_values_rejects_blanks():
         assert exc.value.status_code == 400
 
     assert _require_scope_values(" org-A ", " proj-A ") == ("org-A", "proj-A")
+
+
+def test_restrict_to_grounding_drops_non_selected_documents():
+    """Grounding guarantee: when a request is pinned to a document set, only
+    evidence from those documents survives — so a contract appraisal can never
+    draw on other uploads. Empty/None means unrestricted (existing behaviour)."""
+    from rbac_backend.retrieval.models import SearchResult
+    from rbac_backend.retrieval.service import _restrict_to_grounding
+
+    selected = SearchResult(document_id="d1", chunk_id="c1", score=0.9, snippet="from selected")
+    other = SearchResult(document_id="d2", chunk_id="c2", score=0.95, snippet="from another doc")
+
+    kept = _restrict_to_grounding([selected, other], ["d1"])
+    assert [r.document_id for r in kept] == ["d1"]  # d2 dropped even though higher score
+
+    assert _restrict_to_grounding([selected, other], None) == [selected, other]
+    assert _restrict_to_grounding([selected, other], []) == [selected, other]

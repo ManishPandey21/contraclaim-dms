@@ -18,10 +18,12 @@ APPRAISAL_PROMPT_VERSION = "1.0"
 # Citation discipline appended to every section question so the engine answers
 # only from the uploaded, tenant-scoped contract documents.
 _CITATION_RULE = (
-    " Cite the exact document name, clause number and page for every point. Where "
-    "the contract does not address it, answer 'Not found in uploaded documents'. "
-    "State Special/Particular vs General Conditions precedence where relevant. Do "
-    "not provide legal advice or invent clauses, dates or amounts."
+    " Use ONLY the selected contract document provided as evidence — do not use "
+    "any other document, prior correspondence or outside knowledge. Cite the exact "
+    "document name, clause number and page for every point. Where the selected "
+    "document does not address it, answer exactly 'Not found in the selected "
+    "document.' State Special/Particular vs General Conditions precedence where "
+    "relevant. Do not provide legal advice or invent clauses, dates or amounts."
 )
 
 # (key, human title, focused question). Ordered as the report renders.

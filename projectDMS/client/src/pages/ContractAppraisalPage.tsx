@@ -503,6 +503,31 @@ const ContractAppraisalPage: React.FC = () => {
               <Progress value={job?.progress ?? 0} />
             </div>
           )}
+
+          {job?.status === "failed" && (
+            <div className="space-y-2 pt-2">
+              <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
+                <div className="text-sm">
+                  <p className="font-medium text-destructive">
+                    Appraisal generation failed
+                  </p>
+                  <p className="break-words text-muted-foreground">
+                    {job.error_message ||
+                      "An unexpected error occurred during generation."}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    No report was saved. Once the issue is resolved you can retry
+                    the same selection.
+                  </p>
+                </div>
+              </div>
+              <Button size="sm" onClick={() => void onGenerate()} disabled={busy}>
+                <RefreshCw className="mr-2 h-4 w-4" />
+                Retry
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
 

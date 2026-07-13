@@ -36,6 +36,22 @@ from .vector_client import VectorClient
 logger = logging.getLogger(__name__)
 
 
+def _restrict_to_grounding(
+    results: List[SearchResult], grounding_document_ids: Optional[Sequence[str]]
+) -> List[SearchResult]:
+    """Keep only evidence from the explicitly selected documents.
+
+    The grounding guarantee for the contract appraisal: when a caller pins the
+    request to a set of ``grounding_document_ids``, the LLM must only ever see
+    chunks from those documents, so an answer can never draw on other uploads,
+    correspondence, or graph-augmented neighbours. Empty/None means unrestricted.
+    """
+    ids = {str(d) for d in (grounding_document_ids or []) if d}
+    if not ids:
+        return results
+    return [r for r in results if str(getattr(r, "document_id", "")) in ids]
+
+
 class RetrievalService:
     def __init__(
         self,
@@ -888,15 +904,25 @@ class RetrievalService:
                 if existing is None or (res.score or 0.0) > (existing.score or 0.0):
                     all_results[key] = res
 
+        grounding_ids = getattr(request, "grounding_document_ids", None)
+
         merged = list(all_results.values())
         merged = await self._expand_contract_clause_results(merged, limit=max(limit, 1))
-        merged = await self._augment_with_contract_graph_results(merged, request, limit=max(limit, 1))
+        # Graph augmentation crosses document boundaries by design (it follows
+        # CITES/REPLIES_TO edges). Skip it entirely when the request is pinned to
+        # a grounding set, so the appraisal can't pull neighbouring documents.
+        if not grounding_ids:
+            merged = await self._augment_with_contract_graph_results(merged, request, limit=max(limit, 1))
         clause_hints = self._extract_clause_hints(request.query, request.metadata_filters)
         reranked = self._rerank_contract_results(merged, request.query, clause_hints, request.metadata_filters)
         if self.reranker is not None and self.reranker.enabled:
             # Cross-encoder pass over the heuristic ordering; falls back to it
             # unchanged on timeout or backend failure.
             reranked = await self.reranker.rerank(request.query, reranked)
+        # Final grounding guarantee: only evidence from the selected documents
+        # survives (clause-expansion above may re-introduce siblings from other
+        # documents), so the LLM answer can never draw on unselected uploads.
+        reranked = _restrict_to_grounding(reranked, grounding_ids)
         return reranked[:limit]
 
     async def _augment_with_contract_graph_results(

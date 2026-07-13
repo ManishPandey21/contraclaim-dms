@@ -117,6 +117,12 @@ class ContractQARequest(RagRequest):
     require_citations: bool = Field(default=False)
     max_iterations: int = Field(default=3, ge=1, le=5)
     metadata_filters: Dict[str, Any] = Field(default_factory=dict)
+    # Opt-in hard grounding: when set, retrieval restricts ALL evidence
+    # (vector + clause-expansion + graph augmentation) to exactly these
+    # document ids and skips cross-document augmentation, so an answer can
+    # never draw on unselected uploads. Unset (default) preserves the existing
+    # tenant-scoped behaviour for every other caller.
+    grounding_document_ids: Optional[List[str]] = None
 
 
 class ContractQAResponse(BaseModel):
