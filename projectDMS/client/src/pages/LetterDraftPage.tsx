@@ -200,6 +200,16 @@ const LetterDraftPage = () => {
       .filter(Boolean);
   }, [conversationThread]);
 
+  // Thread codes the user has not explicitly linked — sent as
+  // `exclude_letter_codes` on both the background and draft runs.
+  const excludeLetterCodes = useMemo(
+    () =>
+      graphThreadCodes.filter(
+        (code) => code && !linkedLetterCodes.includes(code)
+      ),
+    [graphThreadCodes, linkedLetterCodes]
+  );
+
   const combinedContextDocuments = useMemo(() => {
     const registry = new Map<string, DocumentSummarySource>();
     for (const doc of selectedDocs) {
@@ -373,9 +383,7 @@ const LetterDraftPage = () => {
         points: summaryLines.length > 0 ? summaryLines.join("\n") : undefined,
         document_ids: selectedDocIds,
         include_letter_codes: linkedLetterCodes,
-        exclude_letter_codes: graphThreadCodes.filter(
-          (code) => code && !linkedLetterCodes.includes(code)
-        ),
+        exclude_letter_codes: excludeLetterCodes,
       });
       setV2Run(response);
       setBackgroundItems(backgroundItemsFromDraftRun(response));
@@ -405,7 +413,7 @@ const LetterDraftPage = () => {
     editorLetter,
     selectedDocIds,
     linkedLetterCodes,
-    graphThreadCodes,
+    excludeLetterCodes,
     draftType,
     letterCategory,
     fetchLetters,
@@ -461,9 +469,7 @@ const LetterDraftPage = () => {
           draftType === "reply" ? uiLetter.reference?.id : undefined,
         plan_override: planOverride || undefined,
         include_letter_codes: linkedLetterCodes,
-        exclude_letter_codes: graphThreadCodes.filter(
-          (code) => code && !linkedLetterCodes.includes(code)
-        ),
+        exclude_letter_codes: excludeLetterCodes,
       });
       setV2Run(response);
       setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
@@ -498,7 +504,7 @@ const LetterDraftPage = () => {
     selectedDocIds,
     planOverride,
     linkedLetterCodes,
-    graphThreadCodes,
+    excludeLetterCodes,
     draftType,
     letterCategory,
     draftPurpose,
@@ -567,25 +573,27 @@ const LetterDraftPage = () => {
   const handleLifecycleAction = useCallback(
     async (action: "approve" | "export" | "issue") => {
       if (!id || !v2Run?.run_id) return;
+      const lifecycle: Record<
+        "approve" | "export" | "issue",
+        {
+          run: (letterId: string, runId: string) => Promise<DraftRunResponse>;
+          title: string;
+        }
+      > = {
+        approve: { run: approveRun, title: "Draft approved" },
+        export: { run: exportRun, title: "Draft exported" },
+        issue: { run: issueRun, title: "Draft issued" },
+      };
       try {
-        const response =
-          action === "approve"
-            ? await approveRun(id, v2Run.run_id)
-            : action === "export"
-              ? await exportRun(id, v2Run.run_id)
-              : await issueRun(id, v2Run.run_id);
+        const { run, title } = lifecycle[action];
+        const response = await run(id, v2Run.run_id);
         setV2Run(response);
         if (response.draft_artifact?.draft_letter) {
           setV2DraftBody(response.draft_artifact.draft_letter);
         }
         await fetchLetters();
         toast({
-          title:
-            action === "approve"
-              ? "Draft approved"
-              : action === "export"
-                ? "Draft exported"
-                : "Draft issued",
+          title,
           description: "Draft run status was updated.",
         });
       } catch (error: any) {

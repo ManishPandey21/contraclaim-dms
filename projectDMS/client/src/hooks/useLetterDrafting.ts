@@ -79,39 +79,53 @@ export const useLetterDrafting = () => {
     [run]
   );
 
-  const preparePlan = useCallback(
-    (letterId: string, payload: DraftRunCreateRequest) =>
-      requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/prepare-plan`, {
-        method: "POST",
-        body: JSON.stringify({ ...payload, mode: "strategy" }),
-      }).then((json) => {
+  // Wrap a drafting request so its resolved run becomes the hook's current
+  // `data`. Every run-mutating callback below returns the run and stores it.
+  const store = useCallback(
+    (pending: Promise<DraftRunResponse>) =>
+      pending.then((json) => {
         setData(json);
         return json;
       }),
     []
   );
 
+  // The no-body POST run actions differ only by their trailing URL segment.
+  const postAction = useCallback(
+    (letterId: string, runId: string, action: string) =>
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/${action}`,
+          { method: "POST", body: "{}" }
+        )
+      ),
+    [store]
+  );
+
+  const preparePlan = useCallback(
+    (letterId: string, payload: DraftRunCreateRequest) =>
+      store(
+        requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/prepare-plan`, {
+          method: "POST",
+          body: JSON.stringify({ ...payload, mode: "strategy" }),
+        })
+      ),
+    [store]
+  );
+
   const acceptPlan = useCallback(
-    (letterId: string, runId: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/accept-plan`,
-        { method: "POST", body: "{}" }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+    (letterId: string, runId: string) => postAction(letterId, runId, "accept-plan"),
+    [postAction]
   );
 
   const latestRun = useCallback(
     (letterId: string, mode?: DraftMode) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/latest${mode ? `?mode=${mode}` : ""}`
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/latest${mode ? `?mode=${mode}` : ""}`
+        )
+      ),
+    [store]
   );
 
   const getAudit = useCallback(
@@ -190,116 +204,83 @@ export const useLetterDrafting = () => {
 
   const reviseRun = useCallback(
     (letterId: string, runId: string, payload: ReviseDraftRequest) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/revise`,
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-        }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/revise`,
+          {
+            method: "POST",
+            body: JSON.stringify(payload),
+          }
+        )
+      ),
+    [store]
   );
 
   const validateRun = useCallback(
-    (letterId: string, runId: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/validate`,
-        { method: "POST", body: "{}" }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+    (letterId: string, runId: string) => postAction(letterId, runId, "validate"),
+    [postAction]
   );
 
   const critiqueRun = useCallback(
-    (letterId: string, runId: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/critique`,
-        { method: "POST", body: "{}" }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+    (letterId: string, runId: string) => postAction(letterId, runId, "critique"),
+    [postAction]
   );
 
   const approveRun = useCallback(
-    (letterId: string, runId: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/approve`,
-        { method: "POST", body: "{}" }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+    (letterId: string, runId: string) => postAction(letterId, runId, "approve"),
+    [postAction]
   );
 
   const approveStage = useCallback(
     (letterId: string, runId: string, payload: ApproveStageRequest) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/approve-stage`,
-        { method: "POST", body: JSON.stringify(payload) }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/approve-stage`,
+          { method: "POST", body: JSON.stringify(payload) }
+        )
+      ),
+    [store]
   );
 
   const provideUserDirection = useCallback(
     (letterId: string, runId: string, payload: UserDirectionRequest) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/user-direction`,
-        { method: "POST", body: JSON.stringify(payload) }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/user-direction`,
+          { method: "POST", body: JSON.stringify(payload) }
+        )
+      ),
+    [store]
   );
 
   const lockParagraphs = useCallback(
     (letterId: string, runId: string, payload: LockParagraphsRequest) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/lock-paragraphs`,
-        { method: "POST", body: JSON.stringify(payload) }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/lock-paragraphs`,
+          { method: "POST", body: JSON.stringify(payload) }
+        )
+      ),
+    [store]
   );
 
   const exportRun = useCallback(
-    (letterId: string, runId: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/export`,
-        { method: "POST", body: "{}" }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+    (letterId: string, runId: string) => postAction(letterId, runId, "export"),
+    [postAction]
   );
 
   const issueRun = useCallback(
     (letterId: string, runId: string, issuedDocumentId?: string) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/issue`,
-        {
-          method: "POST",
-          body: JSON.stringify({ issued_document_id: issuedDocumentId }),
-        }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/issue`,
+          {
+            method: "POST",
+            body: JSON.stringify({ issued_document_id: issuedDocumentId }),
+          }
+        )
+      ),
+    [store]
   );
 
   const assignReviewer = useCallback(
@@ -328,17 +309,16 @@ export const useLetterDrafting = () => {
 
   const returnForCorrection = useCallback(
     (letterId: string, runId: string, payload: ReturnForCorrectionRequest) =>
-      requestJson<DraftRunResponse>(
-        `/letters/${letterId}/drafting/runs/${runId}/return-for-correction`,
-        {
-          method: "POST",
-          body: JSON.stringify(payload),
-        }
-      ).then((json) => {
-        setData(json);
-        return json;
-      }),
-    []
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/return-for-correction`,
+          {
+            method: "POST",
+            body: JSON.stringify(payload),
+          }
+        )
+      ),
+    [store]
   );
 
   const reset = useCallback(() => {

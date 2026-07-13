@@ -80,6 +80,15 @@ from .user_direction import UserDirectionAgent
 from .validator import DraftValidator
 
 
+# Draft run status / mode groupings referenced across the workflow. Named once
+# here so a new status or mode is classified in a single place instead of by
+# hand-copied set literals scattered through the service.
+_AI_DRAFT_MODES = frozenset(["draft", "review"])
+_FINALIZED_STATUSES = frozenset(["approved", "exported", "issued"])
+_ACTIVE_STATUSES = frozenset(["completed", "needs_attention", "blocked"])
+_EXPORTED_ISSUED_STATUSES = frozenset(["exported", "issued"])
+
+
 class DraftRunService:
     """Coordinates v2 letter drafting runs."""
 
@@ -133,6 +142,23 @@ class DraftRunService:
 
         inputs = self._inputs_payload(letter, request)
 
+        # Identity/config fields shared by every terminal DraftRun below. Kept
+        # in one place so a new field is added once here, not copied into four
+        # hand-written constructor calls that can silently drift apart.
+        base_run = dict(
+            run_id=run_id,
+            letter_id=letter_id,
+            draft_type=request.draft_type,
+            mode=request.mode,
+            letter_category=request.letter_category,
+            contract_package=request.contract_package,
+            role=role,
+            recipient_focus=recipient_focus,
+            inputs=inputs,
+            started_at=started,
+            created_by=self._user_id(current_user),
+        )
+
         document_service = DocumentService(self.db)
         context_builder = DraftContextBuilder(
             document_service=document_service,
@@ -153,6 +179,20 @@ class DraftRunService:
             sources = self._with_source_hashes(sources)
             warnings.extend(context_warnings)
             trace.append({"stage": "context", "status": "success", "source_count": len(sources)})
+
+            # The context pack is only persisted on the terminal path actually
+            # taken, and its `sources` differ before vs. after generation, so it
+            # is built lazily at each terminal below rather than eagerly (and
+            # then discarded) on the success path.
+            def _context_pack(current_sources: List[SourceEvidence]) -> DraftContextPack:
+                return self._build_context_pack(
+                    letter=letter,
+                    request=request,
+                    run_id=run_id,
+                    context=context,
+                    sources=current_sources,
+                    source_warnings=context_warnings,
+                )
 
             incoming_analysis: Optional[IncomingLetterAnalysis] = None
             probing_questions: list[ProbingQuestion] = []
@@ -205,31 +245,15 @@ class DraftRunService:
                     incoming_analysis,
                 )
             )
-            context_pack = self._build_context_pack(
-                letter=letter,
-                request=request,
-                run_id=run_id,
-                context=context,
-                sources=sources,
-                source_warnings=context_warnings,
-            )
-
             threshold_report = self._merge_reports(
                 self.validator.threshold_findings(context),
                 self.input_validator.validate_request(letter, request, context, sources),
             )
             if threshold_report.blocking:
+                context_pack = _context_pack(sources)
                 run = DraftRun(
-                    run_id=run_id,
-                    letter_id=letter_id,
-                    draft_type=request.draft_type,
-                    mode=request.mode,
-                    letter_category=request.letter_category,
-                    contract_package=request.contract_package,
+                    **base_run,
                     status="blocked",
-                    role=role,
-                    recipient_focus=recipient_focus,
-                    inputs=inputs,
                     incoming_analysis=incoming_analysis,
                     probing_questions=probing_questions,
                     planning_sheet=planning_sheet,
@@ -243,15 +267,12 @@ class DraftRunService:
                     validation_report=threshold_report,
                     warnings=warnings,
                     trace=trace,
-                    started_at=started,
                     completed_at=datetime.now(timezone.utc),
-                    created_by=self._user_id(current_user),
                 )
                 return await self._create_and_record(run, current_user, context_pack=context_pack)
 
-            planner = StrategyPlanner(self.prompt_registry)
             plan = await self._resolve_strategy_plan(letter_id, letter, request)
-            if request.mode in {"draft", "review"} and not plan:
+            if request.mode in _AI_DRAFT_MODES and not plan:
                 validation = ValidationReport(
                     blocking=True,
                     findings=[
@@ -262,17 +283,10 @@ class DraftRunService:
                         )
                     ],
                 )
+                context_pack = _context_pack(sources)
                 run = DraftRun(
-                    run_id=run_id,
-                    letter_id=letter_id,
-                    draft_type=request.draft_type,
-                    mode=request.mode,
-                    letter_category=request.letter_category,
-                    contract_package=request.contract_package,
+                    **base_run,
                     status="blocked",
-                    role=role,
-                    recipient_focus=recipient_focus,
-                    inputs=inputs,
                     incoming_analysis=incoming_analysis,
                     probing_questions=probing_questions,
                     planning_sheet=planning_sheet,
@@ -286,12 +300,14 @@ class DraftRunService:
                     validation_report=validation,
                     warnings=warnings,
                     trace=trace + [{"stage": "strategy", "status": "blocked"}],
-                    started_at=started,
                     completed_at=datetime.now(timezone.utc),
-                    created_by=self._user_id(current_user),
                 )
                 return await self._create_and_record(run, current_user, context_pack=context_pack)
             if request.mode in {"background", "strategy"} and not plan:
+                # Constructed lazily: StrategyPlanner builds an AsyncOpenAI
+                # client, and only this branch uses it — a plain draft/review
+                # run must not pay to build a client it never calls.
+                planner = StrategyPlanner(self.prompt_registry)
                 plan, prompt_version, plan_warnings = await planner.generate(
                     letter, role, recipient_focus, context, sources, inputs
                 )
@@ -312,7 +328,7 @@ class DraftRunService:
             confidence_scores: Optional[DraftConfidenceScores] = None
             status = "completed"
 
-            if request.mode in {"draft", "review"}:
+            if request.mode in _AI_DRAFT_MODES:
                 generator = DraftGenerator(self.prompt_registry)
                 artifact, draft_warnings = await generator.generate(
                     letter,
@@ -392,26 +408,11 @@ class DraftRunService:
                     raw_model_output="",
                 )
 
-            context_pack = self._build_context_pack(
-                letter=letter,
-                request=request,
-                run_id=run_id,
-                context=context,
-                sources=sources,
-                source_warnings=context_warnings,
-            )
+            context_pack = _context_pack(sources)
 
             run = DraftRun(
-                run_id=run_id,
-                letter_id=letter_id,
-                draft_type=request.draft_type,
-                mode=request.mode,
-                letter_category=request.letter_category,
-                contract_package=request.contract_package,
+                **base_run,
                 status=status,
-                role=role,
-                recipient_focus=recipient_focus,
-                inputs=inputs,
                 incoming_analysis=incoming_analysis,
                 probing_questions=probing_questions,
                 planning_sheet=planning_sheet,
@@ -430,29 +431,17 @@ class DraftRunService:
                 iteration_count=len(cyclic_trace),
                 warnings=warnings,
                 trace=trace,
-                started_at=started,
                 completed_at=datetime.now(timezone.utc),
-                created_by=self._user_id(current_user),
             )
             return await self._create_and_record(run, current_user, context_pack=context_pack)
         except Exception as exc:
             warnings.append(str(exc))
             run = DraftRun(
-                run_id=run_id,
-                letter_id=letter_id,
-                draft_type=request.draft_type,
-                mode=request.mode,
-                letter_category=request.letter_category,
-                contract_package=request.contract_package,
+                **base_run,
                 status="failed",
-                role=role,
-                recipient_focus=recipient_focus,
-                inputs=inputs,
                 warnings=warnings,
                 trace=trace + [{"stage": "failed", "status": "error", "message": str(exc)}],
-                started_at=started,
                 completed_at=datetime.now(timezone.utc),
-                created_by=self._user_id(current_user),
             )
             stored = await self._create_and_record(run, current_user)
             await self.repository.append_event(
@@ -657,11 +646,11 @@ class DraftRunService:
 
         for run in runs:
             status_counts[run.status] = status_counts.get(run.status, 0) + 1
-            if run.status in {"completed", "needs_attention", "blocked"}:
+            if run.status in _ACTIVE_STATUSES:
                 active_runs += 1
-            if run.status in {"approved", "exported", "issued"}:
+            if run.status in _FINALIZED_STATUSES:
                 approved_runs += 1
-            if run.status in {"exported", "issued"}:
+            if run.status in _EXPORTED_ISSUED_STATUSES:
                 exported_runs += 1
             if run.status == "issued":
                 issued_runs += 1
@@ -678,7 +667,7 @@ class DraftRunService:
                 confidences.append(float(run.confidence_scores.overall))
             source_count = len(run.sources or [])
             source_counts.append(source_count)
-            if run.mode in {"draft", "review"}:
+            if run.mode in _AI_DRAFT_MODES:
                 source_integrity_total += 1
                 if source_count > 0 and all(source.source_hash for source in run.sources):
                     source_integrity_ok += 1
@@ -706,7 +695,7 @@ class DraftRunService:
                 },
             )
             trend["runs"] += 1
-            if run.status in {"approved", "exported", "issued"}:
+            if run.status in _FINALIZED_STATUSES:
                 trend["approved"] += 1
             if run.validation_report and run.validation_report.blocking:
                 trend["blocking"] += 1
@@ -727,7 +716,7 @@ class DraftRunService:
                         created_at=started_at,
                     )
                 )
-            if source_count == 0 and run.mode in {"draft", "review"}:
+            if source_count == 0 and run.mode in _AI_DRAFT_MODES:
                 recent_risks.append(
                     DraftQualityRiskItem(
                         run_id=run.run_id,
@@ -740,7 +729,7 @@ class DraftRunService:
                 )
 
             age_hours = ((now - (started_at or now)).total_seconds() / 3600)
-            if run.status in {"completed", "needs_attention", "blocked"}:
+            if run.status in _ACTIVE_STATUSES:
                 bottleneck_ages.setdefault(run.status, []).append(age_hours)
 
         overdue_review_count = 0
@@ -851,7 +840,7 @@ class DraftRunService:
             raise HTTPException(status_code=404, detail="Draft run not found")
         if run.status in {"blocked", "failed", "approved", "exported", "issued"}:
             raise HTTPException(status_code=400, detail=f"Cannot assign reviewer for draft status '{run.status}'")
-        if run.mode not in {"draft", "review"} or not run.draft_artifact:
+        if run.mode not in _AI_DRAFT_MODES or not run.draft_artifact:
             raise HTTPException(status_code=400, detail="Only generated draft runs can be assigned for review")
         if run.created_by and str(run.created_by) == str(request.reviewer_user_id):
             raise HTTPException(status_code=400, detail="Reviewer must be different from drafter")
@@ -946,7 +935,7 @@ class DraftRunService:
         run = await self.repository.get(letter_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Draft run not found")
-        if run.status in {"approved", "exported", "issued"}:
+        if run.status in _FINALIZED_STATUSES:
             raise HTTPException(status_code=400, detail="Finalized draft cannot be returned for correction")
         if run.assigned_reviewer_id and str(run.assigned_reviewer_id) != str(self._user_id(current_user)):
             can_admin = await self.policy_service.has_permission(current_user, "drafting.admin")
@@ -1653,11 +1642,11 @@ class DraftRunService:
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Draft run not found")
-        if existing.status in {"approved", "exported", "issued"}:
+        if existing.status in _FINALIZED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft is already approved or finalized")
         if existing.status in {"blocked", "failed", "needs_attention"}:
             raise HTTPException(status_code=400, detail="Draft must pass validation before approval")
-        if existing.mode not in {"draft", "review"} or not existing.draft_artifact:
+        if existing.mode not in _AI_DRAFT_MODES or not existing.draft_artifact:
             raise HTTPException(status_code=400, detail="Run does not contain an approvable draft")
         if not (existing.plan or "").strip():
             raise HTTPException(
@@ -1787,7 +1776,7 @@ class DraftRunService:
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Draft run not found")
-        if existing.status not in {"approved", "exported", "issued"}:
+        if existing.status not in _FINALIZED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft must be approved before export")
         now = datetime.now(timezone.utc)
         export_files = await self._export_artifacts(letter_id, existing, current_user)
@@ -1833,7 +1822,7 @@ class DraftRunService:
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Draft run not found")
-        if existing.status not in {"exported", "issued"}:
+        if existing.status not in _EXPORTED_ISSUED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft must be exported before issue")
         if not existing.exported_docx_file_id or not existing.exported_pdf_file_id:
             raise HTTPException(
@@ -1925,7 +1914,7 @@ class DraftRunService:
         run = await self.repository.get(letter_id, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Draft run not found")
-        if run.mode not in {"draft", "review"} or not run.draft_artifact:
+        if run.mode not in _AI_DRAFT_MODES or not run.draft_artifact:
             raise HTTPException(status_code=400, detail="Run does not contain an acceptable draft")
         if not (run.plan or "").strip():
             raise HTTPException(status_code=400, detail="Draft cannot be accepted without a saved strategic plan")
@@ -2788,7 +2777,7 @@ class DraftRunService:
     ) -> str:
         if request.mode == "strategy":
             return ""
-        if request.mode in {"draft", "review"} and not self._strategy_is_approved(letter):
+        if request.mode in _AI_DRAFT_MODES and not self._strategy_is_approved(letter):
             return ""
         if request.plan_override:
             return request.plan_override
