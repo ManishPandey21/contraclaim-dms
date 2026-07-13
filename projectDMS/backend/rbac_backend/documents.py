@@ -15,6 +15,7 @@ from pymongo import ReturnDocument, MongoClient
 from bson.objectid import ObjectId
 import logging
 from bson import Binary, ObjectId
+from bson.errors import InvalidId
 from uuid import uuid4
 import uuid
 import urllib.parse
@@ -399,7 +400,7 @@ async def get_document(
     try:
         try:
             document_id = id
-        except:
+        except Exception:
             raise HTTPException(status_code=400, detail="Invalid Document ID")
         document = await db.documents.find_one({"_id": document_id})
         if not document:
@@ -1180,7 +1181,7 @@ async def update_document(
     # Fetch the existing document
     try:
         document_id = id
-    except:
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid Document ID")
 
     existing_document = await db.documents.find_one({"_id": id})
@@ -1202,7 +1203,7 @@ async def update_document(
         for tag_id in document_update.tags:
             try:
                 ObjectId(tag_id)
-            except:
+            except (InvalidId, TypeError):
                 raise HTTPException(status_code=400, detail=f"Invalid Tag ID: {tag_id}")
 
             tag = await db.tags.find_one({"_id": ObjectId(tag_id)})
@@ -1214,7 +1215,7 @@ async def update_document(
         for subtag_id in document_update.subTags:
             try:
                 ObjectId(subtag_id)
-            except:
+            except (InvalidId, TypeError):
                 raise HTTPException(status_code=400, detail=f"Invalid Subtag ID: {subtag_id}")
 
             subtag = await db.subtags.find_one({"_id": ObjectId(subtag_id)})
