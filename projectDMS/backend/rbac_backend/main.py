@@ -14,6 +14,7 @@ from .routers import (
     arbitration_drafting,
     auth,
     chronology,
+    client_errors,
     contact,
     concerns,
     contracts,
@@ -207,6 +208,7 @@ async def request_context_middleware(request: Request, call_next):
 app.include_router(auth.router, prefix="/api", tags=["auth"])
 app.include_router(sso.router, prefix="/api", tags=["sso"])
 app.include_router(contact.router, prefix="/api", tags=["contact"])
+app.include_router(client_errors.router, prefix="/api", tags=["client-errors"])
 app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
