@@ -2,6 +2,8 @@ import React, { Component, ErrorInfo, ReactNode } from "react";
 import { AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { logError } from "@/lib/error-logger";
+import { isChunkLoadError } from "@/lib/lazyWithRetry";
 
 interface Props {
   children: ReactNode;
@@ -24,10 +26,20 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("Uncaught error:", error, errorInfo);
+    logError(error, {
+      scope: "ErrorBoundary",
+      action: "componentDidCatch",
+      metadata: { componentStack: errorInfo.componentStack },
+    });
   }
 
   private handleRetry = () => {
+    // A stale-deploy chunk failure can't be recovered by re-rendering the same
+    // now-missing module — only a full reload fetches the current assets.
+    if (isChunkLoadError(this.state.error)) {
+      window.location.reload();
+      return;
+    }
     this.setState({ hasError: false, error: null });
   };
 
@@ -37,6 +49,11 @@ export class ErrorBoundary extends Component<Props, State> {
         return this.props.fallback;
       }
 
+      // A failed chunk load is almost always a stale deploy, not a real fault:
+      // show a recovery-oriented message and a Reload action instead of the
+      // raw "Failed to fetch dynamically imported module" string.
+      const chunkError = isChunkLoadError(this.state.error);
+
       return (
         <div className="flex items-center justify-center min-h-screen bg-background">
           <div className="w-full max-w-md p-6">
@@ -44,11 +61,15 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="h-4 w-4" />
               <AlertTitle>Something went wrong</AlertTitle>
               <AlertDescription>
-                {this.state.error?.message || "An unexpected error occurred"}
+                {chunkError
+                  ? "A newer version of the app is available. Reloading will fix this."
+                  : this.state.error?.message || "An unexpected error occurred"}
               </AlertDescription>
             </Alert>
             <div className="mt-4 flex justify-center">
-              <Button onClick={this.handleRetry}>Try Again</Button>
+              <Button onClick={this.handleRetry}>
+                {chunkError ? "Reload" : "Try Again"}
+              </Button>
             </div>
           </div>
         </div>

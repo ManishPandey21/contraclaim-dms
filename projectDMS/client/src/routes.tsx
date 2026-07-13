@@ -1,93 +1,94 @@
-import React, { Suspense, lazy } from "react";
+import React, { Suspense } from "react";
 import { Routes, Route } from "react-router-dom";
+import { lazyWithRetry } from "@/lib/lazyWithRetry";
 import MainLayout from "./components/layout/MainLayout";
 import ProtectedRoute from "./components/auth/ProtectedRoute";
 import RouteSkeleton from "./components/layout/RouteSkeleton";
 import RoleGuard from "./components/auth/RoleGuard";
 
 // Lazy-loaded pages
-const Dashboard = lazy(() => import("./pages/Dashboard"));
-const Overview = lazy(() => import("./pages/Overview"));
-const OrganizationsPage = lazy(() => import("./pages/OrganizationsPage"));
-const ProjectsPage = lazy(() => import("./pages/ProjectsPage"));
-const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
-const EnhancedDocumentsPage = lazy(
+const Dashboard = lazyWithRetry(() => import("./pages/Dashboard"));
+const Overview = lazyWithRetry(() => import("./pages/Overview"));
+const OrganizationsPage = lazyWithRetry(() => import("./pages/OrganizationsPage"));
+const ProjectsPage = lazyWithRetry(() => import("./pages/ProjectsPage"));
+const DocumentsPage = lazyWithRetry(() => import("./pages/DocumentsPage"));
+const EnhancedDocumentsPage = lazyWithRetry(
   () => import("./pages/EnhancedDocumentsPage"),
 );
-const TagsPage = lazy(() => import("./pages/TagsPage"));
-const ProfilePage = lazy(() =>
+const TagsPage = lazyWithRetry(() => import("./pages/TagsPage"));
+const ProfilePage = lazyWithRetry(() =>
   import("./pages/ProfilePage").then((m) => ({ default: m.default })),
 );
-const UsersPage = lazy(() => import("./pages/UsersPage"));
-const PermissionsPage = lazy(() => import("./pages/PermissionsPage"));
-const SettingsPage = lazy(() => import("./pages/SettingsPage"));
-const PlanSettingsPage = lazy(() => import("./pages/PlanSettingsPage"));
-const SubscriptionManagementPage = lazy(
+const UsersPage = lazyWithRetry(() => import("./pages/UsersPage"));
+const PermissionsPage = lazyWithRetry(() => import("./pages/PermissionsPage"));
+const SettingsPage = lazyWithRetry(() => import("./pages/SettingsPage"));
+const PlanSettingsPage = lazyWithRetry(() => import("./pages/PlanSettingsPage"));
+const SubscriptionManagementPage = lazyWithRetry(
   () => import("./pages/SubscriptionManagementPage"),
 );
-const BillingReturnPage = lazy(() => import("./pages/BillingReturnPage"));
-const NotificationCenterPage = lazy(
+const BillingReturnPage = lazyWithRetry(() => import("./pages/BillingReturnPage"));
+const NotificationCenterPage = lazyWithRetry(
   () => import("./pages/NotificationCenterPage"),
 );
-const UploadPage = lazy(() => import("./pages/UploadPage"));
-const DocumentViewerPage = lazy(() => import("./pages/DocumentViewerPage"));
-const RegisterPage = lazy(() => import("./pages/RegisterPage"));
-const FolderStructurePage = lazy(() => import("./pages/FolderStructurePage"));
-const TasksPage = lazy(() => import("./pages/TasksPage"));
-const PartiesInvolvedPage = lazy(() => import("./pages/PartiesInvolvedPage"));
-const LoginPage = lazy(() => import("./pages/LoginPage"));
-const SecurityTermsPage = lazy(() => import("./pages/SecurityTermsPage"));
-const LetterWorkflowPage = lazy(() => import("./pages/LetterWorkflowPage"));
-const LetterInputPage = lazy(() => import("./pages/LetterInputPage"));
-const LetterStrategicPlanPage = lazy(
+const UploadPage = lazyWithRetry(() => import("./pages/UploadPage"));
+const DocumentViewerPage = lazyWithRetry(() => import("./pages/DocumentViewerPage"));
+const RegisterPage = lazyWithRetry(() => import("./pages/RegisterPage"));
+const FolderStructurePage = lazyWithRetry(() => import("./pages/FolderStructurePage"));
+const TasksPage = lazyWithRetry(() => import("./pages/TasksPage"));
+const PartiesInvolvedPage = lazyWithRetry(() => import("./pages/PartiesInvolvedPage"));
+const LoginPage = lazyWithRetry(() => import("./pages/LoginPage"));
+const SecurityTermsPage = lazyWithRetry(() => import("./pages/SecurityTermsPage"));
+const LetterWorkflowPage = lazyWithRetry(() => import("./pages/LetterWorkflowPage"));
+const LetterInputPage = lazyWithRetry(() => import("./pages/LetterInputPage"));
+const LetterStrategicPlanPage = lazyWithRetry(
   () => import("./pages/LetterStrategicPlanPage"),
 );
-const LetterDraftPage = lazy(() => import("./pages/LetterDraftPage"));
-const LetterReviewPage = lazy(() => import("./pages/LetterReviewPage"));
-const LetterApprovalPage = lazy(() => import("./pages/LetterApprovalPage"));
-const LetterCompletedPage = lazy(() => import("./pages/LetterCompletedPage"));
-const LetterQualityDashboardPage = lazy(
+const LetterDraftPage = lazyWithRetry(() => import("./pages/LetterDraftPage"));
+const LetterReviewPage = lazyWithRetry(() => import("./pages/LetterReviewPage"));
+const LetterApprovalPage = lazyWithRetry(() => import("./pages/LetterApprovalPage"));
+const LetterCompletedPage = lazyWithRetry(() => import("./pages/LetterCompletedPage"));
+const LetterQualityDashboardPage = lazyWithRetry(
   () => import("./pages/LetterQualityDashboardPage"),
 );
-const LetterSummaryPage = lazy(() => import("./pages/LetterSummaryPage"));
-const ReportsAnalyticsPage = lazy(() => import("./pages/ReportsAnalyticsPage"));
-const ClaimsRegisterPage = lazy(() => import("./pages/ClaimsRegisterPage"));
-const ClaimDetailPage = lazy(() => import("./pages/ClaimDetailPage"));
-const SLATrackerPage = lazy(() => import("./pages/SLATrackerPage"));
-const KeyDateRegisterPage = lazy(() => import("./pages/KeyDateRegisterPage"));
-const KeyDateDetailPage = lazy(() => import("./pages/KeyDateDetailPage"));
-const VariationRegisterPage = lazy(() => import("./pages/VariationRegisterPage"));
-const BankGuaranteeRegisterPage = lazy(() => import("./pages/BankGuaranteeRegisterPage"));
-const InsuranceRegisterPage = lazy(() => import("./pages/InsuranceRegisterPage"));
-const ConcernsPage = lazy(() => import("./pages/ConcernsPage"));
-const BillingCatalogPage = lazy(() => import("./pages/BillingCatalogPage"));
-const RetrievalConsolePage = lazy(() => import("./pages/RetrievalConsolePage"));
-const IPCBillRegisterPage = lazy(() => import("./pages/IPCBillRegisterPage"));
-const ObservabilityPage = lazy(() => import("./pages/ObservabilityPage"));
-const LetterTemplatePage = lazy(() => import("./pages/LetterTemplatePage"));
-const LetterTemplateEditorPage = lazy(
+const LetterSummaryPage = lazyWithRetry(() => import("./pages/LetterSummaryPage"));
+const ReportsAnalyticsPage = lazyWithRetry(() => import("./pages/ReportsAnalyticsPage"));
+const ClaimsRegisterPage = lazyWithRetry(() => import("./pages/ClaimsRegisterPage"));
+const ClaimDetailPage = lazyWithRetry(() => import("./pages/ClaimDetailPage"));
+const SLATrackerPage = lazyWithRetry(() => import("./pages/SLATrackerPage"));
+const KeyDateRegisterPage = lazyWithRetry(() => import("./pages/KeyDateRegisterPage"));
+const KeyDateDetailPage = lazyWithRetry(() => import("./pages/KeyDateDetailPage"));
+const VariationRegisterPage = lazyWithRetry(() => import("./pages/VariationRegisterPage"));
+const BankGuaranteeRegisterPage = lazyWithRetry(() => import("./pages/BankGuaranteeRegisterPage"));
+const InsuranceRegisterPage = lazyWithRetry(() => import("./pages/InsuranceRegisterPage"));
+const ConcernsPage = lazyWithRetry(() => import("./pages/ConcernsPage"));
+const BillingCatalogPage = lazyWithRetry(() => import("./pages/BillingCatalogPage"));
+const RetrievalConsolePage = lazyWithRetry(() => import("./pages/RetrievalConsolePage"));
+const IPCBillRegisterPage = lazyWithRetry(() => import("./pages/IPCBillRegisterPage"));
+const ObservabilityPage = lazyWithRetry(() => import("./pages/ObservabilityPage"));
+const LetterTemplatePage = lazyWithRetry(() => import("./pages/LetterTemplatePage"));
+const LetterTemplateEditorPage = lazyWithRetry(
   () => import("./pages/LetterTemplateEditorPage"),
 );
-const RepresentativesPage = lazy(() => import("./pages/RepresentativesPage"));
-const ContractsPage = lazy(() => import("./pages/ContractsPage"));
-const ContractsUploadPage = lazy(() => import("./pages/ContractsUploadPage"));
-const ContractsSearchPage = lazy(() => import("./pages/ContractsSearchPage"));
-const ContractQAPage = lazy(() => import("./pages/ContractQAPage"));
-const ContractViewerPage = lazy(() => import("./pages/ContractViewerPage"));
-const ContractAppraisalPage = lazy(() => import("./pages/ContractAppraisalPage"));
-const ContractMasterPage = lazy(() => import("./pages/ContractMasterPage"));
-const ContractTimelinePage = lazy(() => import("./pages/ContractTimelinePage"));
-const LegalWordsPage = lazy(() => import("./pages/LegalWordsPage"));
-const AdminLegalWordsPage = lazy(() => import("./pages/AdminLegalWordsPage"));
-const ArbitrationCaseWorkspacePage = lazy(() => import("./pages/ArbitrationCaseWorkspacePage"));
-const ArbitrationDraftingPage = lazy(() => import("./pages/ArbitrationDraftingPage"));
-const ChronologyBuilderPage = lazy(() => import("./pages/ChronologyBuilderPage"));
-const ReferencePage = lazy(() => import("./pages/ReferencePage"));
-const ShareDocumentPage = lazy(() => import("./pages/ShareDocumentPage"));
-const EmailGroupsPage = lazy(() => import("./pages/EmailGroupsPage"));
-const NotFound = lazy(() => import("./pages/NotFound"));
-const HealthPage = lazy(() => import("./pages/HealthPage"));
-const LandingPage = lazy(() => import("./pages/LandingPage"));
+const RepresentativesPage = lazyWithRetry(() => import("./pages/RepresentativesPage"));
+const ContractsPage = lazyWithRetry(() => import("./pages/ContractsPage"));
+const ContractsUploadPage = lazyWithRetry(() => import("./pages/ContractsUploadPage"));
+const ContractsSearchPage = lazyWithRetry(() => import("./pages/ContractsSearchPage"));
+const ContractQAPage = lazyWithRetry(() => import("./pages/ContractQAPage"));
+const ContractViewerPage = lazyWithRetry(() => import("./pages/ContractViewerPage"));
+const ContractAppraisalPage = lazyWithRetry(() => import("./pages/ContractAppraisalPage"));
+const ContractMasterPage = lazyWithRetry(() => import("./pages/ContractMasterPage"));
+const ContractTimelinePage = lazyWithRetry(() => import("./pages/ContractTimelinePage"));
+const LegalWordsPage = lazyWithRetry(() => import("./pages/LegalWordsPage"));
+const AdminLegalWordsPage = lazyWithRetry(() => import("./pages/AdminLegalWordsPage"));
+const ArbitrationCaseWorkspacePage = lazyWithRetry(() => import("./pages/ArbitrationCaseWorkspacePage"));
+const ArbitrationDraftingPage = lazyWithRetry(() => import("./pages/ArbitrationDraftingPage"));
+const ChronologyBuilderPage = lazyWithRetry(() => import("./pages/ChronologyBuilderPage"));
+const ReferencePage = lazyWithRetry(() => import("./pages/ReferencePage"));
+const ShareDocumentPage = lazyWithRetry(() => import("./pages/ShareDocumentPage"));
+const EmailGroupsPage = lazyWithRetry(() => import("./pages/EmailGroupsPage"));
+const NotFound = lazyWithRetry(() => import("./pages/NotFound"));
+const HealthPage = lazyWithRetry(() => import("./pages/HealthPage"));
+const LandingPage = lazyWithRetry(() => import("./pages/LandingPage"));
 
 const AppRoutes = () => (
   <Suspense fallback={<RouteSkeleton />}>
