@@ -508,7 +508,12 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     error_syncs = await status_collection.count_documents({"sync_status": "error"})
 
     stale_threshold = now - timedelta(minutes=STALE_THRESHOLD_MINUTES)
-    stale_entries = await status_collection.count_documents({"updatedAt": {"$lt": stale_threshold}})
+    stale_entries = await status_collection.count_documents(
+        {
+            "updatedAt": {"$lt": stale_threshold},
+            "sync_status": {"$ne": "synced"},
+        }
+    )
 
     refs_with_data = await db.documents.count_documents({"references": {"$exists": True, "$ne": []}})
     missing_backlinks = await _count_missing_backlinks(db)
