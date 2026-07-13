@@ -145,8 +145,19 @@ class LlamaIndexVectorService:
         
         return self._vector_store
 
-    async def index_chunks(self, payloads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Create embeddings, push to Mongo vector store, and return metadata."""
+    async def index_chunks(
+        self,
+        payloads: Sequence[Dict[str, Any]],
+        *,
+        persist: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Create embeddings, optionally push to Mongo vector store, and return metadata.
+
+        App ingestion writes its own canonical document_vectors rows with
+        top-level tenant metadata. For that path, pass persist=False so this
+        service is used only for embedding generation and does not create a
+        second hidden LlamaIndex row in the same Mongo collection.
+        """
         if not payloads:
             logger.warning("No payloads provided for indexing")
             return []
@@ -188,6 +199,13 @@ class LlamaIndexVectorService:
                 "text": text,
                 "embedding": embedding,
             })
+
+        if not persist:
+            logger.info(
+                "Generated %d embeddings without persisting LlamaIndex vector rows",
+                len(results),
+            )
+            return results
 
         vector_store = self._ensure_vector_store()
 

@@ -241,6 +241,24 @@ class TestIndexChunks:
         assert results[0]["metadata"]["embedding_id"]
         assert len(results[0]["metadata"]["embedding_id"]) > 0
 
+    def test_index_chunks_can_generate_embeddings_without_persisting_mongo_rows(self):
+        service = _make_service()
+
+        payloads = [
+            {
+                "text": "Some chunk text",
+                "metadata": {"document_id": "doc-1", "chunk_index": 0},
+            }
+        ]
+
+        results = asyncio.run(service.index_chunks(payloads, persist=False))
+
+        assert len(results) == 1
+        assert results[0]["vector_ref"] is None
+        assert isinstance(results[0]["embedding"], list)
+        assert service._vector_store is None
+        assert service._mongo_client is None
+
 
 class TestDeleteVectors:
     """Tests for LlamaIndexVectorService.delete_vectors()."""

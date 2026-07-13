@@ -1821,7 +1821,7 @@ class ContractIngestor:
             vector_results: Optional[List[Dict[str, Any]]] = None
             if self.vector_service:
                 try:
-                    vector_results = await self.vector_service.index_chunks(payloads)
+                    vector_results = await self.vector_service.index_chunks(payloads, persist=False)
                     records = self._create_vector_records(vector_results)
                 except Exception as e:
                     logger.warning(f"Vector embedding failed, using fallback: {e}")
@@ -2506,6 +2506,7 @@ class ContractIngestor:
                 "chunk_id": chunk_id,
                 "vector_ref": item.get("vector_ref"),
                 "embedding_id": metadata.get("embedding_id"),
+                "embedding": embedding,
                 "embedding_dims": len(embedding),
                 "embedding_model": self.vector_service.embedding_model_name if self.vector_service else self.config.EMBEDDING_MODEL,
                 "text": text_chunk,

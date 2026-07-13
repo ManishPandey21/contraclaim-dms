@@ -512,7 +512,7 @@ class DatabaseService:
             if delete_result.deleted_count:
                 logger.info("Removed %s existing vector chunks", delete_result.deleted_count)
 
-            vector_results = await vector_service.index_chunks(payloads)
+            vector_results = await vector_service.index_chunks(payloads, persist=False)
 
             now = datetime.utcnow()
             vector_docs = []
@@ -522,6 +522,7 @@ class DatabaseService:
                     **metadata,
                     "vector_ref": record["vector_ref"],
                     "embedding_id": metadata.get("embedding_id"),
+                    "embedding": record["embedding"],
                     "embedding_model": vector_service.embedding_model_name,
                     "embedding_dims": len(record["embedding"]),
                     "text": record["text"],

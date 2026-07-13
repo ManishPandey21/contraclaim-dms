@@ -127,6 +127,43 @@ def test_contract_ingestor_builds_searchable_grounded_clause_payload():
     assert "Pages: 4, 5" in metadata["text_enriched"]
 
 
+def test_contract_ingestor_vector_records_include_embedding_once():
+    ingestor = ContractIngestor.__new__(ContractIngestor)
+    ingestor.config = IngestionConfig(EMBEDDING_MODEL="text-embedding-3-small")
+    ingestor.vector_service = type(
+        "VectorService",
+        (),
+        {"embedding_model_name": "text-embedding-3-small"},
+    )()
+
+    embedding = [0.1, 0.2, 0.3]
+    records = ingestor._create_vector_records(
+        [
+            {
+                "vector_ref": None,
+                "embedding": embedding,
+                "text": "Clause text",
+                "metadata": {
+                    "document_id": "doc-1",
+                    "organization_id": "org-1",
+                    "project_id": "proj-1",
+                    "uploadType": "contract",
+                    "chunk_index": 0,
+                    "chunk_id": "chunk-1",
+                },
+            }
+        ]
+    )
+
+    assert len(records) == 1
+    assert records[0]["embedding"] == embedding
+    assert records[0]["embedding_dims"] == len(embedding)
+    assert records[0]["document_id"] == "doc-1"
+    assert records[0]["organization_id"] == "org-1"
+    assert records[0]["project_id"] == "proj-1"
+    assert records[0]["chunk_id"] == "chunk-1"
+
+
 def test_contract_text_preprocessor_removes_repeated_margins_but_preserves_clause_headings():
     parsed = ParsedDocument(
         text="",
