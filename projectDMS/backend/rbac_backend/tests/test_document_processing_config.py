@@ -120,6 +120,19 @@ def test_local_http_qdrant_uses_configured_api_key():
     assert config.qdrant_enabled is True
 
 
+def test_docker_service_http_qdrant_uses_configured_api_key():
+    config = DocumentProcessingConfig(
+        qdrant_url="http://qdrant:6333",
+        qdrant_api_key="compose-network-key",
+    )
+
+    assert config.qdrant_is_local_http is True
+    assert config.qdrant_auth_configuration_error is None
+    assert config.effective_qdrant_api_key == "compose-network-key"
+    assert config.qdrant_client_kwargs()["api_key"] == "compose-network-key"
+    assert config.qdrant_enabled is True
+
+
 def test_remote_http_qdrant_api_key_disables_qdrant():
     config = DocumentProcessingConfig(
         qdrant_url="http://qdrant.example.com:6333",

@@ -22,7 +22,13 @@ DEFAULT_FALKORDB_URL_HOSTS = {"localhost", "127.0.0.1"}
 DEFAULT_FALKORDB_URLS = {
     f"redis://{host}:{DEFAULT_FALKORDB_PORT}" for host in DEFAULT_FALKORDB_URL_HOSTS
 }
-LOCAL_QDRANT_HOSTS = {"localhost", "127.0.0.1", "::1"}
+LOCAL_QDRANT_HOSTS = {
+    "localhost",
+    "127.0.0.1",
+    "::1",
+    # Docker Compose service DNS used by production for private-network Qdrant.
+    "qdrant",
+}
 QDRANT_API_KEY_PLACEHOLDERS = {
     "none",
     "null",
