@@ -498,7 +498,9 @@ async def _gather_storage_status(method: str = "approx") -> Dict[str, Any]:
     config = DocumentProcessingConfig()
     now = datetime.utcnow()
 
-    mongo_vectors = await db.document_vectors.count_documents({})
+    # document_vectors can contain legacy/fallback metadata rows without an
+    # embedding. Count only rows that can be mirrored into a vector store.
+    mongo_vectors = await db.document_vectors.count_documents({"embedding.0": {"$exists": True}})
     status_collection = db.vector_sync_status
     total_tracked = await status_collection.count_documents({})
     pending_syncs = await status_collection.count_documents({"sync_status": {"$in": ["pending", "qdrant_synced"]}})
