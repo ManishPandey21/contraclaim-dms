@@ -34,6 +34,7 @@ import {
 } from "@/services/enhanced-api";
 import { authenticatedFetch } from "@/services/http";
 import useRBAC from "@/hooks/useRBAC";
+import { useStepUp } from "@/hooks/useStepUp";
 
 type VectorStoreStatus = {
   mongo_chunk_count?: number;
@@ -133,8 +134,17 @@ type FileReconcileResult = {
   details?: Array<Record<string, unknown>>;
 };
 
-const authHeaders = (json = false): Record<string, string> => {
-  return json ? { "Content-Type": "application/json" } : {};
+const STORAGE_REPAIR_ACTION = "storage.repair";
+
+const authHeaders = (
+  json = false,
+  stepUpToken?: string
+): Record<string, string> => {
+  const headers: Record<string, string> = json
+    ? { "Content-Type": "application/json" }
+    : {};
+  if (stepUpToken) headers["X-Step-Up-Token"] = stepUpToken;
+  return headers;
 };
 
 const formatNumber = (value?: number | null) =>
@@ -174,6 +184,7 @@ const HealthPage: React.FC = () => {
   const [fileResult, setFileResult] = useState<FileReconcileResult | null>(null);
 
   const { roles } = useRBAC();
+  const { requestToken, StepUpDialog } = useStepUp();
   const isSuperadmin = roles.includes("superadmin");
 
   const fetchHealth = useCallback(async () => {
@@ -245,11 +256,23 @@ const HealthPage: React.FC = () => {
       return;
     }
     if (!window.confirm("Run bulk vector repair for the selected scope?")) return;
+
+    let stepUpToken: string;
+    try {
+      stepUpToken = await requestToken(
+        STORAGE_REPAIR_ACTION,
+        "Confirm bulk vector repair",
+        "Enter your password to run vector repair for the selected scope."
+      );
+    } catch {
+      return;
+    }
+
     setRepairing(true);
     try {
       const res = await authenticatedFetch(joinApiUrl("/storage-sync/resync-bulk"), {
         method: "POST",
-        headers: authHeaders(true),
+        headers: authHeaders(true, stepUpToken),
         body: JSON.stringify({
           org_id: orgId || null,
           project_id: projectId || null,
@@ -276,11 +299,25 @@ const HealthPage: React.FC = () => {
     if (!dryRun && !window.confirm("Run vector reconciliation with repairs enabled?")) {
       return;
     }
+
+    let stepUpToken: string;
+    try {
+      stepUpToken = await requestToken(
+        STORAGE_REPAIR_ACTION,
+        dryRun ? "Confirm vector reconciliation" : "Confirm vector reconciliation repair",
+        dryRun
+          ? "Enter your password to scan the selected scope for vector mismatches."
+          : "Enter your password to scan and repair vector mismatches in the selected scope."
+      );
+    } catch {
+      return;
+    }
+
     setReconciling(true);
     try {
       const res = await authenticatedFetch(joinApiUrl("/storage-sync/reconcile"), {
         method: "POST",
-        headers: authHeaders(true),
+        headers: authHeaders(true, stepUpToken),
         body: JSON.stringify({
           org_id: orgId || null,
           project_id: projectId || null,
@@ -306,11 +343,23 @@ const HealthPage: React.FC = () => {
       toast.error("Provide org or project to scope file reconciliation.");
       return;
     }
+
+    let stepUpToken: string;
+    try {
+      stepUpToken = await requestToken(
+        STORAGE_REPAIR_ACTION,
+        "Confirm file reconciliation",
+        "Enter your password to scan the selected scope for missing files, orphan chunks, and metadata gaps."
+      );
+    } catch {
+      return;
+    }
+
     setFileReconciling(true);
     try {
       const res = await authenticatedFetch(joinApiUrl("/storage-sync/reconcile-files"), {
         method: "POST",
-        headers: authHeaders(true),
+        headers: authHeaders(true, stepUpToken),
         body: JSON.stringify({
           org_id: orgId || null,
           project_id: projectId || null,
@@ -719,6 +768,7 @@ const HealthPage: React.FC = () => {
         </TabsContent>
         )}
       </Tabs>
+      {StepUpDialog}
     </div>
   );
 };
