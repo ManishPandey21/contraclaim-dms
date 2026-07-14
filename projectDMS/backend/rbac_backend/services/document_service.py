@@ -1193,6 +1193,41 @@ class DocumentService:
             if not stored:
                 logger.warning("Document %s not found for processing", document_id)
                 return False
+            if stored.get("lifecycle_state") == "deleted":
+                now = datetime.utcnow()
+                message = "Document is soft-deleted; skipping processing"
+                logger.info("%s: %s", message, document_id)
+                if job_id:
+                    await db.document_processing_jobs.update_one(
+                        {"_id": job_id},
+                        {
+                            "$set": {
+                                "status": "dead_lettered",
+                                "stage": "skipped_deleted_document",
+                                "error": {
+                                    "message": message,
+                                    "timestamp": now,
+                                    "terminal": True,
+                                },
+                                "updated_at": now,
+                            }
+                        },
+                    )
+                await db.documents.update_one(
+                    {"_id": doc_oid},
+                    {
+                        "$set": {
+                            "processing_status": "skipped",
+                            "processing_error": {
+                                "message": message,
+                                "timestamp": now,
+                                "terminal": True,
+                            },
+                            "updatedAt": now,
+                        }
+                    },
+                )
+                return False
 
             document = Document(**stored)
             org_id = organization_id or document.organization_id

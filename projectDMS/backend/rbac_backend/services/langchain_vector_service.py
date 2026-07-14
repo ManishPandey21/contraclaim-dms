@@ -251,7 +251,12 @@ class LangChainVectorService:
             except Exception as fallback_exc:
                 logger.warning("Delete failed for document_id=%s: %s", document_id, fallback_exc)
 
-            # Prepare texts, metadatas, and deterministic point IDs
+            # Prepare texts, metadatas, and deterministic point IDs.
+            #
+            # Keep the application-level chunk_id unchanged in metadata for
+            # Mongo/reconciliation, but never pass it directly as the Qdrant
+            # point id. Qdrant accepts only unsigned integers or UUID strings;
+            # legacy document chunk ids are often "<document_id>-<digest>".
             texts: List[str] = []
             metadatas: List[Dict[str, Any]] = []
             ids: List[str] = []
@@ -269,11 +274,14 @@ class LangChainVectorService:
                 if not chunk_id:
                     chunk_index = metadata.get("chunk_index", len(texts))
                     chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}:{chunk_index}"))
+                chunk_id = str(chunk_id)
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"contraclaim:qdrant:{document_id}:{chunk_id}"))
                 metadata["chunk_id"] = chunk_id
+                metadata["qdrant_point_id"] = point_id
                 metadata.setdefault("embedding_model", self.config.openai_embedding_model)
                 metadata.setdefault("embedding_provider", "openai")
 
-                ids.append(chunk_id)
+                ids.append(point_id)
                 texts.append(chunk_text)
                 metadatas.append(metadata)
 

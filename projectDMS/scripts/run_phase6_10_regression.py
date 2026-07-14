@@ -50,6 +50,7 @@ BACKEND_PHASE_TESTS = [
     "backend/rbac_backend/tests/test_role_permission_catalog_drift.py",
     "backend/rbac_backend/tests/test_contract_ingest_queue_visibility.py",
     "backend/rbac_backend/tests/test_document_processing_jobs.py",
+    "backend/rbac_backend/tests/test_langchain_vector_service.py",
     "backend/rbac_backend/tests/test_audit_admin_review.py",
     "backend/rbac_backend/tests/test_audit_export.py",
     "backend/rbac_backend/tests/test_observability.py",

@@ -203,6 +203,40 @@ async def test_recover_stale_document_processing_job_keeps_fresh_heartbeat(monke
 
 
 @pytest.mark.asyncio
+async def test_process_document_async_dead_letters_soft_deleted_document():
+    db = FakeDB()
+    service = DocumentService(db)
+    document_id = ObjectId()
+    document = make_document(document_id)
+    data = document.model_dump(by_alias=True)
+    data["_id"] = document_id
+    data["lifecycle_state"] = "deleted"
+    await db.documents.insert_one(data)
+    await db.document_processing_jobs.insert_one(
+        {
+            "_id": "job-deleted",
+            "document_id": str(document_id),
+            "status": "processing",
+            "stage": "materializing",
+            "attempts": 1,
+            "max_attempts": 3,
+            "updated_at": datetime.utcnow(),
+        }
+    )
+
+    ok = await service.process_document_async(str(document_id), "missing.pdf", job_id="job-deleted")
+
+    job = await db.document_processing_jobs.find_one({"_id": "job-deleted"})
+    stored = await db.documents.find_one({"_id": document_id})
+    assert ok is False
+    assert job["status"] == "dead_lettered"
+    assert job["stage"] == "skipped_deleted_document"
+    assert job["error"]["terminal"] is True
+    assert stored["processing_status"] == "skipped"
+    assert stored["processing_error"]["terminal"] is True
+
+
+@pytest.mark.asyncio
 async def test_create_document_honors_supplied_status(tmp_path):
     db = FakeDB()
     service = DocumentService(db)
