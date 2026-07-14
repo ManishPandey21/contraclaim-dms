@@ -73,7 +73,7 @@ async def test_processor_uses_ocr_text_without_openai_file_upload(tmp_path, monk
     processor = make_processor("OCR text from scanned PDF", openai_service)
     captured = {}
 
-    async def fake_save(extracted_content, raw_ocr_text, *args):
+    async def fake_save(extracted_content, raw_ocr_text, *args, **_kwargs):
         parsed_metadata = args[-1]
         captured["extracted_content"] = extracted_content
         captured["raw_ocr_text"] = raw_ocr_text
@@ -101,7 +101,7 @@ async def test_processor_saves_ocr_fallback_when_ai_text_extraction_fails(tmp_pa
     processor = make_processor(ocr_text, openai_service)
     captured = {}
 
-    async def fake_save(extracted_content, raw_ocr_text, *args):
+    async def fake_save(extracted_content, raw_ocr_text, *args, **_kwargs):
         parsed_metadata = args[-1]
         captured["extracted_content"] = extracted_content
         captured["raw_ocr_text"] = raw_ocr_text

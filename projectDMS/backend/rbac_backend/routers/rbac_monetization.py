@@ -47,6 +47,42 @@ async def get_policy_service() -> PolicyService:
     return PolicyService()
 
 
+async def _load_subscription_or_404(
+    service: MonetizationService,
+    subscription_id: str,
+) -> Dict[str, Any]:
+    subscription = await service.get_subscription_by_id(subscription_id)
+    if not subscription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
+    return subscription
+
+
+async def _authorize_subscription_scope(
+    *,
+    policy: PolicyService,
+    current_user: CurrentUser,
+    permission: str,
+    subscription: Dict[str, Any],
+    subscription_id: str,
+    resource_type: str = "subscription",
+) -> None:
+    organization_id = str(subscription.get("organization_id") or "").strip()
+    project_id = str(subscription.get("project_id") or "").strip() or None
+    if not organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Subscription has no organization scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type=resource_type,
+        resource_id=subscription_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Expert Allocations (unchanged)
 # ---------------------------------------------------------------------------
@@ -424,26 +460,16 @@ async def update_subscription(
     _: None = Depends(check_monetization_rate_limit),
 ):
     await require_step_up(request, current_user, action="subscription.entitlement.manage")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE, resource_type="subscription", resource_id=subscription_id)
-
-    # Tenant isolation: verify the subscription belongs to the caller's authorized scope
-    from ..core.database import get_database
-    db = await get_database()
-    from bson import ObjectId
-    try:
-        lookup = ObjectId(subscription_id)
-    except Exception:
-        lookup = subscription_id
-    existing_sub = await db.subscriptions.find_one({"_id": lookup})
-    if not existing_sub:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
-    scope = ScopeService()
-    if not scope.is_superadmin(current_user):
-        sub_org = str(existing_sub.get("organization_id") or "")
-        if not await scope.is_client_scope_allowed(current_user, organization_id=sub_org):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to modify this subscription")
-
-    return await MonetizationService().update_subscription(subscription_id, payload, current_user)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
+    return await service.update_subscription(subscription_id, payload, current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -461,9 +487,17 @@ async def upgrade_subscription(
 ):
     """Upgrade subscription to a higher-tier plan."""
     await require_step_up(request, current_user, action="subscription.upgrade")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_UPGRADE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_UPGRADE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().upgrade_subscription(subscription_id, payload, current_user)
+        return await service.upgrade_subscription(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -479,9 +513,17 @@ async def downgrade_subscription(
 ):
     """Downgrade subscription to a lower-tier plan (effective at period end)."""
     await require_step_up(request, current_user, action="subscription.downgrade")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_DOWNGRADE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_DOWNGRADE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().downgrade_subscription(subscription_id, payload, current_user)
+        return await service.downgrade_subscription(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -497,9 +539,17 @@ async def cancel_subscription(
 ):
     """Cancel a subscription (immediately or at period end)."""
     await require_step_up(request, current_user, action="subscription.cancel")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_CANCEL, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_CANCEL,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().cancel_subscription(subscription_id, payload, current_user)
+        return await service.cancel_subscription(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -513,9 +563,17 @@ async def reactivate_subscription(
 ):
     """Reactivate a cancelled subscription."""
     await require_step_up(request, current_user, action="subscription.upgrade")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_UPGRADE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_UPGRADE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().reactivate_subscription(subscription_id, current_user)
+        return await service.reactivate_subscription(subscription_id, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -530,9 +588,17 @@ async def change_billing_period(
 ):
     """Change subscription billing period (effective at next renewal)."""
     await require_step_up(request, current_user, action="subscription.entitlement.manage")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().change_billing_period(subscription_id, payload, current_user)
+        return await service.change_billing_period(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -547,9 +613,17 @@ async def add_subscription_addon(
 ):
     """Add an add-on to a subscription."""
     await require_step_up(request, current_user, action="subscription.addon.manage")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ADDON_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_ADDON_MANAGE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().add_addon(subscription_id, payload, current_user)
+        return await service.add_addon(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -564,9 +638,17 @@ async def remove_subscription_addon(
 ):
     """Remove an add-on from a subscription."""
     await require_step_up(request, current_user, action="subscription.addon.manage")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_ADDON_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_ADDON_MANAGE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().remove_addon(subscription_id, payload, current_user)
+        return await service.remove_addon(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -582,8 +664,16 @@ async def get_subscription_history(
     policy: PolicyService = Depends(get_policy_service),
 ):
     """Get the full history of a subscription."""
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_HISTORY_VIEW, resource_type="subscription", resource_id=subscription_id)
-    return await MonetizationService().get_subscription_history(subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_HISTORY_VIEW,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
+    return await service.get_subscription_history(subscription_id)
 
 
 @router.get("/subscriptions/{subscription_id}/invoice-preview", response_model=Dict[str, Any])
@@ -593,9 +683,17 @@ async def get_invoice_preview(
     policy: PolicyService = Depends(get_policy_service),
 ):
     """Preview the next invoice for a subscription."""
-    await policy.authorize(current_user, Permissions.BILLING_INVOICE_VIEW, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.BILLING_INVOICE_VIEW,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().get_invoice_preview(subscription_id)
+        return await service.get_invoice_preview(subscription_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -636,9 +734,17 @@ async def convert_trial(
 ):
     """Convert a trial subscription into a paid subscription."""
     await require_step_up(request, current_user, action="subscription.trial.manage")
-    await policy.authorize(current_user, Permissions.SUBSCRIPTION_TRIAL_MANAGE, resource_type="subscription", resource_id=subscription_id)
+    service = MonetizationService()
+    subscription = await _load_subscription_or_404(service, subscription_id)
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_TRIAL_MANAGE,
+        subscription=subscription,
+        subscription_id=subscription_id,
+    )
     try:
-        return await MonetizationService().convert_trial(subscription_id, payload, current_user)
+        return await service.convert_trial(subscription_id, payload, current_user)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

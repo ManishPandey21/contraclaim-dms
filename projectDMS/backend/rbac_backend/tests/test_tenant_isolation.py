@@ -43,11 +43,34 @@ class _FakeCollection:
     def find(self, *_args, **_kwargs):
         return _FakeCursor(self._docs)
 
+    async def find_one(self, query):
+        def matches(doc):
+            for key, expected in (query or {}).items():
+                actual = doc.get(key)
+                if isinstance(expected, dict) and "$in" in expected:
+                    if actual not in expected["$in"] and str(actual) not in {str(item) for item in expected["$in"]}:
+                        return False
+                elif actual != expected and str(actual) != str(expected):
+                    return False
+            return True
+
+        for doc in self._docs:
+            if matches(doc):
+                return dict(doc)
+        return None
+
 
 class _FakeDB:
-    def __init__(self, org_memberships=(), project_memberships=()):
+    def __init__(self, org_memberships=(), project_memberships=(), projects=()):
         self.organization_memberships = _FakeCollection(org_memberships)
         self.project_memberships = _FakeCollection(project_memberships)
+        self.projects = _FakeCollection(
+            projects
+            or (
+                {"_id": "proj-A", "organization_id": "org-A"},
+                {"_id": "proj-B", "organization_id": "org-B"},
+            )
+        )
 
 
 class _PermAllow:
@@ -105,6 +128,23 @@ async def test_project_user_denied_cross_project():
     svc = ScopeService(db=_FakeDB())
     user = _user(org="org-A", projects=("proj-A",), roles=("projectuser",))
     assert await svc.is_client_scope_allowed(user, organization_id="org-A", project_id="proj-A") is True
+    assert await svc.is_client_scope_allowed(user, organization_id="org-A", project_id="proj-B") is False
+
+
+@pytest.mark.asyncio
+async def test_org_user_denied_mismatched_organization_project_pair():
+    svc = ScopeService(db=_FakeDB())
+    user = _user(org="org-A", projects=(), roles=("orguser",))
+
+    assert await svc.is_client_scope_allowed(user, organization_id="org-A", project_id="proj-A") is True
+    assert await svc.is_client_scope_allowed(user, organization_id="org-A", project_id="proj-B") is False
+
+
+@pytest.mark.asyncio
+async def test_project_assignment_cannot_override_mismatched_organization_project_pair():
+    svc = ScopeService(db=_FakeDB())
+    user = _user(org="org-A", projects=("proj-B",), roles=("projectuser",))
+
     assert await svc.is_client_scope_allowed(user, organization_id="org-A", project_id="proj-B") is False
 
 

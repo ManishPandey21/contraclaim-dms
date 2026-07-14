@@ -45,6 +45,7 @@ from ..services.document_audit_service import DocumentAuditService
 from ..services.document_bulk_download_service import DocumentBulkDownloadService
 from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
+from ..services.usage_metering_service import UsageEventType
 from ..services.upload_limits import upload_concurrency_limiter
 from ..services.upload_streaming import SpooledUpload, spool_upload_file, validate_spooled_upload
 from ..services.antivirus_service import AntivirusService
@@ -431,6 +432,11 @@ class DocumentController:
             resource_type="document_vector_search",
             organization_id=filters.get("organization_id") or scope_org,
             project_id=filters.get("project_id") or scope_project,
+            meter_event_type=UsageEventType.ADVANCED_SEARCH,
+            meter_metadata={
+                "operation": "document_vector_search",
+                "limit": limit,
+            },
         )
 
         validated_filters = await self.auth_service.build_document_query(
@@ -645,6 +651,23 @@ class DocumentController:
                             },
                         )
                     # -----------------------------------------------------------
+
+                    await self.policy_service.authorize(
+                        current_user,
+                        Permissions.DOCUMENT_UPLOAD,
+                        resource_type="document_upload",
+                        resource_id=letter_no,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        meter_event_type=UsageEventType.DOCUMENT_UPLOAD,
+                        meter_metadata={
+                            "operation": "create_document",
+                            "filename": file.filename,
+                            "upload_type": upload_type,
+                            "letter_no": letter_no,
+                            "ocr_enabled": bool(kwargs.get("ocr_enabled", False)),
+                        },
+                    )
 
                     # Parse date safely
                     parsed_date = parse_date_safely(date_str)

@@ -40,6 +40,7 @@ from ..services.file_service import SecureFileService
 from ..services.s3_service import S3Service
 from ..services.storage_key_builder import StorageKeyBuilder
 from ..services.storage_settings_service import StorageSettingsService
+from ..services.usage_metering_service import UsageEventType
 from ..services.upload_limits import upload_concurrency_limiter
 from ..services.upload_streaming import (
     SpooledUpload,
@@ -248,6 +249,9 @@ async def _authorize_contract_scope(
     organization_id: Optional[str],
     project_id: Optional[str],
     resource_type: str,
+    meter_event_type: Optional[str] = None,
+    meter_quantity: int = 1,
+    meter_metadata: Optional[Dict[str, Any]] = None,
     audit: bool = True,
 ) -> None:
     await policy.authorize(
@@ -256,6 +260,9 @@ async def _authorize_contract_scope(
         resource_type=resource_type,
         organization_id=organization_id,
         project_id=project_id,
+        meter_event_type=meter_event_type,
+        meter_quantity=meter_quantity,
+        meter_metadata=meter_metadata,
         audit=audit,
     )
 
@@ -384,7 +391,13 @@ async def upload_contracts_multipart(
                     organization_id=effective_org,
                     project_id=effective_project,
                     resource_type="contract_upload",
-                    audit=False,
+                    meter_event_type=UsageEventType.DOCUMENT_UPLOAD,
+                    meter_metadata={
+                        "operation": "upload_contracts_multipart",
+                        "filename": file.filename,
+                        "upload_id": upload_id,
+                    },
+                    audit=True,
                 )
                 store_result = await _write_spooled_to_providers(
                     spooled=spooled,
@@ -598,6 +611,23 @@ async def upload_contract_chunk(
                         status.HTTP_400_BAD_REQUEST
                     )
             # ------------------------------
+
+            await _authorize_contract_scope(
+                policy,
+                current_user,
+                Permissions.DOCUMENT_UPLOAD,
+                organization_id=effective_org,
+                project_id=effective_project,
+                resource_type="contract_upload",
+                meter_event_type=UsageEventType.DOCUMENT_UPLOAD,
+                meter_metadata={
+                    "operation": "upload_contract_chunk_merge",
+                    "filename": filename,
+                    "upload_id": upload_id,
+                    "total_chunks": totalChunks,
+                },
+                audit=True,
+            )
 
             store_result = await _write_spooled_to_providers(
                 spooled=spooled,

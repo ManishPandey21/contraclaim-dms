@@ -8,10 +8,15 @@ from fastapi import HTTPException
 from rbac_backend.core.permissions import CLIENT_DMS_PERMISSIONS, Permissions
 from rbac_backend.models.rbac_monetization import AccountType
 from rbac_backend.routers.storage_sync import _require_superadmin_user
-from rbac_backend.services.entitlement_service import DMS_FEATURE_PERMISSIONS, EntitlementService
+from rbac_backend.services.entitlement_service import (
+    DMS_FEATURE_PERMISSIONS,
+    EntitlementService,
+    required_feature_keys,
+)
 from rbac_backend.services.policy_service import PolicyService
 from rbac_backend.services.scope_service import ScopeService
 from rbac_backend.services.step_up_service import StepUpService, require_step_up
+from rbac_backend.services.usage_metering_service import QuotaExceededError, UsageEventType
 from rbac_backend.utils.rate_limiter import RateLimiter
 
 
@@ -57,22 +62,64 @@ class _AuditService:
         self.events.append(kwargs)
 
 
+class _UsageMeteringService:
+    def __init__(self, *, deny: bool = False, reason: str = "quota_exceeded") -> None:
+        self.deny = deny
+        self.reason = reason
+        self.calls = []
+
+    async def check_and_record(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.deny:
+            raise QuotaExceededError(
+                event_type=kwargs.get("event_type", UsageEventType.DOCUMENT_UPLOAD),
+                reason=self.reason,
+            )
+        return {"allowed": True, "reason": "quota_available", "usage_event_id": "usage-1"}
+
+
 class _CountableCollection:
-    def __init__(self, count: int = 0, document=None) -> None:
+    def __init__(self, count: int = 0, document=None, documents=None) -> None:
         self.count = count
-        self.document = document
+        self.documents = list(documents or ([] if document is None else [document]))
 
     async def count_documents(self, *_args, **_kwargs) -> int:
-        return self.count
+        return self.count if self.count else len(self.documents)
 
     async def find_one(self, *_args, **_kwargs):
-        return dict(self.document) if self.document else None
+        return dict(self.documents[0]) if self.documents else None
+
+    def find(self, *_args, **_kwargs):
+        return _AsyncCursor(self.documents)
+
+
+class _AsyncCursor:
+    def __init__(self, docs) -> None:
+        self.docs = [dict(doc) for doc in docs]
+
+    def __aiter__(self):
+        self._iter = iter(self.docs)
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._iter)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
 class _EntitlementDB:
-    def __init__(self, *, subscription_count: int = 0, subscription=None) -> None:
+    def __init__(
+        self,
+        *,
+        subscription_count: int = 0,
+        subscription=None,
+        plans=None,
+        addons=None,
+    ) -> None:
         self.subscriptions = _CountableCollection(subscription_count, subscription)
-        self.plans = _CountableCollection()
+        self.plans = _CountableCollection(documents=plans or [])
+        self.addons = _CountableCollection(documents=addons or [])
 
 
 def _user(*, roles=None, account_type=AccountType.CLIENT_USER.value):
@@ -145,6 +192,76 @@ async def test_superadmin_bypasses_entitlement_but_is_audited() -> None:
 
 
 @pytest.mark.asyncio
+async def test_metered_policy_authorization_records_usage_after_allow() -> None:
+    usage = _UsageMeteringService()
+    audit = _AuditService()
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=True),
+        entitlement_service=_EntitlementService(True),
+        audit_service=audit,
+        usage_metering_service=usage,
+    )
+
+    await policy.authorize(
+        _user(),
+        Permissions.DOCUMENT_UPLOAD,
+        organization_id="org-1",
+        project_id="project-1",
+        resource_type="document_upload",
+        resource_id="letter-1",
+        meter_event_type=UsageEventType.DOCUMENT_UPLOAD,
+        meter_metadata={"operation": "create_document"},
+    )
+
+    assert usage.calls == [
+        {
+            "event_type": UsageEventType.DOCUMENT_UPLOAD,
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "user_id": "user-1",
+            "quantity": 1,
+            "metadata": {
+                "permission": Permissions.DOCUMENT_UPLOAD,
+                "resource_type": "document_upload",
+                "resource_id": "letter-1",
+                "operation": "create_document",
+            },
+        }
+    ]
+    assert audit.events[-1]["result"] == "allow"
+    assert audit.events[-1]["metadata"]["meter_event_type"] == UsageEventType.DOCUMENT_UPLOAD
+
+
+@pytest.mark.asyncio
+async def test_metered_policy_authorization_denies_when_quota_exhausted() -> None:
+    usage = _UsageMeteringService(deny=True)
+    audit = _AuditService()
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=True),
+        entitlement_service=_EntitlementService(True),
+        audit_service=audit,
+        usage_metering_service=usage,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await policy.authorize(
+            _user(),
+            Permissions.DOCUMENT_UPLOAD,
+            organization_id="org-1",
+            project_id="project-1",
+            resource_type="document_upload",
+            meter_event_type=UsageEventType.DOCUMENT_UPLOAD,
+        )
+
+    assert exc.value.status_code == 403
+    assert "quota" in str(exc.value.detail).lower()
+    assert audit.events[-1]["result"] == "deny"
+    assert audit.events[-1]["reason"] == "quota_exceeded"
+
+
+@pytest.mark.asyncio
 async def test_billing_usage_requires_scope_for_non_admin() -> None:
     policy = PolicyService(
         permission_service=_PermissionService(True),
@@ -179,6 +296,49 @@ async def test_billing_usage_allows_valid_organization_scope() -> None:
 
     assert audit.events[-1]["result"] == "allow"
     assert audit.events[-1]["reason"] == "billing_scope"
+
+
+@pytest.mark.asyncio
+async def test_scoped_billing_admin_permission_still_requires_tenant_scope() -> None:
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=False),
+        entitlement_service=_EntitlementService(True),
+        audit_service=_AuditService(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await policy.authorize(
+            _user(),
+            Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+            organization_id="foreign-org",
+            project_id="foreign-project",
+            resource_type="subscription",
+        )
+
+    assert exc.value.status_code == 403
+    assert "scope" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_global_billing_admin_permission_without_target_scope_is_allowed() -> None:
+    audit = _AuditService()
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=False),
+        entitlement_service=_EntitlementService(True),
+        audit_service=audit,
+    )
+
+    await policy.authorize(
+        _user(),
+        Permissions.BILLING_PLAN_MANAGE,
+        resource_type="plan",
+        resource_id="dms_pro",
+    )
+
+    assert audit.events[-1]["result"] == "allow"
+    assert audit.events[-1]["reason"] == "billing_admin"
 
 
 @pytest.mark.asyncio
@@ -247,6 +407,21 @@ async def test_entitlement_does_not_require_subscription_for_non_service_permiss
 def test_every_client_dms_permission_is_entitlement_scoped() -> None:
     missing = sorted(set(CLIENT_DMS_PERMISSIONS) - DMS_FEATURE_PERMISSIONS)
     assert not missing, f"Client DMS permissions bypass entitlement checks: {missing}"
+
+
+def test_phase3_module_permissions_declare_granular_feature_keys() -> None:
+    assert required_feature_keys(Permissions.CLAIM_CREATE) == (
+        "feature.dms.enabled",
+        "feature.dms.claims",
+    )
+    assert required_feature_keys(Permissions.EVIDENCE_GRAPH_VERIFY) == (
+        "feature.dms.enabled",
+        "feature.dms.evidence_graph",
+    )
+    assert required_feature_keys(Permissions.DRAFTING_DRAFT_CREATE) == (
+        "feature.drafting.enabled",
+        "feature.drafting.ai_drafts",
+    )
 
 
 @pytest.mark.asyncio
@@ -355,6 +530,124 @@ async def test_archive_subscription_allows_newer_dms_read_permissions() -> None:
 
     assert allowed is True
     assert reason == "archive_read_only"
+
+
+@pytest.mark.asyncio
+async def test_phase3_module_entitlement_requires_specific_feature_key() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "active",
+                "plan_code": None,
+                "entitlement_overrides": {"feature.dms.enabled": True},
+            },
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CLAIM_CREATE,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is False
+    assert reason == "feature_disabled:feature.dms.claims"
+
+
+@pytest.mark.asyncio
+async def test_phase3_addon_feature_unlocks_module_entitlement() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "active",
+                "plan_code": None,
+                "active_add_ons": ["addon_claims"],
+                "entitlement_overrides": {"feature.dms.enabled": True},
+            },
+            addons=[
+                {
+                    "code": "addon_claims",
+                    "is_active": True,
+                    "features": {"feature.dms.claims": True},
+                }
+            ],
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CLAIM_CREATE,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is True
+    assert reason == "dms_entitlement"
+
+
+@pytest.mark.asyncio
+async def test_phase3_subscription_override_wins_over_addon_feature() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "active",
+                "plan_code": None,
+                "active_add_ons": ["addon_claims"],
+                "entitlement_overrides": {
+                    "feature.dms.enabled": True,
+                    "feature.dms.claims": False,
+                },
+            },
+            addons=[
+                {
+                    "code": "addon_claims",
+                    "is_active": True,
+                    "features": {"feature.dms.claims": True},
+                }
+            ],
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.CLAIM_CREATE,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is False
+    assert reason == "feature_disabled:feature.dms.claims"
+
+
+@pytest.mark.asyncio
+async def test_phase3_default_plan_fallback_supplies_granular_features() -> None:
+    service = EntitlementService(
+        db=_EntitlementDB(
+            subscription_count=1,
+            subscription={
+                "_id": "sub-1",
+                "status": "active",
+                "plan_code": "claims_commercial_desk",
+                "entitlement_overrides": {
+                    "feature.dms.enabled": True,
+                    "feature.drafting.enabled": True,
+                },
+            },
+        )
+    )
+
+    allowed, reason = await service.check_permission_entitlement(
+        permission=Permissions.EVIDENCE_GRAPH_VERIFY,
+        organization_id="org-1",
+        project_id="project-1",
+    )
+
+    assert allowed is True
+    assert reason == "dms_entitlement"
 
 
 @pytest.mark.asyncio

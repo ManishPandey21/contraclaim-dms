@@ -62,6 +62,30 @@ class ScopeService:
                 project_ids.add(str(membership["project_id"]))
         return project_ids
 
+    async def project_belongs_to_organization(self, *, project_id: str, organization_id: str) -> bool:
+        """Return whether a project exists under the supplied organization.
+
+        This is a tenant-isolation guard, not a convenience lookup. If the
+        projects collection is unavailable, the project is missing, or the
+        project document has no organization, the safe answer is ``False``.
+        """
+        if not project_id or not organization_id:
+            return False
+
+        db = await self._get_db()
+        projects = getattr(db, "projects", None)
+        if projects is None or not hasattr(projects, "find_one"):
+            return False
+
+        project = await projects.find_one({"_id": self.object_id_query(str(project_id))})
+        if not project:
+            return False
+
+        project_org = project.get("organization_id") or project.get("organizationId")
+        if not project_org:
+            return False
+        return str(project_org) == str(organization_id)
+
     async def is_client_scope_allowed(
         self,
         user: Any,
@@ -80,6 +104,11 @@ class ScopeService:
             return False
 
         if project_id:
+            if organization_id and not await self.project_belongs_to_organization(
+                project_id=str(project_id),
+                organization_id=str(organization_id),
+            ):
+                return False
             if str(project_id) in project_ids:
                 return True
             if roles & {"orgadmin", "orguser"} and organization_id and str(organization_id) in org_ids:

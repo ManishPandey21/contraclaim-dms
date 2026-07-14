@@ -105,6 +105,8 @@ def test_unsafe_routes_have_explicit_auth_or_public_classification():
     public_or_legacy = {
         ("/api/login", "login"),
         ("/api/contact", "submit_contact_request"),
+        # Public, rate-limited browser telemetry sink for app-shell/runtime errors.
+        ("/api/client-errors", "report_client_error"),
         ("/api/token", "login_for_access_token"),
         ("/api/logout", "logout_user"),
         # Provider-called webhook: authenticated by HMAC signature verification

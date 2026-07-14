@@ -9,6 +9,7 @@ from ..services.audit_event_service import AuditEventService
 from ..services.entitlement_service import EntitlementService
 from ..services.permission_service import PermissionService
 from ..services.scope_service import ScopeService
+from ..services.usage_metering_service import QuotaExceededError, UsageMeteringService
 
 
 class PolicyService:
@@ -25,12 +26,14 @@ class PolicyService:
         scope_service: Optional[ScopeService] = None,
         entitlement_service: Optional[EntitlementService] = None,
         audit_service: Optional[AuditEventService] = None,
+        usage_metering_service: Optional[UsageMeteringService] = None,
     ) -> None:
         self.db = db
         self.permission_service = permission_service or PermissionService()
         self.scope_service = scope_service or ScopeService(db)
         self.entitlement_service = entitlement_service or EntitlementService(db)
         self.audit_service = audit_service or AuditEventService(db)
+        self.usage_metering_service = usage_metering_service or UsageMeteringService(db)
 
     async def has_permission(self, current_user: Any, permission: str) -> bool:
         if self.scope_service.is_superadmin(current_user):
@@ -63,6 +66,9 @@ class PolicyService:
         package_id: Optional[str] = None,
         letter_id: Optional[str] = None,
         drafting_request_id: Optional[str] = None,
+        meter_event_type: Optional[str] = None,
+        meter_quantity: int = 1,
+        meter_metadata: Optional[dict[str, Any]] = None,
         audit: bool = True,
     ) -> None:
         actor_id = getattr(current_user, "id", None)
@@ -72,10 +78,56 @@ class PolicyService:
         granted = False
         reason = "denied"
         try:
+            metered_quantity = max(1, int(meter_quantity))
+        except Exception:
+            metered_quantity = 1
+
+        async def _allow(allow_reason: str) -> None:
+            nonlocal granted, reason
+            reason = allow_reason
+            if meter_event_type:
+                if not organization_id:
+                    reason = "quota_scope_required"
+                    return await self._deny(reason)
+
+                usage_metadata: dict[str, Any] = {
+                    "permission": permission,
+                    "resource_type": resource_type,
+                }
+                if resource_id:
+                    usage_metadata["resource_id"] = resource_id
+                if package_id:
+                    usage_metadata["package_id"] = package_id
+                if letter_id:
+                    usage_metadata["letter_id"] = letter_id
+                if drafting_request_id:
+                    usage_metadata["drafting_request_id"] = drafting_request_id
+                if meter_metadata:
+                    usage_metadata.update(meter_metadata)
+
+                try:
+                    await self.usage_metering_service.check_and_record(
+                        event_type=meter_event_type,
+                        organization_id=str(organization_id),
+                        project_id=str(project_id) if project_id else None,
+                        user_id=str(actor_id),
+                        quantity=metered_quantity,
+                        metadata=usage_metadata,
+                    )
+                except QuotaExceededError as exc:
+                    reason = exc.reason
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Usage quota is not available for {exc.event_type}: {exc.reason}",
+                    ) from exc
+
+            granted = True
+            reason = allow_reason
+            return None
+
+        try:
             if self.scope_service.is_superadmin(current_user):
-                granted = True
-                reason = "superadmin"
-                return
+                return await _allow("superadmin")
 
             if not await self.has_permission(current_user, permission):
                 reason = "missing_permission"
@@ -94,26 +146,20 @@ class PolicyService:
             domain = permission_domain(permission)
             if domain == "drafting":
                 if self.scope_service.is_superadmin(current_user):
-                    granted = True
-                    reason = "superadmin"
-                    return
+                    return await _allow("superadmin")
                 if permission in self.CLIENT_DRAFTING_PERMISSIONS:
                     if await self.scope_service.is_client_scope_allowed(
                         current_user,
                         organization_id=organization_id,
                         project_id=project_id,
                     ):
-                        granted = True
-                        reason = "client_scope"
-                        return
+                        return await _allow("client_scope")
                     reason = "scope_denied"
                     return await self._deny(reason)
                 if permission in self.DRAFTING_ADMIN_PERMISSIONS and await self.has_permission(
                     current_user, Permissions.DRAFTING_ADMIN
                 ):
-                    granted = True
-                    reason = "drafting_admin"
-                    return
+                    return await _allow("drafting_admin")
                 if await self.scope_service.has_expert_allocation(
                     current_user,
                     permission=permission,
@@ -123,37 +169,27 @@ class PolicyService:
                     letter_id=letter_id,
                     drafting_request_id=drafting_request_id,
                 ):
-                    granted = True
-                    reason = "expert_allocation"
-                    return
+                    return await _allow("expert_allocation")
                 reason = "missing_expert_allocation"
                 return await self._deny(reason)
 
             if domain in {"client_dms", "billing", "system"}:
                 if self.scope_service.is_superadmin(current_user):
-                    granted = True
-                    reason = "superadmin"
-                    return
+                    return await _allow("superadmin")
                 if domain == "billing":
-                    if permission in {Permissions.BILLING_PLAN_MANAGE, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE}:
-                        granted = True
-                        reason = "billing_admin"
-                        return
-                    if permission == Permissions.BILLING_PLAN_VIEW:
-                        granted = True
-                        reason = "billing_plan_view"
-                        return
                     if organization_id or project_id:
                         if await self.scope_service.is_client_scope_allowed(
                             current_user,
                             organization_id=organization_id,
                             project_id=project_id,
                         ):
-                            granted = True
-                            reason = "billing_scope"
-                            return
+                            return await _allow("billing_scope")
                         reason = "scope_denied"
                         return await self._deny(reason)
+                    if permission in {Permissions.BILLING_PLAN_MANAGE, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE}:
+                        return await _allow("billing_admin")
+                    if permission == Permissions.BILLING_PLAN_VIEW:
+                        return await _allow("billing_plan_view")
                     reason = "scope_required"
                     return await self._deny(reason)
                 if domain == "system":
@@ -164,9 +200,7 @@ class PolicyService:
                     organization_id=organization_id,
                     project_id=project_id,
                 ):
-                    granted = True
-                    reason = "client_scope"
-                    return
+                    return await _allow("client_scope")
                 reason = "scope_denied"
                 return await self._deny(reason)
 
@@ -184,10 +218,20 @@ class PolicyService:
                     package_id=package_id,
                     result="allow" if granted else "deny",
                     reason=reason,
-                    metadata={"permission": permission},
+                    metadata={
+                        "permission": permission,
+                        "meter_event_type": meter_event_type,
+                        "meter_quantity": metered_quantity if meter_event_type else None,
+                    },
                 )
 
     async def _deny(self, reason: str) -> None:
+        if reason.startswith("feature_disabled:"):
+            feature_key = reason.split(":", 1)[1]
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Subscription feature is not enabled: {feature_key}",
+            )
         details = {
             "drafting_entitlement": "Drafting service is not active for this project or organization",
             "dms_entitlement": "DMS service is not active for this project or organization",
@@ -196,6 +240,8 @@ class PolicyService:
             "no_subscription_records": "No subscription records are configured for this project or organization",
             "offboarding_export_only": "Only offboarding export actions are allowed for this project or organization",
             "scope_required": "A valid organization or project scope is required for this action",
+            "quota_scope_required": "A valid organization scope is required for metered usage",
+            "quota_exceeded": "Usage quota is exhausted for this project or organization",
             "platform_admin_required": "Platform administration permission is required for this action",
             "unsupported_permission_domain": "Permission is not supported by the central authorization policy",
         }

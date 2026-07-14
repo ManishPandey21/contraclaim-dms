@@ -29,6 +29,7 @@ from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.generator import LLMGenerator
 from ..retrieval.source_metadata import normalize_source_payload
 from ..retrieval.vector_client import VectorClient
+from .usage_metering_service import UsageEventType, UsageMeteringService
 
 LLAMA_INDEX_IMPORT_ERROR: Optional[Exception] = None
 
@@ -1205,6 +1206,7 @@ class ContractIngestor:
         self.hasher = FileHasher()
         self.categorizer = create_contract_categorizer(settings)
         self.contract_graph = ContractGraphService()
+        self.usage_metering_service = UsageMeteringService(db)
         self._indexes_ready = False
 
     def _initialize_vector_service(
@@ -1355,6 +1357,19 @@ class ContractIngestor:
             }
 
         if self.processing_config.ocr_enabled and pages_needing_ocr:
+            await self.usage_metering_service.check_and_record(
+                event_type=UsageEventType.OCR_PAGE,
+                organization_id=organization_id,
+                project_id=project_id,
+                quantity=len(pages_needing_ocr),
+                metadata={
+                    "operation": "contract_ocr",
+                    "document_id": document_id,
+                    "upload_id": upload_id,
+                    "page_numbers": pages_needing_ocr,
+                    "retry": bool(retry_set),
+                },
+            )
             batches = self._group_page_numbers(
                 pages_needing_ocr,
                 max(1, int(self.processing_config.contract_ocr_batch_size)),

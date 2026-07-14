@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..core.config import settings
 from ..core.database import get_database
@@ -38,6 +38,171 @@ DRAFTING_FEATURE_PERMISSIONS = {
 
 DMS_FEATURE_PERMISSIONS = set(CLIENT_DMS_PERMISSIONS)
 
+BASE_DMS_FEATURE = "feature.dms.enabled"
+BASE_DRAFTING_FEATURE = "feature.drafting.enabled"
+
+PERMISSION_FEATURE_REQUIREMENTS: Dict[str, Tuple[str, ...]] = {
+    # DMS commercial modules. All DMS permissions still require the base DMS
+    # feature; these keys add module-level subscription gates.
+    "dms.claim.view": ("feature.dms.claims",),
+    "dms.claim.create": ("feature.dms.claims",),
+    "dms.claim.edit": ("feature.dms.claims",),
+    "dms.claim.delete": ("feature.dms.claims",),
+    "dms.claim.manage": ("feature.dms.claims",),
+    "dms.claim.assess": ("feature.dms.claims",),
+    "dms.contract.appraisal.view": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.generate": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.edit": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.approve": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.reject": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.export": ("feature.dms.contract_appraisal",),
+    "dms.contract.appraisal.create_registers": ("feature.dms.contract_appraisal",),
+    "dms.task.view": ("feature.dms.tasks",),
+    "dms.task.create": ("feature.dms.tasks",),
+    "dms.task.edit": ("feature.dms.tasks",),
+    "dms.task.delete": ("feature.dms.tasks",),
+    "dms.task.manage": ("feature.dms.tasks",),
+    "dms.keydate.view": ("feature.dms.key_dates",),
+    "dms.keydate.create": ("feature.dms.key_dates",),
+    "dms.keydate.edit": ("feature.dms.key_dates",),
+    "dms.keydate.delete": ("feature.dms.key_dates",),
+    "dms.keydate.eot_submit": ("feature.dms.key_dates",),
+    "dms.keydate.eot_approve": ("feature.dms.key_dates",),
+    "dms.keydate.achievement": ("feature.dms.key_dates",),
+    "dms.keydate.export": ("feature.dms.key_dates",),
+    "dms.keydate.manage": ("feature.dms.key_dates",),
+    "dms.variation.view": ("feature.dms.variations",),
+    "dms.variation.create": ("feature.dms.variations",),
+    "dms.variation.edit": ("feature.dms.variations",),
+    "dms.variation.delete": ("feature.dms.variations",),
+    "dms.variation.approve": ("feature.dms.variations",),
+    "dms.variation.export": ("feature.dms.variations",),
+    "dms.bankguarantee.view": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.create": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.edit": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.delete": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.extend": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.release": ("feature.dms.bank_guarantees",),
+    "dms.bankguarantee.export": ("feature.dms.bank_guarantees",),
+    "dms.insurance.view": ("feature.dms.insurance",),
+    "dms.insurance.create": ("feature.dms.insurance",),
+    "dms.insurance.edit": ("feature.dms.insurance",),
+    "dms.insurance.delete": ("feature.dms.insurance",),
+    "dms.insurance.export": ("feature.dms.insurance",),
+    "dms.insurance.manage_types": ("feature.dms.insurance",),
+    "dms.contract.master.view": ("feature.dms.contract_master",),
+    "dms.contract.master.manage": ("feature.dms.contract_master",),
+    "dms.contract.read": ("feature.dms.contract_master",),
+    "dms.contract.update": ("feature.dms.contract_master",),
+    "dms.contract.clause.create": ("feature.dms.contract_processing",),
+    "dms.contract.clause.read": ("feature.dms.contract_processing",),
+    "dms.ai.contract_processing.run": ("feature.dms.contract_processing",),
+    "dms.ipc.view": ("feature.dms.ipc",),
+    "dms.ipc.create": ("feature.dms.ipc",),
+    "dms.ipc.edit": ("feature.dms.ipc",),
+    "dms.ipc.delete": ("feature.dms.ipc",),
+    "dms.ipc.approve": ("feature.dms.ipc",),
+    "dms.ipc.export": ("feature.dms.ipc",),
+    "dms.evidence_graph.view": ("feature.dms.evidence_graph",),
+    "dms.evidence_graph.verify": ("feature.dms.evidence_graph",),
+    "dms.evidence_graph.manage": ("feature.dms.evidence_graph",),
+    "dms.contract.timeline.view": ("feature.dms.contract_timeline",),
+    "dms.chronology.view": ("feature.dms.chronology",),
+    "dms.chronology.create": ("feature.dms.chronology",),
+    "dms.chronology.edit": ("feature.dms.chronology",),
+    "dms.chronology.verify": ("feature.dms.chronology",),
+    "dms.chronology.export": ("feature.dms.chronology",),
+    "dms.chronology.admin": ("feature.dms.chronology",),
+    "dms.arbitration.view": ("feature.dms.arbitration",),
+    "dms.arbitration.create": ("feature.dms.arbitration",),
+    "dms.arbitration.edit": ("feature.dms.arbitration",),
+    "dms.arbitration.generate": ("feature.dms.arbitration",),
+    "dms.arbitration.export": ("feature.dms.arbitration",),
+    "dms.arbitration.approve": ("feature.dms.arbitration",),
+    "dms.arbitration.audit": ("feature.dms.arbitration",),
+    "dms.arbitration.admin": ("feature.dms.arbitration",),
+    # Drafting sub-capabilities.
+    "drafting.request.create": ("feature.drafting.requests",),
+    "drafting.request.view": ("feature.drafting.requests",),
+    "drafting.request.accept": ("feature.drafting.requests",),
+    "drafting.request.assign": ("feature.drafting.assignment",),
+    "drafting.draft.create": ("feature.drafting.ai_drafts",),
+    "drafting.draft.edit": ("feature.drafting.ai_drafts",),
+    "drafting.draft.submit_for_review": ("feature.drafting.review",),
+    "drafting.review.perform": ("feature.drafting.review",),
+    "drafting.review.approve": ("feature.drafting.review",),
+    "drafting.review.return_for_revision": ("feature.drafting.review",),
+    "drafting.final.view": ("feature.drafting.final",),
+    "drafting.audit.view": ("feature.drafting.audit",),
+    "drafting.admin": ("feature.drafting.admin",),
+}
+
+FULL_DMS_MODULE_FEATURES = {
+    "feature.dms.claims": True,
+    "feature.dms.contract_appraisal": True,
+    "feature.dms.tasks": True,
+    "feature.dms.key_dates": True,
+    "feature.dms.variations": True,
+    "feature.dms.bank_guarantees": True,
+    "feature.dms.insurance": True,
+    "feature.dms.contract_master": True,
+    "feature.dms.contract_processing": True,
+    "feature.dms.ipc": True,
+    "feature.dms.evidence_graph": True,
+    "feature.dms.contract_timeline": True,
+    "feature.dms.chronology": True,
+    "feature.dms.arbitration": True,
+}
+
+FULL_DRAFTING_MODULE_FEATURES = {
+    "feature.drafting.requests": True,
+    "feature.drafting.assignment": True,
+    "feature.drafting.ai_drafts": True,
+    "feature.drafting.review": True,
+    "feature.drafting.final": True,
+    "feature.drafting.audit": True,
+    "feature.drafting.admin": True,
+}
+
+DEFAULT_PLAN_FEATURE_FALLBACKS: Dict[str, Dict[str, Any]] = {
+    "dms_enterprise": {BASE_DMS_FEATURE: True, **FULL_DMS_MODULE_FEATURES},
+    "drafting_support_basic": {
+        BASE_DMS_FEATURE: True,
+        BASE_DRAFTING_FEATURE: True,
+        "feature.drafting.requests": True,
+        "feature.drafting.ai_drafts": True,
+    },
+    "contract_correspondence_desk": {
+        BASE_DMS_FEATURE: True,
+        BASE_DRAFTING_FEATURE: True,
+        "feature.dms.tasks": True,
+        "feature.dms.key_dates": True,
+        "feature.dms.variations": True,
+        "feature.dms.bank_guarantees": True,
+        "feature.dms.insurance": True,
+        "feature.dms.contract_master": True,
+        "feature.dms.contract_processing": True,
+        "feature.dms.contract_timeline": True,
+        "feature.dms.chronology": True,
+        **FULL_DRAFTING_MODULE_FEATURES,
+    },
+    "claims_commercial_desk": {
+        BASE_DMS_FEATURE: True,
+        BASE_DRAFTING_FEATURE: True,
+        **FULL_DMS_MODULE_FEATURES,
+        **FULL_DRAFTING_MODULE_FEATURES,
+    },
+    "dedicated_expert_desk": {
+        BASE_DMS_FEATURE: True,
+        BASE_DRAFTING_FEATURE: True,
+        **FULL_DMS_MODULE_FEATURES,
+        **FULL_DRAFTING_MODULE_FEATURES,
+        "feature.dms.api_webhooks": True,
+        "feature.dms.advanced_search": True,
+        "feature.dms.ocr": True,
+    },
+}
+
 DMS_READ_ONLY_ACTIONS = {
     "view",
     "download",
@@ -58,6 +223,18 @@ def _is_write_or_admin_permission(permission: str) -> bool:
     if permission.startswith("dms."):
         return _permission_action(permission) not in DMS_READ_ONLY_ACTIONS
     return False
+
+
+def required_feature_keys(permission: str) -> Tuple[str, ...]:
+    """Return subscription feature keys required by a permission."""
+    if permission in DMS_FEATURE_PERMISSIONS:
+        return (BASE_DMS_FEATURE, *PERMISSION_FEATURE_REQUIREMENTS.get(permission, ()))
+    if permission in DRAFTING_FEATURE_PERMISSIONS:
+        return (
+            BASE_DRAFTING_FEATURE,
+            *PERMISSION_FEATURE_REQUIREMENTS.get(permission, ()),
+        )
+    return PERMISSION_FEATURE_REQUIREMENTS.get(permission, ())
 
 
 class EntitlementService:
@@ -103,16 +280,19 @@ class EntitlementService:
     async def _plan_features(self, plan_code: Optional[str]) -> Dict[str, Any]:
         if not plan_code:
             return {}
+        features = dict(DEFAULT_PLAN_FEATURE_FALLBACKS.get(str(plan_code), {}))
         db = await self._get_db()
         plan = await db.plans.find_one({"code": str(plan_code)})
         if not plan:
             from .monetization_service import MonetizationService
 
-            await MonetizationService(db).list_plans()
-            plan = await db.plans.find_one({"code": str(plan_code)})
+            if not features:
+                await MonetizationService(db).list_plans()
+                plan = await db.plans.find_one({"code": str(plan_code)})
         if not plan:
-            return {}
-        return dict(plan.get("features") or {})
+            return features
+        features.update(plan.get("features") or {})
+        return features
 
     async def _addon_features(self, addon_codes: list) -> Dict[str, Any]:
         """Merge features from all active add-ons."""
@@ -140,6 +320,18 @@ class EntitlementService:
                     pass
         return merged
 
+    async def _subscription_features(self, subscription: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve effective feature flags for one subscription.
+
+        Precedence is: code-level default fallbacks < plan document features <
+        active add-on features < subscription overrides.
+        """
+        features = await self._plan_features(subscription.get("plan_code"))
+        addon_codes = subscription.get("active_add_ons") or []
+        features.update(await self._addon_features(addon_codes))
+        features.update(subscription.get("entitlement_overrides") or {})
+        return features
+
     async def effective_features(
         self,
         *,
@@ -165,13 +357,8 @@ class EntitlementService:
                 "drafting_enabled": False,
             }
 
-        features = await self._plan_features(subscription.get("plan_code"))
-        # Merge add-on features
         addon_codes = subscription.get("active_add_ons") or []
-        addon_features = await self._addon_features(addon_codes)
-        features.update(addon_features)
-        # Apply entitlement overrides last (highest priority)
-        features.update(subscription.get("entitlement_overrides") or {})
+        features = await self._subscription_features(subscription)
         return {
             "source": "project"
             if subscription.get("project_id") not in (None, "")
@@ -239,8 +426,7 @@ class EntitlementService:
             return False, "no_active_subscription"
 
         status = str(subscription.get("status") or "").lower()
-        features = await self._plan_features(subscription.get("plan_code"))
-        features.update(subscription.get("entitlement_overrides") or {})
+        features = await self._subscription_features(subscription)
 
         if status in self.ARCHIVE_STATUSES:
             if _is_write_or_admin_permission(permission):
@@ -256,10 +442,20 @@ class EntitlementService:
             return False, f"subscription_{status or 'inactive'}"
 
         if permission in DMS_FEATURE_PERMISSIONS:
-            return bool(features.get("feature.dms.enabled", False)), "dms_entitlement"
+            if not bool(features.get(BASE_DMS_FEATURE, False)):
+                return False, "dms_entitlement"
+            for feature_key in required_feature_keys(permission)[1:]:
+                if not bool(features.get(feature_key, False)):
+                    return False, f"feature_disabled:{feature_key}"
+            return True, "dms_entitlement"
 
         if permission in DRAFTING_FEATURE_PERMISSIONS:
-            return bool(features.get("feature.drafting.enabled", False)), "drafting_entitlement"
+            if not bool(features.get(BASE_DRAFTING_FEATURE, False)):
+                return False, "drafting_entitlement"
+            for feature_key in required_feature_keys(permission)[1:]:
+                if not bool(features.get(feature_key, False)):
+                    return False, f"feature_disabled:{feature_key}"
+            return True, "drafting_entitlement"
 
         return True, "not_entitlement_scoped"
 

@@ -10,13 +10,16 @@ import hashlib
 import logging
 import asyncio
 from functools import wraps
+from types import SimpleNamespace
 
-from ..core.database import get_db
-from ..core.security import get_current_user, CurrentUser, authorize_scope
+from ..core.permissions import Permissions
+from ..core.security import get_current_user, CurrentUser
 from ..core.config import settings
 from ..services.ai_service import AIService
 from ..services.llm_config_service import LLMConfigService
 from ..services.cache_service import CacheService
+from ..services.policy_service import PolicyService
+from ..services.usage_metering_service import UsageEventType
 from ..utils.rate_limiter import RateLimiter
 from ..models.ai_models import (
     LangGraphDraftRequest,
@@ -59,11 +62,52 @@ class AIAssistantController:
         cache_service: CacheService,
         rate_limiter: RateLimiter,
         llm_config_service: LLMConfigService,
+        policy_service: Optional[PolicyService] = None,
     ):
         self.ai_service = ai_service
         self.cache_service = cache_service
         self.rate_limiter = rate_limiter
         self.llm_config_service = llm_config_service
+        self.policy_service = policy_service or PolicyService()
+
+    def _resolve_request_scope(
+        self,
+        request: Any,
+        current_user: CurrentUser,
+    ) -> tuple[Optional[str], Optional[str]]:
+        org_id = getattr(request, "organization_id", None) or getattr(current_user, "organization_id", None)
+        project_id = getattr(request, "project_id", None)
+        if project_id is None:
+            project_id = (getattr(current_user, "projects", []) or [None])[0]
+        return org_id, project_id
+
+    async def _authorize_ai_action(
+        self,
+        request: Any,
+        current_user: CurrentUser,
+        permission: str,
+        *,
+        resource_type: str,
+        resource_id: Optional[str] = None,
+        meter_event_type: Optional[str] = None,
+        meter_quantity: int = 1,
+        meter_metadata: Optional[Dict[str, Any]] = None,
+        audit: bool = True,
+    ) -> tuple[Optional[str], Optional[str]]:
+        org_id, project_id = self._resolve_request_scope(request, current_user)
+        await self.policy_service.authorize(
+            current_user,
+            permission,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            organization_id=org_id,
+            project_id=project_id,
+            meter_event_type=meter_event_type,
+            meter_quantity=meter_quantity,
+            meter_metadata=meter_metadata,
+            audit=audit,
+        )
+        return org_id, project_id
 
     async def search_similar_letters(
         self,
@@ -77,13 +121,25 @@ class AIAssistantController:
             
             # Input validation and sanitization
             query = sanitize_text(validate_input(request.query, max_length=1000))
+            org_id, project_id = await self._authorize_ai_action(
+                request,
+                current_user,
+                Permissions.DOCUMENT_VIEW,
+                resource_type="ai_assistant_letter_search",
+                meter_event_type=UsageEventType.ADVANCED_SEARCH,
+                meter_metadata={"operation": "search_similar_letters"},
+                audit=False,
+            )
             
             # Check cache first. hashlib, not hash(): Python's hash() is
             # randomized per process (PYTHONHASHSEED), so keys built with it
             # never match across workers or restarts and the cache was
             # effectively disabled in multi-worker deploys.
             query_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:24]
-            cache_key = f"search:{current_user.id}:{query_digest}:{request.limit}"
+            cache_key = (
+                f"search:{current_user.id}:{org_id or 'global'}:"
+                f"{project_id or 'global'}:{query_digest}:{request.limit}"
+            )
             cached_result = await self.cache_service.get(cache_key)
             
             if cached_result:
@@ -92,7 +148,11 @@ class AIAssistantController:
             
             # Perform search
             result = await self.ai_service.search_similar_letters(
-                query, current_user, request.limit
+                query,
+                current_user,
+                request.limit,
+                organization_id=org_id,
+                project_id=project_id,
             )
             
             # Cache result
@@ -121,13 +181,21 @@ class AIAssistantController:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
             
-            # Authorization check
-            org_id = request.organization_id or getattr(current_user, "organization_id", None)
-            proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
-            authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
+            org_id, project_id = await self._authorize_ai_action(
+                request,
+                current_user,
+                Permissions.DRAFTING_REQUEST_CREATE,
+                resource_type="ai_assistant_draft",
+                resource_id=getattr(request, "letter_id", None),
+                meter_event_type=UsageEventType.DRAFTED_LETTER,
+                meter_metadata={"operation": "generate_letter_draft"},
+            )
             
             # Input validation and sanitization
             sanitized_request = await self._sanitize_draft_request(request)
+            sanitized_request = sanitized_request.model_copy(
+                update={"organization_id": org_id, "project_id": project_id}
+            )
             
             # Generate draft
             result = await self.ai_service.generate_draft(
@@ -158,12 +226,32 @@ class AIAssistantController:
         """Execute LangGraph pipeline for the requested letter."""
         try:
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            org_id = request.organization_id or getattr(current_user, "organization_id", None)
-            proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
-            authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
+            org_id, project_id = await self._authorize_ai_action(
+                request,
+                current_user,
+                Permissions.DRAFTING_REQUEST_CREATE,
+                resource_type="ai_assistant_langgraph_draft",
+                resource_id=request.letter_id,
+                meter_event_type=(
+                    UsageEventType.AI_REVIEW
+                    if getattr(request, "analysis_only", False)
+                    else UsageEventType.DRAFTED_LETTER
+                ),
+                meter_metadata={
+                    "operation": (
+                        "generate_langgraph_background"
+                        if getattr(request, "analysis_only", False)
+                        else "generate_langgraph_draft"
+                    ),
+                    "analysis_only": bool(getattr(request, "analysis_only", False)),
+                },
+            )
             sanitized = await self._sanitize_draft_request(request)
             if not isinstance(sanitized, LangGraphDraftRequest):
                 sanitized = LangGraphDraftRequest(**sanitized.model_dump())
+            sanitized = sanitized.model_copy(
+                update={"organization_id": org_id, "project_id": project_id}
+            )
 
             result = await self.ai_service.generate_draft_with_langgraph(
                 sanitized,
@@ -187,10 +275,19 @@ class AIAssistantController:
         """Generate the structured Strategy-stage plan via LangGraph."""
         try:
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            org_id = getattr(request, "organization_id", None) or getattr(current_user, "organization_id", None)
-            proj_id = getattr(request, "project_id", None) or (getattr(current_user, "projects", []) or [None])[0]
-            authorize_scope(current_user, organization_id=org_id, project_id=proj_id)
-            return await self.ai_service.generate_strategy_plan(request, current_user)
+            org_id, project_id = await self._authorize_ai_action(
+                request,
+                current_user,
+                Permissions.DRAFTING_REQUEST_CREATE,
+                resource_type="ai_assistant_strategy_plan",
+                resource_id=request.letter_id,
+                meter_event_type=UsageEventType.AI_REVIEW,
+                meter_metadata={"operation": "generate_strategy_plan"},
+            )
+            scoped_request = request.model_copy(
+                update={"organization_id": org_id, "project_id": project_id}
+            )
+            return await self.ai_service.generate_strategy_plan(scoped_request, current_user)
         except HTTPException:
             raise
         except Exception as exc:  # pragma: no cover - defensive
@@ -207,12 +304,24 @@ class AIAssistantController:
     ) -> LangGraphDraftResponse:
         """Retrieve the last LangGraph run for a letter."""
         await self.rate_limiter.check_user_limit(current_user.id)
-        authorize_scope(
-            current_user,
+        request_scope = SimpleNamespace(
             organization_id=getattr(current_user, "organization_id", None),
-            project_id=(getattr(current_user, "projects", []) or [None])[0] if getattr(current_user, "projects", None) else None,
+            project_id=(getattr(current_user, "projects", []) or [None])[0]
+            if getattr(current_user, "projects", None)
+            else None,
         )
-        snapshot = await self.ai_service.get_latest_langgraph_run(letter_id)
+        org_id, project_id = await self._authorize_ai_action(
+            request_scope,
+            current_user,
+            Permissions.DRAFTING_REQUEST_VIEW,
+            resource_type="ai_assistant_langgraph_run",
+            resource_id=letter_id,
+        )
+        snapshot = await self.ai_service.get_latest_langgraph_run(
+            letter_id,
+            organization_id=org_id,
+            project_id=project_id,
+        )
         if not snapshot:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

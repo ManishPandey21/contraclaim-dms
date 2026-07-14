@@ -38,7 +38,43 @@ class AIService:
             self._letters = db.letters
         return self._letters
 
-    async def _fetch_documents_by_ids(self, identifiers: List[str]) -> List[dict]:
+    @staticmethod
+    def _id_filter_values(value: Optional[Any]) -> List[Any]:
+        if value in (None, ""):
+            return []
+        values: List[Any] = [str(value)]
+        try:
+            values.append(ObjectId(str(value)))
+        except Exception:
+            pass
+        return values
+
+    @classmethod
+    def _scoped_query(
+        cls,
+        base_query: dict,
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
+    ) -> dict:
+        scope_terms: List[dict] = []
+        org_values = cls._id_filter_values(organization_id)
+        if org_values:
+            scope_terms.append({"organization_id": {"$in": org_values}})
+        project_values = cls._id_filter_values(project_id)
+        if project_values:
+            scope_terms.append({"project_id": {"$in": project_values}})
+        if not scope_terms:
+            return base_query
+        return {"$and": [base_query, *scope_terms]}
+
+    async def _fetch_documents_by_ids(
+        self,
+        identifiers: List[str],
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
+    ) -> List[dict]:
         if not identifiers:
             return []
 
@@ -53,7 +89,12 @@ class AIService:
         if not object_ids:
             return []
 
-        cursor = db.documents.find({"_id": {"$in": object_ids}})
+        query = self._scoped_query(
+            {"_id": {"$in": object_ids}},
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        cursor = db.documents.find(query)
         raw_docs = await cursor.to_list(length=None)
         # Ensure documents are dicts and add missing 'keywords' if absent to prevent AttributeError
         documents = []
@@ -84,19 +125,29 @@ class AIService:
         return snippet
 
     async def search_similar_letters(
-        self, query: str, current_user: Any, limit: int
+        self,
+        query: str,
+        current_user: Any,
+        limit: int,
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
     ) -> VectorSearchResponse:
         collection = await self._get_collection()
 
         regex = {"$regex": re.escape(query), "$options": "i"}
-        base_query = {
-            "$or": [
-                {"subject": regex},
-                {"content": regex},
-                {"summary": regex},
-                {"keywords": regex},
-            ]
-        }
+        base_query = self._scoped_query(
+            {
+                "$or": [
+                    {"subject": regex},
+                    {"content": regex},
+                    {"summary": regex},
+                    {"keywords": regex},
+                ]
+            },
+            organization_id=organization_id,
+            project_id=project_id,
+        )
 
         fetch_limit = max(limit * 4, limit)
         docs = await collection.find(base_query).sort("updated_at", -1).limit(fetch_limit).to_list(length=fetch_limit)
@@ -151,7 +202,11 @@ class AIService:
                 if cleaned:
                     bullet_points.append(cleaned)
 
-        source_documents = await self._fetch_documents_by_ids(request.document_ids)
+        source_documents = await self._fetch_documents_by_ids(
+            request.document_ids,
+            organization_id=request.organization_id,
+            project_id=request.project_id,
+        )
         for doc in source_documents:
             summary = doc.get("summary") or doc.get("subject")
             if summary:
@@ -255,8 +310,23 @@ class AIService:
     async def get_latest_langgraph_run(
         self,
         letter_id: str,
+        *,
+        organization_id: Optional[Any] = None,
+        project_id: Optional[Any] = None,
     ) -> Optional[LangGraphDraftResponse]:
         db = await get_database()
+        if organization_id or project_id:
+            try:
+                letter_oid = ObjectId(letter_id)
+            except Exception:
+                return None
+            scoped_query = self._scoped_query(
+                {"_id": letter_oid},
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+            if not await db.letters.find_one(scoped_query, {"_id": 1}):
+                return None
         letter_service = LetterService(db)
         snapshot = await letter_service.get_langgraph_snapshot(letter_id)
         if not snapshot:

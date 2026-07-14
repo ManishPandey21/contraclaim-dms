@@ -58,13 +58,37 @@ class _FakeCollection:
     def find(self, *_args, **_kwargs):
         return _FakeCursor(self._docs)
 
+    async def find_one(self, query):
+        def matches(doc):
+            for key, expected in (query or {}).items():
+                actual = doc.get(key)
+                if isinstance(expected, dict) and "$in" in expected:
+                    expected_values = {str(item) for item in expected["$in"]}
+                    if actual not in expected["$in"] and str(actual) not in expected_values:
+                        return False
+                elif actual != expected and str(actual) != str(expected):
+                    return False
+            return True
+
+        for doc in self._docs:
+            if matches(doc):
+                return dict(doc)
+        return None
+
 
 class _FakeDB:
     """Minimal stand-in for the membership collections ScopeService reads."""
 
-    def __init__(self, memberships=(), project_memberships=()):
+    def __init__(self, memberships=(), project_memberships=(), projects=()):
         self.organization_memberships = _FakeCollection(memberships)
         self.project_memberships = _FakeCollection(project_memberships)
+        self.projects = _FakeCollection(
+            projects
+            or (
+                {"_id": "proj-A", "organization_id": "org-A"},
+                {"_id": "proj-B", "organization_id": "org-B"},
+            )
+        )
 
 
 class _PermissionService:
