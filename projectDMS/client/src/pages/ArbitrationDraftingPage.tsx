@@ -27,22 +27,60 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertTriangle, Download, FilePlus2, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  FilePlus2,
+  Loader2,
+  Lock,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Trash2,
+  Undo2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { enhancedApi } from "@/services/enhanced-api";
 import {
   ArbitrationDraft,
   ArbitrationDraftCreatePayload,
   ArbitrationDraftType,
+  ArbitrationDraftVersion,
+  ArbitrationReferenceInput,
+  addArbitrationDraftReferences,
+  approveArbitrationDraft,
   createArbitrationDraft,
   exportArbitrationDraft,
   generateArbitrationDraft,
   getArbitrationDraft,
+  getArbitrationDraftVersion,
   importDefenceParagraphs,
   importSocParagraphs,
+  listArbitrationDraftVersions,
   listArbitrationDrafts,
   regenerateArbitrationSection,
+  removeArbitrationDraftReference,
+  returnArbitrationDraftForRevision,
+  saveArbitrationDraftVersion,
+  searchArbitrationEvidence,
 } from "@/services/arbitration-drafting-api";
+
+const apiErrorMessage = (error: unknown, fallback: string): string => {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const info = detail as { message?: string; blockers?: Array<{ message?: string } | string> };
+    const blockers = (info.blockers || [])
+      .map((item) => (typeof item === "string" ? item : item?.message || ""))
+      .filter(Boolean)
+      .slice(0, 3);
+    return [info.message, ...blockers].filter(Boolean).join(" — ") || fallback;
+  }
+  return fallback;
+};
 
 const DRAFT_TYPES: Record<string, { value: ArbitrationDraftType; label: string; role: "claimant" | "respondent" }> = {
   claim: { value: "statement_of_claim", label: "Statement of Claim", role: "claimant" },
@@ -136,6 +174,14 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [selectedSection, setSelectedSection] = useState("");
+  const [versions, setVersions] = useState<ArbitrationDraftVersion[]>([]);
+  const [viewedVersion, setViewedVersion] = useState<ArbitrationDraftVersion | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [approving, setApproving] = useState(false);
+  const [evidenceQuery, setEvidenceQuery] = useState("");
+  const [evidenceResults, setEvidenceResults] = useState<ArbitrationReferenceInput[]>([]);
+  const [searchingEvidence, setSearchingEvidence] = useState(false);
 
   const loadDrafts = useCallback(async () => {
     setLoading(true);
@@ -153,6 +199,13 @@ const ArbitrationDraftingPage: React.FC = () => {
     setLoading(true);
     try {
       setDraft(await getArbitrationDraft(draftId));
+      setViewedVersion(null);
+      setEditing(false);
+      try {
+        setVersions(await listArbitrationDraftVersions(draftId));
+      } catch {
+        setVersions([]);
+      }
     } catch {
       toast.error("Failed to load arbitration draft");
     } finally {
@@ -301,6 +354,95 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
+  const approveDraft = async () => {
+    if (!draft) return;
+    setApproving(true);
+    try {
+      setDraft(await approveArbitrationDraft(draft._id));
+      toast.success("Draft approved and locked");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Approval blocked"));
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const returnDraft = async () => {
+    if (!draft) return;
+    const reason = window.prompt("Reason for returning this draft for revision")?.trim();
+    if (!reason) return;
+    setApproving(true);
+    try {
+      setDraft(await returnArbitrationDraftForRevision(draft._id, reason));
+      toast.success("Draft returned for revision");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Unable to return draft for revision"));
+    } finally {
+      setApproving(false);
+    }
+  };
+
+  const openVersion = async (versionNo: number) => {
+    if (!draft) return;
+    if (versionNo === (draft.current_version || 0)) {
+      setViewedVersion(null);
+      return;
+    }
+    try {
+      setViewedVersion(await getArbitrationDraftVersion(draft._id, versionNo));
+    } catch {
+      toast.error("Unable to load draft version");
+    }
+  };
+
+  const saveManualVersion = async () => {
+    if (!draft || !editText.trim()) return;
+    setGenerating(true);
+    try {
+      await saveArbitrationDraftVersion(draft._id, editText);
+      setEditing(false);
+      await loadDraft();
+      toast.success("Edited version saved");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Unable to save edited version"));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const runEvidenceSearch = async () => {
+    if (!draft || !evidenceQuery.trim()) return;
+    setSearchingEvidence(true);
+    try {
+      setEvidenceResults(await searchArbitrationEvidence(draft._id, evidenceQuery));
+    } catch {
+      toast.error("Evidence search failed");
+    } finally {
+      setSearchingEvidence(false);
+    }
+  };
+
+  const addReference = async (reference: ArbitrationReferenceInput) => {
+    if (!draft) return;
+    try {
+      setDraft(await addArbitrationDraftReferences(draft._id, [reference]));
+      setEvidenceResults((prev) => prev.filter((item) => item.source_id !== reference.source_id));
+      toast.success("Evidence added to the draft");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Unable to add evidence"));
+    }
+  };
+
+  const removeReference = async (referenceId?: string) => {
+    if (!draft || !referenceId) return;
+    try {
+      setDraft(await removeArbitrationDraftReference(draft._id, referenceId));
+      toast.success("Evidence removed");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Unable to remove evidence"));
+    }
+  };
+
   if (draftId) {
     const latestVersion = draft?.latest_version;
     const markdown = latestVersion?.full_markdown || "";
@@ -308,6 +450,10 @@ const ArbitrationDraftingPage: React.FC = () => {
     const safetyWarnings = latestVersion?.warnings || latestVersion?.structured_output?.validation_warnings || [];
     const approvalBlockers = latestVersion?.structured_output?.approval_blockers || [];
     const sourceLedger = latestVersion?.source_ledger || [];
+    const isLocked = Boolean(draft?.is_locked);
+    const displayedVersion = viewedVersion || latestVersion;
+    const displayedMarkdown = displayedVersion?.full_markdown || "";
+    const selectedReferences = draft?.selected_references || [];
     return (
       <div className="space-y-6 p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -324,10 +470,21 @@ const ArbitrationDraftingPage: React.FC = () => {
                 <Link to={`/arbitration/cases/${draft.case_id}`}>Case Workspace</Link>
               </Button>
             )}
-            <Button onClick={generate} disabled={generating || !draft}>
+            <Button onClick={generate} disabled={generating || !draft || isLocked}>
               {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
               Generate
             </Button>
+            {isLocked ? (
+              <Button variant="outline" onClick={returnDraft} disabled={approving || !draft}>
+                <Undo2 className="mr-2 h-4 w-4" />
+                Return for Revision
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={approveDraft} disabled={approving || !draft || !markdown}>
+                {approving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                Approve
+              </Button>
+            )}
             <Button variant="outline" onClick={() => exportDraft("docx")} disabled={!markdown}>
               <Download className="mr-2 h-4 w-4" />
               DOCX
@@ -347,14 +504,59 @@ const ArbitrationDraftingPage: React.FC = () => {
         ) : (
           <div className="grid gap-4 xl:grid-cols-[1fr_360px]">
             <section className="rounded-md border bg-background p-4">
-              <div className="mb-3 flex flex-wrap gap-2">
+              <div className="mb-3 flex flex-wrap items-center gap-2">
                 <Badge variant="outline">{pretty(draft?.draft_type)}</Badge>
                 <Badge variant="neutral">{draft?.status}</Badge>
                 <Badge variant="outline">Version {draft?.current_version || 0}</Badge>
+                {isLocked && (
+                  <Badge variant="outline" className="border-emerald-300 text-emerald-700">
+                    <Lock className="mr-1 h-3 w-3" />
+                    Locked (approved)
+                  </Badge>
+                )}
+                {viewedVersion && (
+                  <Badge variant="outline" className="border-blue-300 text-blue-700">
+                    Viewing v{viewedVersion.version}
+                  </Badge>
+                )}
+                <div className="ml-auto flex gap-2">
+                  {editing ? (
+                    <>
+                      <Button size="sm" onClick={saveManualVersion} disabled={generating || !editText.trim()}>
+                        Save as New Version
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setEditing(false)} disabled={generating}>
+                        Cancel
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setEditText(displayedMarkdown);
+                        setEditing(true);
+                      }}
+                      disabled={isLocked || !displayedMarkdown}
+                    >
+                      <Pencil className="mr-2 h-3.5 w-3.5" />
+                      Edit
+                    </Button>
+                  )}
+                </div>
               </div>
-              <pre className="min-h-[520px] whitespace-pre-wrap rounded-md bg-muted/40 p-4 text-sm leading-6">
-                {markdown || "Generate the first version to see the pleading draft here."}
-              </pre>
+              {editing ? (
+                <Textarea
+                  value={editText}
+                  onChange={(event) => setEditText(event.target.value)}
+                  className="min-h-[520px] font-mono text-sm leading-6"
+                  aria-label="Draft markdown editor"
+                />
+              ) : (
+                <pre className="min-h-[520px] whitespace-pre-wrap rounded-md bg-muted/40 p-4 text-sm leading-6">
+                  {displayedMarkdown || "Generate the first version to see the pleading draft here."}
+                </pre>
+              )}
             </section>
 
             <aside className="space-y-4">
@@ -368,7 +570,7 @@ const ArbitrationDraftingPage: React.FC = () => {
                   </CardHeader>
                   <CardContent className="space-y-3">
                     <Textarea value={pleadingText} onChange={(e) => setPleadingText(e.target.value)} rows={7} />
-                    <Button className="w-full" onClick={importParagraphs} disabled={generating || !pleadingText.trim()}>
+                    <Button className="w-full" onClick={importParagraphs} disabled={generating || isLocked || !pleadingText.trim()}>
                       <RefreshCw className="mr-2 h-4 w-4" />
                       Import Paragraphs
                     </Button>
@@ -395,10 +597,90 @@ const ArbitrationDraftingPage: React.FC = () => {
                         ))}
                       </SelectContent>
                     </Select>
-                    <Button className="w-full" variant="outline" onClick={regenerateSection} disabled={generating || !selectedSection}>
+                    <Button className="w-full" variant="outline" onClick={regenerateSection} disabled={generating || isLocked || !selectedSection}>
                       {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
                       Regenerate Section
                     </Button>
+                  </CardContent>
+                </Card>
+              )}
+
+              {versions.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Version History</CardTitle>
+                    <CardDescription>Every generation and manual edit is an immutable version</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-2 text-sm">
+                    {versions.map((item) => {
+                      const isCurrent = item.version === (draft?.current_version || 0) && !viewedVersion;
+                      const isViewed = viewedVersion?.version === item.version;
+                      return (
+                        <button
+                          key={item._id || item.version}
+                          type="button"
+                          onClick={() => openVersion(item.version)}
+                          className={`flex w-full items-center justify-between rounded-md border p-2 text-left hover:bg-muted/50 ${
+                            isCurrent || isViewed ? "border-primary" : ""
+                          }`}
+                        >
+                          <span className="font-medium">v{item.version}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {pretty(item.validation_status) || "not checked"}
+                            {item.created_at ? ` · ${new Date(item.created_at).toLocaleString()}` : ""}
+                          </span>
+                        </button>
+                      );
+                    })}
+                    {viewedVersion && (
+                      <Button size="sm" variant="outline" className="w-full" onClick={() => setViewedVersion(null)}>
+                        Back to Latest
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {!isLocked && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Evidence Search</CardTitle>
+                    <CardDescription>Search project documents and clauses, then link them to this draft</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm">
+                    <div className="flex gap-2">
+                      <Input
+                        value={evidenceQuery}
+                        onChange={(event) => setEvidenceQuery(event.target.value)}
+                        placeholder="e.g. site access, EOT notice, clause 2.1"
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") runEvidenceSearch();
+                        }}
+                      />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={runEvidenceSearch}
+                        disabled={searchingEvidence || !evidenceQuery.trim()}
+                        aria-label="Search evidence"
+                      >
+                        {searchingEvidence ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                      </Button>
+                    </div>
+                    {evidenceResults.map((result) => (
+                      <div key={`${result.source_type}-${result.source_id}`} className="rounded-md border p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-medium">{result.label}</div>
+                            {result.citation && <div className="text-xs text-muted-foreground">{result.citation}</div>}
+                            {result.snippet && <div className="mt-1 text-xs text-muted-foreground">{result.snippet.slice(0, 160)}</div>}
+                          </div>
+                          <Button size="sm" variant="outline" onClick={() => addReference(result)} aria-label={`Add ${result.label}`}>
+                            <Plus className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
                   </CardContent>
                 </Card>
               )}
@@ -410,6 +692,24 @@ const ArbitrationDraftingPage: React.FC = () => {
                 </CardHeader>
                 <CardContent className="space-y-3 text-sm">
                   <div>Sources: {sourceLedger.length || draft?.selected_references?.length || 0}</div>
+                  {selectedReferences.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-xs font-medium text-muted-foreground">Selected references</div>
+                      {selectedReferences.slice(0, 8).map((reference, idx) => (
+                        <div key={reference._id || `${reference.source_id}-${idx}`} className="flex items-start justify-between gap-2 rounded-md border p-2">
+                          <div>
+                            <div className="font-medium">{reference.label}</div>
+                            {reference.citation && <div className="text-xs text-muted-foreground">{reference.citation}</div>}
+                          </div>
+                          {!isLocked && reference._id && (
+                            <Button size="sm" variant="ghost" onClick={() => removeReference(reference._id)} aria-label={`Remove ${reference.label}`}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {latestVersion?.validation_status && <div>Validation: {pretty(latestVersion.validation_status)}</div>}
                   {(latestVersion?.missing_evidence || []).map((item, idx) => (
                     <div key={`${item}-${idx}`} className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">

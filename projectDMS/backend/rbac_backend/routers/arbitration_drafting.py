@@ -32,6 +32,7 @@ from ..models.arbitration_drafting import (
     ArbitrationMatrixRowCreate,
     ArbitrationMatrixRowUpdate,
     ArbitrationReadinessResponse,
+    ArbitrationSelectedReferenceCreate,
     PleadingImportRequest,
     ReturnForRevisionRequest,
 )
@@ -44,6 +45,10 @@ router = APIRouter(prefix="/arbitration", tags=["arbitration-drafting"])
 
 class ManualVersionRequest(BaseModel):
     full_markdown: str = Field(..., min_length=1)
+
+
+class AddReferencesRequest(BaseModel):
+    references: List[ArbitrationSelectedReferenceCreate] = Field(..., min_length=1)
 
 
 async def get_policy(db=Depends(get_db)) -> PolicyService:
@@ -558,6 +563,34 @@ async def prepare_arbitration_draft_from_case(
         await _load_case_and_authorize(str(draft.get("case_id")), Permissions.ARBITRATION_VIEW, db, current_user, policy)
     result = await ArbitrationCaseWorkspaceService(db).prepare_draft_from_case(draft_id, current_user)
     return {**result, "draft": await ArbitrationDraftingService(db).detail(draft_id)}
+
+
+@router.post("/drafts/{draft_id}/references", response_model=ArbitrationDraftDetail)
+async def add_arbitration_references(
+    draft_id: str,
+    payload: AddReferencesRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await _load_and_authorize(draft_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
+    return ArbitrationDraftDetail(
+        **await ArbitrationDraftingService(db).add_references(draft_id, payload.references, current_user)
+    )
+
+
+@router.delete("/drafts/{draft_id}/references/{reference_id}", response_model=ArbitrationDraftDetail)
+async def remove_arbitration_reference(
+    draft_id: str,
+    reference_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await _load_and_authorize(draft_id, Permissions.ARBITRATION_EDIT, db, current_user, policy)
+    return ArbitrationDraftDetail(
+        **await ArbitrationDraftingService(db).remove_reference(draft_id, reference_id, current_user)
+    )
 
 
 @router.post("/drafts/{draft_id}/paragraph-responses/import-soc")

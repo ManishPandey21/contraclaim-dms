@@ -26,7 +26,11 @@ from backend.rbac_backend.services.arbitration_drafting.agents import (
     run_arbitration_agent,
 )
 from backend.rbac_backend.services.arbitration_drafting.agents import llm as llm_agents_module
-from backend.rbac_backend.services.arbitration_drafting.service import stable_generation_input_hash
+from backend.rbac_backend.models.arbitration_drafting import ArbitrationSelectedReferenceCreate
+from backend.rbac_backend.services.arbitration_drafting.service import (
+    ArbitrationDraftingService,
+    stable_generation_input_hash,
+)
 from backend.rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
 
 
@@ -284,6 +288,7 @@ class _FakeDb:
                 }
             ]
         )
+        self.audit_events = _FakeCollection([])
         self.claims = _FakeCollection(
             [
                 {
@@ -1948,6 +1953,51 @@ def test_notice_snippet_reads_ui_and_agent_field_names():
     assert "Late by two days" in notices["NTC-UI"]["snippet"]
     assert "Confirm notice clause and service method" in notices["NTC-AGENT"]["snippet"]
     assert "Precondition impact unclear" in notices["NTC-AGENT"]["snippet"]
+
+
+def test_add_and_remove_draft_references():
+    db = _FakeDb()
+    service = ArbitrationDraftingService(db)
+    payload = [
+        ArbitrationSelectedReferenceCreate(
+            source_type="document",
+            source_id="doc-evidence-1",
+            label="Site access letter",
+            citation="LTR-042",
+            snippet="Workfront handed over late per letter LTR-042.",
+        )
+    ]
+
+    detail = asyncio.run(service.add_references("draft-1", payload, _FakeUser()))
+
+    refs = detail["selected_references"]
+    assert any(ref["source_id"] == "doc-evidence-1" for ref in refs)
+    added = next(ref for ref in refs if ref["source_id"] == "doc-evidence-1")
+    assert added["selected_by"] == "user-1"
+
+    detail = asyncio.run(service.remove_reference("draft-1", added["_id"], _FakeUser()))
+    assert all(ref["source_id"] != "doc-evidence-1" for ref in detail["selected_references"])
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.remove_reference("draft-1", "missing-ref", _FakeUser()))
+    assert exc_info.value.status_code == 404
+
+
+def test_reference_mutations_blocked_on_locked_draft():
+    db = _FakeDb()
+    db.arbitration_drafts.rows[0]["is_locked"] = True
+    service = ArbitrationDraftingService(db)
+    payload = [
+        ArbitrationSelectedReferenceCreate(source_type="document", source_id="doc-x", label="X")
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.add_references("draft-1", payload, _FakeUser()))
+    assert exc_info.value.status_code == 409
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.remove_reference("draft-1", "any-ref", _FakeUser()))
+    assert exc_info.value.status_code == 409
 
 
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():

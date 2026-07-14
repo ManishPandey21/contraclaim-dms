@@ -189,6 +189,38 @@ class ArbitrationDraftingService:
             "missing_evidence": context["missing_evidence"],
         }
 
+    async def add_references(
+        self,
+        draft_id: str,
+        payloads: List[ArbitrationSelectedReferenceCreate],
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        draft = await self._load_unlocked(draft_id)
+        rows = [
+            ArbitrationSelectedReference(
+                **payload.model_dump(),
+                draft_id=draft_id,
+                selected_by=_actor_id(current_user),
+            ).model_dump(by_alias=True)
+            for payload in payloads
+        ]
+        await self.repo.add_references(draft_id, rows)
+        await self._emit(
+            "references_added",
+            draft,
+            current_user,
+            after={"count": len(rows), "source_ids": [row.get("source_id") for row in rows]},
+        )
+        return await self.detail(draft_id)
+
+    async def remove_reference(self, draft_id: str, reference_id: str, current_user: Any) -> Dict[str, Any]:
+        draft = await self._load_unlocked(draft_id)
+        deleted = await self.repo.delete_reference(draft_id, reference_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected reference not found")
+        await self._emit("reference_removed", draft, current_user, after={"reference_id": reference_id})
+        return await self.detail(draft_id)
+
     async def import_pleading_paragraphs(
         self,
         draft_id: str,

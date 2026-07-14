@@ -64,6 +64,12 @@ class ArbitrationDraftingRepository:
     async def list_references(self, draft_id: str) -> List[Dict[str, Any]]:
         return await _collect(self.db.arbitration_selected_references.find({"draft_id": draft_id}))
 
+    async def delete_reference(self, draft_id: str, reference_id: str) -> int:
+        result = await self.db.arbitration_selected_references.delete_many(
+            {"draft_id": draft_id, "_id": reference_id}
+        )
+        return int(getattr(result, "deleted_count", 0) or 0)
+
     async def replace_claim_heads(self, draft_id: str, heads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         await self.db.arbitration_claim_heads.delete_many({"draft_id": draft_id})
         rows = [_jsonable({**row, "draft_id": draft_id}) for row in heads]

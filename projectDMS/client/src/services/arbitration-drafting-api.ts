@@ -21,6 +21,11 @@ export interface ArbitrationReferenceInput {
   metadata?: Record<string, unknown>;
 }
 
+export interface ArbitrationSelectedReference extends ArbitrationReferenceInput {
+  _id?: string;
+  selected_by?: string | null;
+}
+
 export interface ArbitrationClaimHeadInput {
   head_type?: string;
   description: string;
@@ -67,7 +72,7 @@ export interface ArbitrationDraft {
   is_locked: boolean;
   current_version: number;
   latest_version?: ArbitrationDraftVersion | null;
-  selected_references?: ArbitrationReferenceInput[];
+  selected_references?: ArbitrationSelectedReference[];
   claim_heads?: ArbitrationClaimHeadInput[];
   paragraph_responses?: Array<Record<string, unknown>>;
   created_at?: string;
@@ -154,4 +159,53 @@ export async function exportArbitrationDraft(draftId: string, format: "docx" | "
     responseType: "blob",
   });
   return data as Blob;
+}
+
+export async function approveArbitrationDraft(draftId: string) {
+  const { data } = await api.post<ArbitrationDraft>(`/arbitration/drafts/${draftId}/approve`);
+  return data;
+}
+
+export async function returnArbitrationDraftForRevision(draftId: string, reason: string) {
+  const { data } = await api.post<ArbitrationDraft>(`/arbitration/drafts/${draftId}/return-for-revision`, {
+    reason,
+  });
+  return data;
+}
+
+export async function listArbitrationDraftVersions(draftId: string) {
+  const { data } = await api.get<ArbitrationDraftVersion[]>(`/arbitration/drafts/${draftId}/versions`);
+  return data;
+}
+
+export async function getArbitrationDraftVersion(draftId: string, version: number) {
+  const { data } = await api.get<ArbitrationDraftVersion>(`/arbitration/drafts/${draftId}/versions/${version}`);
+  return data;
+}
+
+export async function saveArbitrationDraftVersion(draftId: string, fullMarkdown: string) {
+  const { data } = await api.post<ArbitrationDraftVersion>(`/arbitration/drafts/${draftId}/versions`, {
+    full_markdown: fullMarkdown,
+  });
+  return data;
+}
+
+export async function searchArbitrationEvidence(draftId: string, query: string, limit = 20) {
+  const { data } = await api.post<{ results: ArbitrationReferenceInput[] }>(
+    `/arbitration/drafts/${draftId}/evidence/search`,
+    { query, limit },
+  );
+  return data.results || [];
+}
+
+export async function addArbitrationDraftReferences(draftId: string, references: ArbitrationReferenceInput[]) {
+  const { data } = await api.post<ArbitrationDraft>(`/arbitration/drafts/${draftId}/references`, {
+    references,
+  });
+  return data;
+}
+
+export async function removeArbitrationDraftReference(draftId: string, referenceId: string) {
+  const { data } = await api.delete<ArbitrationDraft>(`/arbitration/drafts/${draftId}/references/${referenceId}`);
+  return data;
 }
