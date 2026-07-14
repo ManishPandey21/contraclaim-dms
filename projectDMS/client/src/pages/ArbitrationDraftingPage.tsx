@@ -66,7 +66,16 @@ import {
   returnArbitrationDraftForRevision,
   saveArbitrationDraftVersion,
   searchArbitrationEvidence,
+  updateArbitrationDraft,
 } from "@/services/arbitration-drafting-api";
+import { ArbitrationCase, listArbitrationCases } from "@/services/arbitration-cases-api";
+
+const REGISTER_ORIGINS = new Set([
+  "claim_register",
+  "variation_register",
+  "ipc_register",
+  "bank_guarantee_register",
+]);
 
 const apiErrorMessage = (error: unknown, fallback: string): string => {
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
@@ -108,6 +117,8 @@ type ProjectOption = { id?: string; _id?: string; name?: string; organization_id
 interface FormState {
   organization_id: string;
   project_id: string;
+  case_id: string;
+  include_registers: string;
   title: string;
   dispute_type: string;
   party_role: "claimant" | "respondent";
@@ -127,6 +138,8 @@ interface FormState {
 const initialForm = (kind: string): FormState => ({
   organization_id: "",
   project_id: "",
+  case_id: "none",
+  include_registers: "yes",
   title: DRAFT_TYPES[kind]?.label || "Arbitration Draft",
   dispute_type: "eot_delay",
   party_role: DRAFT_TYPES[kind]?.role || "claimant",
@@ -168,6 +181,7 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [drafts, setDrafts] = useState<ArbitrationDraft[]>([]);
   const [draft, setDraft] = useState<ArbitrationDraft | null>(null);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [cases, setCases] = useState<ArbitrationCase[]>([]);
   const [form, setForm] = useState<FormState>(() => initialForm(kind));
   const [pleadingText, setPleadingText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -215,6 +229,7 @@ const ArbitrationDraftingPage: React.FC = () => {
 
   useEffect(() => {
     enhancedApi.getProjects().then(setProjects).catch(() => setProjects([]));
+    listArbitrationCases().then(setCases).catch(() => setCases([]));
   }, []);
 
   useEffect(() => {
@@ -247,6 +262,8 @@ const ArbitrationDraftingPage: React.FC = () => {
       const payload: ArbitrationDraftCreatePayload = {
         organization_id: form.organization_id || undefined,
         project_id: form.project_id,
+        case_id: form.case_id && form.case_id !== "none" ? form.case_id : undefined,
+        include_register_sources: form.include_registers !== "no",
         draft_type: draftType.value,
         party_role: form.party_role,
         dispute_type: form.dispute_type,
@@ -443,6 +460,17 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
+  const excludeRegisterSource = async (sourceId: string) => {
+    if (!draft) return;
+    try {
+      const excluded = Array.from(new Set([...(draft.excluded_register_ids || []), sourceId]));
+      setDraft(await updateArbitrationDraft(draft._id, { excluded_register_ids: excluded }));
+      toast.success("Register source excluded — regenerate to refresh the ledger");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Unable to exclude register source"));
+    }
+  };
+
   if (draftId) {
     const latestVersion = draft?.latest_version;
     const markdown = latestVersion?.full_markdown || "";
@@ -495,6 +523,20 @@ const ArbitrationDraftingPage: React.FC = () => {
             </Button>
           </div>
         </div>
+
+        {!loading && draft && !draft.case_id && (
+          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>
+              <span className="font-medium">Ungated draft.</span> This draft is not linked to a case workspace, so the
+              matrix readiness gate (jurisdiction, limitation, quantum, expert alignment) was not applied.{" "}
+              <Link to="/arbitration/cases" className="underline">
+                Link it to a case workspace
+              </Link>{" "}
+              for a gated filing.
+            </div>
+          </div>
+        )}
 
         {loading ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -716,14 +758,41 @@ const ArbitrationDraftingPage: React.FC = () => {
                       {item}
                     </div>
                   ))}
-                  {sourceLedger.slice(0, 5).map((source, idx) => (
-                    <div key={`${String(source.source_id || idx)}-${idx}`} className="rounded-md border p-2">
-                      <div className="font-medium">{String(source.source_key || `S${idx + 1}`)} - {String(source.citation || source.label || "Source")}</div>
-                      {Array.isArray(source.quality_flags) && source.quality_flags.length > 0 && (
-                        <div className="mt-1 text-xs text-muted-foreground">{source.quality_flags.join(", ")}</div>
-                      )}
+                  {sourceLedger.slice(0, 5).map((source, idx) => {
+                    const origin = String(source.source_origin || "");
+                    const sourceId = String(source.source_id || "");
+                    const isRegisterRow = REGISTER_ORIGINS.has(origin);
+                    return (
+                      <div key={`${sourceId || idx}-${idx}`} className="rounded-md border p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <div className="font-medium">
+                              {String(source.source_key || `S${idx + 1}`)} - {String(source.citation || source.label || "Source")}
+                            </div>
+                            {isRegisterRow && <div className="text-xs text-muted-foreground">{pretty(origin)}</div>}
+                            {Array.isArray(source.quality_flags) && source.quality_flags.length > 0 && (
+                              <div className="mt-1 text-xs text-muted-foreground">{source.quality_flags.join(", ")}</div>
+                            )}
+                          </div>
+                          {isRegisterRow && !isLocked && sourceId && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => excludeRegisterSource(sourceId)}
+                              aria-label={`Exclude register source ${String(source.citation || sourceId)}`}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {(draft?.excluded_register_ids || []).length > 0 && (
+                    <div className="text-xs text-muted-foreground">
+                      {draft?.excluded_register_ids?.length} register source(s) excluded from this draft.
                     </div>
-                  ))}
+                  )}
                 </CardContent>
               </Card>
 
@@ -817,6 +886,39 @@ const ArbitrationDraftingPage: React.FC = () => {
                           {label}
                         </SelectItem>
                       ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Case workspace (recommended)</Label>
+                  <Select value={form.case_id} onValueChange={(value) => update("case_id", value)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Link a case workspace" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">None — ungated draft</SelectItem>
+                      {cases
+                        .filter((item) => !form.project_id || item.project_id === form.project_id)
+                        .map((item) => (
+                          <SelectItem key={item._id} value={item._id}>
+                            {item.title}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Linking a case applies the matrix readiness gate before generation and approval.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label>Project register sources</Label>
+                  <Select value={form.include_registers} onValueChange={(value) => update("include_registers", value)}>
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="yes">Include claims/variations/IPCs/BGs (default)</SelectItem>
+                      <SelectItem value="no">Exclude project registers</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>

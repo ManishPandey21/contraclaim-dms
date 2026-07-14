@@ -45,7 +45,7 @@ import { cn } from "@/lib/utils";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import { getCurrentUserProfile } from "@/services/session-api";
 import useRBAC from "@/hooks/useRBAC";
-import { isRouteAllowedByPermission } from "@/config/rolePermissions";
+import { isRouteAllowedByPermission, labelForRole } from "@/config/rolePermissions";
 
 const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
@@ -59,20 +59,21 @@ const Sidebar = () => {
   const [profilePhotoUrl, setProfilePhotoUrl] = useState<string>("");
 
   const roleLabel = useMemo(() => {
-    const norm = roles.map((r) => String(r).toLowerCase());
-    return norm.includes("superadmin")
-      ? "Super Admin"
-      : norm.includes("orgadmin")
-        ? "Organization Admin"
-        : norm.includes("orguser")
-          ? "Organization User"
-          : norm.includes("projectadmin")
-            ? "Project Admin"
-            : norm.includes("projectuser")
-              ? "Project User"
-              : norm[0]
-                ? norm[0].replace(/\b\w/g, (c) => c.toUpperCase())
-                : "User";
+    const priority = [
+      "superadmin",
+      "orgadmin",
+      "projectadmin",
+      "contraclaim_billing_admin",
+      "contraclaim_drafting_manager",
+      "doccontroller",
+      "reporter",
+      "settings_manager",
+      "orguser",
+      "projectuser",
+      "limited_user",
+    ];
+    const selected = priority.find((role) => roles.includes(role)) || roles[0];
+    return selected ? labelForRole(selected) : "User";
   }, [roles]);
 
   useEffect(() => {

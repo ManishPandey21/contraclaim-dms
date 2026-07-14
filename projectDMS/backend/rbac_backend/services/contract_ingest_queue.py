@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlsplit, urlunsplit
@@ -26,6 +28,22 @@ def _utc_now() -> str:
     return datetime.utcnow().isoformat()
 
 
+def _utc_now_dt() -> datetime:
+    return datetime.utcnow()
+
+
+def _parse_utc_timestamp(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
 @dataclass(frozen=True)
 class ContractQueueEnqueueResult:
     job_id: str
@@ -38,6 +56,8 @@ class ContractIngestQueue:
     def __init__(self) -> None:
         self._redis: Optional[Redis] = None
         self._worker_tasks: list[asyncio.Task] = []
+        self._recovery_lock = asyncio.Lock()
+        self._last_recovery_scan_monotonic = 0.0
         self._running = False
         self._logged_connection = False
 
@@ -99,6 +119,16 @@ class ContractIngestQueue:
     @property
     def redis_db_number(self) -> int:
         return self._redis_db_number(self.redis_url)
+
+    @property
+    def visibility_timeout_seconds(self) -> int:
+        return max(60, int(settings.CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS))
+
+    @property
+    def heartbeat_seconds(self) -> int:
+        # Heartbeats must be frequent enough that a slow but healthy ingestion
+        # job is not mistaken for an orphan, while still keeping Redis writes low.
+        return max(5, min(int(settings.CONTRACT_QUEUE_HEARTBEAT_SECONDS), self.visibility_timeout_seconds // 2))
 
     @staticmethod
     def _redact_url(url: str) -> str:
@@ -180,32 +210,88 @@ class ContractIngestQueue:
                 "attempts": "0",
                 "queued_at": _utc_now(),
                 "updated_at": _utc_now(),
+                "visibility_timeout_seconds": str(self.visibility_timeout_seconds),
             },
         )
-        await redis.rpush(settings.CONTRACT_QUEUE_NAME, job_id)
+        await self._push_unique(redis, settings.CONTRACT_QUEUE_NAME, job_id)
         return job_id
 
     async def requeue_orphaned_jobs(self) -> None:
+        """Recover only genuinely stale jobs from the processing list.
+
+        Older code deleted the whole processing list on startup and requeued every
+        entry. In a multi-process deployment that can duplicate active OCR/AI
+        ingestion work. The recovery path now behaves like a visibility timeout:
+        completed/failed records are cleaned up, fresh running records are left
+        alone, and only stale records whose heartbeat has expired are requeued.
+        """
+        await self._recover_stale_processing_jobs(force=True)
+
+    async def _recover_stale_processing_jobs(self, *, force: bool = False) -> int:
         redis = await self.connect()
         if redis is None:
-            return
+            return 0
+        if not force:
+            now_monotonic = time.monotonic()
+            recovery_interval = min(60.0, max(10.0, self.visibility_timeout_seconds / 3))
+            if now_monotonic - self._last_recovery_scan_monotonic < recovery_interval:
+                return 0
+        async with self._recovery_lock:
+            if not force:
+                now_monotonic = time.monotonic()
+                recovery_interval = min(60.0, max(10.0, self.visibility_timeout_seconds / 3))
+                if now_monotonic - self._last_recovery_scan_monotonic < recovery_interval:
+                    return 0
+            recovered = await self._recover_stale_processing_jobs_once(redis)
+            self._last_recovery_scan_monotonic = time.monotonic()
+            return recovered
+
+    async def _recover_stale_processing_jobs_once(self, redis: Redis) -> int:
         processing_jobs = await redis.lrange(
             settings.CONTRACT_QUEUE_PROCESSING_NAME, 0, -1
         )
         if not processing_jobs:
-            return
-        if processing_jobs:
-            await redis.delete(settings.CONTRACT_QUEUE_PROCESSING_NAME)
+            return 0
+        recovered = 0
+        now = _utc_now_dt()
+        seen: set[str] = set()
         for job_id in processing_jobs:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            key = self._job_key(job_id)
+            metadata = await redis.hgetall(key)
+            if not metadata:
+                await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 0, job_id)
+                logger.warning("Removed processing queue entry with missing metadata job_id=%s", job_id)
+                continue
+
+            status = str(metadata.get("status") or "").lower()
+            if status in {"completed", "failed"}:
+                await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 0, job_id)
+                continue
+            if status == "running" and not self._job_is_stale(metadata, now):
+                continue
+
             await redis.hset(
-                self._job_key(job_id),
+                key,
                 mapping={
                     "status": "queued",
                     "updated_at": _utc_now(),
                     "recovered_at": _utc_now(),
+                    "recovery_reason": "visibility_timeout",
                 },
             )
-            await redis.rpush(settings.CONTRACT_QUEUE_NAME, job_id)
+            await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 0, job_id)
+            await self._push_unique(redis, settings.CONTRACT_QUEUE_NAME, job_id)
+            recovered += 1
+            logger.warning(
+                "Recovered stale contract ingest job job_id=%s previous_status=%s visibility_timeout_seconds=%s",
+                job_id,
+                status or "unknown",
+                self.visibility_timeout_seconds,
+            )
+        return recovered
 
     async def _worker_loop(self, worker_name: str) -> None:
         redis = await self.connect()
@@ -221,6 +307,7 @@ class ContractIngestQueue:
                 )
                 backoff = REDIS_TIMEOUT_BACKOFF_INITIAL_SECONDS
                 if not job_id:
+                    await self._recover_stale_processing_jobs()
                     continue
                 await self._process_job(job_id, worker_name)
             except asyncio.CancelledError:
@@ -291,11 +378,14 @@ class ContractIngestQueue:
                 "status": "running",
                 "attempts": str(attempts),
                 "started_at": _utc_now(),
+                "heartbeat_at": _utc_now(),
                 "updated_at": _utc_now(),
                 "worker": worker_name,
+                "visibility_timeout_seconds": str(self.visibility_timeout_seconds),
             },
         )
 
+        heartbeat_task = asyncio.create_task(self._heartbeat_job(job_id, worker_name))
         try:
             from .contract_service import process_contract_ingest_job
 
@@ -306,6 +396,7 @@ class ContractIngestQueue:
                     "status": "completed",
                     "completed_at": _utc_now(),
                     "updated_at": _utc_now(),
+                    "heartbeat_at": _utc_now(),
                 },
             )
             await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
@@ -318,14 +409,54 @@ class ContractIngestQueue:
                     "status": "failed" if attempts >= retries else "queued",
                     "last_error": str(exc),
                     "updated_at": _utc_now(),
+                    "failed_at": _utc_now() if attempts >= retries else "",
+                    "next_retry_at": _utc_now() if attempts < retries else "",
                 },
             )
             await redis.lrem(settings.CONTRACT_QUEUE_PROCESSING_NAME, 1, job_id)
             if attempts >= retries:
-                await redis.rpush(settings.CONTRACT_QUEUE_DEADLETTER_NAME, job_id)
+                await redis.hset(
+                    key,
+                    mapping={
+                        "deadlettered_at": _utc_now(),
+                        "deadletter_reason": "max_retries_exceeded",
+                    },
+                )
+                await self._push_unique(redis, settings.CONTRACT_QUEUE_DEADLETTER_NAME, job_id)
             else:
                 await asyncio.sleep(min(2 ** attempts, 10))
-                await redis.rpush(settings.CONTRACT_QUEUE_NAME, job_id)
+                await self._push_unique(redis, settings.CONTRACT_QUEUE_NAME, job_id)
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat_task
+
+    async def _heartbeat_job(self, job_id: str, worker_name: str) -> None:
+        while True:
+            await asyncio.sleep(self.heartbeat_seconds)
+            redis = await self.connect()
+            if redis is None:
+                return
+            await redis.hset(
+                self._job_key(job_id),
+                mapping={
+                    "heartbeat_at": _utc_now(),
+                    "updated_at": _utc_now(),
+                    "worker": worker_name,
+                },
+            )
+
+    def _job_is_stale(self, metadata: Dict[str, Any], now: datetime) -> bool:
+        heartbeat = _parse_utc_timestamp(
+            metadata.get("heartbeat_at") or metadata.get("started_at") or metadata.get("updated_at")
+        )
+        if heartbeat is None:
+            return True
+        return now - heartbeat > timedelta(seconds=self.visibility_timeout_seconds)
+
+    async def _push_unique(self, redis: Redis, list_name: str, job_id: str) -> None:
+        await redis.lrem(list_name, 0, job_id)
+        await redis.rpush(list_name, job_id)
 
     @staticmethod
     def _job_key(job_id: str) -> str:

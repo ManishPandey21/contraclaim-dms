@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +6,7 @@ import pytest
 from bson import ObjectId
 
 from backend.rbac_backend.models.document import Document
+from backend.rbac_backend.core.config import settings
 from backend.rbac_backend.services.document_service import DocumentService
 
 
@@ -27,7 +28,7 @@ class FakeCollection:
                     return False
                 if "$exists" in expected and (key in doc) != expected["$exists"]:
                     return False
-                if "$lte" in expected and actual is not None and actual > expected["$lte"]:
+                if "$lte" in expected and (actual is None or actual > expected["$lte"]):
                     return False
                 continue
             if actual != expected:
@@ -137,6 +138,68 @@ async def test_process_document_job_marks_completed(monkeypatch):
     assert ok is True
     assert job["status"] == "completed"
     assert stored["processing_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_document_processing_job_marks_retrying(monkeypatch):
+    monkeypatch.setattr(settings, "DOCUMENT_PROCESSING_STALE_AFTER_SECONDS", 300)
+    db = FakeDB()
+    service = DocumentService(db)
+    document_id = ObjectId()
+    document = make_document(document_id)
+    await insert_document(db, document, document_id)
+    stale_time = datetime.utcnow() - timedelta(seconds=600)
+    await db.document_processing_jobs.insert_one(
+        {
+            "_id": "job-stale",
+            "document_id": str(document_id),
+            "status": "processing",
+            "stage": "extracting",
+            "attempts": 1,
+            "max_attempts": 3,
+            "updated_at": stale_time,
+            "heartbeat_at": stale_time,
+        }
+    )
+
+    recovered = await service.recover_stale_processing_jobs()
+
+    job = await db.document_processing_jobs.find_one({"_id": "job-stale"})
+    stored = await db.documents.find_one({"_id": document_id})
+    assert recovered == 1
+    assert job["status"] == "retrying"
+    assert job["stage"] == "recovered_stale"
+    assert job["run_after"] <= datetime.utcnow()
+    assert stored["processing_status"] == "retrying"
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_document_processing_job_keeps_fresh_heartbeat(monkeypatch):
+    monkeypatch.setattr(settings, "DOCUMENT_PROCESSING_STALE_AFTER_SECONDS", 300)
+    db = FakeDB()
+    service = DocumentService(db)
+    document_id = ObjectId()
+    document = make_document(document_id)
+    await insert_document(db, document, document_id)
+    now = datetime.utcnow()
+    await db.document_processing_jobs.insert_one(
+        {
+            "_id": "job-fresh",
+            "document_id": str(document_id),
+            "status": "processing",
+            "stage": "extracting",
+            "attempts": 1,
+            "max_attempts": 3,
+            "updated_at": now,
+            "heartbeat_at": now,
+        }
+    )
+
+    recovered = await service.recover_stale_processing_jobs()
+
+    job = await db.document_processing_jobs.find_one({"_id": "job-fresh"})
+    assert recovered == 0
+    assert job["status"] == "processing"
 
 
 @pytest.mark.asyncio

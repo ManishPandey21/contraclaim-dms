@@ -20,6 +20,7 @@ from fastapi import HTTPException, status
 from pymongo.errors import DuplicateKeyError
 
 from ..core.database import get_database
+from .audit_event_service import AuditEventService
 from .payment_gateway import PaymentGatewayInterface, WebhookEvent, get_payment_gateway
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,9 @@ class BillingWebhookService:
         await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
 
         # Billing record (financial audit trail).
+        record_status = "paid" if event.event_type == "payment.succeeded" else (
+            "failed" if event.event_type == "payment.failed" else event.event_type
+        )
         await db.billing_records.insert_one(
             {
                 "subscription_id": str(subscription["_id"]),
@@ -144,12 +148,28 @@ class BillingWebhookService:
                 "gateway_subscription_id": event.gateway_subscription_id,
                 "amount_minor": event.amount_minor,
                 "currency": event.currency,
-                "record_status": "paid" if event.event_type == "payment.succeeded" else (
-                    "failed" if event.event_type == "payment.failed" else event.event_type
-                ),
+                "record_status": record_status,
                 "created_at": now,
             }
         )
+        if record_status == "failed":
+            await AuditEventService(db).emit(
+                action="billing.webhook.payment_failed",
+                actor_id=f"system:webhook:{self.provider}",
+                resource_type="subscription",
+                resource_id=str(subscription["_id"]),
+                organization_id=str(subscription.get("organization_id", "")),
+                project_id=subscription.get("project_id"),
+                result="failure",
+                reason="payment_failed",
+                metadata={
+                    "requires_admin_review": True,
+                    "event_id": event.event_id,
+                    "event_type": event.event_type,
+                    "gateway_payment_id": event.gateway_payment_id,
+                    "gateway_subscription_id": event.gateway_subscription_id,
+                },
+            )
 
         # Subscription history for the lifecycle audit.
         await db.subscription_history.insert_one(
@@ -234,6 +254,24 @@ class BillingWebhookService:
             "validation_error": detail,
             "created_at": now,
         })
+        await AuditEventService(db).emit(
+            action="billing.webhook.amount_mismatch",
+            actor_id=f"system:webhook:{self.provider}",
+            resource_type="subscription",
+            resource_id=str(subscription["_id"]),
+            organization_id=str(subscription.get("organization_id", "")),
+            project_id=subscription.get("project_id"),
+            result="failure",
+            reason="amount_mismatch",
+            metadata={
+                "requires_admin_review": True,
+                "event_id": event.event_id,
+                "event_type": event.event_type,
+                "gateway_payment_id": event.gateway_payment_id,
+                "gateway_subscription_id": event.gateway_subscription_id,
+                "validation_error": detail,
+            },
+        )
         await db.subscription_history.insert_one({
             "subscription_id": str(subscription["_id"]),
             "organization_id": str(subscription.get("organization_id", "")),

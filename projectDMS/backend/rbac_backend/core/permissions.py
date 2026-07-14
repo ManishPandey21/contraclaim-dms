@@ -134,10 +134,20 @@ BILLING_PERMISSIONS: List[str] = [
     "subscription.offboarding_export",
 ]
 
+ROLE_MANAGEMENT_PERMISSIONS: List[str] = [
+    "roles:read",
+    "roles:create",
+    "roles:update",
+    "roles:delete",
+    "roles:assign",
+    "permissions:read",
+]
+
 CANONICAL_PERMISSIONS: List[str] = [
     *CLIENT_DMS_PERMISSIONS,
     *DRAFTING_PERMISSIONS,
     *BILLING_PERMISSIONS,
+    *ROLE_MANAGEMENT_PERMISSIONS,
 ]
 
 
@@ -276,6 +286,7 @@ PERMISSION_DOMAINS: Dict[str, str] = {
     **{permission: "client_dms" for permission in CLIENT_DMS_PERMISSIONS},
     **{permission: "drafting" for permission in DRAFTING_PERMISSIONS},
     **{permission: "billing" for permission in BILLING_PERMISSIONS},
+    **{permission: "role_management" for permission in ROLE_MANAGEMENT_PERMISSIONS},
 }
 
 LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {

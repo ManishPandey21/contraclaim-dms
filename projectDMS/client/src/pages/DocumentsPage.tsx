@@ -1303,12 +1303,18 @@ const DocumentsPage = () => {
         )
       );
 
-      // Show clear inline message via toast; EnhancedApi normalizes error messages
-      const message =
-        e?.message || "Draft already in progress for this document";
-      toast.error("Draft already in progress for this document", {
-        description: message,
-      });
+      // EnhancedApi normalizes backend 403 messages; do not mask entitlement
+      // or scope failures as duplicate draft requests.
+      const message = e?.message || "Unable to request draft for this document";
+      const isAccessDenied = /403|forbidden|permission|entitlement|subscription|not authorized|access denied/i.test(
+        message,
+      );
+      toast.error(
+        isAccessDenied ? "Draft request not allowed" : "Unable to request draft",
+        {
+          description: message,
+        },
+      );
     }
   };
 

@@ -4,6 +4,7 @@ import { Navigate, Outlet, useLocation } from "react-router-dom";
 import useRBAC from "@/hooks/useRBAC";
 import { isRouteAllowedByPermission } from "@/config/rolePermissions";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
+import AccessDenied from "@/components/auth/AccessDenied";
 import { getSecurityTermsStatus } from "@/services/security-terms-api";
 import { useEffect, useState } from "react";
 
@@ -98,7 +99,7 @@ const ProtectedRoute = ({ children }) => {
     if (location.pathname === "/overview") {
       return <InlineLogin />;
     }
-    return <Navigate to="/overview" replace />;
+    return <AccessDenied path={location.pathname} fallback="/overview" />;
   }
 
   return children ? children : <Outlet />;

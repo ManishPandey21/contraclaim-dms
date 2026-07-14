@@ -302,6 +302,13 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [runningAgent, setRunningAgent] = useState<string | null>(null);
   const [queueingAgent, setQueueingAgent] = useState<string | null>(null);
+  const [agentOptions, setAgentOptions] = useState({
+    agent_mode: "deterministic",
+    interest_rate: "",
+    interest_period_days: "",
+    limitation_period_years: "",
+    cause_of_action_date: "",
+  });
   const [queuedExport, setQueuedExport] = useState<BundleExport | null>(null);
   const [queueingExport, setQueueingExport] = useState<BundleExportFormat | null>(null);
 
@@ -497,11 +504,21 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     }
   };
 
+  const buildAgentOptions = (): Record<string, unknown> => {
+    const options: Record<string, unknown> = {};
+    if (agentOptions.agent_mode === "llm") options.agent_mode = "llm";
+    if (agentOptions.interest_rate.trim()) options.interest_rate = Number(agentOptions.interest_rate);
+    if (agentOptions.interest_period_days.trim()) options.interest_period_days = Number(agentOptions.interest_period_days);
+    if (agentOptions.limitation_period_years.trim()) options.limitation_period_years = Number(agentOptions.limitation_period_years);
+    if (agentOptions.cause_of_action_date.trim()) options.cause_of_action_date = agentOptions.cause_of_action_date.trim();
+    return options;
+  };
+
   const runAgent = async (agentType: string) => {
     if (!caseId) return;
     setRunningAgent(agentType);
     try {
-      const run = await runArbitrationAgent(caseId, agentType, { options: {} });
+      const run = await runArbitrationAgent(caseId, agentType, { options: buildAgentOptions() });
       const [nextDashboard, nextReadiness] = await Promise.all([
         getArbitrationCaseDashboard(caseId),
         getArbitrationReadiness(caseId),
@@ -524,7 +541,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     if (!caseId) return;
     setQueueingAgent(agentType);
     try {
-      const run = await queueArbitrationAgent(caseId, agentType, { options: {} });
+      const run = await queueArbitrationAgent(caseId, agentType, { options: buildAgentOptions() });
       setDashboard(await getArbitrationCaseDashboard(caseId));
       toast.success(`Queued ${pretty(run.agent_type)} job`);
     } catch {
@@ -963,6 +980,65 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                 <CardDescription>Populate case matrices from scoped sources</CardDescription>
               </CardHeader>
               <CardContent className="space-y-3">
+                <div className="space-y-2 rounded-md border p-2">
+                  <div className="text-xs font-medium text-muted-foreground">Agent options (applied to every run)</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Mode</Label>
+                      <Select
+                        value={agentOptions.agent_mode}
+                        onValueChange={(value) => setAgentOptions((prev) => ({ ...prev, agent_mode: value }))}
+                      >
+                        <SelectTrigger className="h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="deterministic">Deterministic</SelectItem>
+                          <SelectItem value="llm">LLM (needs review)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Interest rate % p.a.</Label>
+                      <Input
+                        className="h-8"
+                        type="number"
+                        value={agentOptions.interest_rate}
+                        onChange={(event) => setAgentOptions((prev) => ({ ...prev, interest_rate: event.target.value }))}
+                        aria-label="Interest rate percent per annum"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Interest period (days)</Label>
+                      <Input
+                        className="h-8"
+                        type="number"
+                        value={agentOptions.interest_period_days}
+                        onChange={(event) => setAgentOptions((prev) => ({ ...prev, interest_period_days: event.target.value }))}
+                        aria-label="Interest period in days"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Limitation period (years)</Label>
+                      <Input
+                        className="h-8"
+                        type="number"
+                        value={agentOptions.limitation_period_years}
+                        onChange={(event) => setAgentOptions((prev) => ({ ...prev, limitation_period_years: event.target.value }))}
+                        aria-label="Limitation period in years"
+                      />
+                    </div>
+                    <div className="col-span-2 space-y-1">
+                      <Label className="text-xs">Cause of action date (YYYY-MM-DD)</Label>
+                      <Input
+                        className="h-8"
+                        value={agentOptions.cause_of_action_date}
+                        onChange={(event) => setAgentOptions((prev) => ({ ...prev, cause_of_action_date: event.target.value }))}
+                        aria-label="Cause of action date"
+                      />
+                    </div>
+                  </div>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {AGENT_ACTIONS.map((action) => (
                     <Button

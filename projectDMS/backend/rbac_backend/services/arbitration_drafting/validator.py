@@ -64,6 +64,16 @@ class ArbitrationDraftValidator:
             warnings.append(message)
             approval_blockers.append(message)
 
+        # Audit P2: a draft without a case link skipped the matrix readiness gate.
+        # Fail-visible: this is a standing warning (legal review required), not a
+        # silent pass — the gated path is linking the draft to a case workspace.
+        if not context.get("draft", {}).get("case_id"):
+            warnings.append(
+                "Draft is not linked to an arbitration case: the matrix readiness gate "
+                "(jurisdiction, limitation, quantum, expert alignment) was not applied. "
+                "Link the draft to a case workspace before filing."
+            )
+
         matrix_context = context.get("matrix_context") or {}
         self._duplication_warnings(matrix_context, warnings)
         self._global_claim_warnings(matrix_context, warnings)

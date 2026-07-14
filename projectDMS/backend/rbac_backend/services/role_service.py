@@ -25,6 +25,19 @@ RESERVED_ROLE_KEYS = {
     "projectadmin",
     "projectadministrator",
 }
+NON_DELEGABLE_PERMISSION_PREFIXES = (
+    "platform.",
+    "billing.",
+    "subscription.",
+    "permissions:",
+    "roles:",
+)
+NON_DELEGABLE_PERMISSIONS = {
+    "*",
+    "system:admin",
+    "dms.admin",
+    "drafting.admin",
+}
 
 class RoleServiceError(Exception):
     """Custom exception for role service errors."""
@@ -133,6 +146,40 @@ class RoleService:
             return False
         return bool(self._role_identity_keys(role) & keys)
 
+    def _is_superadmin_actor(self, actor: Any) -> bool:
+        return "superadmin" in self._extract_role_names(actor)
+
+    def _normalize_permission_list(self, permissions: Optional[List[str]]) -> List[str]:
+        seen: set[str] = set()
+        normalized: List[str] = []
+        for permission in permissions or []:
+            value = str(permission or "").strip()
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _ensure_permissions_assignable(self, actor: Any, permissions: Optional[List[str]]) -> List[str]:
+        normalized = self._normalize_permission_list(permissions)
+        if self._is_superadmin_actor(actor):
+            return normalized
+
+        for permission in normalized:
+            lowered = permission.lower()
+            if lowered in NON_DELEGABLE_PERMISSIONS or lowered.startswith(NON_DELEGABLE_PERMISSION_PREFIXES):
+                raise RoleServiceError(
+                    f"Not authorized to assign privileged permission: {permission}",
+                    403,
+                )
+        return normalized
+
+    def _field_changed(self, existing: Dict[str, Any], field: str, value: Any) -> bool:
+        current = existing.get(field)
+        if current is None and value in (None, ""):
+            return False
+        return str(current) != str(value)
+
     def _collect_user_org_ids(self, current_user: Any) -> set[str]:
         org_ids: set[str] = set()
         if current_user is None:
@@ -218,6 +265,10 @@ class RoleService:
             "is_system": self._get_role_field(role, "is_system"),
         }
         scope = self._derive_scope_from_doc(role_doc)
+        if self._get_role_field(role_doc, "is_system") or self._role_matches_keys(
+            role_doc, SYSTEM_ROLE_NAMES | RESERVED_ROLE_KEYS
+        ):
+            return False
 
         if "orgadmin" in role_names:
             if scope not in {"organization", "project"}:
@@ -277,6 +328,8 @@ class RoleService:
         scope = self._derive_scope_from_doc(role_doc)
         if scope == "system":
             raise RoleServiceError("Not authorized to modify system roles", 403)
+        if role_doc.get("is_system") or self._role_matches_keys(role_doc, SYSTEM_ROLE_NAMES | RESERVED_ROLE_KEYS):
+            raise RoleServiceError("Not authorized to modify reserved or system roles", 403)
 
         org_id = str(getattr(current_user, "organization_id", "") or "")
         project_ids = {str(p) for p in (getattr(current_user, "projects", []) or []) if p}
@@ -285,7 +338,7 @@ class RoleService:
             if scope != "organization":
                 raise RoleServiceError("Organization admins may only manage organization roles", 403)
             role_org = role_doc.get("organization_id")
-            if role_org and str(role_org) != org_id:
+            if not role_org or str(role_org) != org_id:
                 raise RoleServiceError("Not authorized to manage roles for another organization", 403)
             return
 
@@ -293,7 +346,7 @@ class RoleService:
             if scope != "project":
                 raise RoleServiceError("Project admins may only manage project roles", 403)
             role_project = role_doc.get("project_id")
-            if role_project and str(role_project) not in project_ids:
+            if not role_project or str(role_project) not in project_ids:
                 raise RoleServiceError("Not authorized to manage roles for another project", 403)
             return
 
@@ -394,11 +447,13 @@ class RoleService:
             else:
                 raise RoleServiceError("Not authorized to create roles", 403)
 
+            permissions = self._ensure_permissions_assignable(created_by, role_data.permissions)
+
             # Create role document
             role_doc = {
                 "name": role_data.name,
                 "description": role_data.description or "",
-                "permissions": role_data.permissions or [],
+                "permissions": permissions,
                 "is_system": bool(role_data.is_system) if is_superadmin else False,
                 "scope": scope,
                 "organization_id": str(organization_id) if organization_id else None,
@@ -571,6 +626,19 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
 
             self._ensure_role_manageable(updated_by, existing)
+            if not self._is_superadmin_actor(updated_by):
+                if update_data.name is not None and self._normalize_role_key(update_data.name) in RESERVED_ROLE_KEYS:
+                    raise RoleServiceError("Not authorized to rename roles to reserved names", 403)
+                if update_data.is_system is not None and self._field_changed(existing, "is_system", bool(update_data.is_system)):
+                    raise RoleServiceError("Not authorized to change system role status", 403)
+                if update_data.scope is not None and update_data.scope != self._derive_scope_from_doc(existing):
+                    raise RoleServiceError("Not authorized to change role scope", 403)
+                if update_data.organization_id is not None and self._field_changed(
+                    existing, "organization_id", update_data.organization_id
+                ):
+                    raise RoleServiceError("Not authorized to move roles across organizations", 403)
+                if update_data.project_id is not None and self._field_changed(existing, "project_id", update_data.project_id):
+                    raise RoleServiceError("Not authorized to move roles across projects", 403)
 
             # Build update document
             update_doc = {
@@ -580,11 +648,14 @@ class RoleService:
             
             # Add fields that are being updated
             if update_data.name is not None:
+                duplicate = await db.roles.find_one({"name": update_data.name})
+                if duplicate and str(duplicate.get("_id")) != str(query_id):
+                    raise RoleServiceError(f"Role '{update_data.name}' already exists", 409)
                 update_doc["name"] = update_data.name
             if update_data.description is not None:
                 update_doc["description"] = update_data.description
             if update_data.permissions is not None:
-                update_doc["permissions"] = update_data.permissions
+                update_doc["permissions"] = self._ensure_permissions_assignable(updated_by, update_data.permissions)
             if update_data.is_system is not None:
                 update_doc["is_system"] = update_data.is_system
             if update_data.scope is not None:
@@ -645,6 +716,8 @@ class RoleService:
             
             return result.modified_count > 0
             
+        except RoleServiceError:
+            raise
         except Exception as e:
             logger.error(f"Failed to delete role {role_id}: {str(e)}")
             return False
@@ -748,6 +821,13 @@ class RoleService:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
+
+            existing = await db.roles.find_one({"_id": query_id})
+            if not existing:
+                raise RoleServiceError("Role not found", 404)
+
+            self._ensure_role_manageable(updated_by, existing)
+            permission_ids = self._ensure_permissions_assignable(updated_by, permission_ids)
             
             # Update role permissions
             result = await db.roles.update_one(
@@ -795,6 +875,7 @@ class RoleService:
                 raise RoleServiceError("Role not found", 404)
 
             self._ensure_role_manageable(updated_by, existing)
+            permission_id = self._ensure_permissions_assignable(updated_by, [permission_id])[0]
 
             # Add permission to role (if not already present)
             result = await db.roles.update_one(

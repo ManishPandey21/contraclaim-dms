@@ -1,11 +1,11 @@
 import React, { PropsWithChildren } from "react";
-import { Navigate } from "react-router-dom";
 import useRBAC from "@/hooks/useRBAC";
 import { isRouteAllowedByPermission } from "@/config/rolePermissions";
+import AccessDenied from "@/components/auth/AccessDenied";
 
 /**
  * Guards a given route element by checking user roles against ROUTE_RULES.
- * If unauthorized, redirects to a safe fallback (Overview).
+ * If unauthorized, renders a clear fallback page with the required permission.
  */
 type RoleGuardProps = {
   path: string; // absolute app path, e.g. "/register"
@@ -26,7 +26,7 @@ const RoleGuard: React.FC<PropsWithChildren<RoleGuardProps>> = ({
 
   const allowed = isRouteAllowedByPermission(can, path);
   if (!allowed) {
-    return <Navigate to={fallback} replace />;
+    return <AccessDenied path={path} fallback={fallback} />;
   }
 
   return <>{children}</>;

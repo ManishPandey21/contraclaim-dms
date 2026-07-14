@@ -798,11 +798,26 @@ class ArbitrationContextBuilder:
     ) -> List[Dict[str, Any]]:
         if not draft.get("project_id"):
             return []
+        # Audit P2: registers are included by default, but the user controls it.
+        if draft.get("include_register_sources") is False:
+            context_warnings.append(
+                "Project register sources (claims, variations, IPCs, bank guarantees) are disabled for this draft."
+            )
+            return []
         out: List[Dict[str, Any]] = []
         out.extend(await self._claim_register_sources(draft, offset + len(out), include_review_sources))
         out.extend(await self._variation_register_sources(draft, offset + len(out), include_review_sources))
         out.extend(await self._ipc_register_sources(draft, offset + len(out), include_review_sources))
         out.extend(await self._bank_guarantee_sources(draft, offset + len(out), include_review_sources))
+        excluded = {str(item) for item in draft.get("excluded_register_ids") or [] if item}
+        if excluded:
+            kept = [row for row in out if str(row.get("source_id")) not in excluded]
+            removed_count = len(out) - len(kept)
+            if removed_count:
+                context_warnings.append(
+                    f"{removed_count} register source(s) excluded from this draft by user selection."
+                )
+            out = kept
         return out
 
     def _scope_query(self, draft: Dict[str, Any], *, require_contract: bool = False) -> Optional[Dict[str, Any]]:

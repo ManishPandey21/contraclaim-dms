@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import contextlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
@@ -856,6 +858,7 @@ class DocumentService:
     async def process_next_processing_jobs(self, *, limit: int = 3) -> int:
         """Claim and process queued durable jobs. Intended for worker/background loops."""
 
+        await self.recover_stale_processing_jobs(limit=max(1, limit))
         processed = 0
         for _ in range(max(1, limit)):
             job = await self._claim_next_processing_job()
@@ -881,6 +884,7 @@ class DocumentService:
                     "status": "processing",
                     "stage": "claimed",
                     "started_at": now,
+                    "heartbeat_at": now,
                     "updated_at": now,
                 },
                 "$inc": {"attempts": 1},
@@ -888,6 +892,93 @@ class DocumentService:
             sort=[("created_at", 1)],
             return_document=ReturnDocument.AFTER,
         )
+
+    async def recover_stale_processing_jobs(self, *, limit: int = 25) -> int:
+        """Move crashed/stuck Mongo-backed document jobs back to retrying.
+
+        The document pipeline touches local/S3 storage, OCR, Mongo metadata,
+        Qdrant vectors, and FalkorDB graph sync. If a worker dies while a job is
+        marked ``processing``, that document can remain stuck forever. Recovery
+        is heartbeat-based so a slow but healthy OCR/vector job is not duplicated.
+        """
+
+        db = await self._get_db()
+        recovered = 0
+        now = datetime.utcnow()
+        stale_after_seconds = max(300, int(settings.DOCUMENT_PROCESSING_STALE_AFTER_SECONDS))
+        stale_before = now - timedelta(seconds=stale_after_seconds)
+        for _ in range(max(1, limit)):
+            job = await db.document_processing_jobs.find_one_and_update(
+                {
+                    "status": "processing",
+                    "$or": [
+                        {"heartbeat_at": {"$exists": True, "$lte": stale_before}},
+                        {"heartbeat_at": {"$exists": False}, "updated_at": {"$lte": stale_before}},
+                    ],
+                },
+                {
+                    "$set": {
+                        "status": "retrying",
+                        "stage": "recovered_stale",
+                        "run_after": now,
+                        "recovered_at": now,
+                        "updated_at": now,
+                        "error": {
+                            "message": f"Recovered stale processing job after {stale_after_seconds} seconds without heartbeat",
+                            "timestamp": now,
+                            "terminal": False,
+                        },
+                    }
+                },
+                sort=[("updated_at", 1)],
+                return_document=ReturnDocument.AFTER,
+            )
+            if not job:
+                break
+            recovered += 1
+            document_id = str(job.get("document_id") or "")
+            try:
+                await db.documents.update_one(
+                    {"_id": self._validate_document_id(document_id)},
+                    {
+                        "$set": {
+                            "processing_status": "retrying",
+                            "processing_error": job.get("error"),
+                            "updatedAt": now,
+                        }
+                    },
+                )
+            except Exception:
+                logger.debug(
+                    "Unable to update document status while recovering stale processing job document_id=%s job_id=%s",
+                    document_id,
+                    job.get("_id"),
+                    exc_info=True,
+                )
+            logger.warning(
+                "Recovered stale document processing job document_id=%s job_id=%s stale_after_seconds=%s",
+                document_id,
+                job.get("_id"),
+                stale_after_seconds,
+            )
+        return recovered
+
+    async def _heartbeat_processing_job(self, job_id: str) -> None:
+        interval = max(
+            5,
+            min(
+                int(settings.DOCUMENT_PROCESSING_HEARTBEAT_SECONDS),
+                max(5, int(settings.DOCUMENT_PROCESSING_STALE_AFTER_SECONDS) // 2),
+            ),
+        )
+        while True:
+            await asyncio.sleep(interval)
+            db = await self._get_db()
+            now = datetime.utcnow()
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id, "status": "processing"},
+                {"$set": {"heartbeat_at": now, "updated_at": now}},
+            )
 
     async def process_document_job(
         self,
@@ -936,6 +1027,7 @@ class DocumentService:
                 }
             },
         )
+        heartbeat_task = asyncio.create_task(self._heartbeat_processing_job(job_id))
         try:
             ok = await self.process_document_async(
                 document_id=document_id,
@@ -949,6 +1041,10 @@ class DocumentService:
             logger.exception("Document processing job failed document_id=%s job_id=%s", document_id, job_id)
             ok = False
             await self._mark_processing_failure(job, str(exc))
+        finally:
+            heartbeat_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat_task
 
         if ok:
             completed_at = datetime.utcnow()

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
@@ -58,6 +58,75 @@ async def export_audit_events(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/audit/admin-review", response_model=List[Dict[str, Any]])
+async def list_admin_review_items(
+    organization_id: str = Query(...),
+    project_id: Optional[str] = Query(None),
+    status_value: Optional[str] = Query("open", alias="status"),
+    severity: Optional[str] = Query(None),
+    reason: Optional[str] = Query(None),
+    limit: int = Query(500, ge=1, le=5000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Tenant-scoped admin review queue raised from audit and authorization events."""
+    await PolicyService().authorize(
+        current_user,
+        Permissions.AUDIT_VIEW,
+        resource_type="admin_review",
+        organization_id=organization_id,
+        project_id=project_id,
+    )
+    return await AuditEventService(db).query_admin_review_items(
+        organization_id=organization_id,
+        project_id=project_id,
+        status=status_value,
+        severity=severity,
+        reason=reason,
+        limit=limit,
+    )
+
+
+@router.patch("/audit/admin-review/{review_id}", response_model=Dict[str, Any])
+async def update_admin_review_item(
+    review_id: str,
+    organization_id: str = Query(...),
+    status_value: str = Query(..., alias="status", pattern="^(open|acknowledged|resolved|dismissed)$"),
+    note: Optional[str] = Query(None, max_length=2000),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Acknowledge, resolve, dismiss, or reopen a tenant-scoped review item."""
+    await PolicyService().authorize(
+        current_user,
+        Permissions.AUDIT_VIEW,
+        resource_type="admin_review",
+        resource_id=review_id,
+        organization_id=organization_id,
+    )
+    service = AuditEventService(db)
+    updated = await service.update_admin_review_item(
+        review_id,
+        organization_id=organization_id,
+        status=status_value,
+        reviewer_id=getattr(current_user, "id", None),
+        note=note,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Admin review item not found")
+    await service.emit(
+        action="admin_review.update",
+        actor_id=getattr(current_user, "id", None),
+        resource_type="admin_review",
+        resource_id=review_id,
+        organization_id=organization_id,
+        result="success",
+        reason=status_value,
+        metadata={"note_present": bool(note)},
+    )
+    return {"status": status_value, "review_id": review_id}
 
 
 @router.get("/reports", response_model=List[ReportDefinition])

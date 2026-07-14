@@ -2000,6 +2000,51 @@ def test_reference_mutations_blocked_on_locked_draft():
     assert exc_info.value.status_code == 409
 
 
+def test_validator_flags_ungated_draft_without_case_link():
+    base_context = {
+        "draft": {"_id": "draft-1", "project_id": "project-1", "draft_type": "statement_of_claim", "title": "SoC"},
+        "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "citation": "X", "snippet": "X"}],
+        "paragraph_responses": [],
+    }
+
+    report = ArbitrationDraftValidator().validation_report(base_context, "Draft body. [S1: X]")
+    assert any("not linked to an arbitration case" in item for item in report["warnings"])
+    # A warning, not a blocker: standalone drafts stay usable but flagged.
+    assert not any("not linked to an arbitration case" in item for item in report["approval_blockers"])
+
+    gated = {**base_context, "draft": {**base_context["draft"], "case_id": "case-1"}}
+    report = ArbitrationDraftValidator().validation_report(gated, "Draft body. [S1: X]")
+    assert not any("not linked to an arbitration case" in item for item in report["warnings"])
+
+
+def test_register_sources_respect_draft_controls():
+    draft = {
+        "_id": "draft-1",
+        "case_id": "case-1",
+        "organization_id": "org-1",
+        "project_id": "project-1",
+        "draft_type": "statement_of_claim",
+        "title": "EOT claim",
+    }
+
+    # Default: claim register row (claim-1) joins the ledger.
+    context = asyncio.run(ArbitrationContextBuilder(_FakeDb()).build(draft, [], [], [], object()))
+    assert any(row.get("source_origin") == "claim_register" for row in context["source_ledger"])
+
+    # Per-row exclusion removes exactly that register row and warns.
+    excluded_draft = {**draft, "excluded_register_ids": ["claim-1"]}
+    context = asyncio.run(ArbitrationContextBuilder(_FakeDb()).build(excluded_draft, [], [], [], object()))
+    assert all(row.get("source_id") != "claim-1" for row in context["source_ledger"])
+    assert any("excluded from this draft" in warning for warning in context["context_warnings"])
+
+    # Wholesale opt-out removes every register origin and warns.
+    disabled_draft = {**draft, "include_register_sources": False}
+    context = asyncio.run(ArbitrationContextBuilder(_FakeDb()).build(disabled_draft, [], [], [], object()))
+    register_origins = {"claim_register", "variation_register", "ipc_register", "bank_guarantee_register"}
+    assert not any(row.get("source_origin") in register_origins for row in context["source_ledger"])
+    assert any("register sources" in warning.lower() for warning in context["context_warnings"])
+
+
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
     fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
     data = json.loads(fixture_path.read_text(encoding="utf-8"))

@@ -333,24 +333,30 @@ exhibit id; **exhibit files that cannot be resolved to bytes**; **pin-cites**
 
 **P2 — grounding / process risks**
 
-5. **Standalone drafts bypass the readiness gate.** A draft created without `case_id`
-   generates immediately — still ledger-grounded and validator-checked, but without
-   matrices, jurisdiction/limitation checks, or human matrix review. *Recommend: require
-   (or strongly default) a case link for SoC/SoD/counterclaim/rejoinder, or show a
-   prominent "ungated draft" banner.*
+5. ~~Standalone drafts bypass the readiness gate.~~ **Resolved 2026-07-11:** the
+   validator now emits a standing "not linked to an arbitration case — readiness gate
+   not applied" warning on every ungated version (legal review required, fail-visible);
+   the draft page shows a prominent amber **Ungated draft** banner linking to the case
+   workspaces; and the creation forms carry a **"Case workspace (recommended)"**
+   selector (filtered to the chosen project) so the gated path is the default
+   affordance. Standalone drafts remain possible but are never silent.
 6. **Deterministic generator = template + citations, not prose.** Sections render matrix
    rows and citations; a filing-quality narrative still needs lawyer editing (by design —
    the LLM drafting upgrade would slot behind the same ledger/validator contract).
 7. **Rejoinder/counterclaim agents are review-only in deterministic mode** (defence
    analysis has an LLM implementation; rejoinder/counterclaim matrix rows are manual or
    imported). *Extend LLM mode to generate rejoinder replies from imported SoD paragraphs.*
-8. **Registers ingest without per-row user selection.** Claim/variation/IPC/BG register
-   rows within the project scope join the ledger automatically (status-filtered). This is
-   project data, not foreign data, but "grounded only in documents selected by the user"
-   is diluted. *Add a per-case register include/exclude list.*
-9. **Interest/limitation parameters arrive via agent run options** (`interest_rate`,
-   `cause_of_action_date`…), which the UI's agent buttons don't expose. *Add an options
-   dialog for agent runs.*
+8. ~~Registers ingest without per-row user selection.~~ **Resolved 2026-07-11:** drafts
+   now carry `include_register_sources` (creation-form toggle; wholesale opt-out with a
+   context warning) and `excluded_register_ids` (per-row **Exclude** buttons on
+   register-origin ledger rows in the Evidence Status panel, via `PATCH /drafts/{id}`);
+   exclusions are surfaced as context warnings and an "N register source(s) excluded"
+   note.
+9. ~~Interest/limitation parameters not exposed in the UI.~~ **Resolved 2026-07-11:**
+   the case dashboard's Agent Runs card gained an **Agent options** panel
+   (deterministic/LLM mode, interest rate % p.a., interest period days, limitation
+   period years, cause-of-action date) applied to every run/queue call; empty fields are
+   omitted from the payload.
 10. **Amount/date validator is text-match based** — a supported amount reformatted
     (e.g. `1,000,000` vs `10,00,000`) can false-positive as unsupported; conversely
     amounts inside long snippets pass. Acceptable fail-closed bias, but worth normalizing.

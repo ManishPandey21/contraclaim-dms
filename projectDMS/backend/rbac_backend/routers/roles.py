@@ -8,9 +8,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from typing import List, Optional, Dict, Any
 import logging
 
-from typing import List, Optional, Dict, Any
-import logging
-
 from ..core.security import get_current_user, CurrentUser, require_permission
 from ..services.role_service import RoleService, RoleServiceError
 from ..services.permission_service import PermissionService
@@ -39,6 +36,44 @@ def get_permission_service() -> PermissionService:
 
 def get_policy_service() -> PolicyService:
     return PolicyService()
+
+def _role_field(role: Any, key: str) -> Any:
+    if isinstance(role, dict):
+        return role.get(key) or role.get(key.replace("_", ""))
+    return getattr(role, key, None)
+
+def _role_policy_scope(role: Any) -> tuple[Optional[str], Optional[str]]:
+    organization_id = (
+        _role_field(role, "organization_id")
+        or _role_field(role, "organizationId")
+    )
+    project_id = (
+        _role_field(role, "project_id")
+        or _role_field(role, "projectId")
+    )
+    return (
+        str(organization_id) if organization_id else None,
+        str(project_id) if project_id else None,
+    )
+
+def _create_role_policy_scope(role_data: RoleCreate, current_user: CurrentUser) -> tuple[Optional[str], Optional[str]]:
+    roles = {str(role).lower() for role in (current_user.roles or [])}
+    if "superadmin" in roles:
+        return (
+            str(role_data.organization_id) if role_data.organization_id else None,
+            str(role_data.project_id) if role_data.project_id else None,
+        )
+    if "orgadmin" in roles:
+        return (str(current_user.organization_id) if current_user.organization_id else None, None)
+    if "projectadmin" in roles:
+        projects = [str(project) for project in (current_user.projects or []) if project]
+        requested_project = str(role_data.project_id) if role_data.project_id else None
+        project_id = requested_project or (projects[0] if projects else None)
+        return (str(current_user.organization_id) if current_user.organization_id else None, project_id)
+    return (
+        str(role_data.organization_id) if role_data.organization_id else None,
+        str(role_data.project_id) if role_data.project_id else None,
+    )
 
 @router.get("/roles", response_model=List[Role])
 async def get_roles(
@@ -118,7 +153,14 @@ async def create_role(
 ):
     """Create new role."""
     await require_step_up(request, current_user, action="platform.role.manage")
-    await policy.authorize(current_user, "platform.role.manage", resource_type="role")
+    organization_id, project_id = _create_role_policy_scope(role_data, current_user)
+    await policy.authorize(
+        current_user,
+        "roles:create",
+        resource_type="role",
+        organization_id=organization_id,
+        project_id=project_id,
+    )
     try:
         role = await role_service.create_role(role_data, current_user)
         await AuditEventService().emit(
@@ -154,9 +196,19 @@ async def update_role(
 ):
     """Update role."""
     await require_step_up(request, current_user, action="platform.role.manage")
-    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         before = await role_service.get_role_by_id(role_id)
+        if not before:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        organization_id, project_id = _role_policy_scope(before)
+        await policy.authorize(
+            current_user,
+            "roles:update",
+            resource_type="role",
+            resource_id=role_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
         role = await role_service.update_role(role_id, update_data, current_user)
         await AuditEventService().emit(
             action="role.updated",
@@ -191,9 +243,19 @@ async def delete_role(
 ):
     """Delete role."""
     await require_step_up(request, current_user, action="platform.role.manage")
-    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         before = await role_service.get_role_by_id(role_id)
+        if not before:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        organization_id, project_id = _role_policy_scope(before)
+        await policy.authorize(
+            current_user,
+            "roles:delete",
+            resource_type="role",
+            resource_id=role_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
         success = await role_service.delete_role(role_id, current_user)
         if not success:
             raise HTTPException(
@@ -262,9 +324,19 @@ async def add_role_permission(
 ):
     """Add permission to role."""
     await require_step_up(request, current_user, action="platform.role.manage")
-    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         before = await role_service.get_role_by_id(role_id)
+        if not before:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        organization_id, project_id = _role_policy_scope(before)
+        await policy.authorize(
+            current_user,
+            "roles:assign",
+            resource_type="role",
+            resource_id=role_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
         role = await role_service.add_permission_to_role(role_id, permission_id, current_user)
         await AuditEventService().emit(
             action="role.permission_added",
@@ -301,9 +373,19 @@ async def remove_role_permission(
 ):
     """Remove permission from role."""
     await require_step_up(request, current_user, action="platform.role.manage")
-    await policy.authorize(current_user, "platform.role.manage", resource_type="role", resource_id=role_id)
     try:
         before = await role_service.get_role_by_id(role_id)
+        if not before:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Role not found")
+        organization_id, project_id = _role_policy_scope(before)
+        await policy.authorize(
+            current_user,
+            "roles:assign",
+            resource_type="role",
+            resource_id=role_id,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
         role = await role_service.remove_permission_from_role(role_id, permission_id, current_user)
         await AuditEventService().emit(
             action="role.permission_removed",

@@ -54,6 +54,8 @@ export interface ArbitrationDraftCreatePayload {
   claim_amount?: number | null;
   currency?: string | null;
   interest_rate?: number | null;
+  include_register_sources?: boolean;
+  excluded_register_ids?: string[];
   selected_references?: ArbitrationReferenceInput[];
   claim_heads?: ArbitrationClaimHeadInput[];
 }
@@ -71,6 +73,8 @@ export interface ArbitrationDraft {
   status: string;
   is_locked: boolean;
   current_version: number;
+  include_register_sources?: boolean;
+  excluded_register_ids?: string[];
   latest_version?: ArbitrationDraftVersion | null;
   selected_references?: ArbitrationSelectedReference[];
   claim_heads?: ArbitrationClaimHeadInput[];
@@ -113,6 +117,11 @@ export async function createArbitrationDraft(payload: ArbitrationDraftCreatePayl
 
 export async function getArbitrationDraft(draftId: string) {
   const { data } = await api.get<ArbitrationDraft>(`/arbitration/drafts/${draftId}`);
+  return data;
+}
+
+export async function updateArbitrationDraft(draftId: string, payload: Record<string, unknown>) {
+  const { data } = await api.patch<ArbitrationDraft>(`/arbitration/drafts/${draftId}`, payload);
   return data;
 }
 

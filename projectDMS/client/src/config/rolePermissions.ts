@@ -22,6 +22,103 @@ export const Roles = {
 
 export type Role = (typeof Roles)[keyof typeof Roles];
 
+export const ROLE_ALIASES: Record<string, string> = {
+  "organization-user": Roles.OrgUser,
+  "org-user": Roles.OrgUser,
+  "organization user": Roles.OrgUser,
+  organizationuser: Roles.OrgUser,
+  orguser: Roles.OrgUser,
+  "organization-admin": Roles.OrgAdmin,
+  "org-admin": Roles.OrgAdmin,
+  "organization admin": Roles.OrgAdmin,
+  organizationadmin: Roles.OrgAdmin,
+  orgadmin: Roles.OrgAdmin,
+  "project-user": Roles.ProjectUser,
+  "project user": Roles.ProjectUser,
+  projectuser: Roles.ProjectUser,
+  "proj-user": Roles.ProjectUser,
+  "proj user": Roles.ProjectUser,
+  projuser: Roles.ProjectUser,
+  "project-admin": Roles.ProjectAdmin,
+  "project admin": Roles.ProjectAdmin,
+  projectadmin: Roles.ProjectAdmin,
+  "proj-admin": Roles.ProjectAdmin,
+  "proj admin": Roles.ProjectAdmin,
+  projadmin: Roles.ProjectAdmin,
+  "super-admin": Roles.SuperAdmin,
+  "super admin": Roles.SuperAdmin,
+  superadministrator: Roles.SuperAdmin,
+  "super-user": "superuser",
+  "super user": "superuser",
+  superuser: "superuser",
+  superadmin: Roles.SuperAdmin,
+  admin: Roles.SuperAdmin,
+  administrator: Roles.SuperAdmin,
+  "document-controller": Roles.DocumentController,
+  "document controller": Roles.DocumentController,
+  documentcontroller: Roles.DocumentController,
+  doccontroller: Roles.DocumentController,
+  reporter: Roles.Reporter,
+  auditor: Roles.Reporter,
+  "settings-manager": Roles.SettingsManager,
+  "settings manager": Roles.SettingsManager,
+  settingsmanager: Roles.SettingsManager,
+  settings_manager: Roles.SettingsManager,
+  "limited-user": Roles.LimitedUser,
+  "limited user": Roles.LimitedUser,
+  limiteduser: Roles.LimitedUser,
+  limited_user: Roles.LimitedUser,
+  "contract-manager-organization": Roles.ContractManagerOrg,
+  "contract manager organization": Roles.ContractManagerOrg,
+  "contract manager - organization": Roles.ContractManagerOrg,
+  contractmgr_org: Roles.ContractManagerOrg,
+  "contraclaim drafting manager": Roles.DraftingManager,
+  contraclaim_drafting_manager: Roles.DraftingManager,
+  "contraclaim expert drafter": Roles.ExpertDrafter,
+  "contraclaim contract expert - drafter": Roles.ExpertDrafter,
+  contraclaim_expert_drafter: Roles.ExpertDrafter,
+  "contraclaim expert reviewer": Roles.ExpertReviewer,
+  "contraclaim contract expert - reviewer": Roles.ExpertReviewer,
+  contraclaim_expert_reviewer: Roles.ExpertReviewer,
+  "contraclaim billing admin": Roles.BillingAdmin,
+  contraclaim_billing_admin: Roles.BillingAdmin,
+};
+
+export function normalizeRoleId(role: string): string {
+  const raw = String(role || "").trim().toLowerCase();
+  if (!raw) return "";
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+  return ROLE_ALIASES[raw] || ROLE_ALIASES[compact] || raw;
+}
+
+export const ROLE_LABELS: Record<string, string> = {
+  [Roles.SuperAdmin]: "Super Admin",
+  [Roles.OrgAdmin]: "Organization Admin",
+  [Roles.OrgUser]: "Organization User",
+  [Roles.ProjectAdmin]: "Project Admin",
+  [Roles.ProjectUser]: "Project User",
+  [Roles.DocumentController]: "Document Controller",
+  [Roles.Reporter]: "Reporter / Auditor",
+  [Roles.SettingsManager]: "Settings Manager",
+  [Roles.LimitedUser]: "Limited User",
+  [Roles.ContractManagerOrg]: "Contract Manager",
+  [Roles.DraftingManager]: "Drafting Manager",
+  [Roles.ExpertDrafter]: "Expert Drafter",
+  [Roles.ExpertReviewer]: "Expert Reviewer",
+  [Roles.BillingAdmin]: "Billing Admin",
+};
+
+export function labelForRole(role: string): string {
+  const normalized = normalizeRoleId(role);
+  return (
+    ROLE_LABELS[normalized] ||
+    normalized
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase()) ||
+    "User"
+  );
+}
+
 const ALL_APP_ROLES: Role[] = Object.values(Roles);
 const ORG_PROJECT_ROLES: Role[] = [
   Roles.OrgAdmin,
@@ -56,6 +153,105 @@ const DRAFTING_ROLES: Role[] = [
   Roles.ExpertDrafter,
   Roles.ExpertReviewer,
 ];
+
+// Keep frontend aliases aligned with backend core.permissions.LEGACY_PERMISSION_ALIASES
+// plus the non-document org/project aliases retained by PermissionService.
+// Document access is intentionally canonical-only, matching backend policy.
+export const PERMISSION_ALIASES: Record<string, string[]> = {
+  "dms.dashboard.view": ["projects:read"],
+  "dms.report.view": ["reports:view"],
+  "dms.user.manage": ["users:create", "users:update", "users:delete"],
+  "dms.project.manage": [
+    "projects:create",
+    "projects:update",
+    "projects:delete",
+    "projects:assign",
+  ],
+  "dms.audit.view": ["audit:read"],
+  "dms.claim.manage": ["projects:update"],
+  "dms.contract.appraisal.approve": ["projects:update"],
+  "dms.contract.appraisal.reject": ["projects:update"],
+  "dms.task.manage": ["projects:update"],
+  "dms.keydate.eot_approve": ["projects:update"],
+  "dms.keydate.manage": ["projects:update"],
+  "dms.variation.approve": ["projects:update"],
+  "dms.bankguarantee.release": ["projects:update"],
+  "dms.contract.master.view": ["projects:read"],
+  "dms.contract.master.manage": ["projects:update"],
+  "dms.ipc.approve": ["projects:update"],
+  "dms.evidence_graph.manage": ["projects:update"],
+  "dms.chronology.admin": ["projects:update"],
+  "dms.arbitration.approve": ["projects:update"],
+  "dms.arbitration.admin": ["projects:update"],
+  "dms.admin": ["system:admin"],
+  "billing.plan.view": ["organizations:read"],
+  "billing.plan.manage": ["system:admin"],
+  "billing.invoice.view": ["organizations:read"],
+  "billing.invoice.download": ["organizations:read"],
+  "subscription.entitlement.manage": ["system:admin"],
+  "subscription.upgrade": ["system:admin"],
+  "subscription.downgrade": ["system:admin"],
+  "subscription.cancel": ["system:admin"],
+  "subscription.trial.manage": ["system:admin"],
+  "subscription.addon.manage": ["system:admin"],
+  "subscription.history.view": ["organizations:read"],
+  "subscription.usage.view": ["reports:view"],
+  "subscription.archive_access": [],
+  "subscription.offboarding_export": [],
+  "organizations:read": ["orgs:view"],
+  "organizations:create": ["orgs:create"],
+  "organizations:update": ["orgs:edit"],
+  "organizations:delete": ["orgs:delete"],
+  "projects:read": ["projects:view"],
+  "projects:update": ["projects:edit"],
+};
+
+const ALIAS_TO_CANONICAL = Object.entries(PERMISSION_ALIASES).reduce(
+  (acc, [canonical, aliases]) => {
+    for (const alias of aliases) {
+      acc[alias] = [...(acc[alias] || []), canonical];
+    }
+    return acc;
+  },
+  {} as Record<string, string[]>,
+);
+
+export function normalizePermissionId(permission: string): string {
+  const key = String(permission || "").trim().toLowerCase();
+  if (!key) return "";
+  return ALIAS_TO_CANONICAL[key]?.[0] || key;
+}
+
+export function expandPermissionAliases(permission: string): string[] {
+  const key = String(permission || "").trim().toLowerCase();
+  if (!key) return [];
+  const canonicalPermissions = ALIAS_TO_CANONICAL[key] || [key];
+  return Array.from(
+    new Set([
+      key,
+      ...canonicalPermissions,
+      ...canonicalPermissions.flatMap((canonical) => PERMISSION_ALIASES[canonical] || []),
+      ...(PERMISSION_ALIASES[key] || []),
+    ].filter(Boolean)),
+  );
+}
+
+export function expandPermissionSet(permissions: Iterable<string>): Set<string> {
+  const expanded = new Set<string>();
+  for (const permission of permissions) {
+    for (const candidate of expandPermissionAliases(permission)) {
+      expanded.add(candidate);
+    }
+  }
+  return expanded;
+}
+
+export const OPEN_AUTHENTICATED_ROUTES = [
+  "/overview",
+  "/security-terms",
+  "/profile",
+  "/notifications",
+] as const;
 
 export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/overview": [], // Open to all authenticated users
@@ -116,7 +312,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/reports": ["reports:view"],
   "/health": ["system:admin"],
   "/users": ["users:read"],
-  "/permissions": ["roles:read"],
+  "/permissions": ["roles:read", "permissions:read"],
   "/plan-settings": ["subscription.entitlement.manage"],
   "/subscription-management": ["subscription.entitlement.manage", "subscription.upgrade"],
   // Razorpay hosted-checkout return landing (Phase 4). Same billing audience.
@@ -133,29 +329,71 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/tasks": ["tasks:read", "dms.document.view"],
 };
 
-export function isRouteAllowedByPermission(
-  can: (perm: string) => boolean,
-  path: string
-): boolean {
-  const normalizedPath = path.split("?")[0].replace(/\/+$/, "") || "/overview";
-  
-  if (normalizedPath === "/overview" || normalizedPath === "/security-terms" || normalizedPath === "/profile" || normalizedPath === "/notifications") {
-    return true; // Universally allowed authenticated routes
+export type RouteAccessDescriptor = {
+  normalizedPath: string;
+  matchedPath: string | null;
+  requiredAnyPermissions: string[];
+  isOpen: boolean;
+  isMapped: boolean;
+};
+
+export function normalizeRoutePath(path: string): string {
+  return path.split("?")[0].replace(/\/+$/, "") || "/overview";
+}
+
+export function getRouteAccessDescriptor(path: string): RouteAccessDescriptor {
+  const normalizedPath = normalizeRoutePath(path);
+  if (OPEN_AUTHENTICATED_ROUTES.includes(normalizedPath as any)) {
+    return {
+      normalizedPath,
+      matchedPath: normalizedPath,
+      requiredAnyPermissions: [],
+      isOpen: true,
+      isMapped: true,
+    };
   }
 
   const exact = ROUTE_PERMISSIONS[normalizedPath];
   if (exact) {
-    if (exact.length === 0) return true;
-    return exact.some((p) => can(p));
+    return {
+      normalizedPath,
+      matchedPath: normalizedPath,
+      requiredAnyPermissions: exact,
+      isOpen: exact.length === 0,
+      isMapped: true,
+    };
   }
 
-  const matchedKey = Object.keys(ROUTE_PERMISSIONS)
+  const matchedPath = Object.keys(ROUTE_PERMISSIONS)
     .sort((a, b) => b.length - a.length)
     .find((base) => normalizedPath === base || normalizedPath.startsWith(base + "/"));
 
-  if (!matchedKey) return false;
-  
-  const required = ROUTE_PERMISSIONS[matchedKey];
-  if (required.length === 0) return true;
-  return required.some((p) => can(p));
+  if (!matchedPath) {
+    return {
+      normalizedPath,
+      matchedPath: null,
+      requiredAnyPermissions: [],
+      isOpen: false,
+      isMapped: false,
+    };
+  }
+
+  const requiredAnyPermissions = ROUTE_PERMISSIONS[matchedPath];
+  return {
+    normalizedPath,
+    matchedPath,
+    requiredAnyPermissions,
+    isOpen: requiredAnyPermissions.length === 0,
+    isMapped: true,
+  };
+}
+
+export function isRouteAllowedByPermission(
+  can: (perm: string) => boolean,
+  path: string
+): boolean {
+  const descriptor = getRouteAccessDescriptor(path);
+  if (!descriptor.isMapped) return false;
+  if (descriptor.isOpen) return true;
+  return descriptor.requiredAnyPermissions.some((p) => can(p));
 }

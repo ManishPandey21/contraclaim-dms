@@ -294,6 +294,8 @@ class Settings(BaseSettings):
     CONTRACT_UPLOAD_MAX_CHUNK_SIZE_MB: int = Field(default=5, validation_alias="CONTRACT_UPLOAD_MAX_CHUNK_SIZE_MB")
     CONTRACT_UPLOAD_SESSION_TTL_SECONDS: int = Field(default=3600, validation_alias="CONTRACT_UPLOAD_SESSION_TTL_SECONDS")
     CONTRACT_UPLOAD_MAX_CONCURRENT_SESSIONS: int = Field(default=10, validation_alias="CONTRACT_UPLOAD_MAX_CONCURRENT_SESSIONS")
+    DOCUMENT_PROCESSING_STALE_AFTER_SECONDS: int = Field(default=3600, ge=300, validation_alias="DOCUMENT_PROCESSING_STALE_AFTER_SECONDS")
+    DOCUMENT_PROCESSING_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="DOCUMENT_PROCESSING_HEARTBEAT_SECONDS")
 
     # Durable contract ingestion queue
     CONTRACT_QUEUE_ENABLED: bool = Field(default=True, validation_alias="CONTRACT_QUEUE_ENABLED")
@@ -303,6 +305,8 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_DEADLETTER_NAME: str = Field(default="contract_ingest_deadletter", validation_alias="CONTRACT_QUEUE_DEADLETTER_NAME")
     CONTRACT_QUEUE_MAX_RETRIES: int = Field(default=3, validation_alias="CONTRACT_QUEUE_MAX_RETRIES")
     CONTRACT_QUEUE_WORKERS: int = Field(default=1, validation_alias="CONTRACT_QUEUE_WORKERS")
+    CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=1800, ge=60, validation_alias="CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
+    CONTRACT_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="CONTRACT_QUEUE_HEARTBEAT_SECONDS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
 

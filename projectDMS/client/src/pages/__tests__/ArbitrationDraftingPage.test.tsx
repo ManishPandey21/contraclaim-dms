@@ -15,6 +15,7 @@ const searchEvidenceMock = vi.fn();
 const addReferencesMock = vi.fn();
 const removeReferenceMock = vi.fn();
 const generateMock = vi.fn();
+const updateDraftMock = vi.fn();
 
 vi.mock("@/services/arbitration-drafting-api", () => ({
   listArbitrationDrafts: vi.fn().mockResolvedValue([]),
@@ -34,6 +35,11 @@ vi.mock("@/services/arbitration-drafting-api", () => ({
   searchArbitrationEvidence: (...args: unknown[]) => searchEvidenceMock(...args),
   addArbitrationDraftReferences: (...args: unknown[]) => addReferencesMock(...args),
   removeArbitrationDraftReference: (...args: unknown[]) => removeReferenceMock(...args),
+  updateArbitrationDraft: (...args: unknown[]) => updateDraftMock(...args),
+}));
+
+vi.mock("@/services/arbitration-cases-api", () => ({
+  listArbitrationCases: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/services/enhanced-api", () => ({
@@ -51,7 +57,10 @@ const VERSION = {
   full_markdown: "# EOT Statement of Claim\n\nRelies on [S1: Delay notice].",
   sections: [{ key: "introduction", heading: "Introduction", body: "..." }],
   structured_output: { validation_warnings: [], approval_blockers: [] },
-  source_ledger: [{ source_key: "S1", source_id: "doc-1", citation: "Delay notice" }],
+  source_ledger: [
+    { source_key: "S1", source_id: "doc-1", citation: "Delay notice" },
+    { source_key: "S2", source_id: "claim-1", citation: "CL-001", source_origin: "claim_register" },
+  ],
   missing_evidence: [],
   warnings: [],
   validation_status: "passed",
@@ -108,6 +117,22 @@ describe("ArbitrationDraftingPage (draft view)", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Approve/ }));
     await waitFor(() => expect(approveMock).toHaveBeenCalledWith("draft-1"));
+  });
+
+  it("shows the ungated banner for drafts without a case link and excludes register sources", async () => {
+    updateDraftMock.mockResolvedValue({ ...DRAFT, excluded_register_ids: ["claim-1"] });
+    renderDraftView();
+    await waitFor(() => expect(getDraftMock).toHaveBeenCalled());
+
+    // DRAFT has no case_id -> the ungated warning is prominent.
+    expect(screen.getByText(/Ungated draft/)).toBeInTheDocument();
+
+    // The claim-register ledger row offers per-row exclusion.
+    await userEvent.click(screen.getByRole("button", { name: "Exclude register source CL-001" }));
+    await waitFor(() =>
+      expect(updateDraftMock).toHaveBeenCalledWith("draft-1", { excluded_register_ids: ["claim-1"] }),
+    );
+    expect(await screen.findByText(/1 register source\(s\) excluded/)).toBeInTheDocument();
   });
 
   it("locked draft disables generation and offers return-for-revision", async () => {

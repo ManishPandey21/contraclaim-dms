@@ -480,6 +480,10 @@ class ArbitrationDraftBase(BaseModel):
     claim_amount: Optional[float] = None
     currency: Optional[str] = None
     interest_rate: Optional[float] = None
+    # Register-source controls (audit P2): registers join the ledger by default,
+    # but the user can turn them off wholesale or exclude specific rows.
+    include_register_sources: bool = True
+    excluded_register_ids: List[str] = Field(default_factory=list)
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -505,6 +509,8 @@ class ArbitrationDraftUpdate(BaseModel):
     claim_amount: Optional[float] = None
     currency: Optional[str] = None
     interest_rate: Optional[float] = None
+    include_register_sources: Optional[bool] = None
+    excluded_register_ids: Optional[List[str]] = None
     status: Optional[ArbitrationDraftStatus] = None
 
     model_config = ConfigDict(use_enum_values=True)

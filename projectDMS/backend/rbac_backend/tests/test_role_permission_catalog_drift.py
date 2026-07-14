@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -169,7 +170,7 @@ async def test_role_service_saves_and_retrieves_full_client_dms_permissions():
     updated = await service.update_role_permissions(
         "orgadmin",
         list(CLIENT_DMS_PERMISSIONS),
-        updated_by="test-user",
+        updated_by=SimpleNamespace(id="superadmin-user", roles=["superadmin"]),
     )
     assert set(updated.permissions) == set(CLIENT_DMS_PERMISSIONS)
 

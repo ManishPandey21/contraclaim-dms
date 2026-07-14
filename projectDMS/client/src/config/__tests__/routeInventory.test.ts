@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ROUTE_PERMISSIONS } from "../rolePermissions";
+import { OPEN_AUTHENTICATED_ROUTES, ROUTE_PERMISSIONS } from "../rolePermissions";
 
 // Phase 0 — route inventory guard.
 // Parses every <Route path="..."> declared in routes.tsx and asserts each
@@ -20,7 +20,7 @@ const routesSource = readFileSync(
 // Public/unauthenticated routes that intentionally have no permission mapping.
 const PUBLIC_ROUTES = new Set(["/", "/login", "*"]);
 // Authenticated routes that are open to any signed-in user by design.
-const OPEN_ROUTES = new Set(["/overview", "/profile", "/notifications"]);
+const OPEN_ROUTES = new Set<string>([...OPEN_AUTHENTICATED_ROUTES]);
 
 function extractRoutePaths(source: string): string[] {
   const paths: string[] = [];

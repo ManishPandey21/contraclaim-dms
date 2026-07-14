@@ -173,6 +173,21 @@ class PolicyService:
                 reason = "missing_expert_allocation"
                 return await self._deny(reason)
 
+            if domain == "role_management":
+                if organization_id or project_id:
+                    if await self.scope_service.is_client_scope_allowed(
+                        current_user,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                    ):
+                        return await _allow("role_management_scope")
+                    reason = "scope_denied"
+                    return await self._deny(reason)
+                if permission in {"roles:read", "permissions:read"}:
+                    return await _allow("role_management_catalog")
+                reason = "scope_required"
+                return await self._deny(reason)
+
             if domain in {"client_dms", "billing", "system"}:
                 if self.scope_service.is_superadmin(current_user):
                     return await _allow("superadmin")

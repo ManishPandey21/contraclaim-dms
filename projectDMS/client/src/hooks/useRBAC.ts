@@ -1,102 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { enhancedApi as api, Role } from "@/services/enhanced-api";
 import { getCurrentUserProfile } from "@/services/session-api";
-
-// Normalize role id strings similar to backend ROLE_ALIASES in core/security.py
-const ROLE_ALIASES: Record<string, string> = {
-  "organization-user": "orguser",
-  "org-user": "orguser",
-  "organization user": "orguser",
-  organizationuser: "orguser",
-  orguser: "orguser",
-  admin: "superadmin",
-  administrator: "superadmin",
-  "organization-admin": "orgadmin",
-  "org-admin": "orgadmin",
-  "organization admin": "orgadmin",
-  organizationadmin: "orgadmin",
-  orgadmin: "orgadmin",
-  "project-user": "projectuser",
-  "project user": "projectuser",
-  projectuser: "projectuser",
-  "project-admin": "projectadmin",
-  "project admin": "projectadmin",
-  projectadmin: "projectadmin",
-  "super-admin": "superadmin",
-  "super admin": "superadmin",
-  superadministrator: "superadmin",
-  "super-user": "superuser",
-  "super user": "superuser",
-  superuser: "superuser",
-  superadmin: "superadmin",
-  "document-controller": "doccontroller",
-  "document controller": "doccontroller",
-  documentcontroller: "doccontroller",
-  doccontroller: "doccontroller",
-  reporter: "reporter",
-  auditor: "reporter",
-  "settings-manager": "settings_manager",
-  "settings manager": "settings_manager",
-  settingsmanager: "settings_manager",
-  settings_manager: "settings_manager",
-  "limited-user": "limited_user",
-  "limited user": "limited_user",
-  limiteduser: "limited_user",
-  limited_user: "limited_user",
-  "contract-manager-organization": "contractmgr_org",
-  "contract manager organization": "contractmgr_org",
-  "contract manager - organization": "contractmgr_org",
-  contractmgr_org: "contractmgr_org",
-  "contraclaim drafting manager": "contraclaim_drafting_manager",
-  contraclaim_drafting_manager: "contraclaim_drafting_manager",
-  "contraclaim expert drafter": "contraclaim_expert_drafter",
-  "contraclaim contract expert - drafter": "contraclaim_expert_drafter",
-  contraclaim_expert_drafter: "contraclaim_expert_drafter",
-  "contraclaim expert reviewer": "contraclaim_expert_reviewer",
-  "contraclaim contract expert - reviewer": "contraclaim_expert_reviewer",
-  contraclaim_expert_reviewer: "contraclaim_expert_reviewer",
-  "contraclaim billing admin": "contraclaim_billing_admin",
-  contraclaim_billing_admin: "contraclaim_billing_admin",
-};
-
-function normalizeRoleId(r: string): string {
-  const s = String(r || "")
-    .trim()
-    .toLowerCase();
-  return ROLE_ALIASES[s] || s;
-}
-
-const PERMISSION_ALIASES: Record<string, string> = {
-  "dms.document.view": "dms.document.view",
-  "dms.document.upload": "dms.document.upload",
-  "dms.document.edit_metadata": "dms.document.edit_metadata",
-  "dms.document.delete": "dms.document.delete",
-  "dms.document.download": "dms.document.download",
-  "dms.document.bulk_download": "dms.document.bulk_download",
-  "dms.document.share": "dms.document.share",
-  "drafting.request.create": "drafting.request.create",
-  "projects:view": "projects:read",
-  "projects:edit": "projects:update",
-  "orgs:view": "organizations:read",
-  "orgs:create": "organizations:create",
-  "orgs:edit": "organizations:update",
-  "orgs:delete": "organizations:delete",
-};
-
-function normalizePermissionId(p: string): string {
-  const key = String(p || "")
-    .trim()
-    .toLowerCase();
-  return PERMISSION_ALIASES[key] || key;
-}
-
-function expandPermissionAliases(permission: string): string[] {
-  const legacyToCanonical: Record<string, string[]> = {
-    "reports:view": ["dms.report.view"],
-    "dms.report.view": ["reports:view"],
-  };
-  return [permission, ...(legacyToCanonical[permission] || [])];
-}
+import {
+  expandPermissionAliases,
+  expandPermissionSet,
+  normalizeRoleId,
+} from "@/config/rolePermissions";
 
 const permissionCache = new Map<
   string,
@@ -201,18 +110,19 @@ export function useRBAC(): UseRBACResult {
           const rid = normalizeRoleId(role._id);
           if (wanted.has(rid)) {
             (role.permissions || []).forEach((p) => {
-              const normalized = normalizePermissionId(p);
-              expandPermissionAliases(normalized).forEach((candidate) =>
+              expandPermissionAliases(p).forEach((candidate) =>
                 collected.add(candidate)
               );
             });
           }
         }
 
+        const expanded = expandPermissionSet(collected);
+
         if (mounted) {
-          setPerms(collected);
+          setPerms(expanded);
           permissionCache.set(roleKey, {
-            permissions: new Set(collected),
+            permissions: new Set(expanded),
             cachedAt: Date.now(),
           });
           setLoading(false);
@@ -242,7 +152,9 @@ export function useRBAC(): UseRBACResult {
     ) {
       return true;
     }
-    return perms.has(permId);
+    return expandPermissionAliases(permId).some((candidate) =>
+      perms.has(candidate)
+    );
     // Wildcard not used here; superadmin covers full access.
   };
 

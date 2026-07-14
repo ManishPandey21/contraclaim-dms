@@ -342,6 +342,43 @@ async def test_global_billing_admin_permission_without_target_scope_is_allowed()
 
 
 @pytest.mark.asyncio
+async def test_role_management_policy_allows_scoped_role_admin_actions() -> None:
+    audit = _AuditService()
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=True),
+        entitlement_service=_EntitlementService(True),
+        audit_service=audit,
+    )
+
+    await policy.authorize(
+        _user(),
+        "roles:create",
+        organization_id="org-1",
+        resource_type="role",
+    )
+
+    assert audit.events[-1]["result"] == "allow"
+    assert audit.events[-1]["reason"] == "role_management_scope"
+
+
+@pytest.mark.asyncio
+async def test_role_management_policy_requires_scope_for_mutations() -> None:
+    policy = PolicyService(
+        permission_service=_PermissionService(True),
+        scope_service=_ScopeService(scope_allowed=True),
+        entitlement_service=_EntitlementService(True),
+        audit_service=_AuditService(),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await policy.authorize(_user(), "roles:update", resource_type="role", resource_id="role-1")
+
+    assert exc.value.status_code == 403
+    assert "scope" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
 async def test_policy_denies_platform_permission_for_non_superadmin() -> None:
     policy = PolicyService(
         permission_service=_PermissionService(True),

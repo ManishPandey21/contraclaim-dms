@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  expandPermissionSet,
+  getRouteAccessDescriptor,
   isRouteAllowedByPermission,
+  OPEN_AUTHENTICATED_ROUTES,
   ROUTE_PERMISSIONS,
 } from "../rolePermissions";
 
@@ -66,7 +69,7 @@ const SIDEBAR_PATHS = [
   "/settings",
 ];
 
-const OPEN_ROUTES = new Set(["/overview", "/profile", "/notifications"]);
+const OPEN_ROUTES = new Set<string>([...OPEN_AUTHENTICATED_ROUTES]);
 
 function hasMapping(path: string): boolean {
   const normalized = path.replace(/\/+$/, "");
@@ -130,6 +133,32 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
         "/subscription-management",
       ),
     ).toBe(true);
+  });
+
+  it("Permissions page accepts role or permission catalog read access", () => {
+    expect(isRouteAllowedByPermission(canFor(["roles:read"]), "/permissions")).toBe(true);
+    expect(isRouteAllowedByPermission(canFor(["permissions:read"]), "/permissions")).toBe(true);
+  });
+
+  it("Unmapped routes are denied with a useful descriptor", () => {
+    const descriptor = getRouteAccessDescriptor("/future-admin-screen");
+    expect(descriptor.isMapped).toBe(false);
+    expect(descriptor.requiredAnyPermissions).toEqual([]);
+    expect(isRouteAllowedByPermission(canFor(["system:admin"]), "/future-admin-screen")).toBe(false);
+  });
+
+  it("Expands backend permission aliases without document-permission shortcuts", () => {
+    const expanded = expandPermissionSet([
+      "reports:view",
+      "orgs:view",
+      "projects:edit",
+    ]);
+    expect(expanded.has("dms.report.view")).toBe(true);
+    expect(expanded.has("subscription.usage.view")).toBe(true);
+    expect(expanded.has("organizations:read")).toBe(true);
+    expect(expanded.has("projects:update")).toBe(true);
+    expect(expanded.has("billing.plan.manage")).toBe(false);
+    expect(expanded.has("dms.document.view")).toBe(false);
   });
 
   it("Legal words are open to signed-in users while admin stays gated", () => {

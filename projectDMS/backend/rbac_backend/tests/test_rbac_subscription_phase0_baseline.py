@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from rbac_backend.core.config import Settings
-from rbac_backend.routers import ai_assistant, rbac_monetization
+from rbac_backend.routers import ai_assistant, rbac_monetization, roles
 from rbac_backend.services import entitlement_service
 from rbac_backend.services.scope_service import ScopeService
 
@@ -291,3 +291,36 @@ def test_phase5_subscription_helper_authorizes_stored_subscription_scope():
     assert "subscription.get(\"project_id\")" in source
     assert "policy.authorize" in source
     assert "resource_id=subscription_id" in source
+
+
+def test_phase6_role_mutation_routes_authorize_resolved_role_scope():
+    scoped_role_functions = [
+        roles.update_role,
+        roles.delete_role,
+        roles.add_role_permission,
+        roles.remove_role_permission,
+    ]
+
+    for fn in scoped_role_functions:
+        source = inspect.getsource(fn)
+        assert "_role_policy_scope(before)" in source
+        assert "policy.authorize" in source
+        assert '"roles:update"' in source or '"roles:delete"' in source or '"roles:assign"' in source
+
+    create_source = inspect.getsource(roles.create_role)
+    assert "_create_role_policy_scope" in create_source
+    assert '"roles:create"' in create_source
+
+
+def test_phase6_role_service_blocks_direct_privilege_escalation_paths():
+    from rbac_backend.services import role_service
+
+    service_source = inspect.getsource(role_service.RoleService)
+    assert "_ensure_permissions_assignable" in service_source
+    assert "Not authorized to change system role status" in service_source
+    assert "Not authorized to move roles across organizations" in service_source
+    assert "Not authorized to modify reserved or system roles" in service_source
+    assert "except RoleServiceError" in inspect.getsource(role_service.RoleService.delete_role)
+    assert "_ensure_role_manageable(updated_by, existing)" in inspect.getsource(
+        role_service.RoleService.update_role_permissions
+    )

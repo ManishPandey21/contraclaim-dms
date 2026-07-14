@@ -35,6 +35,8 @@ class ObservabilityRegistry:
     _request_latency_count: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _errors_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _domain_events_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _audit_events_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
+    _admin_review_items_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _backup_health: Dict[str, float] = field(default_factory=dict)
     _arbitration_agent_runs_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _arbitration_bundle_exports_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
@@ -72,6 +74,36 @@ class ObservabilityRegistry:
         key = (str(resource_type or "unknown"), str(event_type or "unknown"))
         async with self._lock:
             self._domain_events_total[key] = self._domain_events_total.get(key, 0) + 1
+
+    async def record_audit_event(
+        self,
+        *,
+        action: str,
+        result: str,
+        resource_type: str | None = None,
+    ) -> None:
+        key = (
+            str(action or "unknown"),
+            str(result or "unknown"),
+            str(resource_type or "unknown"),
+        )
+        async with self._lock:
+            self._audit_events_total[key] = self._audit_events_total.get(key, 0) + 1
+
+    async def record_admin_review_item(
+        self,
+        *,
+        status: str,
+        severity: str,
+        source: str,
+    ) -> None:
+        key = (
+            str(status or "unknown"),
+            str(severity or "unknown"),
+            str(source or "unknown"),
+        )
+        async with self._lock:
+            self._admin_review_items_total[key] = self._admin_review_items_total.get(key, 0) + 1
 
     async def record_backup_health(
         self,
@@ -144,6 +176,8 @@ class ObservabilityRegistry:
             "request_total": total_requests,
             "server_error_total": total_errors,
             "domain_event_total": sum(self._domain_events_total.values()),
+            "audit_event_total": sum(self._audit_events_total.values()),
+            "admin_review_item_total": sum(self._admin_review_items_total.values()),
             "backup_health": dict(self._backup_health),
             "arbitration_agent_run_total": sum(self._arbitration_agent_runs_total.values()),
             "arbitration_bundle_export_total": sum(self._arbitration_bundle_exports_total.values()),
@@ -206,6 +240,26 @@ class ObservabilityRegistry:
         for (resource_type, event_type), value in sorted(self._domain_events_total.items()):
             labels = _labels((("resource_type", resource_type), ("event_type", event_type)))
             lines.append(f"contractdms_document_audit_events_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_audit_events_total Tenant audit events by action, result, and resource type.",
+                "# TYPE contractdms_audit_events_total counter",
+            ]
+        )
+        for (action, result, resource_type), value in sorted(self._audit_events_total.items()):
+            labels = _labels((("action", action), ("result", result), ("resource_type", resource_type)))
+            lines.append(f"contractdms_audit_events_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_admin_review_items_total Admin review items raised by status, severity, and source.",
+                "# TYPE contractdms_admin_review_items_total counter",
+            ]
+        )
+        for (review_status, severity, source), value in sorted(self._admin_review_items_total.items()):
+            labels = _labels((("status", review_status), ("severity", severity), ("source", source)))
+            lines.append(f"contractdms_admin_review_items_total{labels} {value}")
 
         lines.extend(
             [

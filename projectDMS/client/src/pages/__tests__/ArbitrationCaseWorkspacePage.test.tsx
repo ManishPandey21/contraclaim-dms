@@ -10,6 +10,7 @@ const getArbitrationCaseDashboardMock = vi.fn();
 const listMatrixRowsMock = vi.fn();
 const listArbitrationCasesMock = vi.fn();
 const getArbitrationReadinessMock = vi.fn();
+const runArbitrationAgentMock = vi.fn();
 
 vi.mock("@/services/arbitration-cases-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/arbitration-cases-api")>();
@@ -20,6 +21,7 @@ vi.mock("@/services/arbitration-cases-api", async (importOriginal) => {
     listMatrixRows: (...args: unknown[]) => listMatrixRowsMock(...args),
     listArbitrationCases: (...args: unknown[]) => listArbitrationCasesMock(...args),
     getArbitrationReadiness: (...args: unknown[]) => getArbitrationReadinessMock(...args),
+    runArbitrationAgent: (...args: unknown[]) => runArbitrationAgentMock(...args),
   };
 });
 
@@ -92,6 +94,28 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     listMatrixRowsMock.mockResolvedValue(DOCUMENT_ROWS);
     listArbitrationCasesMock.mockResolvedValue([CASE]);
     getArbitrationReadinessMock.mockResolvedValue(READINESS);
+    runArbitrationAgentMock.mockResolvedValue({ agent_type: "claim-identification", created_records: [] });
+  });
+
+  it("passes agent options (interest rate, mode) into agent runs from the dashboard", async () => {
+    render(
+      <MemoryRouter initialEntries={["/arbitration/cases/case-1"]}>
+        <Routes>
+          <Route path="/arbitration/cases/:caseId" element={<ArbitrationCaseWorkspacePage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(getArbitrationCaseMock).toHaveBeenCalledWith("case-1"));
+
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Interest rate percent per annum" }), "12");
+    await userEvent.type(screen.getByRole("spinbutton", { name: "Interest period in days" }), "365");
+    await userEvent.click(screen.getByRole("button", { name: /Claims/ }));
+
+    await waitFor(() =>
+      expect(runArbitrationAgentMock).toHaveBeenCalledWith("case-1", "claim-identification", {
+        options: { interest_rate: 12, interest_period_days: 365 },
+      }),
+    );
   });
 
   it("loads the case workspace and renders every matrix tab including Jurisdiction & Limitation", async () => {
