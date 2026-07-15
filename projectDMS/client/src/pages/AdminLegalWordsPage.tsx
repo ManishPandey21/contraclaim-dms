@@ -5,6 +5,7 @@ import {
   CalendarClock,
   CheckCircle2,
   Edit,
+  Eye,
   Loader2,
   Plus,
   Rocket,
@@ -12,6 +13,7 @@ import {
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X,
   XCircle,
 } from "lucide-react";
@@ -48,16 +50,19 @@ import {
   LegalWord,
   LegalWordAISuggestion,
   LegalWordPayload,
+  LegalWordPublicationType,
   LegalWordSource,
   LegalWordStatus,
   approveAdminLegalWord,
   createAdminLegalWord,
+  deleteAdminLegalWord,
   deactivateAdminLegalWord,
   listAdminLegalWords,
   publishAdminLegalWord,
   rejectAdminLegalWord,
   scheduleAdminLegalWord,
   suggestAdminLegalWordsWithAI,
+  unpublishAdminLegalWord,
   updateAdminLegalWord,
 } from "@/services/legal-words-api";
 
@@ -72,6 +77,7 @@ type TabKey =
 
 type WordForm = {
   word: string;
+  category: string;
   meaning: string;
   synonyms: string[];
   example_sentence: string;
@@ -92,8 +98,17 @@ const statusOptions: LegalWordStatus[] = [
 
 const sourceOptions: LegalWordSource[] = ["system", "admin_created", "user_requested", "ai_suggested"];
 
+const publicationTypeOptions: LegalWordPublicationType[] = [
+  "new",
+  "repeated",
+  "previously_published",
+  "unpublished",
+  "eligible_for_republication",
+];
+
 const initialForm: WordForm = {
   word: "",
+  category: "",
   meaning: "",
   synonyms: [],
   example_sentence: "",
@@ -118,6 +133,12 @@ const formatLabel = (value: string) =>
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+
+const formatPublicationType = (value: LegalWordPublicationType) => {
+  if (value === "eligible_for_republication") return "Eligible for Republication";
+  if (value === "previously_published") return "Previously Published";
+  return formatLabel(value);
+};
 
 const formatDate = (value?: string | null) => {
   if (!value) return "N/A";
@@ -153,8 +174,14 @@ const AdminLegalWordsPage = () => {
   const [suggestions, setSuggestions] = useState<LegalWordAISuggestion[]>([]);
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | LegalWordStatus>("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | LegalWordSource>("all");
+  const [categoryFilter, setCategoryFilter] = useState("");
+  const [publishedDateFilter, setPublishedDateFilter] = useState("");
+  const [publicationTypeFilter, setPublicationTypeFilter] = useState<"all" | LegalWordPublicationType>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingWord, setEditingWord] = useState<LegalWord | null>(null);
+  const [previewWord, setPreviewWord] = useState<LegalWord | null>(null);
   const [form, setForm] = useState<WordForm>(initialForm);
   const [scheduleWord, setScheduleWord] = useState<LegalWord | null>(null);
   const [scheduleDate, setScheduleDate] = useState("");
@@ -164,6 +191,11 @@ const AdminLegalWordsPage = () => {
     try {
       const response = await listAdminLegalWords({
         limit: 200,
+        status: statusFilter === "all" ? undefined : statusFilter,
+        source: sourceFilter === "all" ? undefined : sourceFilter,
+        category: categoryFilter.trim() || undefined,
+        published_date: publishedDateFilter || undefined,
+        publication_type: publicationTypeFilter === "all" ? undefined : publicationTypeFilter,
         search: appliedSearch || undefined,
       });
       setWords(response.words);
@@ -172,7 +204,7 @@ const AdminLegalWordsPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [appliedSearch]);
+  }, [appliedSearch, categoryFilter, publishedDateFilter, publicationTypeFilter, sourceFilter, statusFilter]);
 
   useEffect(() => {
     void loadWords();
@@ -207,6 +239,31 @@ const AdminLegalWordsPage = () => {
     return base;
   }, [words]);
 
+  const categories = useMemo(
+    () =>
+      Array.from(new Set(words.map((word) => word.category).filter(Boolean) as string[]))
+        .sort((a, b) => a.localeCompare(b)),
+    [words],
+  );
+
+  const filtersActive =
+    statusFilter !== "all" ||
+    sourceFilter !== "all" ||
+    !!categoryFilter ||
+    !!publishedDateFilter ||
+    publicationTypeFilter !== "all" ||
+    !!appliedSearch;
+
+  const clearFilters = () => {
+    setStatusFilter("all");
+    setSourceFilter("all");
+    setCategoryFilter("");
+    setPublishedDateFilter("");
+    setPublicationTypeFilter("all");
+    setSearch("");
+    setAppliedSearch("");
+  };
+
   const openCreate = () => {
     setEditingWord(null);
     setForm(initialForm);
@@ -217,6 +274,7 @@ const AdminLegalWordsPage = () => {
     setEditingWord(word);
     setForm({
       word: word.word || "",
+      category: word.category || "",
       meaning: word.meaning || "",
       synonyms: normalizeChips(word.synonyms || []),
       example_sentence: word.example_sentence || "",
@@ -242,6 +300,7 @@ const AdminLegalWordsPage = () => {
     setEditingWord(record);
     setForm({
       word: suggestion.word || record.word || "",
+      category: record.category || "",
       meaning: suggestion.meaning || record.meaning || "",
       synonyms: normalizeChips(suggestion.synonyms?.length ? suggestion.synonyms : record.synonyms || []),
       example_sentence: suggestion.example_sentence || record.example_sentence || "",
@@ -279,6 +338,7 @@ const AdminLegalWordsPage = () => {
   const saveWord = async () => {
     const payload: LegalWordPayload = {
       word: form.word.trim(),
+      category: form.category.trim() || null,
       meaning: form.meaning.trim() || null,
       synonyms: normalizeChips(form.synonyms),
       example_sentence: form.example_sentence.trim() || null,
@@ -403,6 +463,70 @@ const AdminLegalWordsPage = () => {
           </form>
         </div>
 
+        <div className="grid gap-3 rounded-md border border-gray-200 bg-white p-3 md:grid-cols-2 xl:grid-cols-6">
+          <Field label="Status">
+            <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as "all" | LegalWordStatus)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Statuses</SelectItem>
+                {statusOptions.map((status) => (
+                  <SelectItem key={status} value={status}>{formatLabel(status)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Source">
+            <Select value={sourceFilter} onValueChange={(value) => setSourceFilter(value as "all" | LegalWordSource)}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Sources</SelectItem>
+                {sourceOptions.map((source) => (
+                  <SelectItem key={source} value={source}>{formatLabel(source)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Category">
+            <Input
+              list="legal-word-categories"
+              value={categoryFilter}
+              onChange={(event) => setCategoryFilter(event.target.value)}
+              placeholder="All categories"
+            />
+            <datalist id="legal-word-categories">
+              {categories.map((category) => (
+                <option key={category} value={category} />
+              ))}
+            </datalist>
+          </Field>
+          <Field label="Publication Date">
+            <Input
+              type="date"
+              value={publishedDateFilter}
+              onChange={(event) => setPublishedDateFilter(event.target.value)}
+            />
+          </Field>
+          <Field label="Publication Type">
+            <Select
+              value={publicationTypeFilter}
+              onValueChange={(value) => setPublicationTypeFilter(value as "all" | LegalWordPublicationType)}
+            >
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Types</SelectItem>
+                {publicationTypeOptions.map((type) => (
+                  <SelectItem key={type} value={type}>{formatPublicationType(type)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className="flex items-end">
+            <Button type="button" variant="outline" onClick={clearFilters} disabled={!filtersActive} className="w-full">
+              Clear Filters
+            </Button>
+          </div>
+        </div>
+
         {suggestions.length ? (
           <AISuggestionsTable
             suggestions={suggestions}
@@ -458,16 +582,17 @@ const AdminLegalWordsPage = () => {
               <TableRow>
                 <TableHead className="w-[18%]">Word</TableHead>
                 <TableHead>Meaning</TableHead>
-                <TableHead className="w-[14%]">Status</TableHead>
-                <TableHead className="w-[14%]">Source</TableHead>
+                <TableHead className="w-[12%]">Category</TableHead>
+                <TableHead className="w-[12%]">Status</TableHead>
+                <TableHead className="w-[16%]">Publication</TableHead>
                 <TableHead className="w-[14%]">Dates</TableHead>
-                <TableHead className="w-[260px] text-right">Actions</TableHead>
+                <TableHead className="w-[300px] text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-32 text-center text-gray-500">
+                  <TableCell colSpan={7} className="h-32 text-center text-gray-500">
                     <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" />
                     Loading legal words
                   </TableCell>
@@ -477,6 +602,7 @@ const AdminLegalWordsPage = () => {
                   <TableRow key={word.id}>
                     <TableCell className="align-top">
                       <div className="font-medium text-gray-950">{word.word}</div>
+                      <div className="mt-1 text-xs text-gray-500">{formatLabel(word.source)}</div>
                       <div className="mt-1 flex flex-wrap gap-1">
                         {word.synonyms.slice(0, 3).map((synonym) => (
                           <Badge key={synonym} variant="outline" className="rounded-md bg-gray-50 font-normal">
@@ -497,17 +623,35 @@ const AdminLegalWordsPage = () => {
                       </p>
                     </TableCell>
                     <TableCell className="align-top">
-                      <StatusBadge status={word.status} />
+                      {word.category ? (
+                        <Badge variant="outline" className="rounded-md bg-gray-50">
+                          {word.category}
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-gray-500">Uncategorised</span>
+                      )}
                     </TableCell>
-                    <TableCell className="align-top text-sm text-gray-700">
-                      {formatLabel(word.source)}
+                    <TableCell className="align-top">
+                      <StatusBadge word={word} />
+                    </TableCell>
+                    <TableCell className="align-top">
+                      <PublicationTypeBadge word={word} />
+                      <div className="mt-1 text-xs text-gray-500">
+                        {word.published_count || 0} publication{(word.published_count || 0) === 1 ? "" : "s"}
+                      </div>
+                      {word.is_eligible_for_republish === false ? (
+                        <div className="mt-1 text-xs text-red-700">Repeat blocked until period passes</div>
+                      ) : null}
                     </TableCell>
                     <TableCell className="align-top text-xs text-gray-600">
                       <div>Scheduled: {formatDate(word.scheduled_date)}</div>
-                      <div className="mt-1">Published: {formatDate(word.published_date)}</div>
+                      <div className="mt-1">Last: {formatDate(word.last_published_date || word.published_date)}</div>
                     </TableCell>
                     <TableCell className="align-top">
                       <div className="flex flex-wrap justify-end gap-1">
+                        <IconButton label="Preview" onClick={() => setPreviewWord(word)}>
+                          <Eye className="h-4 w-4" />
+                        </IconButton>
                         <Button
                           type="button"
                           variant="outline"
@@ -552,13 +696,30 @@ const AdminLegalWordsPage = () => {
                         >
                           <Ban className="h-4 w-4" />
                         </IconButton>
+                        <IconButton
+                          label="Unpublish"
+                          onClick={() => void runAction("Word unpublished", () => unpublishAdminLegalWord(word.id))}
+                          disabled={!word.published_count}
+                        >
+                          <X className="h-4 w-4" />
+                        </IconButton>
+                        <IconButton
+                          label="Delete"
+                          onClick={() => {
+                            if (window.confirm(`Delete legal word "${word.word}"? This cannot be undone.`)) {
+                              void runAction("Word deleted", () => deleteAdminLegalWord(word.id));
+                            }
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4 text-red-600" />
+                        </IconButton>
                       </div>
                     </TableCell>
                   </TableRow>
                 ))
               ) : (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-32 text-center text-sm text-gray-500">
+                  <TableCell colSpan={7} className="h-32 text-center text-sm text-gray-500">
                     No legal words match this view.
                   </TableCell>
                 </TableRow>
@@ -582,7 +743,16 @@ const AdminLegalWordsPage = () => {
               <Field label="Word">
                 <Input value={form.word} onChange={(event) => setField("word", event.target.value)} />
               </Field>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Category">
+                <Input
+                  value={form.category}
+                  onChange={(event) => setField("category", event.target.value)}
+                  placeholder="e.g. Contractual, Claims, Dispute"
+                />
+              </Field>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Source">
                   <Select value={form.source} onValueChange={(value) => setField("source", value as LegalWordSource)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -603,7 +773,6 @@ const AdminLegalWordsPage = () => {
                     </SelectContent>
                   </Select>
                 </Field>
-              </div>
             </div>
 
             <Field label="Meaning">
@@ -654,6 +823,73 @@ const AdminLegalWordsPage = () => {
               {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
               Save
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!previewWord} onOpenChange={(open) => !open && setPreviewWord(null)}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>{previewWord?.word || "Legal Word Preview"}</DialogTitle>
+            <DialogDescription>
+              Preview the learner-facing content and review publication history.
+            </DialogDescription>
+          </DialogHeader>
+          {previewWord ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge word={previewWord} />
+                <PublicationTypeBadge word={previewWord} />
+                {previewWord.category ? (
+                  <Badge variant="outline" className="rounded-md">{previewWord.category}</Badge>
+                ) : null}
+                <Badge variant="outline" className="rounded-md">{formatLabel(previewWord.source)}</Badge>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Meaning</div>
+                <p className="leading-6 text-gray-800">{previewWord.meaning || "Meaning pending."}</p>
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Useful Synonyms</div>
+                {previewWord.synonyms.length ? (
+                  <div className="flex flex-wrap gap-2">
+                    {previewWord.synonyms.map((synonym) => (
+                      <Badge key={synonym} variant="outline" className="rounded-md bg-gray-50">
+                        {synonym}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500">No synonyms recorded.</p>
+                )}
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold uppercase text-gray-500">Example in Contractual Letter</div>
+                <p className="rounded-md border border-gray-200 bg-gray-50 p-3 leading-6 text-gray-800">
+                  {previewWord.example_sentence || "Example pending."}
+                </p>
+              </div>
+              <div>
+                <div className="mb-2 text-xs font-semibold uppercase text-gray-500">Publication / Republication History</div>
+                {previewWord.publication_history?.length ? (
+                  <div className="space-y-2">
+                    {previewWord.publication_history.map((item, index) => (
+                      <div key={`${item}-${index}`} className="flex items-center justify-between rounded-md border border-gray-200 px-3 py-2 text-sm">
+                        <span>{formatDate(item)}</span>
+                        <Badge variant="secondary" className="rounded-md">
+                          {index === 0 ? "First Publication" : "Republication"}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500">This word has not been published yet.</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewWord(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -918,7 +1154,41 @@ const ChipEditor = ({
   );
 };
 
-const StatusBadge = ({ status }: { status: LegalWordStatus }) => {
+const publicationTypeForWord = (word: LegalWord): LegalWordPublicationType => {
+  const count = Number(word.published_count || 0);
+  if (count <= 0) return "unpublished";
+  if (word.is_eligible_for_republish) return "eligible_for_republication";
+  if (count > 1) return "repeated";
+  return "previously_published";
+};
+
+const PublicationTypeBadge = ({ word }: { word: LegalWord }) => {
+  const type = publicationTypeForWord(word);
+  const className =
+    type === "repeated"
+      ? "bg-amber-100 text-amber-800"
+      : type === "unpublished"
+        ? "bg-gray-100 text-gray-700"
+        : type === "eligible_for_republication"
+          ? "bg-blue-100 text-blue-800"
+          : "bg-green-100 text-green-800";
+  return (
+    <Badge variant="secondary" className={`rounded-md ${className}`}>
+      {formatPublicationType(type)}
+    </Badge>
+  );
+};
+
+const StatusBadge = ({ word }: { word: LegalWord }) => {
+  const status = word.status;
+  const label =
+    status === "pending_review"
+      ? "Draft"
+      : status === "inactive" || status === "rejected"
+        ? "Unpublished"
+        : status === "published" && Number(word.published_count || 0) > 1
+          ? "Repeated"
+          : formatLabel(status);
   const className =
     status === "published"
       ? "bg-green-100 text-green-800"
@@ -929,7 +1199,7 @@ const StatusBadge = ({ status }: { status: LegalWordStatus }) => {
           : "bg-gray-100 text-gray-700";
   return (
     <Badge variant="secondary" className={`rounded-md ${className}`}>
-      {formatLabel(status)}
+      {label}
     </Badge>
   );
 };

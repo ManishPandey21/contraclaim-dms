@@ -320,7 +320,7 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/settings": ["settings:view"],
   "/notifications": [],
   "/legal-words": [],
-  "/admin/legal-words": ["dms.admin", "system:admin"],
+  "/admin/legal-words": ["system:admin"],
   "/profile": ["profile:read"],
   "/tags": ["tags:read"],
   // Tasks: backend currently gates by ownership/scope, not a task permission
