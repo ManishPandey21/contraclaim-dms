@@ -312,7 +312,7 @@ const Sidebar = () => {
       path: "/plan-settings",
       icon: <Settings size={20} />,
       label: "Plan Settings",
-      permission: "subscription.entitlement.manage",
+      permission: "billing.plan.view",
     },
     {
       path: "/admin/billing-catalog",
@@ -330,7 +330,7 @@ const Sidebar = () => {
       path: "/subscription-management",
       icon: <CreditCard size={20} />,
       label: "Subscription",
-      permission: "subscription.entitlement.manage",
+      permission: "billing.plan.view",
     },
     { path: "/settings", icon: <Settings size={20} />, label: "Settings" },
   ], []);

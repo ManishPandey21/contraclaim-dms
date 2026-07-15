@@ -128,6 +128,9 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
       isRouteAllowedByPermission(canFor(["dms.document.view"]), "/subscription-management"),
     ).toBe(false);
     expect(
+      isRouteAllowedByPermission(canFor(["billing.plan.view"]), "/subscription-management"),
+    ).toBe(true);
+    expect(
       isRouteAllowedByPermission(
         canFor(["subscription.entitlement.manage"]),
         "/subscription-management",

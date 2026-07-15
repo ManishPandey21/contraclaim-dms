@@ -56,7 +56,9 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import {
   getPlanCatalog,
+  getPlanSettings,
   listSubscriptions,
+  updatePlanSettingsScope,
   getSubscriptionHistory,
   getInvoicePreview,
   upgradeSubscription,
@@ -69,6 +71,7 @@ import {
   convertTrial,
   type PlanCatalogResponse,
   type PlanSettingsPlan,
+  type PlanSettingsResponse,
   type PlanAddOn,
   type Subscription,
   type SubscriptionHistoryEntry,
@@ -114,9 +117,13 @@ const periodLabel: Record<string, string> = {
 
 const statusColor: Record<string, string> = {
   active: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  expired: "bg-red-500/15 text-red-700 dark:text-red-400",
+  grace_period: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  demo: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   trial: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   pilot: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
   cancelled: "bg-red-500/15 text-red-700 dark:text-red-400",
+  pending: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
   past_due: "bg-orange-500/15 text-orange-700 dark:text-orange-400",
   paused: "bg-gray-500/15 text-gray-700 dark:text-gray-400",
 };
@@ -138,6 +145,14 @@ const changeTypeLabel: Record<string, string> = {
 
 const tierIcons = [null, Zap, Sparkles, Crown, Shield];
 
+type DisplaySubscription = Subscription & {
+  synthetic?: boolean;
+  source?: string;
+};
+
+const syntheticId = (scope: "organization" | "project", id: string) =>
+  `synthetic:${scope}:${id}`;
+
 /* ------------------------------------------------------------------ */
 /* Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -148,6 +163,7 @@ const SubscriptionManagementPage: React.FC = () => {
   const navigate = useNavigate();
 
   const [catalog, setCatalog] = useState<PlanCatalogResponse | null>(null);
+  const [planSettings, setPlanSettings] = useState<PlanSettingsResponse | null>(null);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
   const [history, setHistory] = useState<SubscriptionHistoryEntry[]>([]);
   const [billingRecords, setBillingRecords] = useState<BillingRecord[]>([]);
@@ -166,26 +182,41 @@ const SubscriptionManagementPage: React.FC = () => {
   const [periodDialogOpen, setPeriodDialogOpen] = useState(false);
 
   // Selection state
-  const [selectedSub, setSelectedSub] = useState<Subscription | null>(null);
+  const [selectedSub, setSelectedSub] = useState<DisplaySubscription | null>(null);
   const [selectedPlanCode, setSelectedPlanCode] = useState("");
   const [selectedPeriod, setSelectedPeriod] = useState<BillingPeriod>("monthly");
   const [cancelReason, setCancelReason] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
 
-  const canManage =
-    roles.includes("superadmin") ||
+  const isSuperadmin = roles.includes("superadmin");
+  const isOrgAdmin = roles.includes("orgadmin");
+  const isProjectAdmin = roles.includes("projectadmin");
+  const canDirectManage = isSuperadmin;
+  const canCheckout =
+    isSuperadmin ||
+    isOrgAdmin ||
+    isProjectAdmin ||
     can("subscription.entitlement.manage") ||
     can("subscription.upgrade");
+  const canViewSubscriptions =
+    canCheckout ||
+    can("billing.plan.view") ||
+    roles.some((role) =>
+      ["orguser", "projectuser", "contractmgr_org"].includes(role)
+    );
 
   // Data loading
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [catalogData, subsData] = await Promise.all([
+      const [catalogData, subsData, settingsData] = await Promise.all([
         getPlanCatalog(),
         listSubscriptions(),
+        getPlanSettings().catch(() => null),
       ]);
       setCatalog(catalogData);
       setSubscriptions(subsData);
+      setPlanSettings(settingsData);
       const orgId =
         subsData.find((s) => !s.project_id)?.organization_id ||
         subsData[0]?.organization_id ||
@@ -209,8 +240,8 @@ const SubscriptionManagementPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!rbacLoading) loadData();
-  }, [rbacLoading, loadData]);
+    if (!rbacLoading && canViewSubscriptions) loadData();
+  }, [rbacLoading, canViewSubscriptions, loadData]);
 
   // Returning from the Razorpay hosted page (which cannot redirect back):
   // route through the payment-status page so the user sees confirmation.
@@ -222,20 +253,93 @@ const SubscriptionManagementPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const activeSub = useMemo(
-    () =>
-      subscriptions.find(
-        (s) =>
-          ["active", "trial", "pilot"].includes(s.status) &&
-          !s.project_id
-      ),
-    [subscriptions]
-  );
+  const subscriptionTargets = useMemo<DisplaySubscription[]>(() => {
+    if (!planSettings) return subscriptions;
+
+    const targets: DisplaySubscription[] = subscriptions.map((sub) => ({ ...sub }));
+    const seenScopes = new Set(
+      targets.map((sub) =>
+        sub.project_id
+          ? `project:${String(sub.project_id)}`
+          : `organization:${String(sub.organization_id)}`
+      )
+    );
+
+    for (const org of planSettings.organizations || []) {
+      const orgId = String(org.id || "");
+      const effective = planSettings.effective.organizations[orgId];
+      if (!orgId || seenScopes.has(`organization:${orgId}`)) continue;
+      targets.push({
+        id: syntheticId("organization", orgId),
+        organization_id: orgId,
+        project_id: null,
+        plan_code: effective?.plan_code || "no_service_override",
+        billing_period: effective?.billing_period || "monthly",
+        status: effective?.status || "none",
+        billing_status: effective?.billing_status || "inactive",
+        current_period_start: effective?.current_period_start,
+        current_period_end: effective?.current_period_end,
+        trial: Boolean(effective?.trial),
+        trial_ends_at: effective?.trial_ends_at,
+        pilot: false,
+        auto_renew: false,
+        active_add_ons: effective?.active_add_ons || [],
+        synthetic: true,
+        source: effective?.source,
+      });
+    }
+
+    for (const project of planSettings.projects || []) {
+      const projectId = String(project.id || "");
+      const orgId = String(project.organization_id || project.organizationId || "");
+      const effective = planSettings.effective.projects[projectId];
+      if (!projectId || !orgId || seenScopes.has(`project:${projectId}`)) continue;
+      targets.push({
+        id: syntheticId("project", projectId),
+        organization_id: orgId,
+        project_id: projectId,
+        plan_code: effective?.plan_code || "no_service_override",
+        billing_period: effective?.billing_period || "monthly",
+        status: effective?.status || "none",
+        billing_status: effective?.billing_status || "inactive",
+        current_period_start: effective?.current_period_start,
+        current_period_end: effective?.current_period_end,
+        trial: Boolean(effective?.trial),
+        trial_ends_at: effective?.trial_ends_at,
+        pilot: false,
+        auto_renew: false,
+        active_add_ons: effective?.active_add_ons || [],
+        synthetic: true,
+        source: effective?.source,
+      });
+    }
+
+    return targets;
+  }, [planSettings, subscriptions]);
+
+  const activeSub = useMemo<DisplaySubscription | undefined>(() => {
+    const activeLike = subscriptionTargets.filter((s) =>
+      ["active", "trial", "pilot", "pending", "past_due"].includes(s.status)
+    );
+    const candidates = activeLike.length > 0 ? activeLike : subscriptionTargets;
+    if (isProjectAdmin) {
+      return candidates.find((s) => Boolean(s.project_id)) || candidates[0];
+    }
+    if (isOrgAdmin) {
+      return candidates.find((s) => !s.project_id) || candidates[0];
+    }
+    return candidates.find((s) => !s.project_id) || candidates[0];
+  }, [isOrgAdmin, isProjectAdmin, subscriptionTargets]);
 
   const currentPlan = useMemo(
     () =>
       catalog?.plans.find((p) => p.code === activeSub?.plan_code) || null,
     [catalog, activeSub]
+  );
+
+  const selectedCurrentPlan = useMemo(
+    () => catalog?.plans.find((p) => p.code === (selectedSub || activeSub)?.plan_code) || null,
+    [activeSub, catalog, selectedSub]
   );
 
   const planByCode = useMemo(() => {
@@ -250,9 +354,51 @@ const SubscriptionManagementPage: React.FC = () => {
     return map;
   }, [catalog]);
 
+  const filteredSubscriptions = useMemo(
+    () =>
+      subscriptionTargets.filter((sub) =>
+        statusFilter === "all"
+          ? true
+          : String(sub.status || "").toLowerCase() === statusFilter
+      ),
+    [statusFilter, subscriptionTargets]
+  );
+
+  const statusOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          subscriptionTargets
+            .map((sub) => String(sub.status || "").toLowerCase())
+            .filter(Boolean)
+        )
+      ).sort(),
+    [subscriptionTargets]
+  );
+
+  const planStatusCounts = useMemo(() => {
+    const counts = new Map<string, { planName: string; total: number; statuses: Record<string, number> }>();
+    for (const sub of subscriptions) {
+      const planName = planByCode[sub.plan_code]?.name || sub.plan_code || "No plan";
+      const status = String(sub.status || "unknown").toLowerCase();
+      const entry = counts.get(sub.plan_code) || {
+        planName,
+        total: 0,
+        statuses: {},
+      };
+      entry.total += 1;
+      entry.statuses[status] = (entry.statuses[status] || 0) + 1;
+      counts.set(sub.plan_code, entry);
+    }
+    return Array.from(counts.values()).sort((a, b) => a.planName.localeCompare(b.planName));
+  }, [planByCode, subscriptions]);
+
+  const canUseDirectActions = (sub?: DisplaySubscription | null) =>
+    canDirectManage && Boolean(sub) && !sub?.synthetic;
+
   // Actions
   const handleUpgrade = async (isDowngrade = false) => {
-    if (!selectedSub || !selectedPlanCode) return;
+    if (!selectedSub || !selectedPlanCode || !canUseDirectActions(selectedSub)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -278,6 +424,38 @@ const SubscriptionManagementPage: React.FC = () => {
     }
   };
 
+  const handleSetScopePlan = async () => {
+    if (!selectedSub || !selectedPlanCode || !canDirectManage) return;
+    setActionLoading(true);
+    try {
+      const token = await requestToken(
+        "subscription.entitlement.manage",
+        "Confirm Plan Update",
+        "Enter your password to set this plan."
+      );
+      await updatePlanSettingsScope(
+        {
+          organization_id: selectedSub.organization_id,
+          project_id: selectedSub.project_id || null,
+          mode: "plan",
+          plan_code: selectedPlanCode,
+          billing_period: selectedPeriod,
+          status: "active",
+        },
+        { stepUpToken: token }
+      );
+      toast.success("Plan updated");
+      setUpgradeDialogOpen(false);
+      await loadData();
+    } catch (err: any) {
+      toast.error("Plan update failed", {
+        description: err?.response?.data?.detail || err?.message,
+      });
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   // Razorpay hosted checkout. Provisions a *pending* subscription on the gateway
   // and redirects to the hosted page; the backend billing webhook (not this
   // redirect) activates the subscription and entitlements once payment captures.
@@ -285,8 +463,9 @@ const SubscriptionManagementPage: React.FC = () => {
     if (!selectedPlanCode) return;
     setActionLoading(true);
     try {
+      const targetSub = selectedSub || activeSub;
       let organizationId =
-        activeSub?.organization_id || subscriptions[0]?.organization_id || "";
+        targetSub?.organization_id || subscriptions[0]?.organization_id || "";
       if (!organizationId) {
         const me = await getCurrentUserProfile().catch(() => null);
         organizationId = (me as any)?.organization_id || "";
@@ -296,13 +475,14 @@ const SubscriptionManagementPage: React.FC = () => {
         return;
       }
       const token = await requestToken(
-        "subscription.entitlement.manage",
+        "subscription.checkout",
         "Confirm Subscription",
         "Enter your password to start a secure payment checkout."
       );
       const checkout = await startSubscriptionCheckout(
         {
           organization_id: organizationId,
+          project_id: targetSub?.project_id || undefined,
           plan_code: selectedPlanCode,
           billing_period: selectedPeriod as any,
         },
@@ -331,7 +511,7 @@ const SubscriptionManagementPage: React.FC = () => {
   };
 
   const handleCancel = async () => {
-    if (!selectedSub) return;
+    if (!selectedSub || !canUseDirectActions(selectedSub)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -357,6 +537,7 @@ const SubscriptionManagementPage: React.FC = () => {
   };
 
   const handleReactivate = async (sub: Subscription) => {
+    if (!canUseDirectActions(sub as DisplaySubscription)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -377,6 +558,7 @@ const SubscriptionManagementPage: React.FC = () => {
   };
 
   const handleConvertTrial = async (sub: Subscription) => {
+    if (!canUseDirectActions(sub as DisplaySubscription)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -401,7 +583,7 @@ const SubscriptionManagementPage: React.FC = () => {
   };
 
   const handleChangePeriod = async () => {
-    if (!selectedSub) return;
+    if (!selectedSub || !canUseDirectActions(selectedSub)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -429,6 +611,7 @@ const SubscriptionManagementPage: React.FC = () => {
     addonCode: string,
     isActive: boolean
   ) => {
+    if (!canUseDirectActions(sub as DisplaySubscription)) return;
     setActionLoading(true);
     try {
       const token = await requestToken(
@@ -510,14 +693,14 @@ const SubscriptionManagementPage: React.FC = () => {
 
   if (rbacLoading) return <div className="container mx-auto p-6">Loading...</div>;
 
-  if (!canManage) {
+  if (!canViewSubscriptions) {
     return (
       <div className="container mx-auto p-6">
         <Card>
           <CardHeader>
             <CardTitle>Access Denied</CardTitle>
           </CardHeader>
-          <CardContent>You do not have permission to manage subscriptions.</CardContent>
+          <CardContent>You do not have permission to view subscriptions.</CardContent>
         </Card>
       </div>
     );
@@ -677,10 +860,19 @@ const SubscriptionManagementPage: React.FC = () => {
                   size="sm"
                   variant="outline"
                   className="ml-auto"
-                  onClick={() => handleConvertTrial(activeSub)}
+                  onClick={() => {
+                    if (canUseDirectActions(activeSub)) {
+                      handleConvertTrial(activeSub);
+                      return;
+                    }
+                    setSelectedSub(activeSub);
+                    setSelectedPlanCode(activeSub.plan_code);
+                    setSelectedPeriod((activeSub.billing_period as BillingPeriod) || "monthly");
+                    setUpgradeDialogOpen(true);
+                  }}
                   disabled={actionLoading}
                 >
-                  Convert to Paid
+                  {canUseDirectActions(activeSub) ? "Convert to Paid" : "Pay to Convert"}
                 </Button>
               </div>
             )}
@@ -707,7 +899,7 @@ const SubscriptionManagementPage: React.FC = () => {
                           onClick={() =>
                             handleToggleAddon(activeSub, code, true)
                           }
-                          disabled={actionLoading}
+                          disabled={actionLoading || !canUseDirectActions(activeSub)}
                         >
                           <X className="h-3 w-3" />
                         </button>
@@ -719,93 +911,105 @@ const SubscriptionManagementPage: React.FC = () => {
             )}
           </CardContent>
           <CardFooter className="flex flex-wrap gap-2 pt-0">
-            <Button
-              variant="default"
-              size="sm"
-              className="gap-1"
-              onClick={() => {
-                setSelectedSub(activeSub);
-                setSelectedPlanCode("");
-                setSelectedPeriod(
-                  activeSub.billing_period as BillingPeriod
-                );
-                setUpgradeDialogOpen(true);
-              }}
-            >
-              <ArrowUpRight className="h-3.5 w-3.5" /> Change Plan
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              onClick={() => {
-                setSelectedSub(activeSub);
-                setSelectedPeriod(
-                  activeSub.billing_period as BillingPeriod
-                );
-                setPeriodDialogOpen(true);
-              }}
-            >
-              <Calendar className="h-3.5 w-3.5" /> Change Period
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              onClick={() => {
-                setSelectedSub(activeSub);
-                setAddonDialogOpen(true);
-              }}
-            >
-              <Package className="h-3.5 w-3.5" /> Manage Add-Ons
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              onClick={() => openInvoice(activeSub)}
-            >
-              <CreditCard className="h-3.5 w-3.5" /> Invoice Preview
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              onClick={() => openHistory(activeSub)}
-            >
-              <History className="h-3.5 w-3.5" /> History
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1"
-              onClick={() => openBillingRecords(activeSub)}
-            >
-              <Receipt className="h-3.5 w-3.5" /> Billing History
-            </Button>
-            {activeSub.status === "cancelled" ? (
+            {canCheckout && (
               <Button
-                variant="outline"
+                variant="default"
                 size="sm"
-                className="gap-1 text-emerald-600"
-                onClick={() => handleReactivate(activeSub)}
-                disabled={actionLoading}
-              >
-                <Play className="h-3.5 w-3.5" /> Reactivate
-              </Button>
-            ) : (
-              <Button
-                variant="ghost"
-                size="sm"
-                className="gap-1 text-destructive"
+                className="gap-1"
                 onClick={() => {
                   setSelectedSub(activeSub);
-                  setCancelReason("");
-                  setCancelDialogOpen(true);
+                  setSelectedPlanCode("");
+                  setSelectedPeriod(
+                    activeSub.billing_period as BillingPeriod
+                  );
+                  setUpgradeDialogOpen(true);
                 }}
               >
-                <XCircle className="h-3.5 w-3.5" /> Cancel
+                <ArrowUpRight className="h-3.5 w-3.5" /> Change Plan
               </Button>
+            )}
+            {canUseDirectActions(activeSub) && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => {
+                    setSelectedSub(activeSub);
+                    setSelectedPeriod(
+                      activeSub.billing_period as BillingPeriod
+                    );
+                    setPeriodDialogOpen(true);
+                  }}
+                >
+                  <Calendar className="h-3.5 w-3.5" /> Change Period
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => {
+                    setSelectedSub(activeSub);
+                    setAddonDialogOpen(true);
+                  }}
+                >
+                  <Package className="h-3.5 w-3.5" /> Manage Add-Ons
+                </Button>
+              </>
+            )}
+            {!activeSub.synthetic && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => openInvoice(activeSub)}
+                >
+                  <CreditCard className="h-3.5 w-3.5" /> Invoice Preview
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => openHistory(activeSub)}
+                >
+                  <History className="h-3.5 w-3.5" /> History
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1"
+                  onClick={() => openBillingRecords(activeSub)}
+                >
+                  <Receipt className="h-3.5 w-3.5" /> Billing History
+                </Button>
+              </>
+            )}
+            {canUseDirectActions(activeSub) && (
+              activeSub.status === "cancelled" ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1 text-emerald-600"
+                  onClick={() => handleReactivate(activeSub)}
+                  disabled={actionLoading}
+                >
+                  <Play className="h-3.5 w-3.5" /> Reactivate
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="gap-1 text-destructive"
+                  onClick={() => {
+                    setSelectedSub(activeSub);
+                    setCancelReason("");
+                    setCancelDialogOpen(true);
+                  }}
+                >
+                  <XCircle className="h-3.5 w-3.5" /> Cancel
+                </Button>
+              )
             )}
           </CardFooter>
         </Card>
@@ -893,6 +1097,10 @@ const SubscriptionManagementPage: React.FC = () => {
                       <Badge variant="outline" className="w-full justify-center">
                         Current Plan
                       </Badge>
+                    ) : !canCheckout ? (
+                      <Badge variant="outline" className="w-full justify-center">
+                        View Only
+                      </Badge>
                     ) : (
                       <Button
                         size="sm"
@@ -923,9 +1131,68 @@ const SubscriptionManagementPage: React.FC = () => {
       </div>
 
       {/* All Subscriptions Table */}
-      {subscriptions.length > 1 && (
+      {subscriptionTargets.length > 1 && (
         <div>
-          <h2 className="text-lg font-semibold mb-4">All Subscriptions</h2>
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">
+                {isSuperadmin ? "All Subscriptions" : "Your Subscriptions"}
+              </h2>
+              {isSuperadmin && (
+                <p className="text-sm text-muted-foreground">
+                  Plan-wise status counts and status filtering for all organizations and projects.
+                </p>
+              )}
+            </div>
+            {isSuperadmin && (
+              <div className="w-full md:w-56">
+                <label className="text-xs font-medium text-muted-foreground">
+                  Filter by status
+                </label>
+                <Select value={statusFilter} onValueChange={setStatusFilter}>
+                  <SelectTrigger className="mt-1">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All statuses</SelectItem>
+                    {statusOptions.map((status) => (
+                      <SelectItem key={status} value={status}>
+                        {status.replace(/_/g, " ")}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+          {isSuperadmin && planStatusCounts.length > 0 && (
+            <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+              {planStatusCounts.map((entry) => (
+                <Card key={entry.planName}>
+                  <CardContent className="p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="font-medium">{entry.planName}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {entry.total} subscription{entry.total === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap justify-end gap-1">
+                        {Object.entries(entry.statuses).map(([status, count]) => (
+                          <Badge
+                            key={status}
+                            className={statusColor[status] || statusColor.paused}
+                          >
+                            {status}: {count}
+                          </Badge>
+                        ))}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
           <Card>
             <CardContent className="p-0">
               <div className="overflow-x-auto">
@@ -941,10 +1208,15 @@ const SubscriptionManagementPage: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {subscriptions.map((sub) => (
+                    {filteredSubscriptions.map((sub) => (
                       <tr key={sub.id} className="border-b hover:bg-muted/30">
                         <td className="p-3 font-medium">
                           {planByCode[sub.plan_code]?.name || sub.plan_code}
+                          {sub.synthetic && sub.source === "inherited" && (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              inherited
+                            </span>
+                          )}
                         </td>
                         <td className="p-3">
                           <Badge
@@ -967,24 +1239,49 @@ const SubscriptionManagementPage: React.FC = () => {
                         </td>
                         <td className="p-3 text-right">
                           <div className="flex justify-end gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openHistory(sub)}
-                            >
-                              <History className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openInvoice(sub)}
-                            >
-                              <CreditCard className="h-3.5 w-3.5" />
-                            </Button>
+                            {canCheckout && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => {
+                                  setSelectedSub(sub);
+                                  setSelectedPlanCode("");
+                                  setSelectedPeriod((sub.billing_period as BillingPeriod) || "monthly");
+                                  setUpgradeDialogOpen(true);
+                                }}
+                              >
+                                <ArrowUpRight className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {!sub.synthetic && (
+                              <>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => openHistory(sub)}
+                                >
+                                  <History className="h-3.5 w-3.5" />
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => openInvoice(sub)}
+                                >
+                                  <CreditCard className="h-3.5 w-3.5" />
+                                </Button>
+                              </>
+                            )}
                           </div>
                         </td>
                       </tr>
                     ))}
+                    {filteredSubscriptions.length === 0 && (
+                      <tr>
+                        <td className="p-4 text-center text-muted-foreground" colSpan={6}>
+                          No subscriptions match this status filter.
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -1020,7 +1317,7 @@ const SubscriptionManagementPage: React.FC = () => {
                       (p) =>
                         p.is_active &&
                         p.code !== "no_service_override" &&
-                        p.code !== activeSub?.plan_code
+                        p.code !== (selectedSub || activeSub)?.plan_code
                     )
                     .map((p) => (
                       <SelectItem key={p.code} value={p.code}>
@@ -1054,29 +1351,41 @@ const SubscriptionManagementPage: React.FC = () => {
             <Button variant="outline" onClick={() => setUpgradeDialogOpen(false)}>
               Cancel
             </Button>
-            <Button
-              variant="outline"
-              disabled={!selectedPlanCode || actionLoading}
-              onClick={handleCheckout}
-            >
-              {actionLoading ? "Processing..." : "Pay with Razorpay"}
-            </Button>
-            <Button
-              disabled={!selectedPlanCode || actionLoading}
-              onClick={() => {
-                const newPlan = planByCode[selectedPlanCode];
-                const isDowngrade =
-                  (newPlan?.tier || 0) < (currentPlan?.tier || 0);
-                handleUpgrade(isDowngrade);
-              }}
-            >
-              {actionLoading
-                ? "Processing..."
-                : (planByCode[selectedPlanCode]?.tier || 0) >
-                  (currentPlan?.tier || 0)
-                ? "Upgrade"
-                : "Downgrade"}
-            </Button>
+            {canCheckout && (
+              <Button
+                variant="outline"
+                disabled={!selectedPlanCode || actionLoading}
+                onClick={handleCheckout}
+              >
+                {actionLoading ? "Processing..." : "Pay with Razorpay"}
+              </Button>
+            )}
+            {canDirectManage && selectedSub?.synthetic && (
+              <Button
+                disabled={!selectedPlanCode || actionLoading}
+                onClick={handleSetScopePlan}
+              >
+                {actionLoading ? "Processing..." : "Set Plan"}
+              </Button>
+            )}
+            {canUseDirectActions(selectedSub) && (
+              <Button
+                disabled={!selectedPlanCode || actionLoading}
+                onClick={() => {
+                  const newPlan = planByCode[selectedPlanCode];
+                  const isDowngrade =
+                    (newPlan?.tier || 0) < (selectedCurrentPlan?.tier || 0);
+                  handleUpgrade(isDowngrade);
+                }}
+              >
+                {actionLoading
+                  ? "Processing..."
+                  : (planByCode[selectedPlanCode]?.tier || 0) >
+                    (selectedCurrentPlan?.tier || 0)
+                  ? "Upgrade"
+                  : "Downgrade"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

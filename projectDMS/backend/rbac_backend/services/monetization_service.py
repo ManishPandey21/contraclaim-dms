@@ -496,6 +496,7 @@ class MonetizationService:
         self,
         organization_id: Optional[str] = None,
         organization_ids: Optional[List[str]] = None,
+        project_ids: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         db = await self._get_db()
         query: Dict[str, Any] = {}
@@ -503,6 +504,8 @@ class MonetizationService:
             query["organization_id"] = str(organization_id)
         elif organization_ids is not None:
             query["organization_id"] = {"$in": [str(item) for item in organization_ids]}
+        if project_ids is not None:
+            query["project_id"] = {"$in": [str(item) for item in project_ids]}
         return [self._normalize(row) for row in await db.subscriptions.find(query).sort("updated_at", -1).to_list(length=None)]
 
     async def get_subscription_by_id(self, subscription_id: str) -> Optional[Dict[str, Any]]:
@@ -1336,7 +1339,11 @@ class MonetizationService:
                 "subscription_id": None,
                 "plan_code": None,
                 "plan_name": None,
+                "status": "none",
+                "billing_status": None,
                 "billing_period": None,
+                "current_period_start": None,
+                "current_period_end": None,
                 "trial": False,
                 "trial_ends_at": None,
                 "active_add_ons": [],
@@ -1357,7 +1364,11 @@ class MonetizationService:
             "subscription_id": str(subscription.get("_id") or subscription.get("id") or ""),
             "plan_code": plan_code,
             "plan_name": plan.get("name") or plan_code,
+            "status": subscription.get("status") or "none",
+            "billing_status": subscription.get("billing_status"),
             "billing_period": subscription.get("billing_period", "monthly"),
+            "current_period_start": subscription.get("current_period_start"),
+            "current_period_end": subscription.get("current_period_end"),
             "trial": bool(subscription.get("trial")),
             "trial_ends_at": subscription.get("trial_ends_at"),
             "active_add_ons": subscription.get("active_add_ons") or [],
@@ -1366,7 +1377,12 @@ class MonetizationService:
             "drafting_enabled": bool(features.get("feature.drafting.enabled", False)),
         }
 
-    async def get_plan_settings(self) -> Dict[str, Any]:
+    async def get_plan_settings(
+        self,
+        *,
+        organization_ids: Optional[List[str]] = None,
+        project_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         db = await self._get_db()
         plans = await self.list_plans()
         plan_by_code = {str(plan.get("code")): plan for plan in plans}
@@ -1382,6 +1398,48 @@ class MonetizationService:
             self._normalize(row)
             for row in await db.subscriptions.find({}).sort("updated_at", -1).to_list(length=None)
         ]
+
+        scoped_org_ids = (
+            {str(org_id) for org_id in organization_ids}
+            if organization_ids is not None
+            else None
+        )
+        scoped_project_ids = (
+            {str(project_id) for project_id in project_ids}
+            if project_ids is not None
+            else None
+        )
+
+        if scoped_org_ids is not None or scoped_project_ids is not None:
+            if scoped_project_ids is not None:
+                for project in projects:
+                    project_id = str(project.get("id") or project.get("_id") or "")
+                    if project_id in scoped_project_ids:
+                        org_id = self._org_id_from_project(project)
+                        if org_id:
+                            if scoped_org_ids is None:
+                                scoped_org_ids = set()
+                            scoped_org_ids.add(str(org_id))
+
+            if scoped_org_ids is not None:
+                organizations = [
+                    org
+                    for org in organizations
+                    if str(org.get("id") or org.get("_id") or "") in scoped_org_ids
+                ]
+
+            if scoped_project_ids is not None:
+                projects = [
+                    project
+                    for project in projects
+                    if str(project.get("id") or project.get("_id") or "") in scoped_project_ids
+                ]
+            elif scoped_org_ids is not None:
+                projects = [
+                    project
+                    for project in projects
+                    if self._org_id_from_project(project) in scoped_org_ids
+                ]
 
         active_subscriptions = [
             row
@@ -1425,11 +1483,25 @@ class MonetizationService:
                 inherited["inherited_from_organization_id"] = org_id if inherited.get("plan_code") else None
                 effective["projects"][project_id] = inherited
 
+        visible_subscriptions = subscriptions
+        if scoped_org_ids is not None:
+            visible_subscriptions = [
+                sub
+                for sub in visible_subscriptions
+                if str(sub.get("organization_id") or "") in scoped_org_ids
+            ]
+        if scoped_project_ids is not None:
+            visible_subscriptions = [
+                sub
+                for sub in visible_subscriptions
+                if str(sub.get("project_id") or "") in scoped_project_ids
+            ]
+
         return {
             "organizations": organizations,
             "projects": projects,
             "plans": plans,
-            "subscriptions": subscriptions,
+            "subscriptions": visible_subscriptions,
             "effective": effective,
         }
 

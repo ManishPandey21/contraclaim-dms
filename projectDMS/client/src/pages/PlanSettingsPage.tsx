@@ -51,6 +51,23 @@ const serviceBadge = (enabled: boolean, label: string) => (
   </Badge>
 );
 
+const statusBadge = (status?: string | null, trial?: boolean) => {
+  const normalized = String(trial ? "demo" : status || "none").toLowerCase();
+  const label = normalized
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+  if (normalized === "active") {
+    return <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">Active</Badge>;
+  }
+  if (["expired", "cancelled", "canceled"].includes(normalized)) {
+    return <Badge className="bg-red-500/15 text-red-700 dark:text-red-400">{label}</Badge>;
+  }
+  if (["grace_period", "grace", "demo", "trial", "pilot", "past_due"].includes(normalized)) {
+    return <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400">{label}</Badge>;
+  }
+  return <Badge variant="outline">{label}</Badge>;
+};
+
 const selectValueForPlan = (planCode?: string | null) =>
   planCode || noServiceValue;
 
@@ -68,8 +85,14 @@ const PlanSettingsPage = () => {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const { requestToken, StepUpDialog } = useStepUp();
 
-  const canManage =
-    roles.includes("superadmin") || can("subscription.entitlement.manage");
+  const canEditPlans = roles.includes("superadmin");
+  const canViewPlans =
+    canEditPlans ||
+    can("billing.plan.view") ||
+    can("subscription.entitlement.manage") ||
+    roles.some((role) =>
+      ["orgadmin", "orguser", "projectadmin", "projectuser", "contractmgr_org"].includes(role)
+    );
 
   const loadPlanSettings = async () => {
     try {
@@ -93,10 +116,10 @@ const PlanSettingsPage = () => {
   };
 
   useEffect(() => {
-    if (!rbacLoading && canManage) {
+    if (!rbacLoading && canViewPlans) {
       loadPlanSettings();
     }
-  }, [rbacLoading, canManage]);
+  }, [rbacLoading, canViewPlans]);
 
   const visiblePlans = useMemo(() => {
     return (data?.plans || []).filter(
@@ -207,7 +230,7 @@ const PlanSettingsPage = () => {
     return <div className="container mx-auto p-6">Loading...</div>;
   }
 
-  if (!canManage) {
+  if (!canViewPlans) {
     return (
       <div className="container mx-auto p-6">
         <Card>
@@ -215,7 +238,7 @@ const PlanSettingsPage = () => {
             <CardTitle>Access denied</CardTitle>
           </CardHeader>
           <CardContent>
-            You do not have permission to manage plan settings.
+            You do not have permission to view plan settings.
           </CardContent>
         </Card>
       </div>
@@ -253,6 +276,7 @@ const PlanSettingsPage = () => {
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Plan Selection</TableHead>
+                <TableHead>Status</TableHead>
                 <TableHead>Effective Services</TableHead>
                 <TableHead>Billing Period</TableHead>
                 <TableHead>Trial / Add-on Status</TableHead>
@@ -283,27 +307,36 @@ const PlanSettingsPage = () => {
                         </button>
                       </TableCell>
                       <TableCell>
-                        <Select
-                          value={selectValueForPlan(effectiveOrg?.plan_code)}
-                          onValueChange={(value) =>
-                            handleOrganizationPlanChange(orgId, value)
-                          }
-                          disabled={savingKey === `org:${orgId}`}
-                        >
-                          <SelectTrigger className="w-[280px]">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value={noServiceValue}>
-                              No Service
-                            </SelectItem>
-                            {visiblePlans.map((plan: PlanSettingsPlan) => (
-                              <SelectItem key={plan.code} value={plan.code}>
-                                {plan.name}
+                        {canEditPlans ? (
+                          <Select
+                            value={selectValueForPlan(effectiveOrg?.plan_code)}
+                            onValueChange={(value) =>
+                              handleOrganizationPlanChange(orgId, value)
+                            }
+                            disabled={savingKey === `org:${orgId}`}
+                          >
+                            <SelectTrigger className="w-[280px]">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value={noServiceValue}>
+                                No Service
                               </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                              {visiblePlans.map((plan: PlanSettingsPlan) => (
+                                <SelectItem key={plan.code} value={plan.code}>
+                                  {plan.name}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <span className="text-sm font-medium">
+                            {planName(effectiveOrg?.plan_code)}
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {statusBadge(effectiveOrg?.status, effectiveOrg?.trial)}
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-2">
@@ -354,33 +387,46 @@ const PlanSettingsPage = () => {
                               </div>
                             </TableCell>
                             <TableCell>
-                              <Select
-                                value={selectValueForProject(
-                                  source,
-                                  effectiveProject?.plan_code
-                                )}
-                                onValueChange={(value) =>
-                                  handleProjectPlanChange(orgId, projectId, value)
-                                }
-                                disabled={savingKey === `project:${projectId}`}
-                              >
-                                <SelectTrigger className="w-[280px]">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value={inheritValue}>
-                                    Inherit Organization Plan
-                                  </SelectItem>
-                                  <SelectItem value={noServiceValue}>
-                                    No Service
-                                  </SelectItem>
-                                  {visiblePlans.map((plan: PlanSettingsPlan) => (
-                                    <SelectItem key={plan.code} value={plan.code}>
-                                      {plan.name}
+                              {canEditPlans ? (
+                                <Select
+                                  value={selectValueForProject(
+                                    source,
+                                    effectiveProject?.plan_code
+                                  )}
+                                  onValueChange={(value) =>
+                                    handleProjectPlanChange(orgId, projectId, value)
+                                  }
+                                  disabled={savingKey === `project:${projectId}`}
+                                >
+                                  <SelectTrigger className="w-[280px]">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value={inheritValue}>
+                                      Inherit Organization Plan
                                     </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
+                                    <SelectItem value={noServiceValue}>
+                                      No Service
+                                    </SelectItem>
+                                    {visiblePlans.map((plan: PlanSettingsPlan) => (
+                                      <SelectItem key={plan.code} value={plan.code}>
+                                        {plan.name}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : (
+                                <span className="text-sm font-medium">
+                                  {source === "inherited"
+                                    ? "Inherit Organization Plan"
+                                    : source === "project"
+                                      ? planName(effectiveProject?.plan_code)
+                                      : "No service"}
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {statusBadge(effectiveProject?.status, effectiveProject?.trial)}
                             </TableCell>
                             <TableCell>
                               <div className="flex flex-wrap gap-2">
@@ -428,7 +474,7 @@ const PlanSettingsPage = () => {
                     {orgExpanded && orgProjects.length === 0 && (
                       <TableRow className="bg-muted/20">
                         <TableCell
-                          colSpan={6}
+                          colSpan={7}
                           className="pl-12 text-muted-foreground"
                         >
                           <div className="flex items-center gap-2">

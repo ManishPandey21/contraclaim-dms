@@ -47,6 +47,115 @@ async def get_policy_service() -> PolicyService:
     return PolicyService()
 
 
+ORG_SUBSCRIPTION_ADMIN_ROLES = {"orgadmin"}
+ORG_SUBSCRIPTION_VIEW_ROLES = {
+    "orgadmin",
+    "orguser",
+    "contractmgr_org",
+    "doccontroller",
+    "reporter",
+    "settings_manager",
+}
+PROJECT_SUBSCRIPTION_ADMIN_ROLES = {"projectadmin"}
+PROJECT_SUBSCRIPTION_VIEW_ROLES = {"projectadmin", "projectuser"}
+
+
+def _role_names(current_user: CurrentUser) -> set[str]:
+    return ScopeService.role_names(current_user)
+
+
+def _has_org_subscription_view(roles: set[str]) -> bool:
+    return bool(roles & ORG_SUBSCRIPTION_VIEW_ROLES)
+
+
+def _has_project_subscription_view(roles: set[str]) -> bool:
+    return bool(roles & PROJECT_SUBSCRIPTION_VIEW_ROLES)
+
+
+async def _subscription_scope_filters(
+    current_user: CurrentUser,
+) -> tuple[Optional[List[str]], Optional[List[str]]]:
+    """Return organization/project filters for non-superadmin monetization reads.
+
+    ``project_ids is None`` means organization-wide visibility within the
+    returned organizations. A concrete project list means project-only visibility,
+    used for project admins/users so an organization id on the user profile does
+    not accidentally expose sibling project subscriptions.
+    """
+    scope = ScopeService()
+    if scope.is_superadmin(current_user):
+        return None, None
+
+    roles = _role_names(current_user)
+    allowed_orgs = await scope.client_organization_ids(current_user)
+    allowed_projects = await scope.client_project_ids(current_user)
+
+    if _has_org_subscription_view(roles) and allowed_orgs:
+        return sorted(allowed_orgs), None
+    if _has_project_subscription_view(roles) and allowed_projects:
+        return sorted(allowed_orgs) if allowed_orgs else None, sorted(allowed_projects)
+    if allowed_projects:
+        return sorted(allowed_orgs) if allowed_orgs else None, sorted(allowed_projects)
+    if allowed_orgs:
+        return sorted(allowed_orgs), None
+    return [], []
+
+
+async def _authorize_checkout_scope(
+    payload: "CheckoutRequest",
+    current_user: CurrentUser,
+    policy: PolicyService,
+) -> None:
+    scope = ScopeService()
+    if scope.is_superadmin(current_user):
+        return
+
+    roles = _role_names(current_user)
+    has_subscription_admin_permission = await policy.has_permission(
+        current_user,
+        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
+    ) or await policy.has_permission(current_user, Permissions.SUBSCRIPTION_UPGRADE)
+
+    if roles & ORG_SUBSCRIPTION_ADMIN_ROLES:
+        if await scope.is_client_scope_allowed(
+            current_user,
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+        ):
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
+
+    if roles & PROJECT_SUBSCRIPTION_ADMIN_ROLES:
+        if not payload.project_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Project administrators can change only project subscriptions",
+            )
+        project_ids = await scope.client_project_ids(current_user)
+        if str(payload.project_id) in project_ids and await scope.is_client_scope_allowed(
+            current_user,
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+        ):
+            return
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
+
+    if has_subscription_admin_permission:
+        await policy.authorize(
+            current_user,
+            Permissions.SUBSCRIPTION_UPGRADE,
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+            resource_type="subscription",
+        )
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to change this subscription",
+    )
+
+
 async def _load_subscription_or_404(
     service: MonetizationService,
     subscription_id: str,
@@ -186,14 +295,21 @@ async def get_plan_detail(
 @router.get("/plan-settings", response_model=Dict[str, Any])
 async def get_plan_settings(
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(get_policy_service),
 ):
-    await policy.authorize(
-        current_user,
-        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
-        resource_type="plan_settings",
+    service = MonetizationService()
+    if ScopeService().is_superadmin(current_user):
+        return await service.get_plan_settings()
+
+    organization_ids, project_ids = await _subscription_scope_filters(current_user)
+    if not organization_ids and not project_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No subscription scope available",
+        )
+    return await service.get_plan_settings(
+        organization_ids=organization_ids,
+        project_ids=project_ids,
     )
-    return await MonetizationService().get_plan_settings()
 
 
 @router.get("/plan-settings/effective-services", response_model=Dict[str, Any])
@@ -248,6 +364,11 @@ async def update_plan_settings_scope(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ):
+    if not ScopeService().is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only superadmins can change plans from Plan Settings",
+        )
     await require_step_up(request, current_user, action="subscription.entitlement.manage")
     await policy.authorize(
         current_user,
@@ -342,29 +463,26 @@ async def list_subscriptions(
     policy: PolicyService = Depends(get_policy_service),
 ):
     scope = ScopeService()
-    if scope.is_superadmin(current_user) or await policy.has_permission(
-        current_user,
-        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
-    ):
+    if scope.is_superadmin(current_user):
         return await MonetizationService().list_subscriptions(organization_id)
 
-    allowed_orgs = await scope.client_organization_ids(current_user)
+    allowed_orgs, allowed_projects = await _subscription_scope_filters(current_user)
     if organization_id:
-        await policy.authorize(
-            current_user,
-            Permissions.SUBSCRIPTION_USAGE_VIEW,
+        if str(organization_id) not in {str(org_id) for org_id in allowed_orgs or []}:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
+        return await MonetizationService().list_subscriptions(
             organization_id=organization_id,
-            resource_type="subscription",
+            project_ids=allowed_projects,
         )
-        return await MonetizationService().list_subscriptions(organization_id)
 
-    if not allowed_orgs:
+    if not allowed_orgs and not allowed_projects:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No organization scope available for subscription usage",
         )
     return await MonetizationService().list_subscriptions(
-        organization_ids=sorted(allowed_orgs)
+        organization_ids=allowed_orgs,
+        project_ids=allowed_projects,
     )
 
 
@@ -428,14 +546,8 @@ async def start_subscription_checkout(
     The subscription is created in ``pending`` state; the billing webhook promotes
     it to ``active`` (and enables entitlements) once payment is captured.
     """
-    await require_step_up(request, current_user, action="subscription.entitlement.manage")
-    await policy.authorize(
-        current_user,
-        Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE,
-        organization_id=payload.organization_id,
-        project_id=payload.project_id,
-        resource_type="subscription",
-    )
+    await require_step_up(request, current_user, action="subscription.checkout")
+    await _authorize_checkout_scope(payload, current_user, policy)
     try:
         return await MonetizationService().start_checkout(
             organization_id=payload.organization_id,
