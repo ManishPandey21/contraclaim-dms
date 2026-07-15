@@ -543,6 +543,8 @@ class PermissionService:
                     normalized_rid = _normalize_role_name(rid_str)
                     if normalized_rid:
                         role_names.add(normalized_rid)
+                    if "superadmin" in role_names:
+                        return ["*"]
 
                 try:
                     role_qid = ObjectId(rid)
