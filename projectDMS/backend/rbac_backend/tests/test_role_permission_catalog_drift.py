@@ -96,6 +96,16 @@ class _DB:
                 }
             ]
         )
+        self.users = _Collection(
+            [
+                {
+                    "_id": "user-1",
+                    "email": "project-admin@example.test",
+                    "roles": ["orgadmin"],
+                    "permissions": ["custom:direct"],
+                }
+            ]
+        )
         self.permissions = _Collection(
             [
                 {
@@ -162,6 +172,26 @@ async def test_permission_service_returns_saved_permission_names_missing_from_ca
         "dms.document.delete",
         "dms.admin",
     }
+
+
+async def test_permission_service_returns_effective_permission_names_for_current_user_profile():
+    service = _PermissionService(_DB())
+
+    names = set(await service.get_effective_permission_names("user-1"))
+
+    assert {
+        "custom:direct",
+        "dms.document.view",
+        "dms.document.delete",
+        "dms.admin",
+        "users:read",
+    }.issubset(names)
+
+
+async def test_user_has_permission_handles_raw_role_permissions_without_catalog_match():
+    service = _PermissionService(_DB())
+
+    assert await service.user_has_permission("user-1", "dms.document.delete", log=False)
 
 
 async def test_role_service_saves_and_retrieves_full_client_dms_permissions():

@@ -25,6 +25,7 @@ export function useRBAC(): UseRBACResult {
   const [error, setError] = useState<string | null>(null);
   const [perms, setPerms] = useState<Set<string>>(new Set());
   const [roles, setRoles] = useState<string[]>([]);
+  const [profilePermissions, setProfilePermissions] = useState<string[]>([]);
   // Whether the first role fetch has completed. Until it has, an empty `roles`
   // means "still loading", not "no access" — otherwise a freshly-mounted
   // RoleGuard would deny and bounce deep-links to /overview before roles arrive.
@@ -43,9 +44,23 @@ export function useRBAC(): UseRBACResult {
                 .map((r) => normalizeRoleId(r))
                 .filter(Boolean)
             : [];
-        if (mounted) setRoles(fetched);
+        const fetchedPermissions = Array.isArray(me?.permissions)
+          ? me.permissions.map((permission) => String(permission).trim()).filter(Boolean)
+          : typeof me?.permissions === "string"
+            ? me.permissions
+                .split(",")
+                .map((permission) => permission.trim())
+                .filter(Boolean)
+            : [];
+        if (mounted) {
+          setRoles(fetched);
+          setProfilePermissions(fetchedPermissions);
+        }
       } catch {
-        if (mounted) setRoles([]);
+        if (mounted) {
+          setRoles([]);
+          setProfilePermissions([]);
+        }
       } finally {
         if (mounted) setRolesResolved(true);
       }
@@ -60,7 +75,13 @@ export function useRBAC(): UseRBACResult {
     };
   }, []);
 
-  const roleKey = useMemo(() => roles.join(","), [roles]);
+  const roleKey = useMemo(
+    () =>
+      `${roles.join(",")}|${[...profilePermissions]
+        .sort()
+        .join(",")}`,
+    [profilePermissions, roles],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -73,18 +94,31 @@ export function useRBAC(): UseRBACResult {
         // If roles are not yet resolved but we have a JWT, wait for the /me sync effect
         // to populate roles. This prevents premature "access denied" UI: stay in the
         // loading state until the first role fetch has actually completed.
-        if (roles.length === 0) {
+        if (roles.length === 0 && profilePermissions.length === 0) {
           if (mounted) setLoading(!rolesResolved);
           return;
         }
 
-        // Superadmin short-circuit
-        if (roles.includes("superadmin")) {
+        // Superadmin / wildcard short-circuit
+        if (roles.includes("superadmin") || profilePermissions.includes("*")) {
           const superSet = new Set<string>(["*"]);
           if (mounted) {
             setPerms(superSet);
             permissionCache.set(roleKey, {
               permissions: superSet,
+              cachedAt: Date.now(),
+            });
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (profilePermissions.length > 0) {
+          const expanded = expandPermissionSet(profilePermissions);
+          if (mounted) {
+            setPerms(expanded);
+            permissionCache.set(roleKey, {
+              permissions: new Set(expanded),
               cachedAt: Date.now(),
             });
             setLoading(false);
@@ -139,11 +173,12 @@ export function useRBAC(): UseRBACResult {
     return () => {
       mounted = false;
     };
-  }, [roleKey, roles, rolesResolved]);
+  }, [profilePermissions, roleKey, roles, rolesResolved]);
 
   const can = (permId: string) => {
     if (!permId) return false;
     if (roles.includes("superadmin")) return true;
+    if (perms.has("*")) return true;
     if (
       permId === "users:read" &&
       roles.some((role) =>
@@ -155,7 +190,6 @@ export function useRBAC(): UseRBACResult {
     return expandPermissionAliases(permId).some((candidate) =>
       perms.has(candidate)
     );
-    // Wildcard not used here; superadmin covers full access.
   };
 
   return { roles, permissions: perms, can, loading, error };

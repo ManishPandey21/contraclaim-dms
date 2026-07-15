@@ -23,6 +23,7 @@ from ..services.step_up_service import require_step_up
 from ..services.user_service import UserService, UserServiceError
 from ..services.authentication_service import AuthenticationService
 from ..services.authorization_service import AuthorizationService
+from ..services.permission_service import PermissionService
 from ..services.role_service import RoleService
 from ..models.user_models import (
     User, UserCreate, UserUpdate, UserResponse, UserListResponse,
@@ -114,6 +115,7 @@ class UserController:
         self.audit_logger = audit_logger
         self.notification_service = notification_service
         self.role_service = RoleService()
+        self.permission_service = PermissionService()
 
     async def authenticate_user(
         self,
@@ -219,7 +221,7 @@ class UserController:
             )
             
             # Build user response
-            user_response = await self._build_user_response(user)
+            user_response = await self._build_user_response(user, include_effective_permissions=True)
             
             return LoginResponse(
                 access_token=access_token,
@@ -376,6 +378,26 @@ class UserController:
             raise
         except Exception as e:
             logger.error(f"Failed to get user {user_id}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="User service temporarily unavailable"
+            )
+
+    async def get_current_profile(self, current_user: CurrentUser) -> UserResponse:
+        """Get the authenticated user's profile with effective permissions."""
+        try:
+            await self.rate_limiter.check_user_limit(current_user.id)
+
+            validated_user_id = validate_object_id(str(current_user.id))
+            user = await self.user_service.get_user_by_id(validated_user_id)
+            if not user:
+                raise UserError("User not found", status.HTTP_404_NOT_FOUND)
+
+            return await self._build_user_response(user, include_effective_permissions=True)
+        except (BaseDomainError, HTTPException, ValueError):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get current user profile {current_user.id}: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="User service temporarily unavailable"
@@ -840,7 +862,12 @@ class UserController:
                 if target_projects_set and not target_projects_set.issubset(actor_projects):
                     raise UserError("Not authorized to assign roles outside your project scope", status.HTTP_403_FORBIDDEN)
 
-    async def _build_user_response(self, user: User) -> UserResponse:
+    async def _build_user_response(
+        self,
+        user: User,
+        *,
+        include_effective_permissions: bool = False,
+    ) -> UserResponse:
         """Build user response with resolved names (compatible with models.user.UserResponse)."""
         # Resolve names
         org_name = None
@@ -856,6 +883,12 @@ class UserController:
         last_name = getattr(user, "last_name", None) or "-"
         organizations = getattr(user, "organizations", []) or []
         permissions = getattr(user, "permissions", []) or []
+        if include_effective_permissions:
+            effective_permissions = await self.permission_service.get_effective_permission_names(
+                str(getattr(user, "id", ""))
+            )
+            if effective_permissions:
+                permissions = effective_permissions
         is_active = not bool(getattr(user, "disabled", False))
         is_verified = bool(getattr(user, "is_verified", False))
         preferences = getattr(user, "preferences", None) or {
@@ -979,7 +1012,7 @@ async def get_current_user_profile(
     current_user: CurrentUser = Depends(get_current_user)
 ):
     """Get current user's profile."""
-    return await controller.get_user(str(current_user.id), current_user)
+    return await controller.get_current_profile(current_user)
 
 
 @router.get("/users/{user_id}", response_model=UserResponse)

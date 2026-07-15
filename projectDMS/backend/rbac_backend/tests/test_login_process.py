@@ -11,6 +11,7 @@ from rbac_backend.core.config import settings
 from rbac_backend.core.security import CurrentUser, get_password_hash
 from rbac_backend.routers import auth
 import rbac_backend.services.authentication_service as authentication_service
+import rbac_backend.services.permission_service as permission_service
 import rbac_backend.utils.audit_logger as audit_logger
 
 
@@ -64,6 +65,7 @@ class _FakeDb:
             ]
         )
         self.organizations = _Collection()
+        self.roles = _Collection()
         self.audit_logs = _Collection()
 
 
@@ -78,6 +80,7 @@ def _make_client(monkeypatch):
 
     monkeypatch.setattr(authentication_service, "get_database", fake_get_database)
     monkeypatch.setattr(audit_logger, "get_database", fake_get_database)
+    monkeypatch.setattr(permission_service, "get_database", fake_get_database)
 
     app = FastAPI()
     app.include_router(auth.router, prefix="/api")
@@ -103,6 +106,7 @@ def test_superadmin_login_sets_cookie_and_me_resolves_session(monkeypatch):
     assert me_response.status_code == 200
     assert me_response.json()["email"] == "superadmin@example.com"
     assert me_response.json()["roles"] == ["superadmin"]
+    assert me_response.json()["permissions"] == ["*"]
 
 
 def test_superadmin_me_uses_valid_cookie_when_legacy_bearer_header_is_stale(monkeypatch):
@@ -124,22 +128,27 @@ def test_superadmin_me_uses_valid_cookie_when_legacy_bearer_header_is_stale(monk
     assert me_response.json()["roles"] == ["superadmin"]
 
 
-def test_me_controller_does_not_depend_on_second_user_lookup():
-    class ExplodingUserService:
-        async def get_user_by_id(self, _user_id):
-            raise AssertionError("/me should not perform a second user lookup")
-
+def test_me_controller_returns_effective_permissions():
     class ExplodingRateLimiter:
         async def check_user_limit(self, _user_id):
             raise AssertionError("/me should not rate-limit session verification")
 
+    class UserService:
+        async def get_user_by_id(self, _user_id):
+            return current_user
+
+    class PermissionService:
+        async def get_effective_permission_names(self, _user_id):
+            return ["dms.document.view", "dms.document.upload"]
+
     controller = auth.AuthController(
         auth_service=object(),
-        user_service=ExplodingUserService(),
+        user_service=UserService(),
         authorization_service=object(),
         rate_limiter=ExplodingRateLimiter(),
         audit_logger=object(),
     )
+    controller.permission_service = PermissionService()
 
     current_user = CurrentUser(
         id="68cffb41b50384feb94ff90f",
@@ -156,4 +165,6 @@ def test_me_controller_does_not_depend_on_second_user_lookup():
 
     resolved = anyio.run(controller.get_current_user_info, current_user)
 
-    assert resolved == current_user
+    assert resolved["email"] == "superadmin@example.com"
+    assert resolved["roles"] == ["superadmin"]
+    assert resolved["permissions"] == ["dms.document.view", "dms.document.upload"]

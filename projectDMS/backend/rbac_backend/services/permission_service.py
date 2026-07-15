@@ -509,6 +509,85 @@ class PermissionService:
             logger.error(f"Failed to get permissions for user {user_id}: {str(e)}")
             return []
 
+    async def get_effective_permission_names(self, user_id: str) -> List[str]:
+        """
+        Return the current user's effective permission names without requiring
+        the caller to read the role catalog.
+
+        This is intentionally name-based so frontend route guards can work even
+        when role documents contain permissions that have not yet been seeded in
+        the permissions collection.
+        """
+        try:
+            db = await self._get_db()
+            try:
+                user_query_id = ObjectId(user_id)
+            except Exception:
+                user_query_id = user_id
+
+            user_doc = await db.users.find_one({"_id": user_query_id})
+            if not user_doc:
+                return []
+
+            raw_permissions: set[str] = {
+                str(permission)
+                for permission in (user_doc.get("permissions", []) or [])
+                if permission is not None and str(permission).strip()
+            }
+            role_names: set[str] = set()
+
+            for rid in user_doc.get("roles", []) or []:
+                rid_str = str(rid).strip()
+                if rid_str:
+                    role_names.add(rid_str.lower())
+                    normalized_rid = _normalize_role_name(rid_str)
+                    if normalized_rid:
+                        role_names.add(normalized_rid)
+                    if "superadmin" in role_names:
+                        return ["*"]
+
+                try:
+                    role_qid = ObjectId(rid)
+                except Exception:
+                    role_qid = rid
+
+                role = await db.roles.find_one({"_id": role_qid})
+                if not role:
+                    continue
+
+                role_name = str(role.get("name", "")).strip()
+                if role_name:
+                    role_names.add(role_name.lower())
+                    normalized_name = _normalize_role_name(role_name)
+                    if normalized_name:
+                        role_names.add(normalized_name)
+
+                raw_permissions.update(
+                    str(permission)
+                    for permission in (role.get("permissions", []) or [])
+                    if permission is not None and str(permission).strip()
+                )
+
+            if "superadmin" in role_names or "*" in raw_permissions:
+                return ["*"]
+
+            if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
+                raw_permissions.add("users:read")
+
+            expanded_permissions: set[str] = set(raw_permissions)
+            for permission in list(raw_permissions):
+                expanded_permissions.update(equivalent_permissions(permission) or {permission})
+                expanded_permissions.update(self._permission_aliases.get(permission, []))
+                for canonical, alias_list in self._permission_aliases.items():
+                    if permission in alias_list:
+                        expanded_permissions.add(canonical)
+                        expanded_permissions.update(alias_list)
+
+            return sorted(expanded_permissions)
+        except Exception as e:
+            logger.error(f"Failed to get effective permission names for user {user_id}: {str(e)}")
+            return []
+
     async def build_permission_matrix(self, organization_id: Optional[str], current_user: Any) -> "PermissionMatrix":  # type: ignore[name-defined]
         """
         Build a simple permission matrix placeholder. Returns empty grid for now to avoid import errors.
@@ -680,6 +759,7 @@ class PermissionService:
             else:
                 role_ids = user_doc.get("roles", []) or []
                 raw_permissions: List[str] = []
+                perm_names: set[str] = set()
                 role_names: set[str] = set()
                 for rid in role_ids:
                     rid_str = str(rid).lower()

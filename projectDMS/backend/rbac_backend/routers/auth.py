@@ -16,9 +16,10 @@ from ..core.database import get_db
 from ..core.config import settings
 from ..services.authentication_service import AuthenticationService
 from ..services.authorization_service import AuthorizationService
+from ..services.permission_service import PermissionService
 from ..services.user_service import UserService
 from ..models.user_models import (
-    LoginRequest, LoginResponse, TokenResponse, RefreshTokenRequest
+    LoginRequest, LoginResponse, TokenResponse, RefreshTokenRequest, UserResponse
 )
 from ..utils.validation import validate_email, validate_input
 from ..utils.error_handler import handle_exceptions, AuthenticationError
@@ -88,6 +89,7 @@ class AuthController:
         self.authorization_service = authorization_service
         self.rate_limiter = rate_limiter
         self.audit_logger = audit_logger
+        self.permission_service = PermissionService()
 
     def _extract_session_id(self, token: str) -> Optional[str]:
         """
@@ -337,20 +339,23 @@ class AuthController:
                 detail="Logout service temporarily unavailable"
             )
 
-    async def get_current_user_info(self, current_user: CurrentUser) -> CurrentUser:
+    async def get_current_user_info(self, current_user: CurrentUser) -> dict:
         """Get current user information with validation."""
         try:
-            # get_current_user already validates the JWT/cookie and reloads the
-            # user document from MongoDB. Avoid a second service lookup here:
-            # /me is called on app load/focus and must not fail just because an
-            # auxiliary user-service/rate-limit dependency is temporarily noisy.
             if current_user.disabled:
                 raise AuthenticationError(
                     "User account is no longer active",
                     status.HTTP_401_UNAUTHORIZED
                 )
-            
-            return current_user
+
+            user = await self.user_service.get_user_by_id(str(current_user.id))
+            if not user:
+                raise AuthenticationError(
+                    "User account is no longer active",
+                    status.HTTP_401_UNAUTHORIZED
+                )
+
+            return await self._build_user_response(user)
             
         except (AuthenticationError, HTTPException):
             raise
@@ -386,6 +391,11 @@ class AuthController:
         last_name = getattr(user, "last_name", None) or "-"
         organizations = getattr(user, "organizations", []) or []
         permissions = getattr(user, "permissions", []) or []
+        effective_permissions = await self.permission_service.get_effective_permission_names(
+            str(getattr(user, "id", ""))
+        )
+        if effective_permissions:
+            permissions = effective_permissions
         is_active = not bool(getattr(user, "disabled", False))
         is_verified = bool(getattr(user, "is_verified", False))
         preferences = getattr(user, "preferences", None) or {
@@ -494,7 +504,7 @@ async def get_csrf_token(response: Response):
     return CsrfTokenResponse(csrf_token=token)
 
 
-@router.get("/me", response_model=CurrentUser)
+@router.get("/me", response_model=UserResponse)
 @handle_exceptions
 async def get_current_user_info(
     controller: AuthController = Depends(get_auth_controller),
