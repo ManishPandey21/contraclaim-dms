@@ -164,6 +164,7 @@ class OrganizationCreate(OrganizationBase):
 class OrganizationUpdate(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
+        extra="forbid",
         json_schema_extra={
             "example": {
                 "name": "Updated Example Corp",

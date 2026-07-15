@@ -12,6 +12,7 @@ from .payment_gateway import get_payment_gateway
 from ..models.rbac_monetization import (
     AddOnCreate,
     AddOnUpdate,
+    BillingPeriod,
     BillingRecordCreate,
     PlanSettingsMode,
     PlanSettingsScopeUpdate,
@@ -408,10 +409,13 @@ class MonetizationService:
     async def validate_plan_code(self, plan_code: str) -> bool:
         """Return True if the plan_code exists and is active."""
         db = await self._get_db()
-        plan = await db.plans.find_one({"code": plan_code, "is_active": True})
-        if plan:
-            return True
-        return any(p["code"] == plan_code for p in self.DEFAULT_PLANS)
+        plan = await db.plans.find_one({"code": plan_code})
+        if plan is not None:
+            return bool(plan.get("is_active"))
+        return any(
+            p["code"] == plan_code and bool(p.get("is_active"))
+            for p in self.DEFAULT_PLANS
+        )
 
     async def upsert_plan(self, payload: PlanCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
@@ -1266,6 +1270,37 @@ class MonetizationService:
             pass
         return values
 
+    async def _validate_plan_settings_scope(
+        self,
+        db: Any,
+        organization_id: str,
+        project_id: Optional[str],
+    ) -> None:
+        org = await db.organizations.find_one(
+            {"_id": {"$in": self._id_values(organization_id)}}
+        )
+        if not org:
+            org = await db.organizations.find_one({"id": str(organization_id)})
+        if not org:
+            raise ValueError("Organization not found for subscription scope")
+
+        if not project_id:
+            return
+
+        project = await db.projects.find_one(
+            {"_id": {"$in": self._id_values(project_id)}}
+        )
+        if not project:
+            project = await db.projects.find_one({"id": str(project_id)})
+        if not project:
+            raise ValueError("Project not found for subscription scope")
+
+        project_org_id = str(
+            project.get("organization_id") or project.get("organizationId") or ""
+        )
+        if project_org_id != str(organization_id):
+            raise ValueError("Project does not belong to the selected organization")
+
     @staticmethod
     def _org_id_from_project(project: Dict[str, Any]) -> str:
         return str(project.get("organization_id") or project.get("organizationId") or "")
@@ -1406,6 +1441,7 @@ class MonetizationService:
         db = await self._get_db()
         org_id = str(payload.organization_id)
         project_id = str(payload.project_id) if payload.project_id else None
+        await self._validate_plan_settings_scope(db, org_id, project_id)
 
         if payload.mode == PlanSettingsMode.INHERIT:
             if not project_id:
@@ -1435,8 +1471,13 @@ class MonetizationService:
             plan_code = "no_service_override"
         if not plan_code:
             raise ValueError("plan_code is required for plan mode")
+        if not await self.validate_plan_code(plan_code):
+            raise ValueError(f"Plan '{plan_code}' not found or inactive")
 
         billing_period = payload.billing_period or "monthly"
+        allowed_periods = {period.value for period in BillingPeriod}
+        if billing_period not in allowed_periods:
+            raise ValueError(f"Unsupported billing period '{billing_period}'")
         now = datetime.utcnow()
         query = self._subscription_scope_query(org_id, project_id)
         await db.subscriptions.update_many(

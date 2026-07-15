@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from rbac_backend.models.rbac_monetization import (
     CancelSubscriptionRequest,
+    PlanSettingsMode,
+    PlanSettingsScopeUpdate,
     UpgradeDowngradeRequest,
 )
 from rbac_backend.services.billing_receipt import (
@@ -43,18 +45,20 @@ class FakeCollection:
         self.updates = []
         self.deleted = []
 
-    def find(self, query):
+    @staticmethod
+    def _matches(doc, query):
         # Filter on scalar equality and $in; ignore range operators ($lt/$lte/$gte).
-        def matches(doc):
-            for key, cond in (query or {}).items():
-                if isinstance(cond, dict):
-                    if "$in" in cond and doc.get(key) not in cond["$in"]:
-                        return False
-                elif doc.get(key) != cond:
+        for key, cond in (query or {}).items():
+            if isinstance(cond, dict):
+                if "$in" in cond and doc.get(key) not in cond["$in"]:
                     return False
-            return True
+                continue
+            if doc.get(key) != cond:
+                return False
+        return True
 
-        items = [d for d in self.data if matches(d)]
+    def find(self, query):
+        items = [d for d in self.data if self._matches(d, query or {})]
 
         class FakeCursor:
             def __init__(self, items):
@@ -81,21 +85,33 @@ class FakeCollection:
 
     async def find_one(self, query):
         for d in self.data:
-            if all(d.get(k) == v for k, v in (query or {}).items() if not isinstance(v, dict)):
+            if self._matches(d, query or {}):
                 return d
         return None
 
     async def update_one(self, filter_doc, update_doc):
         self.updates.append((filter_doc, update_doc))
         for d in self.data:
-            if all(d.get(k) == v for k, v in filter_doc.items() if not isinstance(v, dict)):
+            if self._matches(d, filter_doc):
                 d.update(update_doc.get("$set", {}))
                 break
         return type("FakeResult", (), {"modified_count": 1})()
 
+    async def update_many(self, filter_doc, update_doc):
+        self.updates.append((filter_doc, update_doc))
+        count = 0
+        for d in self.data:
+            if self._matches(d, filter_doc):
+                d.update(update_doc.get("$set", {}))
+                count += 1
+        return type("FakeResult", (), {"modified_count": count})()
+
     async def insert_one(self, doc):
-        self.inserted.append(doc)
-        return type("FakeResult", (), {"inserted_id": doc.get("_id", "1")})()
+        inserted_id = doc.get("_id", f"inserted_{len(self.data) + 1}")
+        saved = {**doc, "_id": inserted_id}
+        self.inserted.append(saved)
+        self.data.append(saved)
+        return type("FakeResult", (), {"inserted_id": inserted_id})()
 
     async def insert_many(self, docs):
         self.inserted.extend(docs)
@@ -105,14 +121,126 @@ class FakeCollection:
         self.deleted.append(query)
         return type("FakeResult", (), {"deleted_count": len(self.data)})()
 
+    async def count_documents(self, query=None, limit=None):
+        count = len([d for d in self.data if self._matches(d, query or {})])
+        if limit is not None:
+            return min(count, limit)
+        return count
+
 class FakeDB:
     def __init__(self):
+        self.organizations = FakeCollection()
+        self.projects = FakeCollection()
         self.subscriptions = FakeCollection()
         self.subscription_history = FakeCollection()
         self.usage_counters = FakeCollection()
         self.usage_counters_archive = FakeCollection()
         self.billing_records = FakeCollection()
         self.plans = FakeCollection()
+        self.audit_events = FakeCollection()
+
+
+@pytest.mark.asyncio
+async def test_update_plan_settings_scope_sets_org_subscription_with_billing_period() -> None:
+    db = FakeDB()
+    db.organizations.data = [{"_id": "org_1", "name": "Acme"}]
+    db.plans.data = [
+        {
+            "code": "dms_pro",
+            "name": "DMS Pro",
+            "is_active": True,
+            "features": {"feature.dms.enabled": True},
+            "display_order": 1,
+        },
+        {
+            "code": "no_service_override",
+            "name": "No Service",
+            "is_active": True,
+            "features": {"feature.dms.enabled": False},
+            "display_order": 2,
+        },
+    ]
+    db.subscriptions.data = [
+        {
+            "_id": "old_sub",
+            "organization_id": "org_1",
+            "project_id": None,
+            "package_id": None,
+            "status": "active",
+            "billing_status": "active",
+            "plan_code": "no_service_override",
+        }
+    ]
+
+    result = await MonetizationService(db).update_plan_settings_scope(
+        PlanSettingsScopeUpdate(
+            organization_id="org_1",
+            mode=PlanSettingsMode.PLAN,
+            plan_code="dms_pro",
+            billing_period="annual",
+        ),
+        SimpleNamespace(id="admin_1"),
+    )
+
+    assert db.subscriptions.data[0]["status"] == "cancelled"
+    inserted = db.subscriptions.inserted[0]
+    assert inserted["organization_id"] == "org_1"
+    assert inserted["project_id"] is None
+    assert inserted["plan_code"] == "dms_pro"
+    assert inserted["billing_period"] == "annual"
+    assert result["effective"]["organizations"]["org_1"]["plan_code"] == "dms_pro"
+    assert result["effective"]["organizations"]["org_1"]["billing_period"] == "annual"
+    assert db.audit_events.inserted[-1]["action"] == "subscription.scope_plan_set"
+
+
+@pytest.mark.asyncio
+async def test_update_plan_settings_scope_rejects_invalid_scope_and_plan() -> None:
+    db = FakeDB()
+    db.organizations.data = [{"_id": "org_1", "name": "Acme"}]
+    db.projects.data = [{"_id": "project_2", "organization_id": "org_2"}]
+    db.plans.data = [{"code": "inactive", "is_active": False}]
+    service = MonetizationService(db)
+
+    with pytest.raises(ValueError, match="Organization not found"):
+        await service.update_plan_settings_scope(
+            PlanSettingsScopeUpdate(
+                organization_id="missing",
+                mode=PlanSettingsMode.PLAN,
+                plan_code="inactive",
+            ),
+            SimpleNamespace(id="admin_1"),
+        )
+
+    with pytest.raises(ValueError, match="Project does not belong"):
+        await service.update_plan_settings_scope(
+            PlanSettingsScopeUpdate(
+                organization_id="org_1",
+                project_id="project_2",
+                mode=PlanSettingsMode.PLAN,
+                plan_code="inactive",
+            ),
+            SimpleNamespace(id="admin_1"),
+        )
+
+    with pytest.raises(ValueError, match="not found or inactive"):
+        await service.update_plan_settings_scope(
+            PlanSettingsScopeUpdate(
+                organization_id="org_1",
+                mode=PlanSettingsMode.PLAN,
+                plan_code="inactive",
+            ),
+            SimpleNamespace(id="admin_1"),
+        )
+
+    with pytest.raises(ValueError, match="Unsupported billing period"):
+        await service.update_plan_settings_scope(
+            PlanSettingsScopeUpdate(
+                organization_id="org_1",
+                mode=PlanSettingsMode.NO_SERVICE,
+                billing_period="weekly",
+            ),
+            SimpleNamespace(id="admin_1"),
+        )
 
 
 @pytest.mark.asyncio

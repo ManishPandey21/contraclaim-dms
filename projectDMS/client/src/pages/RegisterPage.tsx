@@ -37,13 +37,25 @@ import * as z from "zod";
 import { Building, Users, ChevronRight, Sparkles, CheckCircle2, Clock, CreditCard } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { enhancedApi } from "@/services/enhanced-api";
+import { useStepUp } from "@/hooks/useStepUp";
 import useHasPermission from "@/hooks/useHasPermission";
 import { ENTITY_PERMISSIONS } from "@/constants/entityPermissions";
 import {
   getPlanCatalog,
+  getPlanSettings,
+  updatePlanSettingsScope,
   type PlanCatalogResponse,
-  type PlanSettingsPlan,
 } from "@/services/plan-settings-api";
+import {
+  DEFAULT_BILLING_PERIOD,
+  NO_SERVICE_PLAN_CODE,
+  buildOrganizationPlanScopePayload,
+  buildOrganizationProfilePayload,
+  organizationSubscriptionChanged,
+  organizationSubscriptionSnapshotFromEffective,
+  organizationSubscriptionSnapshotFromForm,
+  type OrganizationSubscriptionSnapshot,
+} from "@/lib/organization-subscription";
 
 // Formatting helper for plan pricing
 const formatPriceMajor = (minor: number, currency = "INR") => {
@@ -75,6 +87,8 @@ const organizationSchema = z.object({
   trial_enabled: z.boolean().default(true),
 });
 
+type OrganizationFormValues = z.infer<typeof organizationSchema>;
+
 const projectSchema = z.object({
   name: z.string().min(2, "Project name must be at least 2 characters"),
   projectCode: z.string().min(2, "Project code must be at least 2 characters"),
@@ -100,11 +114,14 @@ const projectSchema = z.object({
 const RegisterPage = () => {
   const [activeTab, setActiveTab] = useState("organization");
   const { toast } = useToast();
+  const { requestToken, StepUpDialog } = useStepUp();
   const [loading, setLoading] = useState(false);
   const [organizations, setOrganizations] = useState([]);
   const [mode, setMode] = useState<"create" | "edit">("create");
   const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [initialOrgSubscription, setInitialOrgSubscription] =
+    useState<OrganizationSubscriptionSnapshot | null>(null);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const canCreateOrg = useHasPermission(
@@ -274,6 +291,28 @@ const RegisterPage = () => {
     setLoading(true);
     try {
       const org = await enhancedApi.getOrganization(orgId);
+      let subscriptionValues: Partial<OrganizationFormValues> = {
+        plan_code: "",
+        billing_period: DEFAULT_BILLING_PERIOD,
+        trial_enabled: true,
+      };
+      let subscriptionSnapshot: OrganizationSubscriptionSnapshot | null = null;
+
+      try {
+        const planSettings = await getPlanSettings();
+        const effective = planSettings.effective.organizations[String(orgId)];
+        subscriptionSnapshot =
+          organizationSubscriptionSnapshotFromEffective(effective);
+        subscriptionValues = {
+          plan_code: subscriptionSnapshot.plan_code,
+          billing_period: subscriptionSnapshot.billing_period,
+          trial_enabled: Boolean(effective?.trial ?? true),
+          billingEnabled: subscriptionSnapshot.plan_code !== NO_SERVICE_PLAN_CODE,
+        };
+      } catch (planError) {
+        console.warn("Could not load organization subscription:", planError);
+      }
+
       organizationForm.reset({
         name: org.name || "",
         panNumber: org.panNumber || "",
@@ -286,7 +325,9 @@ const RegisterPage = () => {
         adminEmail: org.adminEmail || "",
         adminContact: org.adminContact || "",
         billingEnabled: Boolean(org.billingEnabled),
+        ...subscriptionValues,
       });
+      setInitialOrgSubscription(subscriptionSnapshot);
     } catch (error: any) {
       toast({
         title: "Error",
@@ -351,7 +392,10 @@ const RegisterPage = () => {
       loadOrganizationForEdit(orgId);
     } else if (nextMode === "edit" && projectId) {
       setActiveTab("project");
+      setInitialOrgSubscription(null);
       loadProjectForEdit(projectId);
+    } else {
+      setInitialOrgSubscription(null);
     }
     // URL-driven form bootstrap; loaders depend on form instances and are called intentionally here.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -371,8 +415,32 @@ const RegisterPage = () => {
     }
     setLoading(true);
     try {
+      const subscriptionNeedsUpdate =
+        isEditing && editingOrgId
+          ? organizationSubscriptionChanged(initialOrgSubscription, data)
+          : false;
+      const stepUpToken = subscriptionNeedsUpdate
+        ? await requestToken(
+            "subscription.entitlement.manage",
+            "Confirm subscription update",
+            "Enter your password to change this organization's subscription."
+          )
+        : undefined;
+
       if (isEditing && editingOrgId) {
-        await enhancedApi.updateOrganization(editingOrgId, data);
+        await enhancedApi.updateOrganization(
+          editingOrgId,
+          buildOrganizationProfilePayload(data)
+        );
+        if (subscriptionNeedsUpdate) {
+          await updatePlanSettingsScope(
+            buildOrganizationPlanScopePayload(editingOrgId, data),
+            { stepUpToken }
+          );
+          setInitialOrgSubscription(
+            organizationSubscriptionSnapshotFromForm(data)
+          );
+        }
         toast({
           title: "Organization updated successfully",
           description: data.name,
@@ -558,6 +626,7 @@ const RegisterPage = () => {
 
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
+      {StepUpDialog}
       <Tabs
         value={activeTab}
         onValueChange={setActiveTab}
