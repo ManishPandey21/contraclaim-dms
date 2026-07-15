@@ -21,6 +21,7 @@ export interface SessionProfile {
   name?: string;
   full_name?: string;
   roles?: string[] | string;
+  permissions?: string[] | string;
   organization_id?: string | null;
   projects?: string[];
 }

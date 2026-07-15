@@ -83,6 +83,21 @@ const deriveRoleLevel = (role: any) => {
   return "project";
 };
 
+export const ROLE_ADMIN_PERMISSION_ITEMS = [
+  { id: "roles:read", name: "View Roles" },
+  { id: "roles:create", name: "Create Roles" },
+  { id: "roles:update", name: "Edit Roles" },
+  { id: "roles:delete", name: "Delete Roles" },
+  { id: "roles:assign", name: "Assign/Reset Roles" },
+] as const;
+
+export const PERMISSION_CATALOG_PERMISSION_ITEMS = [
+  { id: "permissions:read", name: "View Permission Catalog" },
+  { id: "permissions:create", name: "Create Permissions" },
+  { id: "permissions:update", name: "Edit Permissions" },
+  { id: "permissions:delete", name: "Delete Permissions" },
+] as const;
+
 const PermissionsPage = () => {
   const [selectedRole, setSelectedRole] = useState("all");
   const [roles, setRoles] = useState([]);
@@ -457,7 +472,8 @@ const PermissionsPage = () => {
         { id: "users:create", name: "Create Users" },
         { id: "users:update", name: "Edit Users" },
         { id: "users:delete", name: "Delete Users" },
-        { id: "roles:assign", name: "Assign/Reset Roles" },
+        ...ROLE_ADMIN_PERMISSION_ITEMS,
+        ...PERMISSION_CATALOG_PERMISSION_ITEMS,
       ],
     },
     {
