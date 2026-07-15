@@ -7,6 +7,7 @@ Guards the fix for the recurring opaque "Storage sync monitor detected issues:
 from rbac_backend.config.document_processing_config import DocumentProcessingConfig
 from rbac_backend.routers.storage_sync import (
     WARN_REPEAT_SECONDS,
+    _candidate_id_query,
     _qdrant_hint,
     _should_emit_warning,
 )
@@ -38,6 +39,15 @@ def test_qdrant_hint_quiet_when_config_is_fine():
 
 def test_qdrant_hint_for_missing_client():
     assert "qdrant-client" in (_qdrant_hint(_config("http://q", None), "qdrant_client_missing") or "")
+
+
+def test_candidate_id_query_matches_objectid_or_string():
+    query = _candidate_id_query("695b562ed72ae1818b362978")
+
+    assert "$or" in query
+    ids = [condition["_id"] for condition in query["$or"]]
+    assert "695b562ed72ae1818b362978" in ids
+    assert any(value.__class__.__name__ == "ObjectId" for value in ids)
 
 
 def test_warning_only_on_change_then_heartbeat():

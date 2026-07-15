@@ -88,6 +88,43 @@ async def test_enabled_failing_list_chunk_ids_raises():
 
 
 @pytest.mark.asyncio
+async def test_list_chunk_ids_returns_payload_chunk_id_from_qdrant_scroll():
+    client = _offline_client()
+    client.enabled = True
+
+    class _Point:
+        id = "uuid-point-id"
+        payload = {"chunk_id": "legacy-chunk-id"}
+
+    class _ScrollClient:
+        def scroll(self, **kwargs):
+            assert kwargs["with_payload"] is True
+            return ([_Point()], None)
+
+    class _Models:
+        class Filter:
+            def __init__(self, must=None):
+                self.must = must
+
+        class FieldCondition:
+            def __init__(self, **kwargs):
+                pass
+
+        class MatchValue:
+            def __init__(self, **kwargs):
+                pass
+
+        class MatchAny:
+            def __init__(self, **kwargs):
+                pass
+
+    client._client = _ScrollClient()
+    client._qmodels = _Models()
+
+    assert await client.list_chunk_ids(dict(FILTERS)) == ["legacy-chunk-id"]
+
+
+@pytest.mark.asyncio
 async def test_disabled_client_still_serves_in_memory_index():
     client = _offline_client()
     await client.upsert(

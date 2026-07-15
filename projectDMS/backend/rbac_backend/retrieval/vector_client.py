@@ -322,10 +322,15 @@ class VectorClient:
                     collection_name=collection,
                     scroll_filter=qfilter,
                     limit=limit,
-                    with_payload=False,
+                    with_payload=True,
                     with_vectors=False,
                 )
-                return [str(point.id) for point in res]
+                ids: List[str] = []
+                for point in res:
+                    payload = getattr(point, "payload", None) or {}
+                    chunk_id = payload.get("chunk_id") if isinstance(payload, dict) else None
+                    ids.append(str(chunk_id or point.id))
+                return ids
             except Exception as exc:
                 # Enabled-but-failing is an outage: a silent empty list here
                 # would make reconciliation believe every vector is missing.
