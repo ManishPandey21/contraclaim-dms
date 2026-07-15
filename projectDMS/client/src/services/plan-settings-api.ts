@@ -61,7 +61,11 @@ export interface EffectivePlanState {
   subscription_id?: string | null;
   plan_code?: string | null;
   plan_name?: string | null;
+  status?: string | null;
+  billing_status?: string | null;
   billing_period?: string | null;
+  current_period_start?: string | null;
+  current_period_end?: string | null;
   trial?: boolean;
   trial_ends_at?: string | null;
   active_add_ons?: string[];

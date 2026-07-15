@@ -313,10 +313,10 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/health": ["system:admin"],
   "/users": ["users:read"],
   "/permissions": ["roles:read", "permissions:read"],
-  "/plan-settings": ["subscription.entitlement.manage"],
-  "/subscription-management": ["subscription.entitlement.manage", "subscription.upgrade"],
+  "/plan-settings": ["billing.plan.view", "subscription.entitlement.manage"],
+  "/subscription-management": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],
   // Razorpay hosted-checkout return landing (Phase 4). Same billing audience.
-  "/billing/return": ["subscription.entitlement.manage", "subscription.upgrade"],
+  "/billing/return": ["billing.plan.view", "subscription.entitlement.manage", "subscription.upgrade"],
   "/settings": ["settings:view"],
   "/notifications": [],
   "/legal-words": [],
