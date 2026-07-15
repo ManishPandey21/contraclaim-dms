@@ -167,6 +167,6 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
   it("Legal words are open to signed-in users while admin stays gated", () => {
     expect(isRouteAllowedByPermission(canFor([]), "/legal-words")).toBe(true);
     expect(isRouteAllowedByPermission(canFor(["dms.document.view"]), "/admin/legal-words")).toBe(false);
-    expect(isRouteAllowedByPermission(canFor(["dms.admin"]), "/admin/legal-words")).toBe(true);
+    expect(isRouteAllowedByPermission(canFor(["system:admin"]), "/admin/legal-words")).toBe(true);
   });
 });

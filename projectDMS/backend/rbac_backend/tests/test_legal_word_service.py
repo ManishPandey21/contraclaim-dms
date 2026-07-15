@@ -8,6 +8,7 @@ from pymongo.errors import DuplicateKeyError
 
 from rbac_backend.models.legal_word import (
     LegalWordCreate,
+    LegalWordPublicationType,
     LegalWordSource,
     LegalWordStatus,
     LegalWordSuggestionEligibility,
@@ -527,6 +528,71 @@ async def test_publish_word_immediately_includes_selected_word_in_daily_set(fake
     stored = fake_db.legal_words.docs[words[2].id]
     assert stored["last_published_date"] == publish_date.isoformat()
     assert stored["published_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_published_words_returns_newest_events_and_today_new_badges(fake_db):
+    service = LegalWordService()
+    publish_date = date(2026, 7, 16)
+    words = [
+        await _create_approved_word(service, raw_word)
+        for raw_word in ["Pertinent", "Notwithstanding", "Requisite", "Material", "Expedite", "Covenant"]
+    ]
+
+    await service.publish_daily_words(publish_date)
+    items, total = await service.list_published_words(limit=6, today=publish_date)
+
+    assert total == DAILY_WORD_COUNT
+    assert [item.id for item in items] == [word.id for word in words]
+    assert {item.display_publication_date for item in items} == {publish_date}
+    assert {item.publication_type for item in items} == {LegalWordPublicationType.NEW}
+    assert {item.publication_badge for item in items} == {"New"}
+
+
+@pytest.mark.asyncio
+async def test_list_published_words_marks_republications_only_on_republication_date(fake_db):
+    service = LegalWordService()
+    old_date = date(2025, 12, 1)
+    repeat_date = date(2026, 7, 16)
+    words = [
+        await _create_approved_word(service, raw_word)
+        for raw_word in ["Pertinent", "Notwithstanding", "Requisite", "Material", "Expedite", "Covenant"]
+    ]
+    await service.publish_daily_words(old_date)
+
+    await service.publish_word_immediately(words[0].id, for_date=repeat_date)
+    today_items, _ = await service.list_published_words(limit=6, today=repeat_date)
+    old_items, _ = await service.list_published_words(
+        limit=6,
+        today=repeat_date,
+        published_date=old_date,
+    )
+
+    assert {item.display_publication_date for item in today_items} == {repeat_date}
+    assert {item.publication_type for item in today_items} == {LegalWordPublicationType.REPEATED}
+    assert {item.publication_badge for item in today_items} == {"Repeated"}
+    assert {item.display_publication_date for item in old_items} == {old_date}
+    assert {item.publication_badge for item in old_items} == {None}
+
+
+@pytest.mark.asyncio
+async def test_unpublish_word_removes_public_event_without_deleting_record(fake_db):
+    service = LegalWordService()
+    publish_date = date(2026, 7, 16)
+    words = [
+        await _create_approved_word(service, raw_word)
+        for raw_word in ["Pertinent", "Notwithstanding", "Requisite", "Material", "Expedite", "Covenant"]
+    ]
+    await service.publish_daily_words(publish_date)
+
+    updated = await service.unpublish_word(words[0].id, for_date=publish_date)
+    items, total = await service.list_published_words(limit=6, today=publish_date)
+
+    assert updated.status == LegalWordStatus.APPROVED
+    assert updated.published_count == 0
+    assert updated.publication_history == []
+    assert total == DAILY_WORD_COUNT - 1
+    assert words[0].id not in {item.id for item in items}
 
 
 @pytest.mark.asyncio

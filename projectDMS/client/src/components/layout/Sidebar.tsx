@@ -150,6 +150,7 @@ const Sidebar = () => {
       icon: <LayoutDashboard size={20} />,
       label: "Dashboard",
     },
+    { path: "/legal-words", icon: <BookOpen size={20} />, label: "Learn Legal Words" },
     { path: "/register", icon: <Upload size={20} />, label: "Regisration" },
 
     {
@@ -295,7 +296,6 @@ const Sidebar = () => {
     { path: "/retrieval-console", icon: <Search size={20} />, label: "Retrieval Console" },
     { path: "/folders", icon: <FolderClosed size={20} />, label: "Folder Structure" },
     { path: "/reports", icon: <BarChart size={20} />, label: "Reports & Analytics" },
-    { path: "/legal-words", icon: <BookOpen size={20} />, label: "Learn Legal Words" },
     { path: "/notifications", icon: <Bell size={20} />, label: "Notifications" },
 
     // ── Admin tools ──
@@ -324,7 +324,7 @@ const Sidebar = () => {
       path: "/admin/legal-words",
       icon: <BookMarked size={20} />,
       label: "Legal Words Admin",
-      permission: "dms.admin",
+      permission: "system:admin",
     },
     {
       path: "/subscription-management",

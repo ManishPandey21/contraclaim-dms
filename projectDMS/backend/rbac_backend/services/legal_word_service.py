@@ -22,9 +22,12 @@ from ..models.legal_word import (
     LegalWordSource,
     LegalWordSuggestionEligibility,
     LegalWordStatus,
+    LegalWordPublicationType,
+    LegalWordPublishedItem,
     LegalWordUpdate,
     TodayLegalWordsResponse,
 )
+from .audit_event_service import AuditEventService
 
 
 try:  # pragma: no cover - optional production dependency path
@@ -94,6 +97,7 @@ class LegalWordService:
     """Persistence service for contractual/legal word learning records."""
 
     def __init__(self) -> None:
+        self._db = None
         self._words = None
         self._daily_sets = None
         self._indexes_ready = False
@@ -101,6 +105,7 @@ class LegalWordService:
     async def _get_handles(self):
         if self._words is None or self._daily_sets is None:
             db = await get_database()
+            self._db = db
             self._words = db.legal_words
             self._daily_sets = db.legal_word_daily_sets
         if not self._indexes_ready:
@@ -112,10 +117,12 @@ class LegalWordService:
         daily_sets = self._daily_sets
         if words is None or daily_sets is None:
             db = await get_database()
+            self._db = db
             words = self._words = db.legal_words
             daily_sets = self._daily_sets = db.legal_word_daily_sets
 
         await words.create_index("normalized_word", unique=True)
+        await words.create_index("category")
         await words.create_index("status")
         await words.create_index("source")
         await words.create_index("scheduled_date")
@@ -162,7 +169,14 @@ class LegalWordService:
             raise LegalWordServiceError("Word already exists", 409) from exc
 
         payload["_id"] = str(result.inserted_id)
-        return self._to_word(payload)
+        created = self._to_word(payload)
+        await self._emit_audit(
+            "legal_word.created",
+            current_user,
+            str(created.id or result.inserted_id),
+            after=created.model_dump(mode="json"),
+        )
+        return created
 
     async def get_word_by_id(self, word_id: str) -> Optional[LegalWord]:
         words, _ = await self._get_handles()
@@ -184,6 +198,9 @@ class LegalWordService:
         *,
         status: Optional[str] = None,
         source: Optional[str] = None,
+        category: Optional[str] = None,
+        published_date: Optional[date] = None,
+        publication_type: Optional[str] = None,
         search: Optional[str] = None,
         skip: int = 0,
         limit: int = 50,
@@ -196,25 +213,49 @@ class LegalWordService:
             query["source"] = source
             if source == LegalWordSource.USER_REQUESTED.value and not status:
                 query["status"] = LegalWordStatus.PENDING_REVIEW.value
+        if category:
+            pattern = re.escape(category.strip())
+            if pattern:
+                query["category"] = {"$regex": f"^{pattern}$", "$options": "i"}
+        if published_date:
+            query["$or"] = [
+                {"published_date": published_date.isoformat()},
+                {"last_published_date": published_date.isoformat()},
+                {"publication_history": published_date.isoformat()},
+            ]
         if search:
             pattern = re.escape(search.strip())
             if pattern:
-                query["$or"] = [
+                search_clause = [
                     {"word": {"$regex": pattern, "$options": "i"}},
                     {"meaning": {"$regex": pattern, "$options": "i"}},
                     {"synonyms": {"$regex": pattern, "$options": "i"}},
                 ]
+                if "$or" in query:
+                    query["$and"] = [{"$or": query.pop("$or")}, {"$or": search_clause}]
+                else:
+                    query["$or"] = search_clause
 
         page_size = max(1, min(int(limit or 50), 200))
         offset = max(0, int(skip or 0))
-        total = await words.count_documents(query)
-        docs = (
-            await words.find(query)
-            .sort("updated_at", -1)
-            .skip(offset)
-            .limit(page_size)
-            .to_list(length=page_size)
-        )
+        if publication_type:
+            docs = await words.find(query).sort("updated_at", -1).to_list(length=2000)
+            docs = [
+                doc
+                for doc in docs
+                if self._admin_publication_type(doc, date.today()).value == publication_type
+            ]
+            total = len(docs)
+            docs = docs[offset : offset + page_size]
+        else:
+            total = await words.count_documents(query)
+            docs = (
+                await words.find(query)
+                .sort("updated_at", -1)
+                .skip(offset)
+                .limit(page_size)
+                .to_list(length=page_size)
+            )
         return [self._to_word(doc) for doc in docs], total
 
     async def update_word(
@@ -227,13 +268,13 @@ class LegalWordService:
         update_fields = update.model_dump(
             exclude_unset=True, exclude_none=True, mode="json"
         )
+        existing_doc = await words.find_one({"_id": self._to_query_id(word_id)})
         if "word" in update_fields:
             update_fields["normalized_word"] = self.normalize_word(update_fields["word"])
         publication_date_value = update_fields.get("last_published_date") or update_fields.get("published_date")
         if publication_date_value:
             parsed_publication_date = self._coerce_date(publication_date_value)
             if parsed_publication_date:
-                existing_doc = await words.find_one({"_id": self._to_query_id(word_id)})
                 history = self._publication_history(existing_doc or {})
                 already_recorded = parsed_publication_date in history
                 if not already_recorded:
@@ -267,7 +308,15 @@ class LegalWordService:
             raise LegalWordServiceError("Word not found", 404)
 
         updated = await words.find_one({"_id": self._to_query_id(word_id)})
-        return self._to_word(updated)
+        updated_word = self._to_word(updated)
+        await self._emit_audit(
+            "legal_word.updated",
+            current_user,
+            word_id,
+            before=self._json_safe_doc(existing_doc),
+            after=updated_word.model_dump(mode="json"),
+        )
+        return updated_word
 
     async def search_or_request_word(
         self, query: str, current_user: Optional[Any] = None
@@ -322,7 +371,7 @@ class LegalWordService:
         if not existing:
             raise LegalWordServiceError("Word not found", 404)
         self._ensure_complete_word(existing)
-        return await self._set_word_fields(
+        updated = await self._set_word_fields(
             word_id,
             {
                 "status": LegalWordStatus.APPROVED.value,
@@ -331,24 +380,50 @@ class LegalWordService:
             },
             current_user,
         )
+        await self._emit_audit(
+            "legal_word.approved",
+            current_user,
+            word_id,
+            before=existing.model_dump(mode="json"),
+            after=updated.model_dump(mode="json"),
+        )
+        return updated
 
     async def reject_word(
         self, word_id: str, current_user: Optional[Any] = None
     ) -> LegalWord:
-        return await self._set_word_fields(
+        existing = await self.get_word_by_id(word_id)
+        updated = await self._set_word_fields(
             word_id,
             {"status": LegalWordStatus.REJECTED.value},
             current_user,
         )
+        await self._emit_audit(
+            "legal_word.rejected",
+            current_user,
+            word_id,
+            before=existing.model_dump(mode="json") if existing else None,
+            after=updated.model_dump(mode="json"),
+        )
+        return updated
 
     async def deactivate_word(
         self, word_id: str, current_user: Optional[Any] = None
     ) -> LegalWord:
-        return await self._set_word_fields(
+        existing = await self.get_word_by_id(word_id)
+        updated = await self._set_word_fields(
             word_id,
             {"status": LegalWordStatus.INACTIVE.value},
             current_user,
         )
+        await self._emit_audit(
+            "legal_word.deactivated",
+            current_user,
+            word_id,
+            before=existing.model_dump(mode="json") if existing else None,
+            after=updated.model_dump(mode="json"),
+        )
+        return updated
 
     async def schedule_word(
         self,
@@ -371,7 +446,7 @@ class LegalWordService:
                 400,
             )
         await self._ensure_schedule_slot_available(word_id, scheduled_date)
-        return await self._set_word_fields(
+        updated = await self._set_word_fields(
             word_id,
             {
                 "status": LegalWordStatus.SCHEDULED.value,
@@ -379,6 +454,15 @@ class LegalWordService:
             },
             current_user,
         )
+        await self._emit_audit(
+            "legal_word.scheduled",
+            current_user,
+            word_id,
+            before=existing.model_dump(mode="json"),
+            after=updated.model_dump(mode="json"),
+            metadata={"scheduled_date": scheduled_date.isoformat()},
+        )
+        return updated
 
     async def publish_daily_words(
         self,
@@ -516,6 +600,86 @@ class LegalWordService:
             count=len(ordered),
         )
 
+    async def list_published_words(
+        self,
+        *,
+        search: Optional[str] = None,
+        category: Optional[str] = None,
+        published_date: Optional[date] = None,
+        publication_type: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 6,
+        today: Optional[date] = None,
+    ) -> Tuple[List[LegalWordPublishedItem], int]:
+        """Return publication events, newest first, for the learning page."""
+        words, daily_sets = await self._get_handles()
+        page_size = max(1, min(int(limit or 6), 200))
+        offset = max(0, int(skip or 0))
+        current_date = today or date.today()
+
+        daily_docs = await daily_sets.find({}).sort("published_date", -1).to_list(length=2000)
+        events: List[Tuple[date, int, str]] = []
+        seen: set[Tuple[str, date]] = set()
+        for daily_doc in daily_docs:
+            event_date = self._coerce_date(daily_doc.get("published_date"))
+            if not event_date:
+                continue
+            for position, raw_word_id in enumerate(daily_doc.get("word_ids") or []):
+                word_id = str(raw_word_id)
+                key = (word_id, event_date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append((event_date, position, word_id))
+
+        word_ids = sorted({word_id for _, _, word_id in events})
+        word_docs = (
+            await words.find({"_id": {"$in": [self._to_query_id(word_id) for word_id in word_ids]}})
+            .to_list(length=max(len(word_ids), 1))
+            if word_ids
+            else []
+        )
+        docs_by_id = {str(doc.get("_id")): doc for doc in word_docs}
+
+        legacy_docs = await words.find(
+            {"status": LegalWordStatus.PUBLISHED.value}
+        ).to_list(length=2000)
+        for doc in legacy_docs:
+            word_id = str(doc.get("_id"))
+            docs_by_id.setdefault(word_id, doc)
+            for event_date in self._publication_history(doc):
+                key = (word_id, event_date)
+                if key in seen:
+                    continue
+                seen.add(key)
+                events.append((event_date, DAILY_WORD_COUNT, word_id))
+
+        events.sort(key=lambda item: (item[0].isoformat(), -item[1], item[2]), reverse=True)
+
+        items: List[LegalWordPublishedItem] = []
+        for event_date, _, word_id in events:
+            doc = docs_by_id.get(word_id)
+            if not doc:
+                continue
+            if doc.get("status") in {
+                LegalWordStatus.INACTIVE.value,
+                LegalWordStatus.REJECTED.value,
+            }:
+                continue
+            if published_date and event_date != published_date:
+                continue
+            publication_kind = self._publication_type_for_date(doc, event_date)
+            if publication_type and publication_kind.value != publication_type:
+                continue
+            if category and str(doc.get("category") or "").casefold() != category.casefold():
+                continue
+            if search and not self._word_doc_matches_search(doc, search):
+                continue
+            items.append(self._published_item_from_doc(doc, event_date, current_date))
+
+        total = len(items)
+        return items[offset : offset + page_size], total
+
     async def get_daily_set(self, for_date: date) -> Optional[LegalWordDailySet]:
         _, daily_sets = await self._get_handles()
         doc = await daily_sets.find_one({"published_date": for_date.isoformat()})
@@ -548,6 +712,125 @@ class LegalWordService:
             raise LegalWordServiceError("Daily set already exists", 409) from exc
         payload["_id"] = str(result.inserted_id)
         return self._to_daily_set(payload)
+
+    async def unpublish_word(
+        self,
+        word_id: str,
+        current_user: Optional[Any] = None,
+        *,
+        for_date: Optional[date] = None,
+    ) -> LegalWord:
+        """Remove a word from a publication date and keep its remaining history."""
+        words, daily_sets = await self._get_handles()
+        existing_doc = await words.find_one({"_id": self._to_query_id(word_id)})
+        if not existing_doc:
+            raise LegalWordServiceError("Word not found", 404)
+
+        target_date = (
+            for_date
+            or self._last_published_from_doc(existing_doc)
+            or date.today()
+        )
+        daily_doc = await daily_sets.find_one({"published_date": target_date.isoformat()})
+        if daily_doc:
+            next_ids = [
+                str(item)
+                for item in daily_doc.get("word_ids") or []
+                if str(item) != str(word_id)
+            ]
+            await daily_sets.update_one(
+                {"published_date": target_date.isoformat()},
+                {
+                    "$set": {
+                        "word_ids": next_ids,
+                        "updated_at": datetime.utcnow(),
+                        "updated_by": self._user_id(current_user),
+                    }
+                },
+            )
+
+        history = [
+            item
+            for item in self._publication_history(existing_doc)
+            if item != target_date
+        ]
+        last_published = history[-1] if history else None
+        update_fields = {
+            "status": (
+                LegalWordStatus.PUBLISHED.value
+                if last_published
+                else LegalWordStatus.APPROVED.value
+            ),
+            "published_date": last_published.isoformat() if last_published else None,
+            "last_published_date": last_published.isoformat() if last_published else None,
+            "published_count": len(history),
+            "publication_history": [item.isoformat() for item in history],
+            "is_eligible_for_republish": self._is_republish_eligible(
+                last_published,
+                date.today(),
+            ),
+            "updated_at": datetime.utcnow(),
+            "updated_by": self._user_id(current_user),
+        }
+        await words.update_one(
+            {"_id": self._to_query_id(word_id)},
+            {"$set": update_fields},
+        )
+        updated_doc = await words.find_one({"_id": self._to_query_id(word_id)})
+        updated = self._to_word(updated_doc)
+        await self._emit_audit(
+            "legal_word.unpublished",
+            current_user,
+            word_id,
+            before=self._json_safe_doc(existing_doc),
+            after=updated.model_dump(mode="json"),
+            metadata={"published_date": target_date.isoformat()},
+        )
+        return updated
+
+    async def delete_word(
+        self,
+        word_id: str,
+        current_user: Optional[Any] = None,
+    ) -> LegalWord:
+        """Delete a word and remove it from any daily publication set."""
+        words, daily_sets = await self._get_handles()
+        existing_doc = await words.find_one({"_id": self._to_query_id(word_id)})
+        if not existing_doc:
+            raise LegalWordServiceError("Word not found", 404)
+
+        daily_docs = await daily_sets.find({}).to_list(length=2000)
+        for daily_doc in daily_docs:
+            word_ids = [str(item) for item in daily_doc.get("word_ids") or []]
+            if str(word_id) not in word_ids:
+                continue
+            next_ids = [item for item in word_ids if item != str(word_id)]
+            await daily_sets.update_one(
+                {"_id": daily_doc.get("_id")},
+                {
+                    "$set": {
+                        "word_ids": next_ids,
+                        "updated_at": datetime.utcnow(),
+                        "updated_by": self._user_id(current_user),
+                    }
+                },
+            )
+
+        delete_one = getattr(words, "delete_one", None)
+        if delete_one is None:
+            raise LegalWordServiceError("Delete operation is unavailable", 500)
+        result = await delete_one({"_id": self._to_query_id(word_id)})
+        deleted_count = int(getattr(result, "deleted_count", 0) or 0)
+        if deleted_count == 0:
+            raise LegalWordServiceError("Word not found", 404)
+        deleted = self._to_word(existing_doc)
+        await self._emit_audit(
+            "legal_word.deleted",
+            current_user,
+            word_id,
+            before=self._json_safe_doc(existing_doc),
+        )
+        return deleted
 
     async def _generate_ai_word_candidates(
         self,
@@ -963,6 +1246,20 @@ class LegalWordService:
                 {"_id": self._to_query_id(word_id)},
                 {"$set": update_fields},
             )
+            await self._emit_audit(
+                "legal_word.published",
+                current_user,
+                word_id,
+                before=self._json_safe_doc(doc),
+                after=self._json_safe_doc({**doc, **update_fields}),
+                metadata={
+                    "published_date": published_date.isoformat(),
+                    "publication_type": self._publication_type_for_date(
+                        doc,
+                        published_date,
+                    ).value,
+                },
+            )
 
     async def _get_or_create_user_request(
         self, word: str, current_user: Optional[Any]
@@ -1017,6 +1314,105 @@ class LegalWordService:
             raise LegalWordServiceError("Word not found", 404)
         updated = await words.find_one({"_id": self._to_query_id(word_id)})
         return self._to_word(updated)
+
+    def _published_item_from_doc(
+        self,
+        doc: Dict[str, Any],
+        event_date: date,
+        today: date,
+    ) -> LegalWordPublishedItem:
+        word = self._to_word(doc)
+        publication_type = self._publication_type_for_date(doc, event_date)
+        badge: Optional[str] = None
+        if event_date == today:
+            badge = "Repeated" if publication_type == LegalWordPublicationType.REPEATED else "New"
+        payload = word.model_dump(by_alias=True)
+        payload["display_publication_date"] = event_date
+        payload["publication_type"] = publication_type
+        payload["publication_badge"] = badge
+        return LegalWordPublishedItem(**payload)
+
+    def _publication_type_for_date(
+        self,
+        doc: Dict[str, Any],
+        event_date: date,
+    ) -> LegalWordPublicationType:
+        prior_history = [
+            item for item in self._publication_history(doc) if item < event_date
+        ]
+        return (
+            LegalWordPublicationType.REPEATED
+            if prior_history
+            else LegalWordPublicationType.NEW
+        )
+
+    def _admin_publication_type(
+        self,
+        doc: Dict[str, Any],
+        today: date,
+    ) -> LegalWordPublicationType:
+        history = self._publication_history(doc)
+        if not history or int(doc.get("published_count") or 0) <= 0:
+            return LegalWordPublicationType.UNPUBLISHED
+        if self._is_republish_eligible(history[-1], today):
+            return LegalWordPublicationType.ELIGIBLE_FOR_REPUBLICATION
+        if len(history) > 1:
+            return LegalWordPublicationType.REPEATED
+        return LegalWordPublicationType.PREVIOUSLY_PUBLISHED
+
+    def _word_doc_matches_search(self, doc: Dict[str, Any], search: str) -> bool:
+        needle = search.strip().casefold()
+        if not needle:
+            return True
+        haystacks = [
+            str(doc.get("word") or ""),
+            str(doc.get("meaning") or ""),
+            str(doc.get("example_sentence") or ""),
+            str(doc.get("category") or ""),
+            " ".join(str(item) for item in doc.get("synonyms") or []),
+        ]
+        return any(needle in value.casefold() for value in haystacks)
+
+    def _json_safe_doc(self, doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if doc is None:
+            return None
+        safe: Dict[str, Any] = {}
+        for key, value in doc.items():
+            if isinstance(value, (date, datetime)):
+                safe[key] = value.isoformat()
+            elif isinstance(value, ObjectId):
+                safe[key] = str(value)
+            elif isinstance(value, list):
+                safe[key] = [
+                    item.isoformat() if isinstance(item, (date, datetime)) else str(item) if isinstance(item, ObjectId) else item
+                    for item in value
+                ]
+            else:
+                safe[key] = value
+        return safe
+
+    async def _emit_audit(
+        self,
+        action: str,
+        current_user: Optional[Any],
+        word_id: str,
+        *,
+        before: Optional[Dict[str, Any]] = None,
+        after: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        try:
+            await AuditEventService(self._db).emit(
+                action=action,
+                actor_id=self._user_id(current_user),
+                resource_type="legal_word",
+                resource_id=str(word_id),
+                before=before,
+                after=after,
+                metadata=metadata,
+            )
+        except Exception:  # pragma: no cover - audit must not block admin actions
+            logger.warning("Failed to write legal word audit event %s", action, exc_info=True)
 
     def _ensure_complete_word(self, word: LegalWord) -> None:
         if not word.meaning or not word.example_sentence:

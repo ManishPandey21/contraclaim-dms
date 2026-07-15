@@ -29,8 +29,17 @@ class LegalWordSuggestionEligibility(str, Enum):
     ELIGIBLE_FOR_REPUBLISH = "eligible_for_republish"
 
 
+class LegalWordPublicationType(str, Enum):
+    NEW = "new"
+    REPEATED = "repeated"
+    PREVIOUSLY_PUBLISHED = "previously_published"
+    UNPUBLISHED = "unpublished"
+    ELIGIBLE_FOR_REPUBLICATION = "eligible_for_republication"
+
+
 class LegalWordBase(BaseModel):
     word: str = Field(..., min_length=1, max_length=100)
+    category: Optional[str] = Field(default=None, max_length=100)
     meaning: Optional[str] = Field(default=None, max_length=2000)
     synonyms: List[str] = Field(default_factory=list, max_length=25)
     example_sentence: Optional[str] = Field(default=None, max_length=3000)
@@ -43,7 +52,7 @@ class LegalWordBase(BaseModel):
             raise ValueError("word must not be empty")
         return value
 
-    @field_validator("meaning", "example_sentence")
+    @field_validator("category", "meaning", "example_sentence")
     @classmethod
     def _strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -120,6 +129,7 @@ class LegalWordCreate(LegalWordBase):
 
 class LegalWordUpdate(BaseModel):
     word: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    category: Optional[str] = Field(default=None, max_length=100)
     meaning: Optional[str] = Field(default=None, max_length=2000)
     synonyms: Optional[List[str]] = Field(default=None, max_length=25)
     example_sentence: Optional[str] = Field(default=None, max_length=3000)
@@ -140,7 +150,7 @@ class LegalWordUpdate(BaseModel):
             return None
         return LegalWordBase._strip_word(value)
 
-    _strip_optional_text = field_validator("meaning", "example_sentence")(
+    _strip_optional_text = field_validator("category", "meaning", "example_sentence")(
         LegalWordBase._strip_optional_text.__func__
     )
     _normalize_synonyms = field_validator("synonyms")(
@@ -158,6 +168,27 @@ class LegalWordListResponse(BaseModel):
 
     @model_validator(mode="after")
     def _compute_pagination(self) -> "LegalWordListResponse":
+        self.has_next = (self.page * self.limit) < self.total
+        self.has_prev = self.page > 1
+        return self
+
+
+class LegalWordPublishedItem(LegalWord):
+    display_publication_date: date
+    publication_type: LegalWordPublicationType
+    publication_badge: Optional[str] = None
+
+
+class LegalWordPublishedListResponse(BaseModel):
+    words: List[LegalWordPublishedItem]
+    total: int
+    page: int
+    limit: int
+    has_next: bool = False
+    has_prev: bool = False
+
+    @model_validator(mode="after")
+    def _compute_pagination(self) -> "LegalWordPublishedListResponse":
         self.has_next = (self.page * self.limit) < self.total
         self.has_prev = self.page > 1
         return self
@@ -249,6 +280,9 @@ __all__ = [
     "LegalWordDailySet",
     "LegalWordListResponse",
     "LegalWordPublishRequest",
+    "LegalWordPublicationType",
+    "LegalWordPublishedItem",
+    "LegalWordPublishedListResponse",
     "LegalWordScheduleRequest",
     "LegalWordSearchRequest",
     "LegalWordSearchResponse",
