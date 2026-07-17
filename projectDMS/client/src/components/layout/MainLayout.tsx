@@ -4,9 +4,12 @@ import { Outlet, useLocation } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import { ErrorBoundary } from '@/components/error-boundary/ErrorBoundary';
+import { TenantProvider, useTenant } from '@/contexts/TenantContext';
 
-const MainLayout = () => {
+const MainLayoutContent = () => {
   const location = useLocation();
+  const { selectedOrganizationId, selectedProjectId } = useTenant();
+  const tenantKey = `${selectedOrganizationId}:${selectedProjectId}`;
   return (
     <div className="min-h-screen bg-docsumo-light flex">
       <Sidebar />
@@ -20,13 +23,21 @@ const MainLayout = () => {
             the key a crashed page would keep showing the fallback even after
             the user navigates elsewhere.
           */}
-          <ErrorBoundary key={location.pathname}>
-            <Outlet />
+          <ErrorBoundary key={`${location.pathname}:${tenantKey}`}>
+            <div key={tenantKey}>
+              <Outlet />
+            </div>
           </ErrorBoundary>
         </main>
       </div>
     </div>
   );
 };
+
+const MainLayout = () => (
+  <TenantProvider>
+    <MainLayoutContent />
+  </TenantProvider>
+);
 
 export default MainLayout;

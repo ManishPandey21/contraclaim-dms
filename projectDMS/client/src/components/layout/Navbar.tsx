@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import NotificationCenter from "@/components/NotificationCenter";
 import { useAuth } from "@/hooks/use-auth";
+import TenantScopeBar from "./TenantScopeBar";
 
 const Navbar = () => {
   const location = useLocation();
@@ -38,13 +39,15 @@ const Navbar = () => {
 
   return (
     <header className="bg-white border-b border-gray-200 py-3 px-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-semibold text-docsumo-text">
           {getPageTitle()}
         </h1>
 
+        <TenantScopeBar />
+
         <div className="flex items-center space-x-4">
-          <div className="relative">
+          <div className="relative hidden 2xl:block">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Search size={18} className="text-gray-400" />
             </div>
