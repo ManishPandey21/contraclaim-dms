@@ -128,7 +128,8 @@ const LetterInputPage = () => {
   }
 
   return (
-    <div className="container mx-auto p-6">
+    <div className="container mx-auto space-y-4 p-6">
+      <h1 className="text-2xl font-bold">Letter Input</h1>
       <div className="mb-4">
         <Button variant="ghost" onClick={() => navigate('/letters')}>
           <ArrowLeft className="mr-2 h-4 w-4" />

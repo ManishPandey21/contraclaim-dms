@@ -790,6 +790,7 @@ const LetterDraftPage = () => {
 
   return (
     <div className="container mx-auto p-6 space-y-6">
+      <h1 className="text-2xl font-bold">Letter Draft</h1>
       <div>
         <Button variant="ghost" onClick={() => navigate("/letters")}>
           <ArrowLeft className="mr-2 h-4 w-4" />

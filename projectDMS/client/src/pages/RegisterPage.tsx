@@ -627,6 +627,7 @@ const RegisterPage = () => {
   return (
     <div className="max-w-6xl mx-auto p-6 space-y-6">
       {StepUpDialog}
+      <h1 className="text-2xl font-bold">Registration</h1>
       <Tabs
         value={activeTab}
         onValueChange={setActiveTab}

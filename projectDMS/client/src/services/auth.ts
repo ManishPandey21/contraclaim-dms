@@ -66,6 +66,7 @@ export function clearSession() {
     window.localStorage.removeItem("user_roles");
     window.localStorage.removeItem("org_id");
     window.localStorage.removeItem("proj_id");
+    window.localStorage.removeItem("profile_cache");
   } catch {
     // no-op
   }

@@ -63,6 +63,7 @@ const clearLegacyAuthStorage = () => {
   localStorage.removeItem("user_roles");
   localStorage.removeItem("org_id");
   localStorage.removeItem("proj_id");
+  localStorage.removeItem("profile_cache");
 };
 
 const syncSessionContext = (_profile: SessionProfile) => {

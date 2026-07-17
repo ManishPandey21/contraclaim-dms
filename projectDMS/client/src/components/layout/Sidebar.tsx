@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -42,9 +42,8 @@ import {
   ListTree,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { enhancedApi as api } from "@/services/enhanced-api";
-import { getCurrentUserProfile } from "@/services/session-api";
 import useRBAC from "@/hooks/useRBAC";
+import { useSidebarIdentity } from "@/hooks/useSidebarIdentity";
 import { isRouteAllowedByPermission, labelForRole } from "@/config/rolePermissions";
 
 const Sidebar = () => {
@@ -53,10 +52,7 @@ const Sidebar = () => {
   const location = useLocation();
   const { roles, can } = useRBAC();
 
-  // Dynamic user identity shown in the sidebar footer
-  const [displayName, setDisplayName] = useState<string>("User Name");
-  const [initials, setInitials] = useState<string>("US");
-  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string>("");
+  const { displayName, initials, profilePhotoUrl } = useSidebarIdentity();
 
   const roleLabel = useMemo(() => {
     const priority = [
@@ -75,69 +71,6 @@ const Sidebar = () => {
     const selected = priority.find((role) => roles.includes(role)) || roles[0];
     return selected ? labelForRole(selected) : "User";
   }, [roles]);
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        let name = "User Name";
-        let photo = "";
-
-        // Prefer profile names if available
-        try {
-          const profile = await api.getProfile().catch(() => null as any);
-          if (profile) {
-            const first = (profile as any).first_name || "";
-            const last = (profile as any).last_name || "";
-            const email = (profile as any).email || "";
-            const candidate = `${first} ${last}`.trim() || email;
-            if (candidate) name = candidate;
-            photo = (profile as any).profile_photo_url || "";
-          }
-        } catch {
-          // ignore
-        }
-
-        // Fallback to /me when full profile data is unavailable.
-        if (!name || name === "User Name") {
-          try {
-            const me = await getCurrentUserProfile();
-            const candidate = me?.email || me?.id;
-            if (candidate) name = candidate;
-          } catch {
-            // ignore
-          }
-        }
-
-        // Local cache override from profile save flow
-        try {
-          const cacheRaw =
-            typeof window !== "undefined"
-              ? window.localStorage.getItem("profile_cache")
-              : null;
-          if (cacheRaw) {
-            const cache = JSON.parse(cacheRaw);
-            if (cache?.full_name) name = cache.full_name;
-            if (cache?.profile_photo_url) photo = cache.profile_photo_url;
-          }
-        } catch {
-          // ignore
-        }
-
-        // Compute initials from name
-        const parts = String(name).trim().split(/\s+/).filter(Boolean);
-        const init =
-          (parts[0]?.[0] || "U").toUpperCase() +
-          (parts[1]?.[0] || parts[0]?.[1] || "S").toUpperCase();
-
-        setDisplayName(name);
-        setInitials(init);
-        setProfilePhotoUrl(photo || "");
-      } catch {
-        // ignore
-      }
-    };
-    load();
-  }, [location.pathname]);
 
   const toggleSidebar = () => {
     setCollapsed(!collapsed);

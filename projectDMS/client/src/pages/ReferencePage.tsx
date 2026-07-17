@@ -735,6 +735,7 @@ const ReferencePage: React.FC = () => {
 
   return (
     <div className="p-4 space-y-4">
+      <h1 className="text-2xl font-bold">Document References</h1>
       {actionError && (
         <Card className="border-destructive/40 bg-destructive/5">
           <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">

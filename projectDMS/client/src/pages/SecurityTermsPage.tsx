@@ -11,7 +11,6 @@ import {
   CardDescription,
   CardFooter,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -92,7 +91,9 @@ const SecurityTermsPage: React.FC = () => {
                 <ShieldCheck className="h-6 w-6" />
               </div>
               <div>
-                <CardTitle>Security, Privacy & Anti-Piracy Terms</CardTitle>
+                <h1 className="text-2xl font-semibold leading-none tracking-tight">
+                  Security, Privacy &amp; Anti-Piracy Terms
+                </h1>
                 <CardDescription>
                   Review and accept the active terms before accessing Contraclaim DMS.
                 </CardDescription>
