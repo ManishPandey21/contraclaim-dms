@@ -596,11 +596,11 @@ class FileService:
             summary_dir = Path(self.config.uploads_dir) / path_structure
             
             if upload_type == "incoming":
-                summary_filename = "incoming.txt"
+                summary_filename = "incoming.md"
             elif upload_type == "outgoing":
-                summary_filename = "outgoing.txt"
+                summary_filename = "outgoing.md"
             else:
-                summary_filename = "projectid.txt"
+                summary_filename = "projectid.md"
             
             summary_path = summary_dir / summary_filename
             

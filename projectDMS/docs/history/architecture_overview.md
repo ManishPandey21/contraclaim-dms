@@ -20,7 +20,7 @@
   - FalkorDB for letter threads and references (`FalkorGraphService`).
   - Graphiti REST via `GraphAdapter` (optional).
 - **Files**:
-  - Local uploads in `uploads/` (per org/project); summaries appended under `uploads/<org>/<project>/incoming.txt|outgoing.txt`.
+  - Local uploads in `uploads/` (per org/project); Markdown summaries appended under `uploads/<org>/<project>/incoming.md|outgoing.md`.
   - Optional S3 via `StorageSettingsService`.
 
 ### Frontend entrypoints and core components
