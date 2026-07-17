@@ -98,7 +98,7 @@ No broken links found (searches yielded no invalid URLs). Coding issues are most
    - Chunk: text → chunks (3000 chars, 200 overlap).
    - Embeddings: OpenAI embeddings.create (batch), delete old vectors, insert document_vectors (doc_id, org, proj, chunk_index, text, embedding, checksum).
    - Output: chunks_created count.
-6. **FS (FileService)**: save_summary → Append to uploads/org/proj/incoming.txt or outgoing.txt (header + content + footer).
+6. **FS (FileService)**: save_summary → Append to uploads/org/proj/incoming.md or outgoing.md (Markdown source heading + extracted content + divider).
 7. **Graph**: GraphIngestionService.ingest_document (payload + metadata, for refs graph; errors logged silently).
 
 - **Error Handling**: ProcessingResult (success/error/time), set processing_error in doc if fail. Logs everywhere.

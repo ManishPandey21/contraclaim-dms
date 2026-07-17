@@ -108,7 +108,7 @@ Contents:
         5. Step 4: Metadata extraction:
            - If PydanticAI enabled, attempts structured extraction; on failure/fallback: TextProcessingService.parse_extraction_report(extracted_content).
         6. Step 5: Save results via self.\_save_results(...)
-           - FileService.save_summary(...) writes summary to uploads/<org>/<project>/incoming|outgoing.txt.
+           - FileService.save_summary(...) writes Markdown summaries to uploads/<org>/<project>/incoming|outgoing.md.
            - DatabaseService.save_document_data(document_id, file_path, parsed_metadata, full_text, embedding_text)
              - Upserts metadata to db.documents; creates chunk embeddings and stores vector chunks.
 

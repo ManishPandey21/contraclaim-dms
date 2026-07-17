@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -15,6 +14,11 @@ logger = logging.getLogger(__name__)
 class FileService:
     """Service for file system operations"""
 
+    _SUMMARY_FILENAMES = {
+        "incoming": "incoming.md",
+        "outgoing": "outgoing.md",
+    }
+
     def __init__(self, config: DocumentProcessingConfig):
         self.config = config
 
@@ -25,34 +29,48 @@ class FileService:
         path_structure: str,
         upload_type: str,
     ) -> None:
-        """Save processing summary to file system"""
+        """Append an extracted correspondence report to its Markdown summary."""
         try:
             summary_dir = Path(self.config.uploads_dir) / path_structure
-
-            if upload_type == "incoming":
-                summary_filename = "incoming.txt"
-            elif upload_type == "outgoing":
-                summary_filename = "outgoing.txt"
-            else:
-                summary_filename = "projectid.txt"
-
-            summary_path = summary_dir / summary_filename
+            summary_path = summary_dir / self._summary_filename(upload_type)
             summary_dir.mkdir(parents=True, exist_ok=True)
 
-            header = f"\n\n--- {os.path.basename(source_path)} ---\n"
-            footer = "\n" + "=" * 50 + "\n"
-            full_content = header + content + footer
+            full_content = self._format_summary_markdown(content, source_path)
 
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
-                lambda: summary_path.open("a", encoding="utf-8").write(full_content),
+                self._append_text,
+                summary_path,
+                full_content,
             )
 
             logger.info("Summary saved to: %s", summary_path)
 
         except Exception as e:  # pragma: no cover - log and continue
             logger.error("Failed to save summary: %s", e)
+
+    @classmethod
+    def _summary_filename(cls, upload_type: str) -> str:
+        """Return the canonical Markdown filename for a correspondence scope."""
+        return cls._SUMMARY_FILENAMES.get(upload_type, "projectid.md")
+
+    @staticmethod
+    def _format_summary_markdown(content: str, source_path: str) -> str:
+        """Wrap an extraction in Markdown without altering its document structure."""
+        source_name = Path(source_path).name.replace("\r", " ").replace("\n", " ")
+        body = content if content else "_No extracted content was available._"
+
+        # Keep the extractor output verbatim. It may already contain headings,
+        # paragraphs, lists, tables, or reference links; escaping or code-fencing
+        # it here would discard its Markdown semantics.
+        return f"\n\n## Source: {source_name}\n\n{body.rstrip()}\n\n---\n"
+
+    @staticmethod
+    def _append_text(path: Path, content: str) -> None:
+        """Append UTF-8 content while closing the file handle deterministically."""
+        with path.open("a", encoding="utf-8") as summary_file:
+            summary_file.write(content)
 
 
 class SecureFileService(FileService):
