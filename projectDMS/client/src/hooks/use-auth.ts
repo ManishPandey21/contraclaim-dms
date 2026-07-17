@@ -73,6 +73,7 @@ export const useAuth = () => {
         localStorage.removeItem("user_roles");
         localStorage.removeItem("org_id");
         localStorage.removeItem("proj_id");
+        localStorage.removeItem("profile_cache");
         setIsAuthenticated(false);
         window.dispatchEvent(new Event("auth-state-changed"));
         navigate("/login");

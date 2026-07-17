@@ -639,6 +639,7 @@ const FolderStructurePage: React.FC = () => {
       </aside>
 
       <main className="flex-1 p-6">
+        <h1 className="mb-6 text-2xl font-bold">Folder Structure</h1>
         <Card>
           <CardHeader>
             <CardTitle>Folder Structure</CardTitle>

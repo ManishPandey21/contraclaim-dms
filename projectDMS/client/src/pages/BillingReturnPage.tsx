@@ -79,7 +79,8 @@ const BillingReturnPage: React.FC = () => {
   const polling = !done && shouldKeepPolling(state);
 
   return (
-    <div className="container mx-auto max-w-xl p-6">
+    <div className="container mx-auto max-w-xl space-y-6 p-6">
+      <h1 className="text-2xl font-bold">Payment Status</h1>
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">

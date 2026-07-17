@@ -88,9 +88,9 @@ export default function LetterQualityDashboardPage() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold text-slate-950">
+          <h1 className="text-2xl font-semibold text-slate-950">
             Letter Quality Dashboard
-          </h2>
+          </h1>
           <p className="mt-1 text-sm text-slate-600">
             Metrics for drafting cycle time, source grounding, governance, and issued artifacts.
           </p>

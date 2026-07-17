@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/ui/use-toast";
+import ProfileScopeSubscriptionCard from "@/components/profile/ProfileScopeSubscriptionCard";
 import { enhancedApi as api } from "@/services/enhanced-api";
 import {
   getUserDateFormat,
@@ -168,13 +169,9 @@ const ProfilePage = () => {
       setSelectedPhotoFile(null);
       setPhotoPreviewUrl(null);
 
-      window.localStorage.setItem(
-        "profile_cache",
-        JSON.stringify({
-          full_name:
-            `${merged.first_name || ""} ${merged.last_name || ""}`.trim(),
-          profile_photo_url: merged.profile_photo_url || "",
-        }),
+      window.localStorage.removeItem("profile_cache");
+      window.dispatchEvent(
+        new CustomEvent("profile-updated", { detail: merged }),
       );
 
       toast({
@@ -279,6 +276,8 @@ const ProfilePage = () => {
 
   return (
     <div className="container mx-auto py-8 animate-fade-in">
+      <h1 className="mb-6 text-2xl font-bold">My Profile</h1>
+      <ProfileScopeSubscriptionCard />
       <div className="flex flex-col items-center md:flex-row md:items-start gap-8">
         <div className="w-full md:w-1/3">
           <Card>

@@ -82,7 +82,7 @@ const Index = () => {
     <div className="min-h-screen bg-gradient-to-b from-white to-gray-100">
       <div className="container mx-auto py-12 px-4">
         <div className="text-center mb-12">
-          <h1 className="text-4xl md:text-5xl font-bold mb-4 text-docsumo-text">Document Management System</h1>
+          <h1 className="text-4xl md:text-5xl font-bold mb-4 text-docsumo-text">Overview</h1>
           <p className="text-xl text-gray-600 max-w-3xl mx-auto">
             A comprehensive platform for managing documents, organizations, and projects with advanced features
           </p>
