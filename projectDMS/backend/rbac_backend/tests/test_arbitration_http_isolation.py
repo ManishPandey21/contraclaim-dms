@@ -3,7 +3,10 @@
 Follows the ``test_http_isolation.py`` pattern: the real FastAPI app and real
 PolicyService/ScopeService run against overridden ``get_db``/``get_current_user``
 with a seeded two-tenant dataset. Permission and entitlement gates are stubbed
-to "allow" so the tests prove *tenant scope* end-to-end:
+to "allow" so the tests prove *tenant scope* end-to-end. The RBAC-hardening
+project/organization ownership guard (``ScopeService.project_belongs_to_organization``)
+stays live: the fixture seeds a ``projects`` collection so same-tenant access
+resolves, and a dedicated test pins that a mismatched project/org denies.
 
 - an Org-B user can never read or mutate Org-A arbitration cases, matrix rows,
   agent runs, or exhibit lists (404 from the scoped case lookup);
@@ -227,6 +230,16 @@ class _FakeDb:
         self.project_memberships = _FakeCollection([])
         self.audit_events = _FakeCollection([])
         self.tasks = _FakeCollection([])
+        # RBAC hardening: is_client_scope_allowed cross-checks that the request's
+        # project actually belongs to the request's organization via db.projects
+        # (fail-closed when the collection/rows are missing). Seed real ownership
+        # rows so same-tenant access resolves and the guard stays exercised.
+        self.projects = _FakeCollection(
+            [
+                {"_id": "proj-a1", "organization_id": "org-A", "name": "Org A project"},
+                {"_id": "proj-b1", "organization_id": "org-B", "name": "Org B project"},
+            ]
+        )
 
     def __getitem__(self, name):
         return getattr(self, name)
@@ -363,3 +376,25 @@ def test_case_create_rejects_foreign_organization(client):
     )
     assert resp.status_code == 403
     assert all(row.get("title") != "Cuckoo case" for row in client.db.arbitration_cases.rows)
+
+
+def test_project_org_ownership_guard_denies_mismatched_case(client):
+    """Pin the RBAC-hardening guard: a case whose project belongs to another org
+    is denied even for a user inside the case's own organization (tampered or
+    legacy data must fail closed via ScopeService.project_belongs_to_organization)."""
+    client.db.arbitration_cases.rows.append(
+        {
+            "_id": "case-a-tampered",
+            "organization_id": "org-A",
+            "project_id": "proj-b1",  # belongs to org-B
+            "title": "Org A case pointing at Org B project",
+            "party_perspective": "claimant",
+            "status": "matrix_preparation",
+        }
+    )
+
+    resp = client.as_user(ORG_A_USER).get("/api/arbitration/cases/case-a-tampered")
+    assert resp.status_code == 403
+
+    # The legitimate same-org case remains accessible - the guard is targeted.
+    assert client.as_user(ORG_A_USER).get("/api/arbitration/cases/case-a1").status_code == 200
