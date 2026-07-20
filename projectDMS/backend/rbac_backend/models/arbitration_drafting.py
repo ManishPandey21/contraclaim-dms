@@ -605,6 +605,9 @@ class ArbitrationGenerateRequest(BaseModel):
     section_key: Optional[str] = None
     include_unverified_graph_links: bool = False
     additional_instruction: Optional[str] = Field(default=None, max_length=2000)
+    # audit item 6: "deterministic" (default) or "llm" prose generation. LLM mode
+    # falls back to deterministic when no model client is configured.
+    draft_mode: Optional[str] = None
 
 
 class PleadingImportRequest(BaseModel):

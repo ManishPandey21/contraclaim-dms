@@ -1675,6 +1675,22 @@ class ArbitrationCaseWorkspaceService:
                 str(out_of_scope[0].get("_id")),
             )
 
+        # Guide §2 pleading timetable: overdue, unfiled stages need legal attention.
+        overdue_timetable = [
+            row
+            for row in jurisdiction_rows
+            if str(row.get("check_type") or "") == "pleading_timetable"
+            and str(row.get("timetable_status") or "").lower() == "overdue"
+        ]
+        if overdue_timetable:
+            add(
+                "pleading_timetable",
+                "jurisdiction",
+                ReadinessCheckStatus.NEEDS_LEGAL_REVIEW,
+                f"{len(overdue_timetable)} pleading-timetable stage(s) are past their deadline and not marked filed.",
+                str(overdue_timetable[0].get("_id")),
+            )
+
     def _claim_readiness(self, add: Any, claim_rows: List[Dict[str, Any]]) -> None:
         ready_claims = [row for row in claim_rows if (row.get("claim_head") or row.get("facts")) and _is_ready_row(row)]
         add(
