@@ -102,6 +102,15 @@ For each source claim row, return one object with:
 - "positive_case": the respondent's own version of events if supported by the source, or null
 Base every point only on the source text. Do not invent facts."""
 
+REJOINDER_INSTRUCTION = """Task: build rejoinder matrix rows replying to imported Statement of Defence paragraphs.
+For each SoD paragraph source, return one object with:
+- "source_id": the SoD paragraph number, copied exactly
+- "nature_of_defence": short classification (e.g. denial, no-notice, concurrency, within-scope, quantum objection)
+- "claimant_reply": the claimant's reply to that defence, grounded only in the paragraph text; a reply must give a reason, never a bare denial
+- "new_matter": true only if the reply raises a claim or ground not already in the Statement of Claim, otherwise false
+- "reply_to_counterclaim": the reply if the paragraph is a counterclaim, otherwise null
+A rejoinder must not become a second Statement of Claim: prefer new_matter=false and only set true when the reply genuinely introduces fresh matter."""
+
 DOCUMENT_INSTRUCTION = """Task: classify project documents for the arbitration document index.
 For each source document, return one object with:
 - "source_id": the id of the document source, copied exactly
@@ -448,6 +457,63 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
                 source_id=str(row["source_id"]),
                 label=f"Defence to claim {claim_no}",
             )
+
+    async def _rejoinder_reply(self, agent_type: str) -> None:
+        if not self.draft_id:
+            self.warnings.append(
+                "Rejoinder reply agent needs a draft_id with imported Statement of Defence paragraphs."
+            )
+            return
+        paragraphs = await self._paragraph_responses()
+        by_id: Dict[str, Dict[str, Any]] = {}
+        sources: List[Dict[str, str]] = []
+        for para in paragraphs:
+            number = str(para.get("source_paragraph_number") or "")
+            text = _condense(para.get("source_paragraph_text"), 600)
+            if not number or not text:
+                continue
+            by_id[number] = para
+            sources.append({"id": number, "text": text})
+        if not sources:
+            self.warnings.append(
+                "Rejoinder reply agent found no imported Statement of Defence paragraphs on this draft."
+            )
+            return
+        next_no = len(await self._matrix_rows("rejoinder-matrix")) + 1
+        for row in await self._generate_rows(agent_type, REJOINDER_INSTRUCTION, sources):
+            number = str(row["source_id"])
+            reply = self._clean(row.get("claimant_reply"), 800)
+            if not reply:
+                self.warnings.append(
+                    f"{agent_type}: reply for SoD paragraph {number} rejected — no grounded reply text."
+                )
+                continue
+            new_matter = bool(row.get("new_matter"))
+            body = {
+                "source_sod_para": number,
+                "rejoinder_no": next_no,
+                "nature_of_defence": self._clean(row.get("nature_of_defence"), 200),
+                "claimant_reply": reply,
+                "reply_to_counterclaim": self._clean(row.get("reply_to_counterclaim"), 600),
+                "new_matter": new_matter,
+                # A rejoinder that raises new matter needs tribunal leave; flag it so
+                # the readiness gate and validator block it until permission is recorded.
+                "tribunal_permission_required": new_matter,
+            }
+            inserted = await self._insert_matrix_row(
+                "rejoinder-matrix",
+                body,
+                unique={"source_sod_para": number},
+                agent_type=agent_type,
+                source_id=number,
+                label=f"Reply to SoD para {number}",
+            )
+            if inserted:
+                next_no += 1
+            if new_matter:
+                self.warnings.append(
+                    f"Rejoinder reply to SoD paragraph {number} raises new matter; tribunal permission is required."
+                )
 
     async def _document_understanding(self, agent_type: str) -> None:
         documents = await self._find_source_rows("documents", limit=int(self.options.get("document_limit") or 50))

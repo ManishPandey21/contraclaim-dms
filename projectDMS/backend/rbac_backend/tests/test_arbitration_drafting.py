@@ -2045,6 +2045,252 @@ def test_register_sources_respect_draft_controls():
     assert any("register sources" in warning.lower() for warning in context["context_warnings"])
 
 
+def _soc_context_with_source():
+    return {
+        "draft": {
+            "_id": "draft-1",
+            "case_id": "case-1",
+            "project_id": "project-1",
+            "draft_type": "statement_of_claim",
+            "title": "EOT Claim",
+            "relief_sought": "Award extension of time.",
+        },
+        "source_ledger": [
+            {
+                "source_key": "S1",
+                "source_id": "doc-1",
+                "source_type": "document",
+                "allowed_use": "fact",
+                "label": "Delay notice",
+                "citation": "CPL/2025/0142",
+                "snippet": "Notice of delay due to late access.",
+            }
+        ],
+        "matrix_context": {},
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+        "context_warnings": [],
+    }
+
+
+class _FakeDraftLLM:
+    def __init__(self, response, available=True):
+        self._response = response
+        self._available = available
+
+    @property
+    def available(self):
+        return self._available
+
+    async def generate(self, prompt, max_tokens=512, model=None):
+        _FakeDraftLLM.last_prompt = prompt
+        if isinstance(self._response, Exception):
+            raise self._response
+        return self._response
+
+
+def test_llm_draft_generator_rewrites_sections_preserving_citations():
+    from backend.rbac_backend.services.arbitration_drafting.llm_generator import LLMDraftGenerator
+
+    context = _soc_context_with_source()
+    fake = _FakeDraftLLM(
+        json.dumps(
+            {
+                "introduction": "By this Statement of Claim the Claimant advances its case on the record. [S1: CPL/2025/0142]",
+            }
+        )
+    )
+    gen = LLMDraftGenerator(generator=fake, model="gpt-4o")
+
+    result = asyncio.run(gen.generate(context))
+
+    assert result["ai_prompt_version"] == "arbitration_pleadings_llm.v1"
+    assert result["structured_output"]["generation_mode"] == "llm"
+    assert result["structured_output"]["llm_rewritten_sections"] >= 1
+    assert "the Claimant advances its case on the record. [S1: CPL/2025/0142]" in result["full_markdown"]
+
+
+def test_llm_draft_generator_rejects_fabricated_citation():
+    from backend.rbac_backend.services.arbitration_drafting.llm_generator import LLMDraftGenerator
+
+    context = _soc_context_with_source()
+    fake = _FakeDraftLLM(
+        json.dumps(
+            {
+                "introduction": "Fabricated prose citing a nonexistent exhibit. [S1: CPL/2025/0142] [S9: Invented]",
+            }
+        )
+    )
+    gen = LLMDraftGenerator(generator=fake, model="gpt-4o")
+
+    result = asyncio.run(gen.generate(context))
+
+    # The rewrite invented [S9], so it is rejected and the deterministic body kept.
+    assert "[S9: Invented]" not in result["full_markdown"]
+    assert "Fabricated prose" not in result["full_markdown"]
+
+
+def test_llm_draft_generator_falls_back_on_runtime_error():
+    from backend.rbac_backend.services.arbitration_drafting.llm_generator import LLMDraftGenerator
+
+    context = _soc_context_with_source()
+    gen = LLMDraftGenerator(generator=_FakeDraftLLM(RuntimeError("boom")), model="gpt-4o")
+
+    result = asyncio.run(gen.generate(context))
+
+    assert result["ai_prompt_version"] == "arbitration_pleadings.v2"  # deterministic
+    assert any("LLM draft generation failed" in w for w in context["context_warnings"])
+
+
+def test_llm_rejoinder_reply_agent_creates_matrix_rows_flagging_new_matter(monkeypatch):
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+    db.arbitration_paragraph_responses.rows.extend(
+        [
+            {
+                "_id": "para-1",
+                "draft_id": "draft-1",
+                "source_paragraph_number": "12",
+                "source_paragraph_text": "The Respondent denies late access and says the contractor failed to mobilise.",
+            },
+            {
+                "_id": "para-2",
+                "draft_id": "draft-1",
+                "source_paragraph_number": "20",
+                "source_paragraph_text": "The Respondent counterclaims liquidated damages for delay.",
+            },
+        ]
+    )
+
+    class _Gen(_FakeLLMGenerator):
+        response = json.dumps(
+            [
+                {
+                    "source_id": "12",
+                    "nature_of_defence": "denial",
+                    "claimant_reply": "Access was handed over late per the contemporaneous notice; the mobilisation allegation is unsupported.",
+                    "new_matter": False,
+                },
+                {
+                    "source_id": "20",
+                    "nature_of_defence": "counterclaim",
+                    "claimant_reply": "The LD counterclaim fails because the delay is an employer-risk event.",
+                    "reply_to_counterclaim": "LD is not leviable where EOT is due.",
+                    "new_matter": True,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(llm_agents_module, "LLMGenerator", _Gen)
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "rejoinder-reply",
+            payload=ArbitrationAgentRunRequest(draft_id="draft-1", options={"agent_mode": "llm"}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    rows = {row["source_sod_para"]: row for row in db.arbitration_rejoinder_matrix.rows}
+    assert set(rows) == {"12", "20"}
+    assert rows["12"]["new_matter"] is False
+    assert rows["20"]["new_matter"] is True
+    # New matter must carry the tribunal-permission flag so the gate blocks it.
+    assert rows["20"]["tribunal_permission_required"] is True
+    assert rows["12"]["approval_status"] == "needs_review"
+    assert any("raises new matter" in w for w in result["warnings"])
+
+
+def test_deterministic_rejoinder_reply_remains_review_only():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    result = asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "rejoinder-reply",
+            payload=ArbitrationAgentRunRequest(draft_id="draft-1", options={}),
+            current_user=_FakeUser(),
+        )
+    )
+
+    assert result["created_records"] == []
+    assert not db.arbitration_rejoinder_matrix.rows
+
+
+def test_jurisdiction_agent_seeds_pleading_timetable_and_amendment_rule():
+    db = _FakeDb()
+    case = db.arbitration_cases.rows[0]
+
+    asyncio.run(
+        run_arbitration_agent(
+            db,
+            case,
+            "jurisdiction",
+            payload=ArbitrationAgentRunRequest(
+                options={
+                    "pleading_timetable": {"statement_of_defence": "2020-01-01"},
+                    "amendment_leave_required": True,
+                }
+            ),
+            current_user=_FakeUser(),
+        )
+    )
+
+    rows = db.arbitration_jurisdiction_matrix.rows
+    timetable = {row.get("pleading_stage"): row for row in rows if row.get("check_type") == "pleading_timetable"}
+    assert {"statement_of_claim", "statement_of_defence", "rejoinder"}.issubset(set(timetable))
+    assert timetable["statement_of_defence"]["timetable_status"] == "overdue"
+    assert timetable["rejoinder"]["timetable_status"] == "not_scheduled"
+    amendment = [row for row in rows if row.get("check_type") == "amendment_rule"]
+    assert amendment and amendment[0]["leave_required"] is True
+
+
+def test_readiness_flags_overdue_pleading_timetable():
+    db = _FakeDb()
+    db.arbitration_jurisdiction_matrix.rows.append(
+        {
+            "_id": "tt-1",
+            "case_id": "case-1",
+            "check_type": "pleading_timetable",
+            "pleading_stage": "statement_of_defence",
+            "timetable_status": "overdue",
+            "approval_status": "approved",
+        }
+    )
+
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness("case-1"))
+    blockers = {check["check_key"]: check["status"] for check in readiness["blockers"]}
+    assert blockers.get("pleading_timetable") == "needs_legal_review"
+
+
+def test_exporter_renders_markdown_tables_and_contents():
+    from backend.rbac_backend.services.arbitration_drafting.exporter import ArbitrationDraftExporter
+
+    markdown = (
+        "# EOT Statement of Claim\n\n"
+        "## Claim Summary\n\n"
+        "| Claim | Amount |\n|---|---|\n| EOT | INR 100 |\n| Prolongation | INR 200 |\n\n"
+        "## Relief\n\nAward the sums claimed.\n"
+    )
+
+    docx_bytes = ArbitrationDraftExporter.build_docx({"full_markdown": markdown})
+    pdf_bytes = ArbitrationDraftExporter.build_pdf({"full_markdown": markdown})
+
+    assert docx_bytes[:2] == b"PK"
+    assert pdf_bytes[:4] == b"%PDF"
+    with zipfile.ZipFile(io.BytesIO(docx_bytes), "r") as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    # Table cell text and the generated Contents list are present.
+    assert "Prolongation" in document_xml
+    assert "Contents" in document_xml
+    assert "Claim Summary" in document_xml
+
+
 def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
     fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
     data = json.loads(fixture_path.read_text(encoding="utf-8"))

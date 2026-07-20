@@ -122,16 +122,25 @@ const AGENT_ACTIONS = [
   { type: "quantum", label: "Quantum" },
   { type: "notice-compliance", label: "Notices" },
   { type: "issue-framing", label: "Issues" },
+  { type: "jurisdiction", label: "Jurisdiction" },
+  { type: "delay-expert", label: "Expert" },
+  { type: "defence-analysis", label: "Defence" },
+  { type: "rejoinder-reply", label: "Rejoinder" },
 ] as const;
 
-const MATRIX_FIELDS: Record<MatrixSlug, Array<{ key: string; label: string; type?: "textarea" | "number" }>> = {
+const EXHIBIT_PREFIXES = ["C", "R", "J", "CE", "RE", "QE", "DE"];
+
+const MATRIX_FIELDS: Record<
+  MatrixSlug,
+  Array<{ key: string; label: string; type?: "textarea" | "number" | "select"; options?: string[] }>
+> = {
   "document-index": [
     { key: "title", label: "Document title" },
     { key: "source_type", label: "Source type" },
     { key: "source_id", label: "Source id" },
     { key: "document_date", label: "Document date" },
     { key: "document_type", label: "Document type" },
-    { key: "exhibit_prefix", label: "Exhibit prefix" },
+    { key: "exhibit_prefix", label: "Exhibit prefix", type: "select", options: EXHIBIT_PREFIXES },
     { key: "relevance_note", label: "Relevance note", type: "textarea" },
   ],
   "chronology-matrix": [
@@ -1136,6 +1145,22 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     <Label>{field.label}</Label>
                     {field.type === "textarea" ? (
                       <Textarea value={matrixForm[field.key] || ""} onChange={(event) => setMatrixForm((prev) => ({ ...prev, [field.key]: event.target.value }))} rows={3} />
+                    ) : field.type === "select" ? (
+                      <Select
+                        value={matrixForm[field.key] || (field.options?.[0] ?? "")}
+                        onValueChange={(value) => setMatrixForm((prev) => ({ ...prev, [field.key]: value }))}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(field.options || []).map((option) => (
+                            <SelectItem key={option} value={option}>
+                              {option}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     ) : (
                       <Input type={field.type || "text"} value={matrixForm[field.key] || ""} onChange={(event) => setMatrixForm((prev) => ({ ...prev, [field.key]: event.target.value }))} />
                     )}
@@ -1356,6 +1381,9 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
           </Card>
           <aside className="space-y-3 rounded-md border bg-background p-4">
             <h2 className="text-base font-medium">Export</h2>
+            <p className="text-xs text-muted-foreground">
+              Direct download streams the full bundle including exhibit files — use it for large cases.
+            </p>
             <Button className="w-full" onClick={() => downloadBundle("zip")}>
               <Download className="mr-2 h-4 w-4" />
               Download ZIP Bundle
@@ -1368,18 +1396,24 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
               <Download className="mr-2 h-4 w-4" />
               Download PDF Summary
             </Button>
-            <div className="grid grid-cols-3 gap-2">
-              {(["zip", "docx", "pdf"] as BundleExportFormat[]).map((format) => (
-                <Button
-                  key={format}
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => queueBundleExport(format)}
-                  disabled={Boolean(queueingExport)}
-                >
-                  {queueingExport === format ? <Loader2 className="h-4 w-4 animate-spin" /> : format.toUpperCase()}
-                </Button>
-              ))}
+            <div className="space-y-1 border-t pt-3">
+              <div className="text-xs font-medium text-muted-foreground">Queued export (background job)</div>
+              <p className="text-xs text-muted-foreground">
+                Inline queued exports are capped at 12 MB. If a case has many exhibit files, use Direct download above instead.
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {(["zip", "docx", "pdf"] as BundleExportFormat[]).map((format) => (
+                  <Button
+                    key={format}
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => queueBundleExport(format)}
+                    disabled={Boolean(queueingExport)}
+                  >
+                    {queueingExport === format ? <Loader2 className="h-4 w-4 animate-spin" /> : format.toUpperCase()}
+                  </Button>
+                ))}
+              </div>
             </div>
             {queuedExport ? (
               <div className="rounded-md border p-3 text-sm">

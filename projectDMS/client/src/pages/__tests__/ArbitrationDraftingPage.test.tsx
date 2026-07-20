@@ -158,6 +158,18 @@ describe("ArbitrationDraftingPage (draft view)", () => {
     await waitFor(() => expect(saveVersionMock).toHaveBeenCalledWith("draft-1", "Edited pleading body."));
   });
 
+  it("exposes a draft-mode selector and threads the mode into generation", async () => {
+    generateMock.mockResolvedValue(DRAFT);
+    renderDraftView();
+    await waitFor(() => expect(getDraftMock).toHaveBeenCalled());
+
+    // The AI-prose vs source-grounded selector is present (Radix portal options
+    // don't open under jsdom, so we assert wiring via the default generate call).
+    expect(screen.getByRole("combobox", { name: /Draft mode/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Generate/ }));
+    await waitFor(() => expect(generateMock).toHaveBeenCalledWith("draft-1", { draft_mode: "deterministic" }));
+  });
+
   it("evidence search links a found source to the draft", async () => {
     renderDraftView();
     await waitFor(() => expect(getDraftMock).toHaveBeenCalled());

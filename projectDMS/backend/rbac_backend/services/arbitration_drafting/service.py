@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import os
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -32,6 +34,7 @@ from ..audit_event_service import AuditEventService
 from .context import ArbitrationContextBuilder, condense
 from .exporter import ArbitrationDraftExporter
 from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_BY_DRAFT_TYPE, SOURCE_POLICY
+from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository
 from .validator import ArbitrationDraftValidator
@@ -69,6 +72,7 @@ def stable_generation_input_hash(
     additional_instruction: Optional[str] = None,
     include_unverified_graph_links: bool = False,
     run_type: GenerationRunType | str = GenerationRunType.FULL_DRAFT,
+    draft_mode: Optional[str] = None,
 ) -> str:
     draft = context.get("draft") or {}
     payload = {
@@ -82,6 +86,7 @@ def stable_generation_input_hash(
         "additional_instruction": additional_instruction,
         "include_unverified_graph_links": include_unverified_graph_links,
         "run_type": getattr(run_type, "value", run_type),
+        "draft_mode": str(draft_mode or "deterministic").lower(),
         "prompt_version": PROMPT_VERSION,
         "source_policy": SOURCE_POLICY,
     }
@@ -269,6 +274,7 @@ class ArbitrationDraftingService:
             additional_instruction=payload.additional_instruction,
             include_unverified_graph_links=payload.include_unverified_graph_links,
             run_type=run_type,
+            draft_mode=payload.draft_mode,
         )
         latest = await self.repo.latest_version(draft_id)
         latest_structured = (latest or {}).get("structured_output") or {}
@@ -276,6 +282,7 @@ class ArbitrationDraftingService:
             await self._emit("generation_reused", draft, current_user, after={"version": latest.get("version"), "input_hash": input_hash})
             return await self.detail(draft_id)
         retrieval_queries = self._retrieval_queries(context)
+        generator, run_model, run_prompt_version = self._resolve_generator(payload.draft_mode, context)
         run = ArbitrationGenerationRun(
             draft_id=draft_id,
             run_type=run_type,
@@ -283,19 +290,21 @@ class ArbitrationDraftingService:
             status=GenerationRunStatus.RUNNING,
             input_hash=input_hash,
             retrieval_queries=retrieval_queries,
-            prompt_version=PROMPT_VERSION,
-            model="deterministic-source-grounded",
+            prompt_version=run_prompt_version,
+            model=run_model,
             source_ids=[row.get("source_id") for row in context["source_ledger"]],
             created_by=_actor_id(current_user),
             started_at=datetime.utcnow(),
         ).model_dump(by_alias=True)
         await self.repo.create_generation_run(run)
         try:
-            generated = self.generator.generate(
+            generated = generator.generate(
                 context,
                 section_key=payload.section_key,
                 additional_instruction=payload.additional_instruction,
             )
+            if inspect.isawaitable(generated):
+                generated = await generated
             safety_report = self.validator.validation_report(context, generated["full_markdown"])
             warnings = self._merge_warnings(context.get("context_warnings") or [], safety_report["warnings"])
             structured_output = {
@@ -568,6 +577,24 @@ class ArbitrationDraftingService:
                     "allowed_section_keys": sorted(allowed),
                 },
             )
+
+    def _resolve_generator(self, draft_mode: Optional[str], context: Dict[str, Any]):
+        """Pick the draft generator by mode (audit item 6).
+
+        LLM mode requires a configured model client; otherwise it falls back to
+        the deterministic generator with a visible context warning so the caller
+        never silently gets a different engine than requested.
+        """
+        mode = str(draft_mode or os.getenv("ARBITRATION_DRAFT_MODE") or "deterministic").strip().lower()
+        if mode == "llm":
+            llm = LLMDraftGenerator()
+            if llm.available:
+                return llm, llm.model_name, "arbitration_pleadings_llm.v1"
+            context.setdefault("context_warnings", []).append(
+                "LLM draft mode was requested but no model client is configured; "
+                "the deterministic source-grounded draft was used instead."
+            )
+        return self.generator, "deterministic-source-grounded", PROMPT_VERSION
 
     def _retrieval_queries(self, context: Dict[str, Any]) -> List[str]:
         draft = context.get("draft") or {}

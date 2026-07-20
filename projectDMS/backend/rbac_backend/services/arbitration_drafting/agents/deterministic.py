@@ -25,6 +25,9 @@ PRE_ARBITRATION_STEPS = [
 ]
 DEFAULT_LIMITATION_PERIOD_YEARS = 3
 
+# Guide §2: standard pleading-timetable stages.
+PLEADING_STAGES = ["statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder", "reply_to_counterclaim"]
+
 # Guide §16 construction-specific issue templates, keyed by dispute category.
 DISPUTE_ISSUE_TEMPLATES: Dict[str, Dict[str, str]] = {
     "eot_delay": {
@@ -134,7 +137,7 @@ class DeterministicArbitrationAgent:
             "claim-identification": self._claim_identification,
             "defence-analysis": self._defence_analysis,
             "counterclaim-setoff": self._review_only_agent,
-            "rejoinder-reply": self._review_only_agent,
+            "rejoinder-reply": self._rejoinder_reply,
             "quantum": self._quantum,
             "notice-compliance": self._notice_compliance,
             "delay-expert": self._delay_expert_alignment,
@@ -613,6 +616,53 @@ class DeterministicArbitrationAgent:
             )
         await self._limitation_analysis(agent_type)
         await self._pre_arbitration_steps(agent_type)
+        await self._pleading_timetable(agent_type)
+        await self._amendment_rule(agent_type)
+
+    async def _pleading_timetable(self, agent_type: str) -> None:
+        """Guide §2: pleading timetable (SoC/SoD/counterclaim/rejoinder deadlines)."""
+        timetable = self.options.get("pleading_timetable") or {}
+        for stage in PLEADING_STAGES:
+            due = _iso_date(_parse_date(timetable.get(stage)))
+            row = {
+                "check_type": "pleading_timetable",
+                "pleading_stage": stage,
+                "due_date": due,
+                "filed_date": _iso_date(_parse_date((timetable.get(f"{stage}_filed") if isinstance(timetable, dict) else None))),
+                "timetable_status": "filed"
+                if timetable.get(f"{stage}_filed")
+                else (_timetable_status(_parse_date(timetable.get(stage))) if due else "not_scheduled"),
+                "notes": "Confirm the tribunal's procedural-order deadline for this pleading stage.",
+            }
+            await self._insert_matrix_row(
+                "jurisdiction-matrix",
+                row,
+                unique={"check_type": "pleading_timetable", "pleading_stage": stage},
+                agent_type=agent_type,
+                source_id=f"timetable:{stage}",
+                label=f"Pleading timetable: {stage}",
+            )
+
+    async def _amendment_rule(self, agent_type: str) -> None:
+        """Guide §2: whether new claims / additional evidence require tribunal leave."""
+        leave_required = self.options.get("amendment_leave_required")
+        row = {
+            "check_type": "amendment_rule",
+            "leave_required": leave_required,
+            "amendment_status": "needs_review" if leave_required is None else "recorded",
+            "notes": (
+                "Confirm from the arbitration rules / procedural order whether new claims or "
+                "additional evidence require tribunal leave after the pleading is filed."
+            ),
+        }
+        await self._insert_matrix_row(
+            "jurisdiction-matrix",
+            row,
+            unique={"check_type": "amendment_rule"},
+            agent_type=agent_type,
+            source_id="amendment_rule",
+            label="Amendment rule",
+        )
 
     async def _limitation_analysis(self, agent_type: str) -> None:
         period_years = int(self.options.get("limitation_period_years") or DEFAULT_LIMITATION_PERIOD_YEARS)
@@ -897,6 +947,11 @@ class DeterministicArbitrationAgent:
         # separately so the LLM agent subclass can supply a real implementation.
         await self._review_only_agent(agent_type)
 
+    async def _rejoinder_reply(self, agent_type: str) -> None:
+        # Deterministic mode has no safe heuristic for reply drafting; named
+        # separately so the LLM agent subclass can supply a real implementation.
+        await self._review_only_agent(agent_type)
+
     async def _review_only_agent(self, agent_type: str) -> None:
         self.warnings.append(f"{agent_type} is registered for the workflow but needs pleading-specific source import before row generation.")
 
@@ -935,6 +990,17 @@ class DeterministicArbitrationAgent:
         cursor = collection.find({"case_id": self.case_id, "deleted_at": {"$exists": False}})
         if hasattr(cursor, "sort"):
             cursor = cursor.sort("created_at", 1)
+        return await _collect(cursor)
+
+    async def _paragraph_responses(self) -> List[Dict[str, Any]]:
+        if not self.draft_id:
+            return []
+        collection = _collection(self.db, "arbitration_paragraph_responses")
+        if collection is None:
+            return []
+        cursor = collection.find({"draft_id": self.draft_id})
+        if hasattr(cursor, "sort"):
+            cursor = cursor.sort("source_paragraph_number", 1)
         return await _collect(cursor)
 
     async def _insert_matrix_row(
@@ -1204,6 +1270,17 @@ def _limitation_status(expiry: Optional[datetime], *, at_risk_days: int = 90) ->
     if expiry <= now + timedelta(days=at_risk_days):
         return "at_risk"
     return "within_limitation"
+
+
+def _timetable_status(due: Optional[datetime], *, due_soon_days: int = 7) -> str:
+    if not due:
+        return "not_scheduled"
+    now = datetime.utcnow()
+    if due < now:
+        return "overdue"
+    if due <= now + timedelta(days=due_soon_days):
+        return "due_soon"
+    return "scheduled"
 
 
 def _numeric(value: Any) -> Optional[float]:

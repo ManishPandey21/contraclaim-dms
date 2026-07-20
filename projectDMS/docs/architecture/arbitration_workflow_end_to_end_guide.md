@@ -340,12 +340,22 @@ exhibit id; **exhibit files that cannot be resolved to bytes**; **pin-cites**
    workspaces; and the creation forms carry a **"Case workspace (recommended)"**
    selector (filtered to the chosen project) so the gated path is the default
    affordance. Standalone drafts remain possible but are never silent.
-6. **Deterministic generator = template + citations, not prose.** Sections render matrix
-   rows and citations; a filing-quality narrative still needs lawyer editing (by design —
-   the LLM drafting upgrade would slot behind the same ledger/validator contract).
-7. **Rejoinder/counterclaim agents are review-only in deterministic mode** (defence
-   analysis has an LLM implementation; rejoinder/counterclaim matrix rows are manual or
-   imported). *Extend LLM mode to generate rejoinder replies from imported SoD paragraphs.*
+6. ~~Deterministic generator = template + citations, not prose.~~ **Resolved 2026-07-15:**
+   an `LLMDraftGenerator` (`llm_generator.py`) runs behind the *same* ledger/validator
+   contract — the deterministic generator supplies the grounded section skeleton and the
+   LLM only rewrites each section into prose, with in-code reconciliation rejecting any
+   rewrite that invents/drops a citation token or drops an `[Evidence required]` marker,
+   and the unchanged validator as the backstop. Selected via `draft_mode` on generate
+   (`ARBITRATION_DRAFT_MODE` env fallback); deterministic fallback with a context warning
+   when no client is configured. UI: a **Source-grounded / AI prose** selector on the
+   draft page.
+7. ~~Rejoinder agent review-only in deterministic mode.~~ **Resolved 2026-07-15:** the LLM
+   agent's `rejoinder-reply` handler generates rejoinder-matrix rows from imported SoD
+   paragraphs (grounded per-paragraph, no blanket denials), flagging `new_matter` +
+   `tribunal_permission_required` so the readiness gate and validator block un-permissioned
+   new matter. Runnable from the case dashboard's Rejoinder agent button. (Counterclaim
+   generation from a respondent claim register remains manual — narrower, less clearly
+   sourced — and is left as-is.)
 8. ~~Registers ingest without per-row user selection.~~ **Resolved 2026-07-11:** drafts
    now carry `include_register_sources` (creation-form toggle; wholesale opt-out with a
    context warning) and `excluded_register_ids` (per-row **Exclude** buttons on
@@ -361,14 +371,20 @@ exhibit id; **exhibit files that cannot be resolved to bytes**; **pin-cites**
     (e.g. `1,000,000` vs `10,00,000`) can false-positive as unsupported; conversely
     amounts inside long snippets pass. Acceptable fail-closed bias, but worth normalizing.
 
-**P3 — polish**
+**P3 — polish** — ***all resolved 2026-07-15***
 
-11. Exhibit prefix taxonomy (`J/CE/RE/QE/DE`) is free-text, not a guided selector.
-12. Queued bundle exports cap at 12 MB inline; large exhibit sets must use the streaming
-    ZIP route (documented, but the UI doesn't steer users).
-13. DOCX/PDF exporters render markdown headings/paragraphs only (no tables/TOC styling).
-14. Pleading timetable / amendment-rule records (guide §2) remain unmodeled (noted as
-    deferred in the tickets doc).
+11. ~~Exhibit prefix taxonomy free-text.~~ **Resolved:** the document-index exhibit-prefix
+    field is now a guided selector (`C / R / J / CE / RE / QE / DE`).
+12. ~~Queued bundle exports cap without UI steering.~~ **Resolved:** the filing-bundle
+    Export panel now labels the 12 MB queued-export cap and steers large-exhibit cases to
+    the streaming Direct-download ZIP.
+13. ~~DOCX/PDF render headings/paragraphs only.~~ **Resolved:** the exporter parses
+    markdown tables into real DOCX/PDF tables and inserts a generated Contents list of the
+    section headings (minimal-docx fallback degrades tables to tab-joined rows).
+14. ~~Pleading timetable / amendment-rule records unmodeled.~~ **Resolved:** the
+    jurisdiction agent seeds `pleading_timetable` rows (per stage, with overdue/scheduled
+    status) and an `amendment_rule` row; readiness flags overdue, unfiled pleading stages
+    for legal review.
 
 ---
 

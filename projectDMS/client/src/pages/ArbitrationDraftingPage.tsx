@@ -193,6 +193,7 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState("");
   const [approving, setApproving] = useState(false);
+  const [draftMode, setDraftMode] = useState<"deterministic" | "llm">("deterministic");
   const [evidenceQuery, setEvidenceQuery] = useState("");
   const [evidenceResults, setEvidenceResults] = useState<ArbitrationReferenceInput[]>([]);
   const [searchingEvidence, setSearchingEvidence] = useState(false);
@@ -318,9 +319,9 @@ const ArbitrationDraftingPage: React.FC = () => {
     if (!draft) return;
     setGenerating(true);
     try {
-      const next = await generateArbitrationDraft(draft._id, {});
+      const next = await generateArbitrationDraft(draft._id, { draft_mode: draftMode });
       setDraft(next);
-      toast.success("Draft generated");
+      toast.success(draftMode === "llm" ? "Draft generated (AI prose)" : "Draft generated");
     } catch {
       toast.error("Draft generation failed");
     } finally {
@@ -498,6 +499,15 @@ const ArbitrationDraftingPage: React.FC = () => {
                 <Link to={`/arbitration/cases/${draft.case_id}`}>Case Workspace</Link>
               </Button>
             )}
+            <Select value={draftMode} onValueChange={(value) => setDraftMode(value as "deterministic" | "llm")}>
+              <SelectTrigger className="w-[150px]" aria-label="Draft mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="deterministic">Source-grounded</SelectItem>
+                <SelectItem value="llm">AI prose</SelectItem>
+              </SelectContent>
+            </Select>
             <Button onClick={generate} disabled={generating || !draft || isLocked}>
               {generating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
               Generate
