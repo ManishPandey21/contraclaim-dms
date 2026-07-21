@@ -158,7 +158,6 @@ class MongoDraftCheckpointStore:
             writes_collection_name="letter_draft_langgraph_checkpoint_writes",
             ttl=int(settings.DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS) * 86400,
         )
-        self.saver.setup()
 
     def close(self) -> None:
         self.client.close()
