@@ -5,7 +5,8 @@ ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
 BACKEND_ENV_FILE=${BACKEND_ENV_FILE:-"$ROOT_DIR/backend/.env"}
 COMPOSE_FILES=${COMPOSE_FILES:-"-f docker-compose.prod.yml"}
-BACKEND_BASE_URL=${BACKEND_BASE_URL:-http://localhost:8000}
+BACKEND_BASE_URL=${BACKEND_BASE_URL:-}
+PYTHON_BIN=${PYTHON_BIN:-}
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
 SMOKE_ATTEMPTS=${SMOKE_ATTEMPTS:-12}
 SMOKE_SLEEP_SECONDS=${SMOKE_SLEEP_SECONDS:-5}
@@ -25,6 +26,42 @@ load_env_file() {
     source "$file"
     set +a
   fi
+}
+
+resolve_python_bin() {
+  if [[ -n "$PYTHON_BIN" ]]; then
+    command -v "$PYTHON_BIN" >/dev/null 2>&1 || return 1
+    printf '%s' "$PYTHON_BIN"
+    return
+  fi
+
+  local candidate
+  for candidate in python python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+  return 1
+}
+
+resolve_backend_base_url() {
+  if [[ -n "$BACKEND_BASE_URL" ]]; then
+    printf '%s' "$BACKEND_BASE_URL"
+    return
+  fi
+
+  local backend_container backend_ip
+  backend_container=$(docker compose --env-file "$ENV_FILE" $COMPOSE_FILES ps -q backend 2>/dev/null || true)
+  if [[ -n "$backend_container" ]]; then
+    backend_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' "$backend_container" 2>/dev/null | sed -n '/^[0-9a-fA-F:.]\+$/ {p; q}')
+    if [[ -n "$backend_ip" ]]; then
+      printf 'http://%s:8000' "$backend_ip"
+      return
+    fi
+  fi
+
+  printf '%s' 'http://localhost:8000'
 }
 
 get_env() {
@@ -57,12 +94,19 @@ cd "$ROOT_DIR"
 load_env_file "$ENV_FILE"
 load_env_file "$BACKEND_ENV_FILE"
 
+python_bin=$(resolve_python_bin || true)
+BACKEND_BASE_URL=$(resolve_backend_base_url)
+
 docker compose --env-file "$ENV_FILE" $COMPOSE_FILES ps || fail "docker compose ps failed"
 
-SMOKE_BASE_URL="$BACKEND_BASE_URL" \
-SMOKE_ATTEMPTS="$SMOKE_ATTEMPTS" \
-SMOKE_SLEEP_SECONDS="$SMOKE_SLEEP_SECONDS" \
-python "$ROOT_DIR/scripts/smoke_health.py" && pass "Backend live/ready smoke checks passed" || fail "Backend live/ready smoke checks failed"
+if [[ -n "$python_bin" ]]; then
+  SMOKE_BASE_URL="$BACKEND_BASE_URL" \
+  SMOKE_ATTEMPTS="$SMOKE_ATTEMPTS" \
+  SMOKE_SLEEP_SECONDS="$SMOKE_SLEEP_SECONDS" \
+  "$python_bin" "$ROOT_DIR/scripts/smoke_health.py" && pass "Backend live/ready smoke checks passed" || fail "Backend live/ready smoke checks failed"
+else
+  fail "No Python interpreter was available for backend health checks"
+fi
 
 metrics_token=$(get_env METRICS_TOKEN)
 metrics_enabled=$(get_env METRICS_ENABLED)
@@ -77,7 +121,7 @@ fi
 backup_root=$(get_env BACKUP_ROOT)
 backup_max_age=$(get_env BACKUP_MAX_AGE_HOURS)
 require_fresh_backup=${REQUIRE_FRESH_BACKUP:-false}
-if python "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+if [[ -n "$python_bin" ]] && "$python_bin" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
   pass "Backup freshness check passed"
 else
   if [[ "$require_fresh_backup" == "true" || "$require_fresh_backup" == "True" ]]; then
