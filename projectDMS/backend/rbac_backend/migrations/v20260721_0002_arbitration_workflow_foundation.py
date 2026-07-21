@@ -32,6 +32,42 @@ INDEXES = [
 ]
 
 
+def _normalized_keys(keys: Any) -> List[tuple[str, Any]]:
+    if isinstance(keys, str):
+        return [(keys, 1)]
+    return [(str(key), direction) for key, direction in keys]
+
+
+async def ensure_compatible_index(collection: Any, keys: Any, **kwargs: Any) -> str:
+    """Reuse an equivalent pre-existing index without renaming or dropping it.
+
+    MongoDB raises code 85/86 when startup index creation already produced the
+    same key/options under a different name.  A migration must accept only an
+    exact compatible specification; any real option/key conflict still fails.
+    """
+
+    try:
+        return await collection.create_index(keys, **kwargs)
+    except Exception as exc:
+        if getattr(exc, "code", None) not in {85, 86}:
+            raise
+        requested_keys = _normalized_keys(keys)
+        requested_unique = bool(kwargs.get("unique", False))
+        requested_partial = kwargs.get("partialFilterExpression")
+        requested_ttl = kwargs.get("expireAfterSeconds")
+        for name, existing in (await collection.index_information()).items():
+            if _normalized_keys(existing.get("key") or []) != requested_keys:
+                continue
+            if bool(existing.get("unique", False)) != requested_unique:
+                continue
+            if existing.get("partialFilterExpression") != requested_partial:
+                continue
+            if existing.get("expireAfterSeconds") != requested_ttl:
+                continue
+            return str(name)
+        raise
+
+
 async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
     operations: List[Dict[str, Any]] = [{"operation": "seed_version_counters_from_existing_maximum"}]
     if not dry_run:
@@ -55,7 +91,7 @@ async def upgrade(db: Any, dry_run: bool) -> MigrationResult:
                 kwargs["partialFilterExpression"] = partial
             if name == "arb_checkpoint_created_ttl":
                 kwargs["expireAfterSeconds"] = 30 * 86400
-            await db[collection].create_index(keys, **kwargs)
+            await ensure_compatible_index(db[collection], keys, **kwargs)
     return MigrationResult(version=VERSION, name=NAME, status="dry_run" if dry_run else "applied", operations=operations)
 
 
