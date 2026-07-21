@@ -11,7 +11,11 @@ import type {
   DraftMode,
   DraftQualityDashboardResponse,
   DraftRunCreateRequest,
+  DraftRunAccepted,
+  DraftRunCancelRequest,
+  DraftRunResumeRequest,
   DraftRunResponse,
+  DraftRunStateResponse,
   ExactClauseSearchRequest,
   ExactReferenceSearchRequest,
   LockParagraphsRequest,
@@ -43,6 +47,11 @@ async function requestJson<T>(endpoint: string, init: RequestInit = {}): Promise
   return (await response.json()) as T;
 }
 
+const isAcceptedRun = (value: DraftRunResponse | DraftRunAccepted): value is DraftRunAccepted =>
+  "poll_url" in value && value.engine === "langgraph_v3";
+
+const pause = (milliseconds: number) => new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+
 export const useLetterDrafting = () => {
   const [data, setData] = useState<DraftRunResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -53,15 +62,21 @@ export const useLetterDrafting = () => {
       setLoading(true);
       setError(null);
       try {
-        const json = await requestJson<DraftRunResponse>(
+        const json = await requestJson<DraftRunResponse | DraftRunAccepted>(
           `/letters/${letterId}/drafting/runs`,
           {
             method: "POST",
             body: JSON.stringify(payload),
+            headers: { "Idempotency-Key": crypto.randomUUID() },
           }
         );
-        setData(json);
-        return json;
+        if (!isAcceptedRun(json)) {
+          setData(json);
+          return json;
+        }
+        const resolved = await waitForWorkflowRun(letterId, json.run_id);
+        setData(resolved);
+        return resolved;
       } catch (err: any) {
         const message = err?.message ?? "Unable to run letter drafting workflow";
         setError(message);
@@ -70,6 +85,61 @@ export const useLetterDrafting = () => {
         setLoading(false);
       }
     },
+    []
+  );
+
+  const getWorkflowState = useCallback(
+    (letterId: string, runId: string) =>
+      requestJson<DraftRunStateResponse>(`/letters/${letterId}/drafting/runs/${runId}/state`),
+    []
+  );
+
+  const getRun = useCallback(
+    (letterId: string, runId: string) =>
+      requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`),
+    []
+  );
+
+  const waitForWorkflowRun = useCallback(
+    async (letterId: string, runId: string) => {
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        const state = await requestJson<DraftRunStateResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/state`
+        );
+        if (state.next_action !== "poll") {
+          return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
+        }
+        await pause(1000);
+      }
+      return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
+    },
+    []
+  );
+
+  const resumeWorkflowRun = useCallback(
+    async (letterId: string, runId: string, payload: DraftRunResumeRequest) => {
+      setLoading(true);
+      try {
+        await requestJson<DraftRunStateResponse>(`/letters/${letterId}/drafting/runs/${runId}/resume`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        const resolved = await waitForWorkflowRun(letterId, runId);
+        setData(resolved);
+        return resolved;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [waitForWorkflowRun]
+  );
+
+  const cancelWorkflowRun = useCallback(
+    (letterId: string, runId: string, payload: DraftRunCancelRequest) =>
+      requestJson<DraftRunStateResponse>(`/letters/${letterId}/drafting/runs/${runId}/cancel`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      }),
     []
   );
 
@@ -335,6 +405,10 @@ export const useLetterDrafting = () => {
     preparePlan,
     acceptPlan,
     latestRun,
+    getRun,
+    getWorkflowState,
+    resumeWorkflowRun,
+    cancelWorkflowRun,
     getAudit,
     getContextPack,
     getSourceLedger,

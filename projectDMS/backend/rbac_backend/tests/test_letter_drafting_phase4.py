@@ -18,6 +18,8 @@ from rbac_backend.models.letter_drafting import (
     ApproveStageRequest,
     DraftArtifact,
     DraftRun,
+    LegalRiskFlag,
+    LegalRiskReport,
     ValidationReport,
 )
 from rbac_backend.services.letter_drafting.service import DraftRunService
@@ -231,6 +233,23 @@ async def test_blocked_run_cannot_enter_chain():
     with pytest.raises(HTTPException) as exc:
         await _approve(service, "drafter", "drafter-1")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_high_legal_risk_requires_recorded_human_review_before_approval():
+    risk = LegalRiskReport(
+        human_review_required=True,
+        flags=[
+            LegalRiskFlag(
+                flag_id="risk-1", category="admission", severity="high",
+                excerpt="We accept liability", explanation="Potential admission",
+            )
+        ],
+    )
+    service = _service(_run(legal_risk_report=risk))
+    with pytest.raises(HTTPException) as exc:
+        await _approve(service, "drafter", "drafter-1")
+    assert exc.value.status_code == 409
 
 
 @pytest.mark.asyncio

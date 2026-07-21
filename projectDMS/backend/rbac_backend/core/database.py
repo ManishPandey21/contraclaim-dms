@@ -272,6 +272,17 @@ async def ensure_indexes(db):
     # Letter drafting v2
     await db.letter_draft_runs.create_index("run_id", unique=True, background=True)
     await db.letter_draft_runs.create_index(
+        [("letter_id", 1), ("idempotency_key", 1)],
+        unique=True,
+        partialFilterExpression={"idempotency_key": {"$type": "string"}},
+        background=True,
+    )
+    await db.letter_draft_runs.create_index(
+        [("thread_id", 1), ("state_version", -1)],
+        partialFilterExpression={"thread_id": {"$type": "string"}},
+        background=True,
+    )
+    await db.letter_draft_runs.create_index(
         [("letter_id", 1), ("mode", 1), ("started_at", -1)],
         background=True,
     )
@@ -315,6 +326,16 @@ async def ensure_indexes(db):
         [("letter_id", 1), ("run_id", 1), ("created_at", -1)],
         background=True,
     )
+    await db.letter_draft_input_snapshots.create_index("snapshot_id", unique=True, background=True)
+    await db.letter_draft_input_snapshots.create_index("run_id", unique=True, background=True)
+    await db.letter_draft_evidence_snapshots.create_index("snapshot_id", unique=True, background=True)
+    await db.letter_draft_evidence_snapshots.create_index("run_id", unique=True, background=True)
+    await db.letter_draft_effects.create_index("effect_id", unique=True, background=True)
+    await db.letter_draft_effects.create_index("effect_key", unique=True, background=True)
+    await db.letter_draft_effects.create_index([("run_id", 1), ("created_at", -1)], background=True)
+    await db.letter_draft_outbox.create_index("event_id", unique=True, background=True)
+    await db.letter_draft_outbox.create_index([("status", 1), ("created_at", 1)], background=True)
+    await db.letter_draft_shadow_comparisons.create_index("run_id", unique=True, background=True)
     await db.draft_context_packs.create_index(
         [("project.organization_id", 1), ("project.project_id", 1), ("created_at", -1)],
         background=True,

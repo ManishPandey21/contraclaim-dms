@@ -98,6 +98,7 @@ const LetterDraftPage = () => {
     approveRun,
     approveStage,
     provideUserDirection,
+    resumeWorkflowRun,
     lockParagraphs,
     exportRun,
     issueRun,
@@ -636,7 +637,18 @@ const LetterDraftPage = () => {
     async (answers: { question_id?: string; answer: string }[], directions?: string) => {
       if (!id || !v2Run?.run_id) return;
       try {
-        const response = await provideUserDirection(id, v2Run.run_id, { answers, directions });
+        const response = v2Run.engine === "langgraph_v3"
+          ? await resumeWorkflowRun(id, v2Run.run_id, {
+              answers: answers.map((answer) => ({
+                ...answer,
+                question_version: v2Run.probing_questions?.find(
+                  (question) => question.question_id === answer.question_id
+                )?.question_version,
+              })),
+              directions,
+              expected_state_version: v2Run.state_version ?? 0,
+            })
+          : await provideUserDirection(id, v2Run.run_id, { answers, directions });
         setV2Run(response);
         toast({
           title: "Direction recorded",
@@ -650,8 +662,27 @@ const LetterDraftPage = () => {
         });
       }
     },
-    [id, provideUserDirection, toast, v2Run]
+    [id, provideUserDirection, resumeWorkflowRun, toast, v2Run]
   );
+
+  const handleConfirmV3Strategy = useCallback(async () => {
+    if (!id || !v2Run?.run_id || v2Run.engine !== "langgraph_v3") return;
+    try {
+      const response = await resumeWorkflowRun(id, v2Run.run_id, {
+        strategy_approved: true,
+        expected_state_version: v2Run.state_version ?? 0,
+      });
+      setV2Run(response);
+      setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
+      toast({ title: "Strategy confirmed", description: "Draft generation resumed." });
+    } catch (error: any) {
+      toast({
+        title: "Unable to confirm strategy",
+        description: error?.message ?? "Refresh the workflow state and try again.",
+        variant: "destructive",
+      });
+    }
+  }, [id, resumeWorkflowRun, toast, v2Run]);
 
   const handleLockParagraphs = useCallback(
     async (lockedParagraphs: string[]) => {
@@ -1167,6 +1198,18 @@ const LetterDraftPage = () => {
                 loading={draftingV2Loading}
                 onSubmit={handleUserDirection}
               />
+              {v2Run.engine === "langgraph_v3" && v2Run.next_action === "confirm_strategy" && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-sm">Confirm drafting strategy</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <Button onClick={handleConfirmV3Strategy} disabled={draftingV2Loading}>
+                      Confirm strategy and generate draft
+                    </Button>
+                  </CardContent>
+                </Card>
+              )}
               <LegalRiskPanel report={v2Run.legal_risk_report} />
               <LockedParagraphsPanel
                 run={v2Run}

@@ -16,7 +16,12 @@ class PolicyService:
     """Central deny-by-default authorization policy."""
 
     CLIENT_DRAFTING_PERMISSIONS = {Permissions.DRAFTING_REQUEST_CREATE}
-    DRAFTING_ADMIN_PERMISSIONS = {Permissions.DRAFTING_REQUEST_ASSIGN, Permissions.DRAFTING_ADMIN}
+    DRAFTING_ADMIN_PERMISSIONS = {
+        Permissions.DRAFTING_REQUEST_ASSIGN,
+        Permissions.DRAFTING_WORKFLOW_CHECKPOINTS,
+        Permissions.DRAFTING_WORKFLOW_FORCE_V2,
+        Permissions.DRAFTING_ADMIN,
+    }
 
     def __init__(
         self,

@@ -114,6 +114,11 @@ DRAFTING_PERMISSIONS: List[str] = [
     "drafting.review.return_for_revision",
     "drafting.final.view",
     "drafting.audit.view",
+    "drafting.workflow.state",
+    "drafting.workflow.resume",
+    "drafting.workflow.cancel",
+    "drafting.workflow.checkpoints",
+    "drafting.workflow.force_v2",
     "drafting.admin",
 ]
 
@@ -261,6 +266,11 @@ class Permissions:
     DRAFTING_REVIEW_RETURN_FOR_REVISION = "drafting.review.return_for_revision"
     DRAFTING_FINAL_VIEW = "drafting.final.view"
     DRAFTING_AUDIT_VIEW = "drafting.audit.view"
+    DRAFTING_WORKFLOW_STATE = "drafting.workflow.state"
+    DRAFTING_WORKFLOW_RESUME = "drafting.workflow.resume"
+    DRAFTING_WORKFLOW_CANCEL = "drafting.workflow.cancel"
+    DRAFTING_WORKFLOW_CHECKPOINTS = "drafting.workflow.checkpoints"
+    DRAFTING_WORKFLOW_FORCE_V2 = "drafting.workflow.force_v2"
     DRAFTING_ADMIN = "drafting.admin"
 
     BILLING_PLAN_VIEW = "billing.plan.view"

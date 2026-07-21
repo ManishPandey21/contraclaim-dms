@@ -110,11 +110,14 @@ export interface ProbingQuestion {
   question: string;
   category?: "position" | "deadline" | "clause" | "amount" | "missing_input" | "scope";
   why?: string;
+  question_version?: number;
+  required?: boolean;
 }
 
 export interface UserDirectionAnswer {
   question_id?: string;
   answer: string;
+  question_version?: number;
 }
 
 export interface UserDirectionRequest {
@@ -162,6 +165,12 @@ export interface DraftRunResponse {
   letter_category: LetterCategory;
   contract_package?: string;
   status:
+    | "queued"
+    | "running"
+    | "awaiting_user_direction"
+    | "awaiting_strategy_confirmation"
+    | "cancel_requested"
+    | "cancelled"
     | "completed"
     | "blocked"
     | "needs_attention"
@@ -244,6 +253,42 @@ export interface DraftRunResponse {
   started_at?: string;
   completed_at?: string;
   created_by?: string;
+  engine?: "v2" | "langgraph_v3";
+  engine_version?: string;
+  thread_id?: string;
+  execution_status?: "queued" | "running" | "awaiting_user_direction" | "awaiting_strategy_confirmation" | "completed" | "failed" | "cancel_requested" | "cancelled";
+  next_action?: "none" | "poll" | "answer_questions" | "confirm_strategy" | "approve" | "cancelled";
+  state_version?: number;
+  last_checkpoint_id?: string;
+}
+
+export interface DraftRunAccepted {
+  run_id: string;
+  letter_id: string;
+  engine: "langgraph_v3";
+  execution_status: "queued" | "running" | "awaiting_user_direction" | "awaiting_strategy_confirmation" | "completed" | "failed" | "cancel_requested" | "cancelled";
+  next_action: "none" | "poll" | "answer_questions" | "confirm_strategy" | "approve" | "cancelled";
+  state_version: number;
+  poll_url: string;
+}
+
+export interface DraftRunStateResponse extends Omit<DraftRunAccepted, "poll_url"> {
+  last_checkpoint_id?: string;
+  cancellation_requested_at?: string;
+  updated_at?: string;
+  probing_questions?: ProbingQuestion[];
+}
+
+export interface DraftRunResumeRequest {
+  answers?: UserDirectionAnswer[];
+  directions?: string;
+  strategy_approved?: boolean;
+  expected_state_version: number;
+}
+
+export interface DraftRunCancelRequest {
+  reason?: string;
+  expected_state_version: number;
 }
 
 export interface DraftLifecycleEvent {

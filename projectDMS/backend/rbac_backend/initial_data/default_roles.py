@@ -369,6 +369,26 @@ _merge_role_permissions(
 )
 
 _merge_role_permissions(
+    {"contraclaim_drafting_manager"},
+    [
+        "drafting.workflow.state",
+        "drafting.workflow.resume",
+        "drafting.workflow.cancel",
+        "drafting.workflow.checkpoints",
+        "drafting.workflow.force_v2",
+    ],
+)
+
+_merge_role_permissions(
+    {"contraclaim_expert_drafter"},
+    [
+        "drafting.workflow.state",
+        "drafting.workflow.resume",
+        "drafting.workflow.cancel",
+    ],
+)
+
+_merge_role_permissions(
     {"orguser", "projectuser"},
     DOCUMENT_EDITOR_PERMISSIONS,
 )
