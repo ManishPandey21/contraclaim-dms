@@ -13,6 +13,7 @@ from rbac_backend.initial_data.seed_catalog import (
 )
 from rbac_backend.migrations import MIGRATIONS, Migration, MigrationResult, MigrationRunner
 from rbac_backend.migrations.v20260705_0001_arbitration_hardening_indexes import upgrade as upgrade_arbitration_hardening
+from rbac_backend.migrations.v20260721_0002_arbitration_workflow_foundation import ensure_compatible_index
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -149,3 +150,58 @@ async def test_arbitration_hardening_migration_creates_background_job_indexes():
         {"background": True},
     ) in db.arbitration_bundle_exports.indexes
     assert ("background_job_id", {"background": True}) in db.arbitration_agent_runs.indexes
+
+
+@pytest.mark.asyncio
+async def test_workflow_migration_reuses_exact_index_with_a_different_name():
+    class _IndexConflict(Exception):
+        code = 85
+
+    class _ExistingIndexCollection:
+        async def create_index(self, keys, **kwargs):
+            raise _IndexConflict("same key specification already has another name")
+
+        async def index_information(self):
+            return {
+                "draft_id_1_version_1": {
+                    "key": [("draft_id", 1), ("version", 1)],
+                    "unique": True,
+                }
+            }
+
+    name = await ensure_compatible_index(
+        _ExistingIndexCollection(),
+        [("draft_id", 1), ("version", 1)],
+        name="arb_draft_version_unique",
+        unique=True,
+        background=True,
+    )
+
+    assert name == "draft_id_1_version_1"
+
+
+@pytest.mark.asyncio
+async def test_workflow_migration_rejects_incompatible_existing_index():
+    class _IndexConflict(Exception):
+        code = 85
+
+    class _ExistingIndexCollection:
+        async def create_index(self, keys, **kwargs):
+            raise _IndexConflict("same key specification has incompatible options")
+
+        async def index_information(self):
+            return {
+                "draft_id_1_version_1": {
+                    "key": [("draft_id", 1), ("version", 1)],
+                    "unique": False,
+                }
+            }
+
+    with pytest.raises(_IndexConflict):
+        await ensure_compatible_index(
+            _ExistingIndexCollection(),
+            [("draft_id", 1), ("version", 1)],
+            name="arb_draft_version_unique",
+            unique=True,
+            background=True,
+        )
