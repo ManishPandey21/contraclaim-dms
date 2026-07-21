@@ -101,6 +101,13 @@ class _FakeCollection:
             row.update(update["$set"])
         return SimpleNamespace(matched_count=1 if row else 0, modified_count=1 if row else 0)
 
+    async def update_many(self, query=None, update=None, *args, **kwargs):
+        rows = await self.find(query).to_list()
+        if update and "$set" in update:
+            for row in rows:
+                row.update(update["$set"])
+        return SimpleNamespace(matched_count=len(rows), modified_count=len(rows))
+
     async def find_one_and_update(self, query=None, update=None, *args, **kwargs):
         row = await self.find_one(query)
         if row and update and "$set" in update:
@@ -206,6 +213,7 @@ class _FakeDb:
             ]
         )
         self.arbitration_readiness_checks = _FakeCollection([])
+        self.arbitration_workflow_approvals = _FakeCollection([])
         self.arbitration_bundle_exports = _FakeCollection([])
         self.arbitration_drafts = _FakeCollection(
             [
