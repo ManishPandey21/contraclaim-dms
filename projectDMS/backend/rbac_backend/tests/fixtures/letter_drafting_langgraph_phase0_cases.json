@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "purpose": "Deterministic Phase 0 regression inputs for the LangGraph migration. These cases contain no customer data and are safe for local and CI use.",
+  "required_artifacts": [
+    "source_ledger",
+    "probing_questions",
+    "planning_sheet",
+    "reply_matrix",
+    "draft_artifact",
+    "validation_report",
+    "legal_risk_report"
+  ],
+  "cases": [
+    {
+      "case_id": "delay_eot_notice",
+      "letter_category": "eot_reply",
+      "subject": "Reply to extension of time notice",
+      "points": "Assess notice compliance, delay attribution and reservation of rights.",
+      "expected_question_categories": ["position", "deadline", "clause"]
+    },
+    {
+      "case_id": "variation_instruction",
+      "letter_category": "variation",
+      "subject": "Response to variation instruction",
+      "points": "Confirm valuation basis, instruction authority and time impact.",
+      "expected_question_categories": ["position", "amount", "clause"]
+    },
+    {
+      "case_id": "payment_ipc",
+      "letter_category": "payment_ipc",
+      "subject": "Reply on interim payment certificate",
+      "points": "Address certified amount, deductions and payment due date.",
+      "expected_question_categories": ["position", "amount", "deadline"]
+    },
+    {
+      "case_id": "quality_ncr",
+      "letter_category": "ncr_quality",
+      "subject": "Response to non-conformance report",
+      "points": "State corrective action, evidence and programme effect.",
+      "expected_question_categories": ["scope", "deadline", "missing_input"]
+    },
+    {
+      "case_id": "claim_reply",
+      "letter_category": "claim_reply",
+      "subject": "Reply to contractor claim",
+      "points": "Respond to entitlement, causation, records and quantum.",
+      "expected_question_categories": ["position", "amount", "clause"]
+    },
+    {
+      "case_id": "dispute_escalation",
+      "letter_category": "dispute",
+      "subject": "Notice of dispute response",
+      "points": "Preserve contractual remedies and set the agreed next step.",
+      "expected_question_categories": ["position", "deadline", "scope"]
+    },
+    {
+      "case_id": "progress_delay",
+      "letter_category": "delay_progress",
+      "subject": "Notice regarding delayed progress",
+      "points": "Require recovery programme and contemporaneous records.",
+      "expected_question_categories": ["position", "deadline", "missing_input"]
+    }
+  ]
+}

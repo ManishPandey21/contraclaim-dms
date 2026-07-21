@@ -45,6 +45,12 @@ IssueType = Literal[
 ]
 IssueTypeSource = Literal["manual", "ai", "system_default"]
 DraftRunStatus = Literal[
+    "queued",
+    "running",
+    "awaiting_user_direction",
+    "awaiting_strategy_confirmation",
+    "cancel_requested",
+    "cancelled",
     "completed",
     "blocked",
     "needs_attention",
@@ -75,6 +81,30 @@ DraftLifecycleEventType = Literal[
     "exported",
     "issued",
     "failed",
+    "queued",
+    "resumed",
+    "cancel_requested",
+    "cancelled",
+    "fallback_started",
+]
+DraftEngine = Literal["v2", "langgraph_v3"]
+DraftExecutionStatus = Literal[
+    "queued",
+    "running",
+    "awaiting_user_direction",
+    "awaiting_strategy_confirmation",
+    "completed",
+    "failed",
+    "cancel_requested",
+    "cancelled",
+]
+DraftNextAction = Literal[
+    "none",
+    "poll",
+    "answer_questions",
+    "confirm_strategy",
+    "approve",
+    "cancelled",
 ]
 ReplyMatrixStatus = Literal["supported", "needs_confirmation", "unsupported"]
 RevisionAction = Literal[
@@ -127,6 +157,10 @@ class LegalRiskReport(BaseModel):
     reviewed_at: Optional[datetime] = None
 
 
+class LegalRiskReviewRequest(BaseModel):
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+
 class LockParagraphsRequest(BaseModel):
     """Human-approved paragraphs the AI must not change on redraft."""
 
@@ -159,11 +193,14 @@ class ProbingQuestion(BaseModel):
         "position", "deadline", "clause", "amount", "missing_input", "scope"
     ] = "scope"
     why: Optional[str] = None
+    question_version: int = Field(default=1, ge=1)
+    required: bool = True
 
 
 class UserDirectionAnswer(BaseModel):
     question_id: Optional[str] = None
     answer: str = Field(..., min_length=1, max_length=4000)
+    question_version: Optional[int] = Field(default=None, ge=1)
 
 
 class UserDirectionRequest(BaseModel):
@@ -211,6 +248,25 @@ class DraftRunCreateRequest(BaseModel):
         default=False,
         description="Allows Learning Update extraction when a user explicitly finalizes/approves the draft.",
     )
+
+
+class DraftRunResumeRequest(BaseModel):
+    """Versioned human input used to resume an interrupted v3 run."""
+
+    answers: List[UserDirectionAnswer] = Field(default_factory=list)
+    directions: Optional[str] = Field(default=None, max_length=8000)
+    strategy_approved: bool = False
+    expected_state_version: int = Field(..., ge=0)
+
+
+class DraftRunCancelRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, max_length=1000)
+    expected_state_version: int = Field(..., ge=0)
+
+
+class ForceV2FallbackRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=1000)
+    expected_state_version: int = Field(..., ge=0)
 
 
 class CitedClauseEvaluation(BaseModel):
@@ -635,6 +691,50 @@ class DraftAuditResponse(BaseModel):
     events: List[DraftLifecycleEvent] = Field(default_factory=list)
 
 
+class DraftInputSnapshot(BaseModel):
+    """Immutable create/resume input record for reproducible execution."""
+
+    snapshot_id: str
+    letter_id: str
+    run_id: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    payload_hash: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class DraftEvidenceSnapshot(BaseModel):
+    """Immutable, source-minimised evidence ledger for one run."""
+
+    snapshot_id: str
+    letter_id: str
+    run_id: str
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    context_hash: str
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class DraftExecutionEffect(BaseModel):
+    effect_id: str
+    effect_key: str
+    run_id: str
+    effect_type: str
+    status: Literal["pending", "completed", "failed"] = "pending"
+    payload_hash: str
+    created_at: datetime = Field(default_factory=now_utc)
+    completed_at: Optional[datetime] = None
+
+
+class DraftOutboxEvent(BaseModel):
+    event_id: str
+    run_id: str
+    event_type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    status: Literal["pending", "processing", "completed", "failed"] = "pending"
+    attempt_count: int = 0
+    created_at: datetime = Field(default_factory=now_utc)
+    processed_at: Optional[datetime] = None
+
+
 class DraftRun(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
 
@@ -686,6 +786,35 @@ class DraftRun(BaseModel):
     issued_at: Optional[datetime] = None
     last_validated_at: Optional[datetime] = None
     warnings: List[str] = Field(default_factory=list)
+    # Engine and execution metadata.  These optional/defaulted fields keep all
+    # pre-migration v2 records readable while making the v3 contract explicit.
+    engine: DraftEngine = "v2"
+    engine_version: str = "v2"
+    graph_version: Optional[str] = None
+    state_schema_version: int = 1
+    thread_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    request_hash: Optional[str] = None
+    attempt_number: int = Field(default=1, ge=1)
+    parent_run_id: Optional[str] = None
+    fallback_of_run_id: Optional[str] = None
+    fallback_reason: Optional[str] = None
+    shadow_of_run_id: Optional[str] = None
+    context_snapshot_id: Optional[str] = None
+    input_snapshot_id: Optional[str] = None
+    input_snapshot_hash: Optional[str] = None
+    context_snapshot_hash: Optional[str] = None
+    execution_status: DraftExecutionStatus = "completed"
+    next_action: DraftNextAction = "none"
+    state_version: int = Field(default=0, ge=0)
+    last_checkpoint_id: Optional[str] = None
+    queue_job_id: Optional[str] = None
+    lease_owner: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    cancellation_requested_at: Optional[datetime] = None
+    cancellation_reason: Optional[str] = None
+    resumed_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     trace: List[Dict[str, Any]] = Field(default_factory=list)
     started_at: datetime = Field(default_factory=now_utc)
     completed_at: datetime = Field(default_factory=now_utc)
@@ -701,6 +830,41 @@ class DraftRun(BaseModel):
 
 class DraftRunResponse(DraftRun):
     pass
+
+
+class DraftRunAccepted(BaseModel):
+    """Asynchronous creation response; legacy/off mode still returns DraftRun."""
+
+    run_id: str
+    letter_id: str
+    engine: DraftEngine
+    execution_status: DraftExecutionStatus = "queued"
+    next_action: DraftNextAction = "poll"
+    state_version: int = 0
+    poll_url: str
+
+
+class DraftRunStateResponse(BaseModel):
+    run_id: str
+    letter_id: str
+    engine: DraftEngine
+    execution_status: DraftExecutionStatus
+    next_action: DraftNextAction
+    state_version: int
+    last_checkpoint_id: Optional[str] = None
+    cancellation_requested_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    probing_questions: List[ProbingQuestion] = Field(default_factory=list)
+
+
+class DraftCheckpointResponse(BaseModel):
+    checkpoint_id: str
+    run_id: str
+    thread_id: str
+    node: str
+    state_schema_version: int
+    created_at: datetime
+    redacted_state: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PromptTemplateRecord(BaseModel):

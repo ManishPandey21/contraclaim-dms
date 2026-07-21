@@ -24,6 +24,8 @@ from ...models.letter_drafting import (
     DraftArtifact,
     DraftConfidenceScores,
     DraftContextPack,
+    DraftExecutionEffect,
+    DraftOutboxEvent,
     DraftCommentRequest,
     DraftGovernanceResponse,
     DraftMetricBottleneck,
@@ -111,6 +113,10 @@ class DraftRunService:
         letter_id: str,
         request: DraftRunCreateRequest,
         current_user: Any,
+        *,
+        idempotency_key: Optional[str] = None,
+        request_hash: Optional[str] = None,
+        engine_metadata: Optional[Dict[str, Any]] = None,
     ) -> DraftRun:
         started = datetime.now(timezone.utc)
         run_id = str(uuid.uuid4())
@@ -122,6 +128,15 @@ class DraftRunService:
             "write",
             drafting_permission="drafting.draft.create",
         )
+        if idempotency_key:
+            existing = await self.repository.get_by_idempotency_key(letter_id, idempotency_key)
+            if existing:
+                if request_hash and existing.request_hash and existing.request_hash != request_hash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Idempotency-Key was already used with a different drafting request",
+                    )
+                return existing
         role = self._resolve_role(letter, request)
         recipient_focus = request.recipient_focus or getattr(letter, "strategy_recipient", None)
 
@@ -157,7 +172,12 @@ class DraftRunService:
             inputs=inputs,
             started_at=started,
             created_by=self._user_id(current_user),
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            updated_at=started,
         )
+        if engine_metadata:
+            base_run.update(engine_metadata)
 
         document_service = DocumentService(self.db)
         context_builder = DraftContextBuilder(
@@ -1646,6 +1666,15 @@ class DraftRunService:
             raise HTTPException(status_code=400, detail="Draft is already approved or finalized")
         if existing.status in {"blocked", "failed", "needs_attention"}:
             raise HTTPException(status_code=400, detail="Draft must pass validation before approval")
+        if (
+            existing.legal_risk_report
+            and existing.legal_risk_report.human_review_required
+            and not existing.legal_risk_report.reviewed_at
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="High legal-risk flags require recorded human review before approval",
+            )
         if existing.mode not in _AI_DRAFT_MODES or not existing.draft_artifact:
             raise HTTPException(status_code=400, detail="Run does not contain an approvable draft")
         if not (existing.plan or "").strip():
@@ -1753,6 +1782,38 @@ class DraftRunService:
             )
         return run
 
+    async def review_legal_risk(
+        self,
+        letter_id: str,
+        run_id: str,
+        comment: Optional[str],
+        current_user: Any,
+    ) -> DraftRun:
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.review.perform",
+        )
+        run = await self.repository.get(letter_id, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if not run.legal_risk_report or not run.legal_risk_report.human_review_required:
+            raise HTTPException(status_code=409, detail="This run has no mandatory legal-risk review")
+        report = run.legal_risk_report.model_copy(update={"reviewed_at": datetime.now(timezone.utc)})
+        updated = await self.repository.update_fields(letter_id, run_id, {"legal_risk_report": report})
+        if not updated:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "legal_risk_reviewed",
+            actor_user_id=self._user_id(current_user),
+            status=updated.status,
+            detail=comment,
+        )
+        return updated
+
     async def approve_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
         """Legacy single-approve endpoint: advances the next pending stage of
         the drafter -> reviewer -> final chain."""
@@ -1778,6 +1839,19 @@ class DraftRunService:
             raise HTTPException(status_code=404, detail="Draft run not found")
         if existing.status not in _FINALIZED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft must be approved before export")
+        if existing.status in _EXPORTED_ISSUED_STATUSES and existing.exported_docx_file_id and existing.exported_pdf_file_id:
+            return existing
+        effect_key = f"{run_id}:export"
+        prior_effect = await self.repository.get_effect(effect_key)
+        if prior_effect and prior_effect.status == "completed":
+            return existing
+        await self.repository.record_effect(
+            DraftExecutionEffect(
+                effect_id=str(uuid.uuid4()), effect_key=effect_key, run_id=run_id,
+                effect_type="export_artifacts",
+                payload_hash=hashlib.sha256((existing.draft_artifact.draft_letter if existing.draft_artifact else "").encode("utf-8")).hexdigest(),
+            )
+        )
         now = datetime.now(timezone.utc)
         export_files = await self._export_artifacts(letter_id, existing, current_user)
         run = await self.repository.update_fields(
@@ -1804,6 +1878,13 @@ class DraftRunService:
             status=run.status,
             payload=export_files,
         )
+        await self.repository.complete_effect(effect_key)
+        await self.repository.enqueue_outbox(
+            DraftOutboxEvent(
+                event_id=f"{run_id}:exported", run_id=run_id, event_type="draft_exported",
+                payload={"docx_file_object_id": run.exported_docx_file_id, "pdf_file_object_id": run.exported_pdf_file_id},
+            )
+        )
         return run
 
     async def issue_run(
@@ -1824,11 +1905,24 @@ class DraftRunService:
             raise HTTPException(status_code=404, detail="Draft run not found")
         if existing.status not in _EXPORTED_ISSUED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft must be exported before issue")
+        if existing.status == "issued":
+            return existing
         if not existing.exported_docx_file_id or not existing.exported_pdf_file_id:
             raise HTTPException(
                 status_code=400,
                 detail="Draft must have immutable DOCX and PDF export artifacts before issue",
             )
+        effect_key = f"{run_id}:issue:{issued_document_id or ''}"
+        prior_effect = await self.repository.get_effect(effect_key)
+        if prior_effect and prior_effect.status == "completed":
+            return existing
+        await self.repository.record_effect(
+            DraftExecutionEffect(
+                effect_id=str(uuid.uuid4()), effect_key=effect_key, run_id=run_id,
+                effect_type="issue_draft",
+                payload_hash=hashlib.sha256(str(issued_document_id or "").encode("utf-8")).hexdigest(),
+            )
+        )
         now = datetime.now(timezone.utc)
         issued_id = issued_document_id or f"issued:{run_id}"
         run = await self.repository.update_fields(
@@ -1870,6 +1964,13 @@ class DraftRunService:
             actor_user_id=self._user_id(current_user),
             status=run.status,
             payload={"issued_document_id": issued_id},
+        )
+        await self.repository.complete_effect(effect_key)
+        await self.repository.enqueue_outbox(
+            DraftOutboxEvent(
+                event_id=f"{run_id}:issued:{issued_id}", run_id=run_id, event_type="draft_issued",
+                payload={"issued_document_id": issued_id},
+            )
         )
         await self._emit_notification(
             NotificationType.APPROVAL_COMPLETED,
@@ -2227,9 +2328,19 @@ class DraftRunService:
         *,
         context_pack: Optional[DraftContextPack] = None,
     ) -> DraftRun:
+        stored = await self.repository.create(run)
+        if stored.run_id != run.run_id:
+            # A duplicate idempotent request won the creation race.  It owns
+            # the snapshots and audit event; do not create duplicate evidence.
+            return stored
+        snapshot_fields = await self.repository.create_immutable_snapshots(stored)
+        stored = await self.repository.update_fields(
+            stored.letter_id,
+            stored.run_id,
+            snapshot_fields,
+        ) or stored
         if context_pack:
             await self.repository.create_context_pack(context_pack)
-        stored = await self.repository.create(run)
         await self.repository.append_event(
             stored.letter_id,
             stored.run_id,

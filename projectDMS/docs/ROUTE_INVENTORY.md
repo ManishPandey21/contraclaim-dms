@@ -91,3 +91,22 @@ The guard test `client/src/config/__tests__/routeInventory.test.ts` fails when a
 - Add every new backend-enforced permission to `backend/rbac_backend/core/permissions.py`.
 - The permission catalogs in `backend/rbac_backend/models/permission.py` and `backend/rbac_backend/initial_data/default_permissions.py` append any missing canonical permissions at import time.
 - `backend/rbac_backend/initial_data/default_roles.py` explicitly grants all Client DMS permissions to the default `orgadmin` role during seeding, so Organization Admin permission save/retrieve does not depend on legacy aliases.
+
+## LangGraph drafting API governance
+
+The drafting frontend does not gain a new route. It continues to use the
+existing `/letters/:id/draft` permission gate while the backend provides a
+versioned asynchronous contract behind the server-side rollout policy:
+
+| API route | Permission / protection | Behaviour |
+| --- | --- | --- |
+| `POST /api/letters/{letter_id}/drafting/runs` | `drafting.draft.create`, scoped rate limit, `Idempotency-Key` | Legacy v2 returns 200; enabled v3 returns 202 and a poll URL. |
+| `GET /api/letters/{letter_id}/drafting/runs/{run_id}/state` | `drafting.request.view` | Minimal polling state and question list; no checkpoint payload. |
+| `POST /api/letters/{letter_id}/drafting/runs/{run_id}/resume` | `drafting.draft.create`, optimistic state version | Accepts versioned answers or a strategy confirmation. |
+| `POST /api/letters/{letter_id}/drafting/runs/{run_id}/cancel` | `drafting.draft.create`, optimistic state version | Cooperative cancellation request. |
+| `POST /api/letters/{letter_id}/drafting/runs/{run_id}/force-v2` | `drafting.workflow.force_v2` plus step-up | Only before approval/export/issued effects. |
+| `GET /api/ops/letter-drafting/runs/{run_id}/checkpoints` | `drafting.workflow.checkpoints` plus step-up | Operations-only, paginated and redacted checkpoint diagnostics. |
+
+`test_route_inventory.py` treats the force-v2 route as critical and verifies its
+step-up protection. The server policy, not `VITE_LANGGRAPH_ENABLED`, chooses
+the engine.

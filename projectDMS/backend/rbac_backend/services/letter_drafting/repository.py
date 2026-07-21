@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from bson import Binary, ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ...models.letter_drafting import (
+    DraftEvidenceSnapshot,
+    DraftExecutionEffect,
+    DraftInputSnapshot,
+    DraftOutboxEvent,
     DraftContextPack,
     DraftReviewAssignment,
     DraftReviewComment,
@@ -33,19 +39,72 @@ class DraftRunRepository:
         self.context_packs = db["draft_context_packs"]
         self.assignments = db["letter_draft_assignments"]
         self.comments = db["letter_draft_comments"]
+        self.input_snapshots = db["letter_draft_input_snapshots"]
+        self.evidence_snapshots = db["letter_draft_evidence_snapshots"]
+        self.effects = db["letter_draft_effects"]
+        self.outbox = db["letter_draft_outbox"]
+        self.shadow_comparisons = db["letter_draft_shadow_comparisons"]
 
     async def create(self, run: DraftRun) -> DraftRun:
         payload = run.model_dump(by_alias=True, exclude_none=True)
         payload.pop("_id", None)
-        await self.collection.insert_one(payload)
+        try:
+            await self.collection.insert_one(payload)
+        except DuplicateKeyError:
+            # A duplicate (letter_id, idempotency_key) is an expected race
+            # between two equivalent client retries.  The caller receives the
+            # original immutable run instead of launching duplicate work.
+            if run.idempotency_key:
+                existing = await self.collection.find_one(
+                    {"letter_id": run.letter_id, "idempotency_key": run.idempotency_key}
+                )
+                if existing:
+                    return DraftRun(**existing)
+            raise
         stored = await self.collection.find_one({"run_id": run.run_id})
         return DraftRun(**stored) if stored else run
+
+    async def get_by_idempotency_key(
+        self, letter_id: str, idempotency_key: str
+    ) -> Optional[DraftRun]:
+        doc = await self.collection.find_one(
+            {"letter_id": str(letter_id), "idempotency_key": str(idempotency_key)}
+        )
+        return DraftRun(**doc) if doc else None
 
     async def get(self, letter_id: str, run_id: str) -> Optional[DraftRun]:
         doc = await self.collection.find_one(
             {"letter_id": str(letter_id), "run_id": str(run_id)}
         )
         return DraftRun(**doc) if doc else None
+
+    async def get_by_run_id(self, run_id: str) -> Optional[DraftRun]:
+        doc = await self.collection.find_one({"run_id": str(run_id)})
+        return DraftRun(**doc) if doc else None
+
+    async def compare_and_set_execution(
+        self,
+        letter_id: str,
+        run_id: str,
+        expected_state_version: int,
+        fields: Dict[str, Any],
+    ) -> Optional[DraftRun]:
+        """Atomically apply a user/worker transition and advance its ETag."""
+        payload: Dict[str, Any] = {}
+        for key, value in fields.items():
+            payload[key] = value.model_dump(exclude_none=True) if hasattr(value, "model_dump") else value
+        payload["updated_at"] = datetime.now(timezone.utc)
+        result = await self.collection.update_one(
+            {
+                "letter_id": str(letter_id),
+                "run_id": str(run_id),
+                "state_version": int(expected_state_version),
+            },
+            {"$set": payload, "$inc": {"state_version": 1}},
+        )
+        if not getattr(result, "modified_count", 0):
+            return None
+        return await self.get(letter_id, run_id)
 
     async def latest(self, letter_id: str, mode: Optional[DraftMode] = None) -> Optional[DraftRun]:
         query: Dict[str, Any] = {"letter_id": str(letter_id)}
@@ -71,12 +130,135 @@ class DraftRunRepository:
                 ]
             else:
                 payload[key] = value
-        payload["completed_at"] = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        payload["updated_at"] = now
+        terminal_statuses = {"completed", "blocked", "needs_attention", "failed", "approved", "exported", "issued", "cancelled"}
+        if (
+            "status" in payload
+            and payload["status"] in terminal_statuses
+            and "completed_at" not in payload
+        ):
+            payload["completed_at"] = now
         await self.collection.update_one(
             {"letter_id": str(letter_id), "run_id": str(run_id)},
             {"$set": payload},
         )
         return await self.get(letter_id, run_id)
+
+    @staticmethod
+    def _payload_hash(payload: Dict[str, Any]) -> str:
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    async def create_immutable_snapshots(self, run: DraftRun) -> Dict[str, str]:
+        """Persist immutable inputs and a text-free evidence ledger once per run."""
+        input_payload = dict(run.inputs or {})
+        input_snapshot = DraftInputSnapshot(
+            snapshot_id=str(uuid.uuid4()),
+            letter_id=run.letter_id,
+            run_id=run.run_id,
+            payload=input_payload,
+            payload_hash=self._payload_hash(input_payload),
+        )
+        evidence_rows = [
+            {
+                "source_id": source.source_id,
+                "source_type": source.source_type,
+                "allowed_use": source.allowed_use,
+                "organization_id": source.organization_id,
+                "project_id": source.project_id,
+                "document_id": source.document_id,
+                "letter_id": source.letter_id,
+                "clause_number": source.clause_number,
+                "page_numbers": list(source.page_numbers or []),
+                "source_hash": source.source_hash,
+                "metadata": source.metadata,
+            }
+            for source in run.sources
+        ]
+        context_hash = self._payload_hash(
+            {"context": run.context_bundle.model_dump(mode="json"), "sources": evidence_rows}
+        )
+        evidence_snapshot = DraftEvidenceSnapshot(
+            snapshot_id=str(uuid.uuid4()),
+            letter_id=run.letter_id,
+            run_id=run.run_id,
+            sources=evidence_rows,
+            context_hash=context_hash,
+        )
+        try:
+            await self.input_snapshots.insert_one(input_snapshot.model_dump(mode="python"))
+            await self.evidence_snapshots.insert_one(evidence_snapshot.model_dump(mode="python"))
+        except DuplicateKeyError:
+            # Reconciliation may be safely retried after an interrupted write.
+            existing_input = await self.input_snapshots.find_one({"run_id": run.run_id})
+            existing_evidence = await self.evidence_snapshots.find_one({"run_id": run.run_id})
+            if not existing_input or not existing_evidence:
+                raise
+            input_snapshot = DraftInputSnapshot(**existing_input)
+            evidence_snapshot = DraftEvidenceSnapshot(**existing_evidence)
+        return {
+            "input_snapshot_id": input_snapshot.snapshot_id,
+            "context_snapshot_id": evidence_snapshot.snapshot_id,
+            "input_snapshot_hash": input_snapshot.payload_hash,
+            "context_snapshot_hash": evidence_snapshot.context_hash,
+        }
+
+    async def record_effect(self, effect: DraftExecutionEffect) -> DraftExecutionEffect:
+        payload = effect.model_dump(mode="python")
+        try:
+            await self.effects.insert_one(payload)
+            return effect
+        except DuplicateKeyError:
+            existing = await self.effects.find_one({"effect_key": effect.effect_key})
+            return DraftExecutionEffect(**existing) if existing else effect
+
+    async def get_effect(self, effect_key: str) -> Optional[DraftExecutionEffect]:
+        existing = await self.effects.find_one({"effect_key": str(effect_key)})
+        return DraftExecutionEffect(**existing) if existing else None
+
+    async def complete_effect(self, effect_key: str) -> None:
+        await self.effects.update_one(
+            {"effect_key": str(effect_key)},
+            {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc)}},
+        )
+
+    async def enqueue_outbox(self, event: DraftOutboxEvent) -> DraftOutboxEvent:
+        payload = event.model_dump(mode="python")
+        try:
+            await self.outbox.insert_one(payload)
+            return event
+        except DuplicateKeyError:
+            existing = await self.outbox.find_one({"event_id": event.event_id})
+            return DraftOutboxEvent(**existing) if existing else event
+
+    async def reconciliation_candidates(self, *, limit: int = 100) -> List[DraftRun]:
+        """Find graph runs whose snapshots/checkpoints need safe operator repair."""
+        cursor = self.collection.find(
+            {
+                "engine": "langgraph_v3",
+                "execution_status": {"$in": ["queued", "running", "awaiting_user_direction", "awaiting_strategy_confirmation"]},
+            }
+        ).sort("updated_at", 1).limit(max(1, min(int(limit), 500)))
+        docs = await cursor.to_list(length=max(1, min(int(limit), 500)))
+        return [DraftRun(**doc) for doc in docs]
+
+    async def has_completed_effects(self, run_id: str) -> bool:
+        return bool(await self.effects.find_one({"run_id": str(run_id), "status": "completed"}))
+
+    async def record_shadow_baseline(self, run: DraftRun) -> None:
+        """Capture comparable, hashed v2 output without invoking external effects."""
+        artifacts = {
+            "source_ledger_hash": self._payload_hash({"sources": [source.model_dump(mode="json") for source in run.sources]}),
+            "draft_hash": self._payload_hash({"draft": run.draft_artifact.draft_letter if run.draft_artifact else ""}),
+            "validation_codes": [finding.code for finding in run.validation_report.findings],
+            "legal_risk_count": len(run.legal_risk_report.flags) if run.legal_risk_report else 0,
+        }
+        await self.shadow_comparisons.update_one(
+            {"run_id": run.run_id},
+            {"$set": {"run_id": run.run_id, "engine": run.engine, "artifacts": artifacts, "updated_at": datetime.now(timezone.utc)}},
+            upsert=True,
+        )
 
     async def append_event(
         self,

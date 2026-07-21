@@ -208,6 +208,7 @@ def test_critical_dangerous_routes_require_step_up():
         ("/api/rbac-monetization/subscriptions", "create_subscription"),
         ("/api/rbac-monetization/subscriptions/{subscription_id}", "update_subscription"),
         ("/api/rbac-monetization/billing-records", "create_billing_record"),
+        ("/api/letters/{letter_id}/drafting/runs/{run_id}/force-v2", "force_v2_fallback"),
     }
 
     indexed = {(route.path, route.name): route for route in _api_routes()}

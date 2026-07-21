@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Union
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..core.database import get_database
@@ -21,21 +22,34 @@ from ..models.letter_drafting import (
     DraftMode,
     DraftQualityDashboardResponse,
     DraftRunCreateRequest,
+    DraftRunAccepted,
+    DraftRunCancelRequest,
     DraftRunResponse,
+    DraftRunResumeRequest,
+    DraftRunStateResponse,
+    DraftCheckpointResponse,
+    ForceV2FallbackRequest,
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
     LockParagraphsRequest,
+    LegalRiskReviewRequest,
     ReturnForCorrectionRequest,
     ReviseDraftRequest,
     SourceLedgerResponse,
     UserDirectionRequest,
 )
 from ..services.letter_drafting import DraftRunService
+from ..services.letter_drafting.engines import DraftEngineSelector, canonical_request_hash
+from ..services.letter_drafting.langgraph_engine import LangGraphDraftingEngine
 from ..services.policy_service import PolicyService
+from ..services.step_up_service import require_step_up
 from ..utils.error_handler import handle_exceptions
+from ..utils.rate_limiter import RateLimiter
 
 router = APIRouter(prefix="/letters/{letter_id}/drafting", tags=["letter-drafting"])
 session_router = APIRouter(prefix="/letter-drafting", tags=["letter-drafting"])
+ops_router = APIRouter(prefix="/ops/letter-drafting", tags=["letter-drafting-operations"])
+drafting_run_limiter = RateLimiter(max_requests=30, window_seconds=60, scope="letter_drafting_runs")
 
 
 class IssueDraftRequest(BaseModel):
@@ -142,16 +156,127 @@ async def get_letter_drafting_quality_dashboard(
     )
 
 
-@router.post("/runs", response_model=DraftRunResponse)
+@router.post("/runs", response_model=Union[DraftRunResponse, DraftRunAccepted], responses={202: {"model": DraftRunAccepted}})
 @handle_exceptions
 async def create_draft_run(
     letter_id: str,
     payload: DraftRunCreateRequest,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     service: DraftRunService = Depends(get_draft_run_service),
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    """Start a v2 background, strategy, draft, or review drafting run."""
-    return await service.create_run(letter_id, payload, current_user)
+    """Start a drafting run through the server-authoritative engine policy.
+
+    The Phase 1 default keeps the established synchronous 200 v2 response.
+    Later phases change only the accepted v3 branch to 202 plus polling.
+    """
+    await drafting_run_limiter.check_user_limit(str(getattr(current_user, "id", "") or ""))
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > 256:
+            raise HTTPException(status_code=422, detail="Idempotency-Key must contain 1 to 256 characters")
+    request_hash = canonical_request_hash(
+        letter_id=letter_id,
+        payload=payload,
+        tenant_id=str(getattr(current_user, "organization_id", "") or ""),
+        project_id=str(getattr(current_user, "project_id", "") or ""),
+    )
+    decision = DraftEngineSelector().select(
+        tenant_id=str(getattr(current_user, "organization_id", "") or ""),
+        request_hash=request_hash,
+    )
+    if decision.engine == "langgraph_v3":
+        accepted = await LangGraphDraftingEngine(service.db).create(
+            letter_id,
+            payload,
+            current_user,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        return JSONResponse(status_code=202, content=accepted.model_dump(mode="json"))
+    result = await service.create_run(
+        letter_id,
+        payload,
+        current_user,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        engine_metadata={"engine": "v2", "engine_version": "v2"},
+    )
+    if decision.shadow:
+        await service.repository.record_shadow_baseline(result)
+    return result
+
+
+@router.get("/runs/{run_id}/state", response_model=DraftRunStateResponse)
+@handle_exceptions
+async def get_draft_run_state(
+    letter_id: str,
+    run_id: str,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Return a small pollable state contract without exposing checkpoints."""
+    return await LangGraphDraftingEngine(service.db).get_state(letter_id, run_id, current_user)
+
+
+@router.post("/runs/{run_id}/resume", response_model=DraftRunStateResponse)
+@handle_exceptions
+async def resume_draft_run(
+    letter_id: str,
+    run_id: str,
+    payload: DraftRunResumeRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Resume a paused v3 run using its optimistic state version."""
+    await drafting_run_limiter.check_user_limit(str(getattr(current_user, "id", "") or ""))
+    return await LangGraphDraftingEngine(service.db).resume(letter_id, run_id, payload, current_user)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=DraftRunStateResponse)
+@handle_exceptions
+async def cancel_draft_run(
+    letter_id: str,
+    run_id: str,
+    payload: DraftRunCancelRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Request cooperative cancellation; workers check it before each node."""
+    return await LangGraphDraftingEngine(service.db).cancel(letter_id, run_id, payload, current_user)
+
+
+@router.post("/runs/{run_id}/force-v2", response_model=DraftRunResponse)
+@handle_exceptions
+async def force_v2_fallback(
+    letter_id: str,
+    run_id: str,
+    payload: ForceV2FallbackRequest,
+    request: Request,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Step-up-protected fallback before approval, export, or other effects."""
+    await require_step_up(request, current_user, action="drafting.workflow.force_v2")
+    return await LangGraphDraftingEngine(service.db).force_v2_fallback(
+        letter_id, run_id, payload, current_user
+    )
+
+
+@ops_router.get("/runs/{run_id}/checkpoints", response_model=list[DraftCheckpointResponse])
+@handle_exceptions
+async def list_draft_run_checkpoints(
+    run_id: str,
+    request: Request,
+    limit: int = 50,
+    service: DraftRunService = Depends(get_draft_run_service),
+    policy: PolicyService = Depends(get_policy_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Operations-only, paginated/redacted LangGraph checkpoint history."""
+    await policy.authorize(current_user, "drafting.workflow.checkpoints", resource_type="letter_drafting_checkpoint")
+    await require_step_up(request, current_user, action="drafting.workflow.checkpoints")
+    return await LangGraphDraftingEngine(service.db).list_checkpoints(run_id, limit=limit)
 
 
 @router.post("/analyze-incoming", response_model=DraftRunResponse)
@@ -280,6 +405,19 @@ async def critique_draft_run(
 ):
     """Run deterministic contractual red-flag critique for a draft run."""
     return await service.critique_run(letter_id, run_id, current_user)
+
+
+@router.post("/runs/{run_id}/review-legal-risk", response_model=DraftRunResponse)
+@handle_exceptions
+async def review_draft_legal_risk(
+    letter_id: str,
+    run_id: str,
+    payload: LegalRiskReviewRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Record the required human review of high legal-risk flags."""
+    return await service.review_legal_risk(letter_id, run_id, payload.comment, current_user)
 
 
 @router.get("/runs/latest", response_model=DraftRunResponse)

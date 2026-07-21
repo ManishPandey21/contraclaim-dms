@@ -203,6 +203,20 @@ class Settings(BaseSettings):
     )
     LANGGRAPH_TIMEOUT: int = Field(default=90, validation_alias="LANGGRAPH_TIMEOUT")
     LANGGRAPH_TRACE_STORE: Optional[str] = Field(default=None, validation_alias="LANGGRAPH_TRACE_STORE")
+
+    # Official LangGraph drafting migration.  The server-side policy is the
+    # authority; the older LANGGRAPH_ENABLED frontend/sidecar flag must never
+    # select the production drafting engine by itself.
+    DRAFT_ENGINE_DEFAULT: str = Field(default="v2", validation_alias="DRAFT_ENGINE_DEFAULT")
+    DRAFT_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="DRAFT_ENGINE_ROLLOUT_MODE")
+    DRAFT_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="DRAFT_ENGINE_CANARY_PERCENT")
+    DRAFT_ENGINE_CANARY_TENANT_IDS: str = Field(default="", validation_alias="DRAFT_ENGINE_CANARY_TENANT_IDS")
+    DRAFT_ENGINE_SHADOW_ENABLED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_SHADOW_ENABLED")
+    DRAFT_ENGINE_GRAPH_VERSION: str = Field(default="v3", validation_alias="DRAFT_ENGINE_GRAPH_VERSION")
+    DRAFT_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="DRAFT_ENGINE_STATE_SCHEMA_VERSION")
+    DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")
+    DRAFT_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="DRAFT_ENGINE_MAX_CHECKPOINT_BYTES")
+    DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS")
     
     # FalkorDB / RedisGraph configuration
     FALKORDB_URL: str = Field(default="redis://localhost:6380", validation_alias="FALKORDB_URL")
@@ -309,6 +323,16 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="CONTRACT_QUEUE_HEARTBEAT_SECONDS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
+    START_DRAFTING_QUEUE_WORKERS: bool = Field(default=False, validation_alias="START_DRAFTING_QUEUE_WORKERS")
+    DRAFTING_QUEUE_ENABLED: bool = Field(default=False, validation_alias="DRAFTING_QUEUE_ENABLED")
+    DRAFTING_QUEUE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="DRAFTING_QUEUE_REDIS_URL")
+    DRAFTING_QUEUE_NAME: str = Field(default="letter_drafting_queue", validation_alias="DRAFTING_QUEUE_NAME")
+    DRAFTING_QUEUE_PROCESSING_NAME: str = Field(default="letter_drafting_processing", validation_alias="DRAFTING_QUEUE_PROCESSING_NAME")
+    DRAFTING_QUEUE_DEADLETTER_NAME: str = Field(default="letter_drafting_deadletter", validation_alias="DRAFTING_QUEUE_DEADLETTER_NAME")
+    DRAFTING_QUEUE_MAX_RETRIES: int = Field(default=3, ge=1, validation_alias="DRAFTING_QUEUE_MAX_RETRIES")
+    DRAFTING_QUEUE_WORKERS: int = Field(default=1, ge=1, validation_alias="DRAFTING_QUEUE_WORKERS")
+    DRAFTING_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=1800, ge=60, validation_alias="DRAFTING_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
+    DRAFTING_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="DRAFTING_QUEUE_HEARTBEAT_SECONDS")
 
     # Contract OCR / clause chunking controls. OCR is performed page/batch-wise
     # during contract ingestion so large PDFs do not require one monolithic
@@ -482,9 +506,20 @@ class Settings(BaseSettings):
                 "GRAPHITI_BASE_URL or GRAPHITI_API_URL is required when GRAPH_PROVIDER=graphiti"
             )
 
+        draft_engine_default = str(getattr(self, "DRAFT_ENGINE_DEFAULT", "v2") or "v2").lower()
+        draft_rollout = str(getattr(self, "DRAFT_ENGINE_ROLLOUT_MODE", "off") or "off").lower()
+        if draft_engine_default not in {"v2", "langgraph_v3"}:
+            raise ValueError("DRAFT_ENGINE_DEFAULT must be v2 or langgraph_v3")
+        if draft_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
+            raise ValueError("DRAFT_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
+
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":
             production_errors: list[str] = []
+            if draft_rollout == "primary" and not self.DRAFT_ENGINE_PRODUCTION_ACCEPTED:
+                production_errors.append(
+                    "DRAFT_ENGINE_PRODUCTION_ACCEPTED=true is required before primary LangGraph cutover"
+                )
             if self.ALLOW_DEV_HEADERS:
                 production_errors.append("ALLOW_DEV_HEADERS must be false in production")
             if self.RBAC_ENTITLEMENT_FAIL_OPEN:
