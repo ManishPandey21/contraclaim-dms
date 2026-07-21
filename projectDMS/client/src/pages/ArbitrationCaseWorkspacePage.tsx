@@ -71,12 +71,17 @@ import {
   queueCaseBundleExport,
   reviewMatrixRow,
   runArbitrationAgent,
-  updateMatrixRow,
 } from "@/services/arbitration-cases-api";
 import {
   ArbitrationDraftType,
+  ArbitrationWorkflowState,
+  approveArbitrationWorkflowGate,
+  cancelArbitrationWorkflow,
+  createArbitrationWorkflow,
   createArbitrationDraft,
+  getArbitrationWorkflowState,
   prepareArbitrationDraftFromCase,
+  resumeArbitrationWorkflow,
 } from "@/services/arbitration-drafting-api";
 
 type ProjectOption = { id?: string; _id?: string; name?: string; organization_id?: string };
@@ -191,7 +196,8 @@ const MATRIX_FIELDS: Record<
     { key: "nature_of_defence", label: "Nature of defence" },
     { key: "claimant_reply", label: "Claimant reply", type: "textarea" },
     { key: "new_matter", label: "New matter" },
-    { key: "tribunal_permission_required", label: "Tribunal permission required" },
+    { key: "permission_required", label: "Permission required" },
+    { key: "permission_notes", label: "Permission notes", type: "textarea" },
   ],
   "quantum-annexures": [
     { key: "calculation_id", label: "Calculation id" },
@@ -320,6 +326,15 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   });
   const [queuedExport, setQueuedExport] = useState<BundleExport | null>(null);
   const [queueingExport, setQueueingExport] = useState<BundleExportFormat | null>(null);
+  const [workflow, setWorkflow] = useState<ArbitrationWorkflowState | null>(null);
+  const [workflowDraftId, setWorkflowDraftId] = useState("");
+  const [workflowDocumentIds, setWorkflowDocumentIds] = useState("");
+  const [workflowOpponentDraftId, setWorkflowOpponentDraftId] = useState("");
+  const [workflowOpponentVersionId, setWorkflowOpponentVersionId] = useState("");
+  const [workflowSecondOpponentDraftId, setWorkflowSecondOpponentDraftId] = useState("");
+  const [workflowSecondOpponentVersionId, setWorkflowSecondOpponentVersionId] = useState("");
+  const [workflowBusy, setWorkflowBusy] = useState(false);
+  const [workflowAnswers, setWorkflowAnswers] = useState<Record<string, string>>({});
 
   const loadCases = useCallback(async () => {
     setLoading(true);
@@ -375,6 +390,14 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     setMatrixForm({});
   }, [activeMatrix]);
 
+  useEffect(() => {
+    if (!caseId || !workflow?.run_id || ["completed", "cancelled", "failed"].includes(workflow.status)) return;
+    const timer = window.setInterval(() => {
+      getArbitrationWorkflowState(caseId, workflow.run_id).then(setWorkflow).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [caseId, workflow?.run_id, workflow?.status]);
+
   const updateCaseForm = (key: keyof CaseFormState, value: string) => {
     setForm((prev) => {
       const next = { ...prev, [key]: value };
@@ -423,9 +446,6 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
     try {
       const payload: Record<string, unknown> = {
         ...matrixForm,
-        approval_status: matrixForm.approval_status || "approved",
-        readiness_status: matrixForm.readiness_status || "ready",
-        verification_status: matrixForm.verification_status || "verified",
       };
       if (activeMatrix === "document-index") {
         payload.source_type = payload.source_type || "document";
@@ -440,21 +460,6 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
       toast.error("Unable to save matrix row");
     } finally {
       setSaving(false);
-    }
-  };
-
-  const markRowReady = async (row: MatrixRow) => {
-    if (!caseId) return;
-    try {
-      await updateMatrixRow(caseId, activeMatrix, row._id, {
-        approval_status: "approved",
-        readiness_status: "ready",
-        verification_status: "verified",
-      });
-      setRows(await listMatrixRows(caseId, activeMatrix));
-      toast.success("Row marked ready");
-    } catch {
-      toast.error("Unable to update matrix row");
     }
   };
 
@@ -585,6 +590,98 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
       toast.error("Unable to create draft from case");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const selectedWorkflowDraft = (dashboard?.drafts || []).find((item) => String(item._id) === workflowDraftId);
+
+  const startWorkflow = async () => {
+    if (!caseId || !selectedWorkflowDraft) {
+      toast.error("Select a linked draft first");
+      return;
+    }
+    const pleadingType = String(selectedWorkflowDraft.draft_type) as ArbitrationDraftType;
+    if (["statement_of_defence", "rejoinder"].includes(pleadingType) && (!workflowOpponentDraftId || !workflowOpponentVersionId)) {
+      toast.error("Select the immutable opponent draft and version");
+      return;
+    }
+    if (pleadingType === "rejoinder" && (!workflowSecondOpponentDraftId || !workflowSecondOpponentVersionId)) {
+      toast.error("A Rejoinder must pin both the SoC and SoD immutable versions");
+      return;
+    }
+    setWorkflowBusy(true);
+    try {
+      const key = `arbitration-${caseId}-${workflowDraftId}-${Date.now()}`;
+      setWorkflow(await createArbitrationWorkflow(caseId, {
+        draft_id: workflowDraftId,
+        pleading_type: pleadingType,
+        selected_document_ids: workflowDocumentIds.split(",").map((item) => item.trim()).filter(Boolean),
+        opponent_draft_id: workflowOpponentDraftId || undefined,
+        opponent_version_id: workflowOpponentVersionId || undefined,
+        opponent_pleadings: pleadingType === "rejoinder" ? [
+          { draft_id: workflowOpponentDraftId, version_id: workflowOpponentVersionId },
+          { draft_id: workflowSecondOpponentDraftId, version_id: workflowSecondOpponentVersionId },
+        ] : undefined,
+      }, key));
+      toast.success("Durable pleading workflow accepted");
+    } catch {
+      toast.error("Unable to start pleading workflow");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const continueWorkflow = async () => {
+    if (!caseId || !workflow) return;
+    setWorkflowBusy(true);
+    try {
+      if (workflow.current_node === "document_selection_gate") {
+        setWorkflow(await resumeArbitrationWorkflow(caseId, workflow.run_id, {
+          state_version: workflow.state_version,
+          gate: "document_selection",
+          selected_document_ids: workflowDocumentIds.split(",").map((item) => item.trim()).filter(Boolean),
+        }));
+      } else if (workflow.current_node === "material_question_gate") {
+        setWorkflow(await resumeArbitrationWorkflow(caseId, workflow.run_id, {
+          state_version: workflow.state_version,
+          gate: "material_question",
+          answers: workflowAnswers,
+        }));
+      } else {
+        const gateByNode: Record<string, { gate: string; hash?: string | null; role: string }> = {
+          matrix_review_gate: { gate: "matrix_review", hash: workflow.matrix_revision_hash, role: "legal_reviewer" },
+          readiness_approval_gate: { gate: "readiness", hash: workflow.readiness_artifact_hash, role: "senior_legal_approver" },
+          plan_approval_gate: { gate: "plan", hash: workflow.plan_hash, role: "senior_legal_approver" },
+          legal_review_gate: { gate: "legal_review", hash: workflow.draft_version_hash, role: "legal_reviewer" },
+          draft_approval_gate: { gate: "draft", hash: workflow.draft_version_hash, role: "senior_legal_approver" },
+          export_authorization_gate: { gate: "export", hash: workflow.draft_version_hash, role: "export_authorizer" },
+        };
+        const gate = gateByNode[workflow.current_node];
+        if (!gate?.hash) throw new Error("Current gate has no reviewable artifact");
+        setWorkflow(await approveArbitrationWorkflowGate(caseId, workflow.run_id, gate.gate, {
+          state_version: workflow.state_version, artifact_hash: gate.hash, reviewer_role: gate.role,
+        }));
+      }
+      toast.success("Workflow gate recorded");
+    } catch {
+      toast.error("Workflow action was rejected; refresh state and review blockers");
+    } finally {
+      setWorkflowBusy(false);
+    }
+  };
+
+  const refreshWorkflow = async () => {
+    if (!caseId || !workflow) return;
+    try {
+      setWorkflow(
+        workflow.current_node === "matrix_review_gate"
+          ? await resumeArbitrationWorkflow(caseId, workflow.run_id, {
+              state_version: workflow.state_version, gate: "matrix_review", decision: "refresh",
+            })
+          : await getArbitrationWorkflowState(caseId, workflow.run_id),
+      );
+    } catch {
+      toast.error("Workflow state changed; reload the case workspace");
     }
   };
 
@@ -985,6 +1082,136 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
           <aside className="space-y-4">
             <Card>
               <CardHeader>
+                <CardTitle className="text-base">Durable Pleading Workflow</CardTitle>
+                <CardDescription>Server-selected engine, immutable inputs, human gates, and checkpointed progress</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-1">
+                  <Label>Linked draft</Label>
+                  <Select value={workflowDraftId} onValueChange={setWorkflowDraftId} disabled={Boolean(workflow)}>
+                    <SelectTrigger><SelectValue placeholder="Select draft" /></SelectTrigger>
+                    <SelectContent>
+                      {(dashboard?.drafts || []).map((draft) => (
+                        <SelectItem key={String(draft._id)} value={String(draft._id)}>
+                          {String(draft.title)} ({pretty(String(draft.draft_type))})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label>Selected document IDs</Label>
+                  <Input
+                    value={workflowDocumentIds}
+                    onChange={(event) => setWorkflowDocumentIds(event.target.value)}
+                    placeholder="Comma-separated scoped document IDs"
+                  />
+                </div>
+                {selectedWorkflowDraft && ["statement_of_defence", "rejoinder"].includes(String(selectedWorkflowDraft.draft_type)) ? (
+                  <div className="grid gap-2">
+                    <div className="space-y-1">
+                      <Label>{String(selectedWorkflowDraft.draft_type) === "rejoinder" ? "Statement of Claim draft" : "Opponent draft"}</Label>
+                      <Select value={workflowOpponentDraftId} onValueChange={setWorkflowOpponentDraftId} disabled={Boolean(workflow)}>
+                        <SelectTrigger><SelectValue placeholder="Select immutable pleading" /></SelectTrigger>
+                        <SelectContent>
+                          {(dashboard?.drafts || []).filter((draft) =>
+                            String(draft._id) !== workflowDraftId
+                            && (String(selectedWorkflowDraft.draft_type) !== "rejoinder" || String(draft.draft_type) === "statement_of_claim")
+                          ).map((draft) => (
+                            <SelectItem key={String(draft._id)} value={String(draft._id)}>{String(draft.title)}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {String(selectedWorkflowDraft.draft_type) === "rejoinder" ? (
+                      <>
+                        <div className="space-y-1">
+                          <Label>Statement of Defence draft</Label>
+                          <Select value={workflowSecondOpponentDraftId} onValueChange={setWorkflowSecondOpponentDraftId} disabled={Boolean(workflow)}>
+                            <SelectTrigger><SelectValue placeholder="Select SoD" /></SelectTrigger>
+                            <SelectContent>
+                              {(dashboard?.drafts || []).filter((draft) => String(draft.draft_type) === "statement_of_defence").map((draft) => (
+                                <SelectItem key={String(draft._id)} value={String(draft._id)}>{String(draft.title)}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label>SoD version ID</Label>
+                          <Input value={workflowSecondOpponentVersionId} onChange={(event) => setWorkflowSecondOpponentVersionId(event.target.value)} />
+                        </div>
+                      </>
+                    ) : null}
+                    <div className="space-y-1">
+                      <Label>Opponent version ID</Label>
+                      <Input value={workflowOpponentVersionId} onChange={(event) => setWorkflowOpponentVersionId(event.target.value)} />
+                    </div>
+                  </div>
+                ) : null}
+                {!workflow ? (
+                  <Button className="w-full" onClick={startWorkflow} disabled={workflowBusy || !workflowDraftId}>
+                    {workflowBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldAlert className="mr-2 h-4 w-4" />}
+                    Start governed workflow
+                  </Button>
+                ) : (
+                  <div className="space-y-3 rounded-md border p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <Badge variant="outline">{pretty(workflow.status)}</Badge>
+                      <span className="text-xs text-muted-foreground">v{workflow.state_version} · {workflow.engine}</span>
+                    </div>
+                    <Progress value={workflow.progress} />
+                    <div className="text-sm font-medium">{pretty(workflow.current_node)}</div>
+                    <div className="text-xs text-muted-foreground">
+                      Next: {pretty(workflow.next_action)}
+                      {workflow.required_human_role ? ` · Role: ${pretty(workflow.required_human_role)}` : ""}
+                    </div>
+                    {(workflow.blockers || []).length > 0 ? (
+                      <div className="text-xs text-amber-700">{workflow.blockers.length} blocker(s) require review.</div>
+                    ) : null}
+                    {workflow.current_node === "material_question_gate" ? (
+                      <div className="space-y-2">
+                        {(workflow.targeted_questions || []).map((question) => (
+                          <div key={question.question_id} className="space-y-1">
+                            <Label className="text-xs">{question.prompt}</Label>
+                            <Textarea
+                              value={workflowAnswers[question.question_id] || ""}
+                              onChange={(event) => setWorkflowAnswers((previous) => ({ ...previous, [question.question_id]: event.target.value }))}
+                              rows={2}
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {workflow.plan_hash ? <div className="break-all text-xs text-muted-foreground">Plan: {workflow.plan_hash}</div> : null}
+                    {workflow.draft_version_hash ? <div className="break-all text-xs text-muted-foreground">Version: {workflow.draft_version_hash}</div> : null}
+                    <div className="flex gap-2">
+                      {!['completed', 'cancelled', 'failed'].includes(workflow.status) ? (
+                        <Button size="sm" onClick={continueWorkflow} disabled={workflowBusy}>Review / continue</Button>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={refreshWorkflow}
+                      >
+                        Refresh
+                      </Button>
+                      {!['completed', 'cancelled', 'failed'].includes(workflow.status) ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() => caseId && cancelArbitrationWorkflow(caseId, workflow.run_id, workflow.state_version, "Cancelled by user").then(setWorkflow)}
+                        >
+                          Cancel
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
                 <CardTitle className="text-base">Agent Runs</CardTitle>
                 <CardDescription>Populate case matrices from scoped sources</CardDescription>
               </CardHeader>
@@ -1166,19 +1393,9 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     )}
                   </div>
                 ))}
-                <div className="space-y-2">
-                  <Label>Approval status</Label>
-                  <Select value={matrixForm.approval_status || "approved"} onValueChange={(value) => setMatrixForm((prev) => ({ ...prev, approval_status: value }))}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="approved">Approved</SelectItem>
-                      <SelectItem value="needs_review">Needs review</SelectItem>
-                      <SelectItem value="draft">Draft</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                <p className="text-xs text-muted-foreground">
+                  New rows always begin in needs review. Approval is available only through the role-based review action.
+                </p>
                 <Button className="w-full" onClick={saveMatrixRow} disabled={saving}>
                   {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
                   Save Row
@@ -1265,9 +1482,6 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                                 </Button>
                                 <Button size="sm" variant="outline" onClick={() => submitReviewAction(row, "reject")}>
                                   Reject
-                                </Button>
-                                <Button size="sm" variant="ghost" onClick={() => markRowReady(row)}>
-                                  Mark Ready
                                 </Button>
                               </div>
                             </div>

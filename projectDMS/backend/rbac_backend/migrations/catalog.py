@@ -35,6 +35,14 @@ from .v20260705_0003_arbitration_expert_alignment import DESCRIPTION as ARB_EXPE
 from .v20260705_0003_arbitration_expert_alignment import NAME as ARB_EXPERT_NAME
 from .v20260705_0003_arbitration_expert_alignment import VERSION as ARB_EXPERT_VERSION
 from .v20260705_0003_arbitration_expert_alignment import upgrade as upgrade_arbitration_expert_alignment
+from .v20260721_0001_arbitration_phase0_containment import DESCRIPTION as ARB_PHASE0_DESCRIPTION
+from .v20260721_0001_arbitration_phase0_containment import NAME as ARB_PHASE0_NAME
+from .v20260721_0001_arbitration_phase0_containment import VERSION as ARB_PHASE0_VERSION
+from .v20260721_0001_arbitration_phase0_containment import upgrade as upgrade_arbitration_phase0
+from .v20260721_0002_arbitration_workflow_foundation import DESCRIPTION as ARB_WORKFLOW_DESCRIPTION
+from .v20260721_0002_arbitration_workflow_foundation import NAME as ARB_WORKFLOW_NAME
+from .v20260721_0002_arbitration_workflow_foundation import VERSION as ARB_WORKFLOW_VERSION
+from .v20260721_0002_arbitration_workflow_foundation import upgrade as upgrade_arbitration_workflow
 
 
 MIGRATIONS = [
@@ -79,5 +87,17 @@ MIGRATIONS = [
         name=ARB_EXPERT_NAME,
         description=ARB_EXPERT_DESCRIPTION,
         upgrade=upgrade_arbitration_expert_alignment,
+    ),
+    Migration(
+        version=ARB_PHASE0_VERSION,
+        name=ARB_PHASE0_NAME,
+        description=ARB_PHASE0_DESCRIPTION,
+        upgrade=upgrade_arbitration_phase0,
+    ),
+    Migration(
+        version=ARB_WORKFLOW_VERSION,
+        name=ARB_WORKFLOW_NAME,
+        description=ARB_WORKFLOW_DESCRIPTION,
+        upgrade=upgrade_arbitration_workflow,
     ),
 ]

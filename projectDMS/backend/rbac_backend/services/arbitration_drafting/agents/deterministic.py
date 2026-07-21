@@ -513,7 +513,7 @@ class DeterministicArbitrationAgent:
                 "notice_source_id": document.get("source_id"),
                 "exhibit_id": document.get("exhibit_id"),
                 "contractual_requirement": "Confirm notice clause, timing, service method, and condition precedent impact.",
-                "compliance_status": "needs_review" if not self._auto_approve else "ready",
+                "compliance_status": "needs_review",
                 "risk": "Review whether this notice satisfies the applicable contractual precondition.",
             }
             await self._insert_matrix_row(
@@ -550,7 +550,7 @@ class DeterministicArbitrationAgent:
                     "evidence_ids": _string_list(claim.get("evidence_ids")) + _string_list(claim.get("notice_ids")),
                     "clause_ids": _string_list(claim.get("clause_ids")),
                     "required_finding": template.get("required_finding") or _required_finding(claim),
-                    "status": "ready" if self._auto_approve else "needs_review",
+                    "status": "needs_review",
                 }
                 inserted = await self._insert_matrix_row(
                     "issue-matrix",
@@ -1059,21 +1059,17 @@ class DeterministicArbitrationAgent:
         return True
 
     def _status_defaults(self, matrix_slug: str) -> Dict[str, Any]:
-        status = "approved" if self._auto_approve else "needs_review"
-        readiness = "ready" if self._auto_approve else "needs_review"
         defaults = {
-            "verification_status": "verified" if self._auto_approve else "needs_review",
-            "approval_status": status,
-            "readiness_status": readiness,
-            "human_approval_status": status,
+            "verification_status": "needs_review",
+            "approval_status": "needs_review",
+            "readiness_status": "needs_review",
+            "human_approval_status": "needs_review",
+            "review_status": "needs_review",
+            "review_completed_roles": [],
         }
         if matrix_slug == "issue-matrix":
-            defaults["status"] = readiness
+            defaults["status"] = "needs_review"
         return defaults
-
-    @property
-    def _auto_approve(self) -> bool:
-        return str(self.options.get("auto_approve") or "").lower() in {"1", "true", "yes", "approved"}
 
     async def _assign_exhibit(self, row: Dict[str, Any]) -> Dict[str, Any]:
         prefix = str(row.get("exhibit_prefix") or _exhibit_prefix(self.case, self.options)).strip().upper()

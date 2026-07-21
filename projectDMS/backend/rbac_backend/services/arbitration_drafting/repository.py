@@ -91,6 +91,11 @@ class ArbitrationDraftingRepository:
         cursor = self.db.arbitration_paragraph_responses.find({"draft_id": draft_id}).sort("source_paragraph_number", 1)
         return await _collect(cursor)
 
+    async def update_paragraph_response(self, draft_id: str, response_id: str, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        return await self.db.arbitration_paragraph_responses.find_one_and_update(
+            {"_id": response_id, "draft_id": draft_id}, {"$set": _jsonable(update)}, return_document=True
+        )
+
     async def create_generation_run(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         payload = _jsonable(doc)
         await self.db.arbitration_generation_runs.insert_one(payload)
@@ -108,7 +113,20 @@ class ArbitrationDraftingRepository:
 
     async def next_version(self, draft_id: str) -> int:
         latest = await self.db.arbitration_draft_versions.find_one({"draft_id": draft_id}, sort=[("version", -1)])
-        return int((latest or {}).get("version") or 0) + 1
+        # $max makes this safe for pre-migration/test databases while the
+        # following atomic $inc remains the sole allocator under concurrency.
+        await self.db.arbitration_draft_version_counters.update_one(
+            {"_id": draft_id},
+            {"$max": {"value": int((latest or {}).get("version") or 0)}, "$setOnInsert": {"draft_id": draft_id}},
+            upsert=True,
+        )
+        counter = await self.db.arbitration_draft_version_counters.find_one_and_update(
+            {"_id": draft_id},
+            {"$inc": {"value": 1}, "$setOnInsert": {"draft_id": draft_id}},
+            upsert=True,
+            return_document=True,
+        )
+        return int(counter.get("value") or 1)
 
     async def create_version(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         payload = _jsonable(doc)
@@ -123,4 +141,3 @@ class ArbitrationDraftingRepository:
 
     async def latest_version(self, draft_id: str) -> Optional[Dict[str, Any]]:
         return await self.db.arbitration_draft_versions.find_one({"draft_id": draft_id}, sort=[("version", -1)])
-

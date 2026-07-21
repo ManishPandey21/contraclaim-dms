@@ -54,6 +54,7 @@ import {
   approveArbitrationDraft,
   createArbitrationDraft,
   exportArbitrationDraft,
+  exportArbitrationFilingDraft,
   generateArbitrationDraft,
   getArbitrationDraft,
   getArbitrationDraftVersion,
@@ -66,6 +67,7 @@ import {
   returnArbitrationDraftForRevision,
   saveArbitrationDraftVersion,
   searchArbitrationEvidence,
+  updateArbitrationParagraphResponse,
   updateArbitrationDraft,
 } from "@/services/arbitration-drafting-api";
 import { ArbitrationCase, listArbitrationCases } from "@/services/arbitration-cases-api";
@@ -184,6 +186,9 @@ const ArbitrationDraftingPage: React.FC = () => {
   const [cases, setCases] = useState<ArbitrationCase[]>([]);
   const [form, setForm] = useState<FormState>(() => initialForm(kind));
   const [pleadingText, setPleadingText] = useState("");
+  const [pleadingSourceId, setPleadingSourceId] = useState("");
+  const [pleadingSourceVersionId, setPleadingSourceVersionId] = useState("");
+  const [paragraphEdits, setParagraphEdits] = useState<Record<string, { response_type: string; response_text: string; response_reason: string; supporting_source_ids: string }>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -347,10 +352,13 @@ const ArbitrationDraftingPage: React.FC = () => {
     if (!draft || !pleadingText.trim()) return;
     setGenerating(true);
     try {
+      const source = pleadingSourceId && pleadingSourceVersionId
+        ? { documentId: pleadingSourceId, versionId: pleadingSourceVersionId }
+        : undefined;
       if (draft.draft_type === "rejoinder") {
-        await importDefenceParagraphs(draft._id, pleadingText);
+        await importDefenceParagraphs(draft._id, pleadingText, source);
       } else {
-        await importSocParagraphs(draft._id, pleadingText);
+        await importSocParagraphs(draft._id, pleadingText, source);
       }
       setDraft(await getArbitrationDraft(draft._id));
       setPleadingText("");
@@ -362,13 +370,41 @@ const ArbitrationDraftingPage: React.FC = () => {
     }
   };
 
-  const exportDraft = async (format: "docx" | "pdf") => {
+  const saveParagraphResponse = async (row: Record<string, unknown>) => {
+    if (!draft) return;
+    const id = String(row._id || "");
+    const edit = paragraphEdits[id] || {
+      response_type: String(row.response_type || "require_proof"),
+      response_text: String(row.response_text || ""),
+      response_reason: String(row.response_reason || ""),
+      supporting_source_ids: Array.isArray(row.supporting_source_ids) ? row.supporting_source_ids.map(String).join(", ") : "",
+    };
+    setSaving(true);
+    try {
+      await updateArbitrationParagraphResponse(draft._id, id, {
+        response_type: edit.response_type,
+        response_text: edit.response_text || null,
+        response_reason: edit.response_reason || null,
+        supporting_source_ids: edit.supporting_source_ids.split(",").map((item) => item.trim()).filter(Boolean),
+      });
+      setDraft(await getArbitrationDraft(draft._id));
+      toast.success("Paragraph response saved");
+    } catch (error) {
+      toast.error(apiErrorMessage(error, "Paragraph response was rejected"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const exportDraft = async (format: "docx" | "pdf", filing = false) => {
     if (!draft) return;
     try {
-      const blob = await exportArbitrationDraft(draft._id, format);
-      downloadBlob(blob, `${draft.title}.${format}`);
-    } catch {
-      toast.error(`Unable to export ${format.toUpperCase()}`);
+      const blob = filing
+        ? await exportArbitrationFilingDraft(draft._id, format)
+        : await exportArbitrationDraft(draft._id, format);
+      downloadBlob(blob, `${draft.title}${filing ? "-filing" : "-preview"}.${format}`);
+    } catch (error) {
+      toast.error(apiErrorMessage(error, `${filing ? "Filing export" : "Preview"} blocked`));
     }
   };
 
@@ -525,12 +561,24 @@ const ArbitrationDraftingPage: React.FC = () => {
             )}
             <Button variant="outline" onClick={() => exportDraft("docx")} disabled={!markdown}>
               <Download className="mr-2 h-4 w-4" />
-              DOCX
+              Preview DOCX
             </Button>
             <Button variant="outline" onClick={() => exportDraft("pdf")} disabled={!markdown}>
               <Download className="mr-2 h-4 w-4" />
-              PDF
+              Preview PDF
             </Button>
+            {isLocked && draft.case_id ? (
+              <>
+                <Button variant="outline" onClick={() => exportDraft("docx", true)} disabled={!markdown}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Filing DOCX
+                </Button>
+                <Button variant="outline" onClick={() => exportDraft("pdf", true)} disabled={!markdown}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Filing PDF
+                </Button>
+              </>
+            ) : null}
           </div>
         </div>
 
@@ -621,11 +669,65 @@ const ArbitrationDraftingPage: React.FC = () => {
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-3">
+                    <Input
+                      value={pleadingSourceId}
+                      onChange={(event) => setPleadingSourceId(event.target.value)}
+                      placeholder="Authoritative opponent document or draft ID"
+                    />
+                    <Input
+                      value={pleadingSourceVersionId}
+                      onChange={(event) => setPleadingSourceVersionId(event.target.value)}
+                      placeholder="Immutable opponent version ID"
+                    />
                     <Textarea value={pleadingText} onChange={(e) => setPleadingText(e.target.value)} rows={7} />
                     <Button className="w-full" onClick={importParagraphs} disabled={generating || isLocked || !pleadingText.trim()}>
                       <RefreshCw className="mr-2 h-4 w-4" />
                       Import Paragraphs
                     </Button>
+                  </CardContent>
+                </Card>
+              )}
+
+              {(draft?.paragraph_responses?.length || 0) > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Paragraph Responses</CardTitle>
+                    <CardDescription>Authoritative admission, denial, reason, and approved evidence mapping</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {(draft?.paragraph_responses || []).map((row) => {
+                      const id = String(row._id || "");
+                      const edit = paragraphEdits[id] || {
+                        response_type: String(row.response_type || "require_proof"),
+                        response_text: String(row.response_text || ""),
+                        response_reason: String(row.response_reason || ""),
+                        supporting_source_ids: Array.isArray(row.supporting_source_ids) ? row.supporting_source_ids.map(String).join(", ") : "",
+                      };
+                      const setEdit = (field: string, value: string) => setParagraphEdits((previous) => ({
+                        ...previous,
+                        [id]: { ...edit, [field]: value },
+                      }));
+                      return (
+                        <div key={id} className="space-y-2 rounded-md border p-3">
+                          <div className="text-sm font-medium">Paragraph {String(row.source_paragraph_number || "")}</div>
+                          <div className="max-h-24 overflow-auto text-xs text-muted-foreground">{String(row.source_paragraph_text || "")}</div>
+                          <Select value={edit.response_type} onValueChange={(value) => setEdit("response_type", value)} disabled={isLocked}>
+                            <SelectTrigger><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="admit">Admit</SelectItem>
+                              <SelectItem value="deny">Deny</SelectItem>
+                              <SelectItem value="partially_admit">Partially admit</SelectItem>
+                              <SelectItem value="require_proof">Require proof</SelectItem>
+                              <SelectItem value="not_applicable">Not applicable</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <Textarea value={edit.response_text} onChange={(event) => setEdit("response_text", event.target.value)} placeholder="Response" disabled={isLocked} />
+                          <Textarea value={edit.response_reason} onChange={(event) => setEdit("response_reason", event.target.value)} placeholder="Reason (required for denial)" disabled={isLocked} />
+                          <Input value={edit.supporting_source_ids} onChange={(event) => setEdit("supporting_source_ids", event.target.value)} placeholder="Approved selected source IDs, comma separated" disabled={isLocked} />
+                          <Button size="sm" variant="outline" onClick={() => saveParagraphResponse(row)} disabled={saving || isLocked}>Save response</Button>
+                        </div>
+                      );
+                    })}
                   </CardContent>
                 </Card>
               )}

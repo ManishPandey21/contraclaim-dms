@@ -42,6 +42,7 @@ class ObservabilityRegistry:
     _arbitration_bundle_exports_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _arbitration_readiness_score: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _arbitration_missing_evidence: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _arbitration_workflow_events_total: Dict[Tuple[str, str, str, str], int] = field(default_factory=dict)
     _vector_store_failures_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _dependency_health: Dict[str, float] = field(default_factory=dict)
 
@@ -152,6 +153,13 @@ class ObservabilityRegistry:
             self._arbitration_readiness_score[key] = float(score or 0)
             self._arbitration_missing_evidence[("readiness", str(status or "unknown"))] = int(missing_evidence_count or 0)
 
+    async def record_arbitration_workflow(
+        self, *, engine: str, status: str, node: str, event: str
+    ) -> None:
+        key = tuple(str(value or "unknown") for value in (engine, status, node, event))
+        async with self._lock:
+            self._arbitration_workflow_events_total[key] = self._arbitration_workflow_events_total.get(key, 0) + 1
+
     async def record_vector_store_failure(self, *, operation: str, namespace: str | None = None) -> None:
         """Count a Qdrant operation that failed while the store was enabled.
 
@@ -181,6 +189,7 @@ class ObservabilityRegistry:
             "backup_health": dict(self._backup_health),
             "arbitration_agent_run_total": sum(self._arbitration_agent_runs_total.values()),
             "arbitration_bundle_export_total": sum(self._arbitration_bundle_exports_total.values()),
+            "arbitration_workflow_event_total": sum(self._arbitration_workflow_events_total.values()),
             "vector_store_failure_total": sum(self._vector_store_failures_total.values()),
             "dependency_health": dict(self._dependency_health),
         }
@@ -317,6 +326,15 @@ class ObservabilityRegistry:
         for (signal, signal_status), value in sorted(self._arbitration_missing_evidence.items()):
             labels = _labels((("signal", signal), ("status", signal_status)))
             lines.append(f"contractdms_arbitration_missing_evidence{labels} {value}")
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_workflow_events_total Arbitration workflow transitions by engine, status, node, and event.",
+                "# TYPE contractdms_arbitration_workflow_events_total counter",
+            ]
+        )
+        for (engine, workflow_status, node, event), value in sorted(self._arbitration_workflow_events_total.items()):
+            labels = _labels((("engine", engine), ("status", workflow_status), ("node", node), ("event", event)))
+            lines.append(f"contractdms_arbitration_workflow_events_total{labels} {value}")
 
         lines.extend(
             [

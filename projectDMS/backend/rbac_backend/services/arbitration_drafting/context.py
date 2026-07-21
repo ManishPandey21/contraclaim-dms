@@ -4,10 +4,13 @@ import hashlib
 from textwrap import shorten
 from typing import Any, Dict, Iterable, List, Optional
 
+from fastapi import HTTPException, status
+
 from ...models.arbitration_drafting import ArbitrationSelectedReferenceCreate
 from ...models.contract_models import ContractSearchRequest
 from ..contract_service import ContractService
 from ..evidence_graph_service import EvidenceGraphService
+from .matrix_registry import MATRIX_COLLECTIONS
 
 
 VERIFIED_SOURCE_STATUSES = {
@@ -46,12 +49,19 @@ def condense(value: Any, width: int = 700) -> str:
 
 
 def source_hash(source: Dict[str, Any]) -> str:
+    metadata = source.get("metadata") or {}
     raw = "|".join(
         [
             str(source.get("source_type") or ""),
             str(source.get("source_id") or ""),
             str(source.get("citation") or ""),
             str(source.get("snippet") or ""),
+            ",".join(str(page) for page in source.get("page_numbers") or []),
+            str(source.get("verification_status") or ""),
+            str(metadata.get("matrix_row_id") or ""),
+            str(metadata.get("authoritative_revision_id") or ""),
+            str(metadata.get("authoritative_sha256") or ""),
+            str(metadata.get("authoritative_updated_at") or ""),
         ]
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -155,6 +165,7 @@ class ArbitrationContextBuilder:
         include_unverified_graph_links: bool = False,
     ) -> Dict[str, Any]:
         context_warnings: List[str] = []
+        references = await self.rehydrate_selected_references(draft, references)
         source_ledger = [self._ledger_row(ref, idx) for idx, ref in enumerate(references, start=1)]
         source_ledger.extend(
             await self._case_workspace_sources(
@@ -187,6 +198,214 @@ class ArbitrationContextBuilder:
             "missing_evidence": missing,
             "context_warnings": context_warnings,
         }
+
+    async def rehydrate_selected_references(
+        self,
+        draft: Dict[str, Any],
+        references: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Resolve selected IDs against scoped server records and discard client prose.
+
+        Manual facts remain available for working drafts, but they are explicitly
+        marked unverified and are blocked by filing validation. Every other
+        selected reference must resolve to an authoritative scoped record or an
+        approved matrix revision belonging to the linked case.
+        """
+
+        hydrated: List[Dict[str, Any]] = []
+        for reference in references or []:
+            source_type = str(reference.get("source_type") or "")
+            if source_type == "manual_fact":
+                hydrated.append(
+                    {
+                        **reference,
+                        "metadata": {
+                            **(reference.get("metadata") or {}),
+                            "source_origin": "manual_user_input",
+                            "verification_status": "needs_review",
+                        },
+                    }
+                )
+                continue
+            matrix_row_id = (reference.get("metadata") or {}).get("matrix_row_id")
+            if matrix_row_id:
+                matrix_reference = await self._rehydrate_matrix_reference(draft, str(matrix_row_id), source_type)
+                if matrix_reference:
+                    hydrated.append({**matrix_reference, "_id": reference.get("_id"), "draft_id": reference.get("draft_id")})
+                    continue
+            authoritative = await self._rehydrate_direct_reference(draft, reference)
+            if not authoritative:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": "Selected arbitration source could not be verified in the current scope",
+                        "source_type": source_type,
+                        "source_id": reference.get("source_id"),
+                    },
+                )
+            hydrated.append({**authoritative, "_id": reference.get("_id"), "draft_id": reference.get("draft_id")})
+        return hydrated
+
+    async def _rehydrate_matrix_reference(
+        self,
+        draft: Dict[str, Any],
+        matrix_row_id: str,
+        source_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        case_id = draft.get("case_id")
+        if not case_id:
+            return None
+        scope = {
+            "_id": matrix_row_id,
+            "case_id": case_id,
+            "deleted_at": {"$exists": False},
+        }
+        for slug, collection_name in MATRIX_COLLECTIONS.items():
+            row = await self.db[collection_name].find_one(scope)
+            if not row:
+                continue
+            if row.get("organization_id") and str(row.get("organization_id")) != str(draft.get("organization_id")):
+                return None
+            if row.get("project_id") and str(row.get("project_id")) != str(draft.get("project_id")):
+                return None
+            if not _is_verified_source(row):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Unapproved matrix rows cannot be selected as drafting evidence",
+                        "matrix": slug,
+                        "matrix_row_id": matrix_row_id,
+                    },
+                )
+            if slug == "document-index":
+                return {
+                    "source_type": row.get("source_type") or "document",
+                    "source_id": str(row.get("source_id")),
+                    "label": row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
+                    "citation": row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
+                    "snippet": row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    "page_numbers": row.get("page_numbers") or [],
+                    "letter_no": row.get("letter_no"),
+                    "allowed_use": row.get("allowed_use") or "fact",
+                    "metadata": {
+                        "matrix": slug,
+                        "matrix_row_id": row.get("_id"),
+                        "source_origin": "approved_matrix_revision",
+                        "verification_status": "approved",
+                        "exhibit_id": row.get("exhibit_id"),
+                    },
+                }
+            if slug == "clause-matrix":
+                return {
+                    "source_type": "clause",
+                    "source_id": str(row.get("clause_source_id") or row.get("source_id") or row.get("_id")),
+                    "label": row.get("topic") or row.get("clause_number") or "Clause matrix row",
+                    "citation": row.get("clause_number") or row.get("topic"),
+                    "snippet": row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    "page_numbers": row.get("page_numbers") or [],
+                    "clause_number": row.get("clause_number"),
+                    "allowed_use": "clause",
+                    "metadata": {
+                        "matrix": slug,
+                        "matrix_row_id": row.get("_id"),
+                        "source_origin": "approved_matrix_revision",
+                        "verification_status": "approved",
+                        "risk": row.get("risk"),
+                    },
+                }
+            return {
+                "source_type": source_type,
+                "source_id": str(row.get("source_id") or row.get("_id")),
+                "label": row.get("title") or row.get("claim_head") or row.get("issue") or row.get("topic") or slug,
+                "citation": row.get("citation") or row.get("claim_no") or row.get("issue_no"),
+                "snippet": row.get("facts") or row.get("summary") or row.get("relevance_note"),
+                "page_numbers": row.get("page_numbers") or [],
+                "allowed_use": row.get("allowed_use") or "fact",
+                "metadata": {
+                    "matrix": slug,
+                    "matrix_row_id": row.get("_id"),
+                    "source_origin": "approved_matrix_revision",
+                    "verification_status": "approved",
+                },
+            }
+        return None
+
+    async def _rehydrate_direct_reference(
+        self,
+        draft: Dict[str, Any],
+        reference: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        source_type = str(reference.get("source_type") or "")
+        source_id = str(reference.get("source_id") or "")
+        if not source_id:
+            return None
+        collection_names = {
+            "document": ("documents",),
+            "letter": ("letters", "documents"),
+            "clause": ("document_vectors", "contract_clauses"),
+            "claim": ("claims",),
+            "variation": ("variations",),
+            "payment_event": ("ipc_bills",),
+            "bank_guarantee": ("bank_guarantees",),
+            "chronology_event": ("matter_chronology_events",),
+            "project_event": ("matter_chronology_events",),
+            "expert_report": ("documents",),
+        }.get(source_type, ())
+        for collection_name in collection_names:
+            query: Dict[str, Any] = {"_id": source_id}
+            if draft.get("organization_id"):
+                query["organization_id"] = draft.get("organization_id")
+            if draft.get("project_id"):
+                query["project_id"] = draft.get("project_id")
+            record = await self.db[collection_name].find_one(query)
+            if not record and source_type == "clause" and collection_name == "document_vectors":
+                query.pop("_id", None)
+                query["document_id"] = source_id
+                record = await self.db[collection_name].find_one(query)
+            if not record:
+                continue
+            label = (
+                record.get("subject")
+                or record.get("filename")
+                or record.get("clause_title")
+                or record.get("claim_number")
+                or record.get("variation_number")
+                or record.get("_id")
+            )
+            citation = (
+                record.get("letterNo")
+                or record.get("clause_number")
+                or record.get("claim_number")
+                or record.get("variation_number")
+                or record.get("filename")
+            )
+            snippet = (
+                record.get("summary")
+                or record.get("ocrText")
+                or record.get("text")
+                or record.get("text_enriched")
+                or record.get("description")
+                or label
+            )
+            return {
+                "source_type": source_type,
+                "source_id": source_id,
+                "label": str(label or source_id),
+                "citation": citation,
+                "snippet": condense(snippet, 650),
+                "page_numbers": record.get("page_numbers") or [],
+                "clause_number": record.get("clause_number"),
+                "letter_no": record.get("letterNo"),
+                "allowed_use": reference.get("allowed_use") or ("clause" if source_type == "clause" else "fact"),
+                "metadata": {
+                    "source_origin": f"authoritative:{collection_name}",
+                    "verification_status": "verified",
+                    "authoritative_revision_id": record.get("current_version_id") or record.get("version_id"),
+                    "authoritative_updated_at": record.get("updated_at"),
+                    "authoritative_sha256": record.get("sha256"),
+                },
+            }
+        return None
 
     def _ledger_row(self, ref: Dict[str, Any], idx: int) -> Dict[str, Any]:
         citation = ref.get("citation") or ref.get("clause_number") or ref.get("letter_no") or ref.get("label")
@@ -662,7 +881,7 @@ class ArbitrationContextBuilder:
                     "clause_number": ", ".join(_string_list(row.get("clause_ids"))) or None,
                     "letter_no": None,
                     "verification_status": row.get("readiness_status") or row.get("approval_status") or "approved",
-                    "is_user_supplied": True,
+                    "is_user_supplied": False,
                     "source_origin": f"case_{slug}",
                     "matrix_row_id": row.get("_id"),
                     "quality_flags": [],
@@ -675,7 +894,11 @@ class ArbitrationContextBuilder:
                         "calculation_id": row.get("calculation_id"),
                         "amount_or_days": row.get("amount_or_days"),
                         "new_matter": row.get("new_matter"),
-                        "tribunal_permission_required": row.get("tribunal_permission_required"),
+                        "permission_required": row.get("permission_required"),
+                        "permission_obtained": row.get("permission_obtained"),
+                        "permission_source_id": row.get("permission_source_id"),
+                        "permission_approved_by": row.get("permission_approved_by"),
+                        "permission_approved_at": row.get("permission_approved_at"),
                     },
                     "source_hash": "",
                 }
