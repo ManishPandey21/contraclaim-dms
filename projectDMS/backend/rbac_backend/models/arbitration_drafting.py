@@ -7,7 +7,61 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+PRIVILEGED_MATRIX_FIELDS = {
+    "approved",
+    "approved_at",
+    "approved_by",
+    "approval_log",
+    "approval_status",
+    "human_approval_status",
+    "last_review_action",
+    "last_reviewed_at",
+    "last_reviewed_by",
+    "permission_approved_at",
+    "permission_approved_by",
+    "permission_obtained",
+    "permission_source_id",
+    "projection_hash",
+    "projection_read_only",
+    "projection_source",
+    "readiness_status",
+    "rejected_at",
+    "rejected_by",
+    "review_completed_roles",
+    "review_status",
+    "source_paragraph_response_id",
+    "verified",
+    "verification_status",
+}
+
+ALLOWED_AGENT_OPTIONS = {
+    "acknowledgement_dates",
+    "agent_mode",
+    "agent_model",
+    "amendment_leave_required",
+    "cause_of_action_date",
+    "chronology_limit",
+    "claim_limit",
+    "clause_limit",
+    "clause_vector_limit",
+    "document_limit",
+    "exhibit_prefix",
+    "final_bill_date",
+    "include_review_sources",
+    "interest_from",
+    "interest_period_days",
+    "interest_rate",
+    "interest_to",
+    "limitation_period_years",
+    "pleading_timetable",
+    "pre_arbitration_steps",
+    "quantum_limit",
+    "rejection_date",
+    "sequence",
+}
 
 
 class ArbitrationDraftType(str, Enum):
@@ -149,6 +203,23 @@ class ArbitrationBundleFormat(str, Enum):
     PDF = "pdf"
 
 
+class ArbitrationWorkflowStatus(str, Enum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    AWAITING_DOCUMENT_SELECTION = "awaiting_document_selection"
+    AWAITING_USER_DIRECTION = "awaiting_user_direction"
+    AWAITING_MATRIX_REVIEW = "awaiting_matrix_review"
+    AWAITING_READINESS_APPROVAL = "awaiting_readiness_approval"
+    AWAITING_PLAN_APPROVAL = "awaiting_plan_approval"
+    AWAITING_LEGAL_REVIEW = "awaiting_legal_review"
+    AWAITING_DRAFT_APPROVAL = "awaiting_draft_approval"
+    AWAITING_EXPORT_AUTHORIZATION = "awaiting_export_authorization"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    FALLBACK_V2 = "fallback_v2"
+
+
 class MatrixApprovalStatus(str, Enum):
     DRAFT = "draft"
     NEEDS_REVIEW = "needs_review"
@@ -249,12 +320,35 @@ class ArbitrationMatrixRowCreate(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_privileged_review_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            supplied = PRIVILEGED_MATRIX_FIELDS.intersection(value)
+            if "status" in value and str(value.get("status") or "").lower() in {
+                "approved",
+                "ready",
+                "verified",
+            }:
+                supplied.add("status")
+            if supplied:
+                raise ValueError(
+                    "Matrix review fields are server-controlled; use the dedicated review endpoint: "
+                    + ", ".join(sorted(supplied))
+                )
+        return value
+
 
 class ArbitrationMatrixRowUpdate(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
     draft_id: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_privileged_review_fields(cls, value: Any) -> Any:
+        return ArbitrationMatrixRowCreate._reject_privileged_review_fields(value)
 
 
 class ArbitrationMatrixReviewRequest(BaseModel):
@@ -266,6 +360,11 @@ class ArbitrationMatrixReviewRequest(BaseModel):
     due_at: Optional[datetime] = None
 
     model_config = ConfigDict(use_enum_values=True)
+
+
+class ArbitrationRejoinderPermissionRequest(BaseModel):
+    permission_source_id: str = Field(..., min_length=1, max_length=200)
+    permission_notes: Optional[str] = Field(default=None, max_length=4000)
 
 
 class ArbitrationMatrixRow(BaseModel):
@@ -315,9 +414,53 @@ class ArbitrationReadinessResponse(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
 
+class ArbitrationReadinessApprovalRequest(BaseModel):
+    draft_id: Optional[str] = None
+    draft_type: Optional[ArbitrationDraftType] = None
+    reviewer_role: MatrixReviewerRole = MatrixReviewerRole.LEGAL
+    comment: Optional[str] = Field(default=None, max_length=4000)
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class ArbitrationApprovalReceipt(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
+    gate: str
+    case_id: str
+    draft_id: Optional[str] = None
+    draft_type: ArbitrationDraftType
+    organization_id: Optional[str] = None
+    project_id: str
+    matrix_revision_set_id: str
+    matrix_revision_hash: str
+    evidence_snapshot_hash: str
+    artifact_hash: str
+    decision: str = "approved"
+    approver_id: str
+    approver_role: str
+    comment: Optional[str] = None
+    approved_at: datetime = Field(default_factory=datetime.utcnow)
+    invalidated_at: Optional[datetime] = None
+    invalidated_by: Optional[str] = None
+    invalidation_reason: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
+
+
 class ArbitrationAgentRunRequest(BaseModel):
     draft_id: Optional[str] = None
     options: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("options")
+    @classmethod
+    def _reject_privileged_or_unknown_options(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        options = dict(value or {})
+        if "auto_approve" in options:
+            raise ValueError("options.auto_approve is prohibited; agents cannot approve arbitration artifacts")
+        unknown = sorted(set(options).difference(ALLOWED_AGENT_OPTIONS))
+        if unknown:
+            raise ValueError("Unsupported arbitration agent options: " + ", ".join(unknown))
+        return options
 
 
 class ArbitrationAgentRun(BaseModel):
@@ -435,6 +578,8 @@ class ArbitrationParagraphResponse(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     draft_id: Optional[str] = None
     source_pleading_document_id: Optional[str] = None
+    source_pleading_version_id: Optional[str] = None
+    source_pleading_version_hash: Optional[str] = None
     source_pleading_type: PleadingSourceType
     source_paragraph_number: str
     source_paragraph_text: str
@@ -450,6 +595,7 @@ class ArbitrationParagraphResponse(BaseModel):
 
 class ArbitrationParagraphResponseCreate(BaseModel):
     source_pleading_document_id: Optional[str] = None
+    source_pleading_version_id: Optional[str] = None
     source_pleading_type: PleadingSourceType
     source_paragraph_number: str
     source_paragraph_text: str
@@ -458,6 +604,16 @@ class ArbitrationParagraphResponseCreate(BaseModel):
     response_reason: Optional[str] = None
     supporting_source_ids: List[str] = Field(default_factory=list)
     missing_evidence: List[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class ArbitrationParagraphResponseUpdate(BaseModel):
+    response_type: ParagraphResponseType
+    response_text: Optional[str] = Field(default=None, max_length=8000)
+    response_reason: Optional[str] = Field(default=None, max_length=8000)
+    supporting_source_ids: List[str] = Field(default_factory=list, max_length=200)
+    missing_evidence: List[str] = Field(default_factory=list, max_length=200)
 
     model_config = ConfigDict(use_enum_values=True)
 
@@ -528,6 +684,10 @@ class ArbitrationDraft(ArbitrationDraftBase):
     updated_at: Optional[datetime] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
+    approved_version_id: Optional[str] = None
+    approved_version: Optional[int] = None
+    approved_version_hash: Optional[str] = None
+    readiness_approval_receipt_id: Optional[str] = None
     exported_by: Optional[str] = None
     exported_at: Optional[datetime] = None
 
@@ -552,6 +712,9 @@ class ArbitrationDraftVersion(BaseModel):
     ai_prompt_version: Optional[str] = None
     model: Optional[str] = None
     generation_run_id: Optional[str] = None
+    parent_version_id: Optional[str] = None
+    parent_version: Optional[int] = None
+    version_hash: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -612,6 +775,7 @@ class ArbitrationGenerateRequest(BaseModel):
 
 class PleadingImportRequest(BaseModel):
     source_pleading_document_id: Optional[str] = None
+    source_pleading_version_id: Optional[str] = None
     source_pleading_type: PleadingSourceType
     text: str = Field(..., min_length=1)
 
@@ -625,3 +789,114 @@ class PleadingImportRequest(BaseModel):
 
 class ReturnForRevisionRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=4000)
+
+
+class ArbitrationOpponentPleadingSelection(BaseModel):
+    draft_id: str
+    version_id: str
+
+
+class ArbitrationWorkflowCreateRequest(BaseModel):
+    draft_id: Optional[str] = None
+    pleading_type: ArbitrationDraftType
+    selected_document_ids: List[str] = Field(default_factory=list, max_length=500)
+    opponent_draft_id: Optional[str] = None
+    opponent_version_id: Optional[str] = None
+    opponent_pleadings: List[ArbitrationOpponentPleadingSelection] = Field(default_factory=list, max_length=4)
+    requested_engine: Optional[str] = None
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class ArbitrationWorkflowAccepted(BaseModel):
+    run_id: str
+    case_id: str
+    draft_id: Optional[str] = None
+    engine: str
+    rollout_mode: str
+    status: ArbitrationWorkflowStatus
+    current_node: str
+    next_action: str
+    state_version: int
+    created_at: datetime
+
+    model_config = ConfigDict(use_enum_values=True)
+
+
+class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
+    pleading_type: ArbitrationDraftType
+    graph_version: str
+    state_schema_version: int
+    progress: int = Field(default=0, ge=0, le=100)
+    blockers: List[Dict[str, Any]] = Field(default_factory=list)
+    required_human_role: Optional[str] = None
+    fallback_available: bool = False
+    last_checkpoint_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    document_manifest_hash: Optional[str] = None
+    opponent_pleading_snapshot_hash: Optional[str] = None
+    evidence_snapshot_hash: Optional[str] = None
+    matrix_revision_set_id: Optional[str] = None
+    matrix_revision_hash: Optional[str] = None
+    readiness_artifact_hash: Optional[str] = None
+    plan_id: Optional[str] = None
+    plan_hash: Optional[str] = None
+    draft_version_id: Optional[str] = None
+    draft_version_hash: Optional[str] = None
+    validation_status: Optional[str] = None
+    validation_blockers: List[Dict[str, Any]] = Field(default_factory=list)
+    approval_receipt_ids: Dict[str, str] = Field(default_factory=dict)
+    targeted_questions: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ArbitrationWorkflowResumeRequest(BaseModel):
+    state_version: int = Field(..., ge=1)
+    gate: str = Field(..., min_length=1, max_length=100)
+    decision: str = Field(default="continue", max_length=100)
+    artifact_hash: Optional[str] = Field(default=None, max_length=128)
+    selected_document_ids: List[str] = Field(default_factory=list, max_length=500)
+    answers: Dict[str, str] = Field(default_factory=dict)
+    directions: Optional[str] = Field(default=None, max_length=8000)
+
+
+class ArbitrationWorkflowApprovalRequest(BaseModel):
+    state_version: int = Field(..., ge=1)
+    decision: str = Field(default="approved", pattern="^(approved|rejected|returned)$")
+    artifact_hash: str = Field(..., min_length=16, max_length=128)
+    reviewer_role: str = Field(..., min_length=1, max_length=100)
+    comment: Optional[str] = Field(default=None, max_length=4000)
+
+
+class ArbitrationWorkflowCancelRequest(BaseModel):
+    state_version: int = Field(..., ge=1)
+    reason: str = Field(..., min_length=1, max_length=1000)
+
+
+class ArbitrationWorkflowFallbackRequest(ArbitrationWorkflowCancelRequest):
+    pass
+
+
+class ArbitrationPlan(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
+    run_id: str
+    case_id: str
+    draft_id: Optional[str] = None
+    version: int = 1
+    plan_hash: str
+    status: str = "needs_review"
+    issues: List[Dict[str, Any]] = Field(default_factory=list)
+    positions: List[Dict[str, Any]] = Field(default_factory=list)
+    legal_basis: List[Dict[str, Any]] = Field(default_factory=list)
+    burden_of_proof: List[Dict[str, Any]] = Field(default_factory=list)
+    anticipated_arguments: List[Dict[str, Any]] = Field(default_factory=list)
+    causation_theory: List[Dict[str, Any]] = Field(default_factory=list)
+    quantum_theory: List[Dict[str, Any]] = Field(default_factory=list)
+    evidentiary_gaps: List[Dict[str, Any]] = Field(default_factory=list)
+    relief_requested: List[Dict[str, Any]] = Field(default_factory=list)
+    section_structure: List[Dict[str, Any]] = Field(default_factory=list)
+    source_mapping: List[Dict[str, Any]] = Field(default_factory=list)
+    decisions: Dict[str, Any] = Field(default_factory=dict)
+    created_by: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(populate_by_name=True)

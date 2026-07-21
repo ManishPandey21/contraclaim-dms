@@ -105,6 +105,41 @@ export interface ArbitrationDraftVersion {
   created_at?: string;
 }
 
+export interface ArbitrationWorkflowState {
+  run_id: string;
+  case_id: string;
+  draft_id?: string | null;
+  pleading_type: ArbitrationDraftType;
+  engine: string;
+  rollout_mode: string;
+  status: string;
+  current_node: string;
+  next_action: string;
+  state_version: number;
+  progress: number;
+  blockers: Array<Record<string, unknown>>;
+  required_human_role?: string | null;
+  fallback_available: boolean;
+  document_manifest_hash?: string | null;
+  matrix_revision_hash?: string | null;
+  readiness_artifact_hash?: string | null;
+  plan_hash?: string | null;
+  draft_version_hash?: string | null;
+  validation_status?: string | null;
+  validation_blockers?: Array<Record<string, unknown>>;
+  approval_receipt_ids?: Record<string, string>;
+  targeted_questions?: Array<{ question_id: string; prompt: string; required?: boolean }>;
+}
+
+export interface ArbitrationWorkflowCreatePayload {
+  draft_id?: string | null;
+  pleading_type: ArbitrationDraftType;
+  selected_document_ids?: string[];
+  opponent_draft_id?: string | null;
+  opponent_version_id?: string | null;
+  opponent_pleadings?: Array<{ draft_id: string; version_id: string }>;
+}
+
 export async function listArbitrationDrafts(params: Record<string, unknown> = {}) {
   const { data } = await api.get<ArbitrationDraft[]>("/arbitration/drafts", { params });
   return data;
@@ -147,23 +182,42 @@ export async function regenerateArbitrationSection(
   return data;
 }
 
-export async function importDefenceParagraphs(draftId: string, text: string) {
+export async function importDefenceParagraphs(
+  draftId: string,
+  text: string,
+  source?: { documentId: string; versionId: string },
+) {
   const { data } = await api.post(`/arbitration/drafts/${draftId}/paragraph-responses/import-defence`, {
     source_pleading_type: "statement_of_defence",
+    source_pleading_document_id: source?.documentId,
+    source_pleading_version_id: source?.versionId,
     text,
   });
   return data;
 }
 
-export async function importSocParagraphs(draftId: string, text: string) {
+export async function importSocParagraphs(
+  draftId: string,
+  text: string,
+  source?: { documentId: string; versionId: string },
+) {
   const { data } = await api.post(`/arbitration/drafts/${draftId}/paragraph-responses/import-soc`, {
     source_pleading_type: "statement_of_claim",
+    source_pleading_document_id: source?.documentId,
+    source_pleading_version_id: source?.versionId,
     text,
   });
   return data;
 }
 
 export async function exportArbitrationDraft(draftId: string, format: "docx" | "pdf") {
+  const { data } = await api.get(`/arbitration/drafts/${draftId}/preview/${format}`, {
+    responseType: "blob",
+  });
+  return data as Blob;
+}
+
+export async function exportArbitrationFilingDraft(draftId: string, format: "docx" | "pdf") {
   const { data } = await api.get(`/arbitration/drafts/${draftId}/export/${format}`, {
     responseType: "blob",
   });
@@ -216,5 +270,75 @@ export async function addArbitrationDraftReferences(draftId: string, references:
 
 export async function removeArbitrationDraftReference(draftId: string, referenceId: string) {
   const { data } = await api.delete<ArbitrationDraft>(`/arbitration/drafts/${draftId}/references/${referenceId}`);
+  return data;
+}
+
+export async function updateArbitrationParagraphResponse(
+  draftId: string,
+  responseId: string,
+  payload: Record<string, unknown>,
+) {
+  const { data } = await api.patch(
+    `/arbitration/drafts/${draftId}/paragraph-responses/${responseId}`,
+    payload,
+  );
+  return data;
+}
+
+export async function createArbitrationWorkflow(
+  caseId: string,
+  payload: ArbitrationWorkflowCreatePayload,
+  idempotencyKey: string,
+) {
+  const { data } = await api.post<ArbitrationWorkflowState>(
+    `/arbitration/cases/${caseId}/workflows`,
+    payload,
+    { headers: { "Idempotency-Key": idempotencyKey } },
+  );
+  return data;
+}
+
+export async function getArbitrationWorkflowState(caseId: string, runId: string) {
+  const { data } = await api.get<ArbitrationWorkflowState>(
+    `/arbitration/cases/${caseId}/workflows/${runId}/state`,
+  );
+  return data;
+}
+
+export async function getArbitrationWorkflowEvents(caseId: string, runId: string) {
+  const { data } = await api.get<Array<Record<string, unknown>>>(
+    `/arbitration/cases/${caseId}/workflows/${runId}/events`,
+  );
+  return data;
+}
+
+export async function resumeArbitrationWorkflow(
+  caseId: string,
+  runId: string,
+  payload: Record<string, unknown>,
+) {
+  const { data } = await api.post<ArbitrationWorkflowState>(
+    `/arbitration/cases/${caseId}/workflows/${runId}/resume`, payload,
+  );
+  return data;
+}
+
+export async function approveArbitrationWorkflowGate(
+  caseId: string,
+  runId: string,
+  gate: string,
+  payload: { state_version: number; artifact_hash: string; reviewer_role: string; decision?: string; comment?: string },
+) {
+  const { data } = await api.post<ArbitrationWorkflowState>(
+    `/arbitration/cases/${caseId}/workflows/${runId}/approvals/${gate}`, payload,
+  );
+  return data;
+}
+
+export async function cancelArbitrationWorkflow(caseId: string, runId: string, stateVersion: number, reason: string) {
+  const { data } = await api.post<ArbitrationWorkflowState>(
+    `/arbitration/cases/${caseId}/workflows/${runId}/cancel`,
+    { state_version: stateVersion, reason },
+  );
   return data;
 }

@@ -217,6 +217,18 @@ class Settings(BaseSettings):
     DRAFT_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="DRAFT_ENGINE_PRODUCTION_ACCEPTED")
     DRAFT_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="DRAFT_ENGINE_MAX_CHECKPOINT_BYTES")
     DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="DRAFT_ENGINE_CHECKPOINT_RETENTION_DAYS")
+    ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2", validation_alias="ARBITRATION_ENGINE_DEFAULT")
+    ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off", validation_alias="ARBITRATION_ENGINE_ROLLOUT_MODE")
+    ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
+    ARBITRATION_ENGINE_CANARY_TENANT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_TENANT_IDS")
+    ARBITRATION_ENGINE_CANARY_PROJECT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_PROJECT_IDS")
+    ARBITRATION_ENGINE_GRAPH_VERSION: str = Field(default="v1", validation_alias="ARBITRATION_ENGINE_GRAPH_VERSION")
+    ARBITRATION_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="ARBITRATION_ENGINE_STATE_SCHEMA_VERSION")
+    ARBITRATION_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="ARBITRATION_ENGINE_PRODUCTION_ACCEPTED")
+    ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES")
+    ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS")
+    ARBITRATION_ENGINE_RETRY_BUDGET: int = Field(default=3, ge=0, le=20, validation_alias="ARBITRATION_ENGINE_RETRY_BUDGET")
+    ARBITRATION_REVIEWER_ROLE_MATRIX: str = Field(default="", validation_alias="ARBITRATION_REVIEWER_ROLE_MATRIX")
     
     # FalkorDB / RedisGraph configuration
     FALKORDB_URL: str = Field(default="redis://localhost:6380", validation_alias="FALKORDB_URL")
@@ -512,6 +524,16 @@ class Settings(BaseSettings):
             raise ValueError("DRAFT_ENGINE_DEFAULT must be v2 or langgraph_v3")
         if draft_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
             raise ValueError("DRAFT_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
+        arbitration_engine_default = str(
+            getattr(self, "ARBITRATION_ENGINE_DEFAULT", "arbitration_v2") or "arbitration_v2"
+        ).lower()
+        arbitration_rollout = str(
+            getattr(self, "ARBITRATION_ENGINE_ROLLOUT_MODE", "off") or "off"
+        ).lower()
+        if arbitration_engine_default not in {"arbitration_v2", "langgraph_v1"}:
+            raise ValueError("ARBITRATION_ENGINE_DEFAULT must be arbitration_v2 or langgraph_v1")
+        if arbitration_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
+            raise ValueError("ARBITRATION_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
 
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":
@@ -519,6 +541,10 @@ class Settings(BaseSettings):
             if draft_rollout == "primary" and not self.DRAFT_ENGINE_PRODUCTION_ACCEPTED:
                 production_errors.append(
                     "DRAFT_ENGINE_PRODUCTION_ACCEPTED=true is required before primary LangGraph cutover"
+                )
+            if arbitration_rollout == "primary" and not self.ARBITRATION_ENGINE_PRODUCTION_ACCEPTED:
+                production_errors.append(
+                    "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=true is required before primary arbitration LangGraph cutover"
                 )
             if self.ALLOW_DEV_HEADERS:
                 production_errors.append("ALLOW_DEV_HEADERS must be false in production")

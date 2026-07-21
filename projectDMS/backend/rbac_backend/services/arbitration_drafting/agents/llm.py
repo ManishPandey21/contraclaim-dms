@@ -27,12 +27,14 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ....config.document_processing_config import DocumentProcessingConfig
 from ....retrieval.generator import LLMGenerator
 from .deterministic import (
     DeterministicArbitrationAgent,
+    _actor_id,
     _collection,
     _condense,
     _document_title,
@@ -42,6 +44,7 @@ from .deterministic import (
     _string_list,
     _verified,
 )
+from ..paragraph_positions import sync_paragraph_position_projection
 
 logger = logging.getLogger(__name__)
 
@@ -146,8 +149,6 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
         super().__init__(db=db, case=case, draft_id=draft_id, options=options, current_user=current_user)
         self.model_name = resolve_llm_model(options)
         self.generator = generator or LLMGenerator(DocumentProcessingConfig(openai_model=self.model_name))
-        if str(options.get("auto_approve") or "").lower() in {"1", "true", "yes", "approved"}:
-            self.warnings.append("auto_approve is ignored in LLM agent mode; generated rows require human review.")
 
     @property
     def available(self) -> bool:
@@ -162,6 +163,8 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
             "approval_status": "needs_review",
             "readiness_status": "needs_review",
             "human_approval_status": "needs_review",
+            "review_status": "needs_review",
+            "review_completed_roles": [],
         }
         if matrix_slug == "issue-matrix":
             defaults["status"] = "needs_review"
@@ -479,7 +482,6 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
                 "Rejoinder reply agent found no imported Statement of Defence paragraphs on this draft."
             )
             return
-        next_no = len(await self._matrix_rows("rejoinder-matrix")) + 1
         for row in await self._generate_rows(agent_type, REJOINDER_INSTRUCTION, sources):
             number = str(row["source_id"])
             reply = self._clean(row.get("claimant_reply"), 800)
@@ -489,27 +491,56 @@ class LLMArbitrationAgent(DeterministicArbitrationAgent):
                 )
                 continue
             new_matter = bool(row.get("new_matter"))
-            body = {
-                "source_sod_para": number,
-                "rejoinder_no": next_no,
-                "nature_of_defence": self._clean(row.get("nature_of_defence"), 200),
-                "claimant_reply": reply,
+            paragraph = by_id[number]
+            now = datetime.utcnow()
+            paragraph_update = {
+                "response_type": "deny",
+                "response_text": reply,
+                "response_reason": self._clean(row.get("nature_of_defence"), 200),
                 "reply_to_counterclaim": self._clean(row.get("reply_to_counterclaim"), 600),
                 "new_matter": new_matter,
-                # A rejoinder that raises new matter needs tribunal leave; flag it so
-                # the readiness gate and validator block it until permission is recorded.
-                "tribunal_permission_required": new_matter,
+                "permission_required": new_matter,
+                "permission_obtained": False,
+                "permission_source_id": None,
+                "permission_approved_by": None,
+                "permission_approved_at": None,
+                "permission_notes": None,
+                "missing_evidence": paragraph.get("missing_evidence") or ["Supporting response evidence not selected."],
+                "last_material_editor_id": _actor_id(self.current_user),
+                "updated_by": _actor_id(self.current_user),
+                "updated_at": now,
             }
-            inserted = await self._insert_matrix_row(
-                "rejoinder-matrix",
-                body,
-                unique={"source_sod_para": number},
-                agent_type=agent_type,
-                source_id=number,
-                label=f"Reply to SoD para {number}",
+            updated = await _collection(self.db, "arbitration_paragraph_responses").find_one_and_update(
+                {"_id": paragraph["_id"], "draft_id": self.draft_id},
+                {"$set": paragraph_update},
+                return_document=True,
             )
-            if inserted:
-                next_no += 1
+            projection = await sync_paragraph_position_projection(
+                self.db,
+                {
+                    "_id": self.draft_id,
+                    "case_id": self.case_id,
+                    "draft_type": "rejoinder",
+                    "organization_id": self.case.get("organization_id"),
+                    "project_id": self.case.get("project_id"),
+                    "contract_id": self.case.get("contract_id"),
+                },
+                updated or {**paragraph, **paragraph_update},
+                actor_id=_actor_id(self.current_user),
+            )
+            self.source_ids.add(number)
+            if projection:
+                self.created_records.append(
+                    {
+                        "agent_type": agent_type,
+                        "matrix": "rejoinder-matrix",
+                        "collection": "arbitration_rejoinder_matrix",
+                        "row_id": projection.get("_id"),
+                        "label": f"Reply to SoD para {number}",
+                        "source_id": number,
+                        "projection_source_id": paragraph.get("_id"),
+                    }
+                )
             if new_matter:
                 self.warnings.append(
                     f"Rejoinder reply to SoD paragraph {number} raises new matter; tribunal permission is required."

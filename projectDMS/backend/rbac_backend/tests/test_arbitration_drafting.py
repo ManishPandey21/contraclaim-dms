@@ -3,6 +3,7 @@ import io
 import json
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -11,9 +12,14 @@ from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationAgentRunRequest,
     ArbitrationDraftCreate,
     ArbitrationDisputeType,
+    ArbitrationGenerateRequest,
+    ArbitrationMatrixRowCreate,
+    ArbitrationMatrixRowUpdate,
     ArbitrationMatrixReviewRequest,
+    ArbitrationParagraphResponseUpdate,
     ArbitrationPartyRole,
     ArbitrationDraftType,
+    GenerationRunType,
 )
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
 from backend.rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
@@ -29,9 +35,23 @@ from backend.rbac_backend.services.arbitration_drafting.agents import llm as llm
 from backend.rbac_backend.models.arbitration_drafting import ArbitrationSelectedReferenceCreate
 from backend.rbac_backend.services.arbitration_drafting.service import (
     ArbitrationDraftingService,
+    immutable_version_hash,
     stable_generation_input_hash,
 )
 from backend.rbac_backend.services.arbitration_drafting.validator import ArbitrationDraftValidator
+from backend.rbac_backend.services.arbitration_drafting.engines.policy import (
+    ArbitrationEngineSelector,
+    canonical_workflow_request_hash,
+)
+from backend.rbac_backend.services.arbitration_drafting.engines.v2 import ArbitrationV2WorkflowEngine
+from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import validate_checkpoint_state
+from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ArbitrationWorkflowDomain
+from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
+    enforce_author_approver_separation,
+    enforce_gate_role,
+)
+from backend.rbac_backend.services.arbitration_drafting.workflow_validation import ArbitrationValidationOrchestrator
+from backend.rbac_backend.models.arbitration_drafting import ArbitrationWorkflowCreateRequest
 
 
 class _FakeCursor:
@@ -62,6 +82,10 @@ class _FakeCollection:
 
     async def find_one(self, query=None, *args, **kwargs):
         rows = await self.find(query).to_list()
+        sort = kwargs.get("sort")
+        if sort:
+            for key, direction in reversed(sort):
+                rows.sort(key=lambda row: row.get(key) or 0, reverse=direction < 0)
         return rows[0] if rows else None
 
     async def insert_one(self, row):
@@ -80,8 +104,15 @@ class _FakeCollection:
 
     async def update_one(self, query=None, update=None, *args, **kwargs):
         row = await self.find_one(query)
+        if row is None and kwargs.get("upsert"):
+            row = dict(query or {})
+            row.update((update or {}).get("$setOnInsert") or {})
+            self.rows.append(row)
         if row and update and "$set" in update:
             row.update(update["$set"])
+        if row and update and "$max" in update:
+            for key, value in update["$max"].items():
+                row[key] = max(int(row.get(key) or 0), int(value))
         return type("UpdateResult", (), {"matched_count": 1 if row else 0, "modified_count": 1 if row else 0})()
 
     async def update_many(self, query=None, update=None, *args, **kwargs):
@@ -95,8 +126,15 @@ class _FakeCollection:
 
     async def find_one_and_update(self, query=None, update=None, *args, **kwargs):
         row = await self.find_one(query)
+        if row is None and kwargs.get("upsert"):
+            row = dict(query or {})
+            row.update((update or {}).get("$setOnInsert") or {})
+            self.rows.append(row)
         if row and update and "$set" in update:
             row.update(update["$set"])
+        if row and update and "$inc" in update:
+            for key, value in update["$inc"].items():
+                row[key] = int(row.get(key) or 0) + int(value)
         return row
 
     def _matches(self, row, query):
@@ -112,6 +150,10 @@ class _FakeCollection:
                 continue
             if isinstance(expected, dict) and "$ne" in expected:
                 if actual == expected["$ne"]:
+                    return False
+                continue
+            if isinstance(expected, dict) and "$nin" in expected:
+                if actual in expected["$nin"]:
                     return False
                 continue
             if actual != expected:
@@ -225,6 +267,13 @@ class _FakeDb:
         self.arbitration_readiness_checks = _FakeCollection([])
         self.arbitration_agent_runs = _FakeCollection([])
         self.arbitration_bundle_exports = _FakeCollection([])
+        self.arbitration_workflow_approvals = _FakeCollection([])
+        self.arbitration_export_authorizations = _FakeCollection([])
+        self.arbitration_workflow_runs = _FakeCollection([])
+        self.arbitration_workflow_snapshots = _FakeCollection([])
+        self.arbitration_workflow_effects = _FakeCollection([])
+        self.arbitration_workflow_events = _FakeCollection([])
+        self.arbitration_plans = _FakeCollection([])
         self.arbitration_drafts = _FakeCollection(
             [
                 {
@@ -252,6 +301,7 @@ class _FakeDb:
                 }
             ]
         )
+        self.arbitration_draft_version_counters = _FakeCollection([])
         self.arbitration_selected_references = _FakeCollection([])
         self.arbitration_claim_heads = _FakeCollection([])
         self.arbitration_paragraph_responses = _FakeCollection([])
@@ -259,6 +309,22 @@ class _FakeDb:
         self.tasks = _FakeCollection([])
         self.documents = _FakeCollection(
             [
+                {
+                    "_id": "doc-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "subject": "Delay notice",
+                    "filename": "delay-notice.txt",
+                    "filepath_local": __file__,
+                },
+                {
+                    "_id": "doc-evidence-1",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "subject": "Authoritative site access letter",
+                    "filename": "site-access.txt",
+                    "summary": "Authoritative record of late access.",
+                },
                 {
                     "_id": "doc-agent-1",
                     "organization_id": "org-1",
@@ -317,6 +383,36 @@ class _FakeUser:
     email = "user@example.test"
 
 
+def _authorize_filing_fixture(db: _FakeDb) -> None:
+    service = ArbitrationCaseWorkspaceService(db)
+    version = db.arbitration_draft_versions.rows[0]
+    version.update({"validation_status": "passed", "missing_evidence": [], "sections": [{"key": "body", "heading": "Body", "body": version["full_markdown"]}]})
+    version["version_hash"] = immutable_version_hash(version)
+    draft = db.arbitration_drafts.rows[0]
+    draft.update(
+        {
+            "status": "approved",
+            "is_locked": True,
+            "approved_version_id": version["_id"],
+            "approved_version": version["version"],
+            "approved_version_hash": version["version_hash"],
+        }
+    )
+    artifact = asyncio.run(service._readiness_artifact_state(db.arbitration_cases.rows[0], "statement_of_claim"))
+    db.arbitration_workflow_approvals.rows.append(
+        {
+            "_id": "readiness-receipt-1",
+            "gate": "readiness",
+            "case_id": "case-1",
+            "draft_type": "statement_of_claim",
+            "matrix_revision_hash": artifact["matrix_revision_hash"],
+            "evidence_snapshot_hash": artifact["evidence_snapshot_hash"],
+            "artifact_hash": artifact["artifact_hash"],
+            "approved_at": "2026-07-21T00:00:00",
+        }
+    )
+
+
 def test_arbitration_draft_create_accepts_rejoinder_payload():
     payload = ArbitrationDraftCreate(
         organization_id="org-1",
@@ -329,6 +425,142 @@ def test_arbitration_draft_create_accepts_rejoinder_payload():
 
     assert payload.draft_type == "rejoinder"
     assert payload.party_role == "claimant"
+
+
+def test_agent_auto_approve_and_unknown_options_are_rejected():
+    with pytest.raises(ValueError, match="auto_approve is prohibited"):
+        ArbitrationAgentRunRequest(options={"auto_approve": True})
+    with pytest.raises(ValueError, match="Unsupported arbitration agent options"):
+        ArbitrationAgentRunRequest(options={"approve_everything": True})
+
+
+def test_matrix_review_fields_are_rejected_and_server_defaults_to_needs_review():
+    with pytest.raises(ValueError, match="server-controlled"):
+        ArbitrationMatrixRowCreate(approval_status="approved")
+    with pytest.raises(ValueError, match="server-controlled"):
+        ArbitrationMatrixRowUpdate(readiness_status="ready")
+
+    db = _FakeDb()
+    row = asyncio.run(
+        ArbitrationCaseWorkspaceService(db).create_matrix_row(
+            "case-1",
+            "issue-matrix",
+            ArbitrationMatrixRowCreate(issue="Whether EOT is due"),
+            _FakeUser(),
+        )
+    )
+    assert row["approval_status"] == "needs_review"
+    assert row["verification_status"] == "needs_review"
+    assert row["readiness_status"] == "needs_review"
+    assert row["status"] == "needs_review"
+
+
+def test_prepare_from_case_copies_only_approved_matrix_rows():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.extend(
+        [
+            {
+                "_id": "claim-approved",
+                "case_id": "case-1",
+                "claim_head": "Approved EOT claim",
+                "approval_status": "approved",
+                "readiness_status": "ready",
+            },
+            {
+                "_id": "claim-review",
+                "case_id": "case-1",
+                "claim_head": "Unreviewed cost claim",
+                "approval_status": "needs_review",
+            },
+        ]
+    )
+    result = asyncio.run(ArbitrationCaseWorkspaceService(db).prepare_draft_from_case("draft-1", _FakeUser()))
+    assert result["references_added"] == 2  # approved document + approved clause
+    assert result["claim_heads_added"] == 1
+    assert db.arbitration_claim_heads.rows[0]["description"] == "Approved EOT claim"
+    assert all(ref.get("source_id") != "doc-review" for ref in db.arbitration_selected_references.rows)
+
+
+def test_matrix_change_invalidates_revision_bound_readiness_receipt():
+    db = _FakeDb()
+    service = ArbitrationCaseWorkspaceService(db)
+    artifact = asyncio.run(service._readiness_artifact_state(db.arbitration_cases.rows[0], "statement_of_claim"))
+    db.arbitration_workflow_approvals.rows.append(
+        {
+            "_id": "receipt-current",
+            "gate": "readiness",
+            "case_id": "case-1",
+            "draft_type": "statement_of_claim",
+            **artifact,
+            "approved_at": "2026-07-21T00:00:00",
+        }
+    )
+    asyncio.run(
+        service.create_matrix_row(
+            "case-1",
+            "issue-matrix",
+            ArbitrationMatrixRowCreate(issue="New material issue"),
+            _FakeUser(),
+        )
+    )
+    receipt = db.arbitration_workflow_approvals.rows[0]
+    assert receipt["invalidated_at"] is not None
+    assert receipt["invalidation_reason"] == "matrix_dependency_changed"
+    assert db.arbitration_cases.rows[0]["readiness_approval_receipt_id"] is None
+
+
+def test_standalone_draft_can_preview_but_cannot_be_approved_or_filed():
+    db = _FakeDb()
+    db.arbitration_drafts.rows[0]["case_id"] = None
+    service = ArbitrationDraftingService(db)
+    preview = asyncio.run(service.preview_export("draft-1", "docx", _FakeUser()))
+    with zipfile.ZipFile(io.BytesIO(preview), "r") as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+    assert "DRAFT — NOT APPROVED FOR FILING" in document_xml
+    with pytest.raises(HTTPException) as approve_error:
+        asyncio.run(service.approve("draft-1", _FakeUser()))
+    assert approve_error.value.status_code == 409
+    with pytest.raises(HTTPException) as export_error:
+        asyncio.run(service.export("draft-1", "docx", _FakeUser()))
+    assert export_error.value.status_code == 409
+
+
+def test_section_regeneration_preserves_complete_parent_and_lineage():
+    db = _FakeDb()
+    service = ArbitrationDraftingService(db)
+    context = asyncio.run(service._context("draft-1", _FakeUser()))
+    parent_generated = service.generator.generate(context)
+    parent = db.arbitration_draft_versions.rows[0]
+    parent.update(
+        {
+            "sections": parent_generated["sections"],
+            "full_markdown": parent_generated["full_markdown"],
+            "source_ledger": context["source_ledger"],
+            "missing_evidence": parent_generated["missing_evidence"],
+            "annexures": parent_generated["annexures"],
+            "validation_status": "needs_review",
+        }
+    )
+    parent_keys = [section["key"] for section in parent["sections"]]
+
+    async def allow_generation(*args, **kwargs):
+        return None
+
+    service.case_workspace.assert_case_ready_for_draft = allow_generation
+    result = asyncio.run(
+        service.generate(
+            "draft-1",
+            ArbitrationGenerateRequest(section_key="introduction", additional_instruction="Clarify the summary."),
+            _FakeUser(),
+            run_type=GenerationRunType.SECTION_REGENERATION,
+        )
+    )
+    latest = result["latest_version"]
+    assert [section["key"] for section in latest["sections"]] == parent_keys
+    assert latest["parent_version_id"] == parent["_id"]
+    assert latest["parent_version"] == parent["version"]
+    run = db.arbitration_generation_runs.rows[-1]
+    assert run["run_type"] == "section_regeneration"
 
 
 def test_rejoinder_generator_requires_imported_sod_paragraphs():
@@ -688,7 +920,7 @@ def test_context_builder_groups_case_matrix_sources_for_generation():
 def test_orchestrator_creates_traceable_matrix_rows_and_is_idempotent():
     db = _FakeDb()
     case = db.arbitration_cases.rows[0]
-    payload = ArbitrationAgentRunRequest(options={"auto_approve": True})
+    payload = ArbitrationAgentRunRequest()
 
     first = asyncio.run(
         run_arbitration_agent(
@@ -730,7 +962,7 @@ def test_case_workspace_run_agent_persists_run_and_readiness():
         service.run_agent(
             "case-1",
             "document-indexing",
-            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            ArbitrationAgentRunRequest(),
             _FakeUser(),
         )
     )
@@ -745,7 +977,7 @@ def test_case_workspace_run_agent_persists_run_and_readiness():
         service.run_agent(
             "case-1",
             "document-indexing",
-            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            ArbitrationAgentRunRequest(),
             _FakeUser(),
         )
     )
@@ -769,7 +1001,7 @@ def test_queue_agent_run_persists_queued_status_and_background_job(monkeypatch):
         service.queue_agent_run(
             "case-1",
             "orchestrator",
-            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            ArbitrationAgentRunRequest(),
             _FakeUser(),
         )
     )
@@ -791,7 +1023,7 @@ def test_execute_queued_agent_run_updates_existing_run(monkeypatch):
         service.queue_agent_run(
             "case-1",
             "document-indexing",
-            ArbitrationAgentRunRequest(options={"auto_approve": True}),
+            ArbitrationAgentRunRequest(),
             _FakeUser(),
         )
     )
@@ -800,7 +1032,7 @@ def test_execute_queued_agent_run_updates_existing_run(monkeypatch):
             "case-1",
             queued["_id"],
             "document-indexing",
-            {"options": {"auto_approve": True}},
+            {"options": {}},
             {"id": "user-1", "email": "user@example.test"},
         )
     )
@@ -913,6 +1145,7 @@ def test_matrix_review_approval_requires_all_roles_then_closes_task():
 
 def test_filing_bundle_zip_contains_manifest_matrices_and_drafts():
     db = _FakeDb()
+    _authorize_filing_fixture(db)
     service = ArbitrationCaseWorkspaceService(db)
 
     content = asyncio.run(service.export_filing_bundle_zip("case-1"))
@@ -933,7 +1166,9 @@ def test_filing_bundle_zip_contains_manifest_matrices_and_drafts():
 
 
 def test_filing_bundle_docx_and_pdf_exports_are_real_files():
-    service = ArbitrationCaseWorkspaceService(_FakeDb())
+    db = _FakeDb()
+    _authorize_filing_fixture(db)
+    service = ArbitrationCaseWorkspaceService(db)
 
     docx_content = asyncio.run(service.export_filing_bundle_docx("case-1"))
     pdf_content = asyncio.run(service.export_filing_bundle_pdf("case-1"))
@@ -944,6 +1179,7 @@ def test_filing_bundle_docx_and_pdf_exports_are_real_files():
 
 def test_queue_filing_bundle_export_persists_status_and_content(monkeypatch):
     db = _FakeDb()
+    _authorize_filing_fixture(db)
     service = ArbitrationCaseWorkspaceService(db)
 
     async def fake_submit(name, func, *args, **kwargs):
@@ -1018,7 +1254,7 @@ def test_llm_agent_creates_needs_review_rows_from_mocked_output(monkeypatch):
             db,
             case,
             "claim-identification",
-            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm", "auto_approve": True}),
+            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm"}),
             current_user=_FakeUser(),
         )
     )
@@ -1027,10 +1263,9 @@ def test_llm_agent_creates_needs_review_rows_from_mocked_output(monkeypatch):
     assert result["model"] != "deterministic-matrix-agent"
     assert result["errors"] == []
     row = next(r for r in db.arbitration_claim_matrix.rows if r.get("source_claim_id") == "claim-1")
-    # LLM output can never be auto-approved.
+    # LLM output can never be approved by an agent.
     assert row["approval_status"] == "needs_review"
     assert row["verification_status"] == "needs_review"
-    assert any("auto_approve is ignored" in warning for warning in result["warnings"])
     assert row["claim_head"] == "Extension of time"
     # Amount is grounded from the claim register, not the model output.
     assert row["amount"] == 1000000.0
@@ -1106,7 +1341,7 @@ def test_llm_mode_falls_back_to_deterministic_when_unavailable(monkeypatch):
             db,
             case,
             "claim-identification",
-            payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm", "auto_approve": True}),
+                payload=ArbitrationAgentRunRequest(options={"agent_mode": "llm"}),
             current_user=_FakeUser(),
         )
     )
@@ -1496,11 +1731,11 @@ def test_context_warns_on_expert_amount_mismatch_and_unaddressed_concurrency():
 
 def test_filing_bundle_zip_embeds_exhibit_files_in_volumes(tmp_path):
     db = _FakeDb()
+    _authorize_filing_fixture(db)
     exhibit_file = tmp_path / "delay-notice.pdf"
     exhibit_file.write_bytes(b"%PDF-1.4 exhibit-bytes")
-    db.documents.rows.append(
-        {"_id": "doc-1", "filename": "delay-notice.pdf", "filepath_local": str(exhibit_file)}
-    )
+    source = next(row for row in db.documents.rows if row.get("_id") == "doc-1")
+    source.update({"filename": "delay-notice.pdf", "filepath_local": str(exhibit_file)})
     service = ArbitrationCaseWorkspaceService(db)
 
     content = asyncio.run(service.export_filing_bundle_zip("case-1"))
@@ -1692,7 +1927,7 @@ def test_quantum_agent_computes_interest_and_claim_summary_rollup():
             case,
             "quantum",
             payload=ArbitrationAgentRunRequest(
-                options={"auto_approve": True, "interest_rate": 12, "interest_period_days": 365}
+                options={"interest_rate": 12, "interest_period_days": 365}
             ),
             current_user=_FakeUser(),
         )
@@ -1725,7 +1960,7 @@ def test_quantum_agent_computes_interest_and_claim_summary_rollup():
 def test_quantum_agent_rollup_is_stable_on_rerun():
     db = _FakeDb()
     case = db.arbitration_cases.rows[0]
-    options = {"auto_approve": True, "interest_rate": 12, "interest_period_days": 365}
+    options = {"interest_rate": 12, "interest_period_days": 365}
 
     asyncio.run(
         run_arbitration_agent(db, case, "quantum", payload=ArbitrationAgentRunRequest(options=options), current_user=_FakeUser())
@@ -1753,7 +1988,7 @@ def test_quantum_agent_links_cost_head_and_delay_events():
             db,
             case,
             "quantum",
-            payload=ArbitrationAgentRunRequest(options={"auto_approve": True}),
+                payload=ArbitrationAgentRunRequest(),
             current_user=_FakeUser(),
         )
     )
@@ -1893,7 +2128,7 @@ def test_validator_strengthened_rejoinder_new_matter_detection():
                 {
                     "source_key": "S2",
                     "citation": "SoD para 12",
-                    "metadata": {"new_matter": True, "tribunal_permission_required": None},
+                    "metadata": {"new_matter": True, "permission_required": True, "permission_obtained": False},
                 }
             ]
         },
@@ -1905,13 +2140,11 @@ def test_validator_strengthened_rejoinder_new_matter_detection():
         context, "The Claimant seeks a further sum by way of compensation. [S1: x]"
     )
     assert any("may introduce a new claim" in item for item in report["approval_blockers"])
-    # Structured detection: matrix row flagged new_matter without tribunal permission blocks approval.
-    assert any("tribunal permission flag" in item for item in report["approval_blockers"])
+    assert any("without an obtained permission receipt" in item for item in report["approval_blockers"])
 
-    # Permission flag present -> the structured blocker clears.
-    context["matrix_context"]["rejoinder_replies"][0]["metadata"]["tribunal_permission_required"] = True
+    context["matrix_context"]["rejoinder_replies"][0]["metadata"]["permission_obtained"] = True
     report = ArbitrationDraftValidator().validation_report(context, "The defences are denied. [S1: x]")
-    assert not any("tribunal permission flag" in item for item in report["approval_blockers"])
+    assert not any("without an obtained permission receipt" in item for item in report["approval_blockers"])
     assert not any("may introduce a new claim" in item for item in report["approval_blockers"])
 
 
@@ -2009,8 +2242,8 @@ def test_validator_flags_ungated_draft_without_case_link():
 
     report = ArbitrationDraftValidator().validation_report(base_context, "Draft body. [S1: X]")
     assert any("not linked to an arbitration case" in item for item in report["warnings"])
-    # A warning, not a blocker: standalone drafts stay usable but flagged.
-    assert not any("not linked to an arbitration case" in item for item in report["approval_blockers"])
+    # Working generation remains available, but final approval is blocked.
+    assert any("not linked to an arbitration case" in item for item in report["approval_blockers"])
 
     gated = {**base_context, "draft": {**base_context["draft"], "case_id": "case-1"}}
     report = ArbitrationDraftValidator().validation_report(gated, "Draft body. [S1: X]")
@@ -2198,10 +2431,248 @@ def test_llm_rejoinder_reply_agent_creates_matrix_rows_flagging_new_matter(monke
     assert set(rows) == {"12", "20"}
     assert rows["12"]["new_matter"] is False
     assert rows["20"]["new_matter"] is True
-    # New matter must carry the tribunal-permission flag so the gate blocks it.
-    assert rows["20"]["tribunal_permission_required"] is True
+    assert rows["20"]["permission_required"] is True
+    assert rows["20"]["permission_obtained"] is False
+    assert all(row["projection_read_only"] is True for row in rows.values())
+    assert all(row["projection_source"] == "paragraph_response" for row in rows.values())
+    paragraph_rows = {row["source_paragraph_number"]: row for row in db.arbitration_paragraph_responses.rows}
+    assert paragraph_rows["12"]["response_text"].startswith("Access was handed over late")
+    assert paragraph_rows["20"]["new_matter"] is True
     assert rows["12"]["approval_status"] == "needs_review"
     assert any("raises new matter" in w for w in result["warnings"])
+
+
+def test_paragraph_response_is_authoritative_and_matrix_projection_is_read_only():
+    db = _FakeDb()
+    draft = db.arbitration_drafts.rows[0]
+    draft["draft_type"] = "statement_of_defence"
+    db.arbitration_paragraph_responses.rows.append(
+        {
+            "_id": "para-soc-1",
+            "draft_id": "draft-1",
+            "source_pleading_type": "statement_of_claim",
+            "source_paragraph_number": "7",
+            "source_paragraph_text": "The Respondent failed to provide access.",
+            "response_type": "require_proof",
+        }
+    )
+    service = ArbitrationDraftingService(db)
+
+    updated = asyncio.run(
+        service.update_paragraph_response(
+            "draft-1",
+            "para-soc-1",
+            ArbitrationParagraphResponseUpdate(
+                response_type="deny",
+                response_text="Denied because access was provided on the contractual date.",
+                response_reason="The contemporaneous handover record records timely access.",
+            ),
+            _FakeUser(),
+        )
+    )
+
+    assert updated["response_type"] == "deny"
+    assert len(db.arbitration_defence_matrix.rows) == 1
+    projection = db.arbitration_defence_matrix.rows[0]
+    assert projection["source_paragraph_response_id"] == "para-soc-1"
+    assert projection["source_soc_para"] == "7"
+    assert projection["defence"].startswith("Denied because")
+    assert projection["projection_read_only"] is True
+    assert projection["approval_status"] == "needs_review"
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ArbitrationCaseWorkspaceService(db).update_matrix_row(
+                "case-1",
+                "defence-matrix",
+                projection["_id"],
+                ArbitrationMatrixRowUpdate(defence="Client-side overwrite"),
+                _FakeUser(),
+            )
+        )
+    assert exc.value.status_code == 409
+
+
+def test_draft_bound_paragraph_position_matrix_cannot_be_created_directly():
+    db = _FakeDb()
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            ArbitrationCaseWorkspaceService(db).create_matrix_row(
+                "case-1",
+                "rejoinder-matrix",
+                ArbitrationMatrixRowCreate(draft_id="draft-1", source_sod_para="4", claimant_reply="Direct duplicate"),
+                _FakeUser(),
+            )
+        )
+    assert exc.value.status_code == 409
+
+
+def test_arbitration_engine_policy_is_server_authoritative_and_deterministic():
+    config = SimpleNamespace(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="canary",
+        ARBITRATION_ENGINE_CANARY_PERCENT=0,
+        ARBITRATION_ENGINE_CANARY_TENANT_IDS="org-1",
+        ARBITRATION_ENGINE_CANARY_PROJECT_IDS="",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=False,
+    )
+    payload = ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim", requested_engine="arbitration_v2")
+    first_hash = canonical_workflow_request_hash(case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1")
+    second_hash = canonical_workflow_request_hash(case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1")
+    decision = ArbitrationEngineSelector(config).select(tenant_id="org-1", project_id="project-1", request_hash=first_hash)
+    assert first_hash == second_hash
+    assert decision.engine == "langgraph_v1"
+    assert decision.reason == "canary_match"
+
+
+def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+    first = asyncio.run(
+        engine.create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key="idem-1", request_hash=request_hash
+        )
+    )
+    second = asyncio.run(
+        engine.create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key="idem-1", request_hash=request_hash
+        )
+    )
+    assert first["_id"] == second["_id"]
+    assert len(db.arbitration_workflow_runs.rows) == 1
+    assert len(db.arbitration_workflow_snapshots.rows) == 5
+    assert {row["kind"] for row in db.arbitration_workflow_snapshots.rows} == {
+        "input", "document_manifest", "matrix_revision_set", "evidence_manifest", "material_questions"
+    }
+    manifest = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "document_manifest")
+    assert manifest["payload"]["documents"][0]["document_id"] == "doc-1"
+    assert "ocrText" not in json.dumps(manifest, default=str)
+
+
+def test_workflow_transition_rejects_stale_state_version():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim")
+    run = asyncio.run(
+        engine.create_workflow("case-1", payload, _FakeUser(), idempotency_key=None, request_hash="hash-1")
+    )
+    updated = asyncio.run(
+        engine.repository.transition(run["_id"], 1, {"status": "running"}, event="resumed")
+    )
+    assert updated["state_version"] == 2
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(engine.repository.transition(run["_id"], 1, {"status": "running"}, event="stale"))
+    assert exc_info.value.status_code == 409
+
+
+def test_checkpoint_state_rejects_raw_legal_content():
+    validate_checkpoint_state(
+        {
+            "run_id": "run-1",
+            "case_id": "case-1",
+            "input_snapshot_id": "snapshot-1",
+            "input_snapshot_hash": "abc",
+            "execution_status": "running",
+        }
+    )
+    with pytest.raises(ValueError, match="Unsafe arbitration checkpoint fields"):
+        validate_checkpoint_state({"run_id": "run-1", "evidence_text": "raw legal evidence"})
+
+
+def test_parallel_and_serial_matrix_analysis_have_identical_revision_hash():
+    db = _FakeDb()
+    domain = ArbitrationWorkflowDomain(db)
+    run = {"_id": "run-parity", "case_id": "case-1", "draft_id": "draft-1", "pleading_type": "statement_of_claim"}
+    parallel = asyncio.run(domain.analyze(run, parallel=True))
+    serial = asyncio.run(domain.analyze(run, parallel=False))
+    assert parallel["revision_hash"] == serial["revision_hash"]
+    assert parallel["revision_set_id"] == serial["revision_set_id"]
+
+
+def test_sod_workflow_requires_immutable_opponent_version():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1", pleading_type="statement_of_defence", selected_document_ids=["doc-1"]
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(engine.create_workflow("case-1", payload, _FakeUser(), idempotency_key=None, request_hash="sod-hash"))
+    assert exc_info.value.status_code == 422
+
+
+def test_rejoinder_workflow_pins_both_soc_and_sod_versions():
+    db = _FakeDb()
+    db.arbitration_drafts.rows.extend(
+        [
+            {"_id": "draft-sod", "case_id": "case-1", "draft_type": "statement_of_defence"},
+            {"_id": "draft-rejoinder", "case_id": "case-1", "draft_type": "rejoinder"},
+        ]
+    )
+    db.arbitration_draft_versions.rows.append(
+        {"_id": "version-sod", "draft_id": "draft-sod", "version": 1, "version_hash": "sod-version-hash"}
+    )
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-rejoinder",
+        pleading_type="rejoinder",
+        selected_document_ids=["doc-1"],
+        opponent_pleadings=[
+            {"draft_id": "draft-1", "version_id": "version-1"},
+            {"draft_id": "draft-sod", "version_id": "version-sod"},
+        ],
+    )
+    run = asyncio.run(
+        ArbitrationV2WorkflowEngine(db).create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key=None, request_hash="rejoinder-hash"
+        )
+    )
+    snapshot = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "opponent_pleading")
+    assert {item["draft_type"] for item in snapshot["payload"]["pleadings"]} == {
+        "statement_of_claim", "statement_of_defence"
+    }
+    assert run["opponent_pleading_snapshot_hash"] == snapshot["snapshot_hash"]
+
+
+def test_reviewer_policy_rejects_wrong_role_and_author_self_approval():
+    user = _FakeUser()
+    with pytest.raises(HTTPException) as role_error:
+        enforce_gate_role("export", "legal_reviewer", user)
+    assert role_error.value.status_code == 403
+    with pytest.raises(HTTPException) as separation_error:
+        enforce_author_approver_separation(user, ["user-1"], gate="plan")
+    assert separation_error.value.status_code == 409
+
+
+def test_atomic_version_allocator_advances_from_existing_maximum():
+    db = _FakeDb()
+    repository = ArbitrationDraftingService(db).repo
+    async def allocate():
+        return await asyncio.gather(repository.next_version("draft-1"), repository.next_version("draft-1"))
+
+    allocated = asyncio.run(allocate())
+    assert sorted(allocated) == [2, 3]
+
+
+def test_validation_remediation_is_bounded_and_does_not_change_draft_content():
+    version = {
+        "full_markdown": "Unsupported assertion [SRC-99]",
+        "source_ledger": [],
+        "structured_output": {"approval_blockers": ["Evidence is required"]},
+        "validation_status": "blocked",
+    }
+    orchestrator = ArbitrationValidationOrchestrator()
+    report = asyncio.run(orchestrator.evaluate(version))
+    remediated = orchestrator.bounded_remediation(report)
+    assert remediated["human_review_required"] is True
+    assert remediated["remediation_cycle"] <= remediated["max_remediation_cycles"]
+    assert version["full_markdown"] == "Unsupported assertion [SRC-99]"
 
 
 def test_deterministic_rejoinder_reply_remains_review_only():

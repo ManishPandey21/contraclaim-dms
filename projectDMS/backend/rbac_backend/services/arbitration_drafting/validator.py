@@ -68,11 +68,24 @@ class ArbitrationDraftValidator:
         # Fail-visible: this is a standing warning (legal review required), not a
         # silent pass — the gated path is linking the draft to a case workspace.
         if not context.get("draft", {}).get("case_id"):
-            warnings.append(
+            message = (
                 "Draft is not linked to an arbitration case: the matrix readiness gate "
                 "(jurisdiction, limitation, quantum, expert alignment) was not applied. "
                 "Link the draft to a case workspace before filing."
             )
+            warnings.append(message)
+            approval_blockers.append(message)
+
+        unverified_selected = [
+            row
+            for row in source_ledger
+            if row.get("is_user_supplied")
+            or str(row.get("verification_status") or "").lower() in {"draft", "needs_review", "pending", "selected", "unverified"}
+        ]
+        if unverified_selected:
+            message = "Draft source ledger contains user-supplied or unverified selected evidence that is not admissible for filing."
+            warnings.append(message)
+            approval_blockers.append(message)
 
         matrix_context = context.get("matrix_context") or {}
         self._duplication_warnings(matrix_context, warnings)
@@ -89,19 +102,25 @@ class ArbitrationDraftValidator:
                 message = "Rejoinder may introduce a new claim; mark for legal review before filing."
                 warnings.append(message)
                 approval_blockers.append(message)
-            # Structured check: rejoinder matrix rows flagged as new matter must
-            # carry the tribunal-permission flag before the draft can be approved.
             for row in matrix_context.get("rejoinder_replies") or []:
                 metadata = row.get("metadata") or {}
-                if metadata.get("new_matter") and not metadata.get("tribunal_permission_required"):
+                if (
+                    metadata.get("new_matter")
+                    and metadata.get("permission_required")
+                    and not metadata.get("permission_obtained")
+                ):
                     message = (
                         f"Rejoinder matrix row {row.get('citation') or row.get('source_id')} introduces new matter "
-                        "without a tribunal permission flag; obtain leave or remove the new matter."
+                        "without an obtained permission receipt; obtain leave or remove the new matter."
                     )
                     warnings.append(message)
                     approval_blockers.append(message)
 
         for response in paragraphs:
+            if not response.get("source_pleading_document_id") or not response.get("source_pleading_version_id") or not response.get("source_pleading_version_hash"):
+                approval_blockers.append(
+                    f"Paragraph {response.get('source_paragraph_number')} is not bound to an immutable opponent pleading version."
+                )
             if response.get("response_type") in {"deny", "part_admit_part_deny", "not_admitted", "misconceived", "incorrect", "misleading"}:
                 if not response.get("supporting_source_ids") and "[Evidence required]" not in str(response.get("response_text") or response.get("response_reason") or ""):
                     warnings.append(

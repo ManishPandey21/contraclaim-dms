@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import re
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,7 @@ from ...models.arbitration_drafting import (
     ArbitrationGenerateRequest,
     ArbitrationParagraphResponse,
     ArbitrationParagraphResponseCreate,
+    ArbitrationParagraphResponseUpdate,
     ArbitrationSelectedReference,
     ArbitrationSelectedReferenceCreate,
     GenerationRunStatus,
@@ -36,8 +38,10 @@ from .exporter import ArbitrationDraftExporter
 from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_BY_DRAFT_TYPE, SOURCE_POLICY
 from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
-from .repository import ArbitrationDraftingRepository
+from .repository import ArbitrationDraftingRepository, _jsonable
 from .validator import ArbitrationDraftValidator
+from .approval_policy import enforce_author_approver_separation
+from .paragraph_positions import replace_paragraph_position_projections, sync_paragraph_position_projection
 
 
 def _actor_id(user: Any) -> Optional[str]:
@@ -94,6 +98,21 @@ def stable_generation_input_hash(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def immutable_version_hash(version: Dict[str, Any]) -> str:
+    payload = {
+        "draft_id": version.get("draft_id"),
+        "version": version.get("version"),
+        "parent_version_id": version.get("parent_version_id"),
+        "full_markdown": version.get("full_markdown") or "",
+        "sections": version.get("sections") or [],
+        "source_ledger": version.get("source_ledger") or [],
+        "validation_status": version.get("validation_status"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 class ArbitrationDraftingService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -113,10 +132,14 @@ class ArbitrationDraftingService:
             created_by=_actor_id(current_user),
             updated_at=datetime.utcnow(),
         ).model_dump(by_alias=True)
+        trusted_refs = await self.context_builder.rehydrate_selected_references(
+            draft,
+            [ref.model_dump() for ref in payload.selected_references],
+        )
         await self.repo.create_draft(draft)
         refs = [
-            ArbitrationSelectedReference(**ref.model_dump(), draft_id=draft["_id"], selected_by=_actor_id(current_user)).model_dump(by_alias=True)
-            for ref in payload.selected_references
+            ArbitrationSelectedReference(**ref, draft_id=draft["_id"], selected_by=_actor_id(current_user)).model_dump(by_alias=True)
+            for ref in trusted_refs
         ]
         heads = [ArbitrationClaimHead(**head.model_dump(), draft_id=draft["_id"]).model_dump(by_alias=True) for head in payload.claim_heads]
         await self.repo.replace_references(draft["_id"], refs)
@@ -201,15 +224,27 @@ class ArbitrationDraftingService:
         current_user: Any,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
-        rows = [
-            ArbitrationSelectedReference(
-                **payload.model_dump(),
-                draft_id=draft_id,
-                selected_by=_actor_id(current_user),
-            ).model_dump(by_alias=True)
-            for payload in payloads
-        ]
+        trusted_refs = await self.context_builder.rehydrate_selected_references(
+            draft,
+            [payload.model_dump() for payload in payloads],
+        )
+        rows = []
+        for payload in trusted_refs:
+            trusted = dict(payload)
+            trusted.pop("draft_id", None)
+            trusted.pop("_id", None)
+            rows.append(
+                ArbitrationSelectedReference(
+                    **trusted,
+                    draft_id=draft_id,
+                    selected_by=_actor_id(current_user),
+                ).model_dump(by_alias=True)
+            )
         await self.repo.add_references(draft_id, rows)
+        if draft.get("case_id"):
+            await self.case_workspace.invalidate_readiness_approvals(
+                str(draft.get("case_id")), "selected_evidence_changed", current_user
+            )
         await self._emit(
             "references_added",
             draft,
@@ -223,6 +258,10 @@ class ArbitrationDraftingService:
         deleted = await self.repo.delete_reference(draft_id, reference_id)
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected reference not found")
+        if draft.get("case_id"):
+            await self.case_workspace.invalidate_readiness_approvals(
+                str(draft.get("case_id")), "selected_evidence_changed", current_user
+            )
         await self._emit("reference_removed", draft, current_user, after={"reference_id": reference_id})
         return await self.detail(draft_id)
 
@@ -232,11 +271,38 @@ class ArbitrationDraftingService:
         payload: PleadingImportRequest,
         current_user: Any,
     ) -> Dict[str, Any]:
-        await self._load_unlocked(draft_id)
+        draft = await self._load_unlocked(draft_id)
+        source_version_id = payload.source_pleading_version_id
+        source_version_hash = None
+        if payload.source_pleading_document_id:
+            source = await self.db.documents.find_one(
+                {
+                    "_id": payload.source_pleading_document_id,
+                    "organization_id": draft.get("organization_id"),
+                    "project_id": draft.get("project_id"),
+                }
+            )
+            if source:
+                source_version_id = source_version_id or source.get("current_version_id")
+                source_version_hash = source.get("sha256") or hashlib.sha256(
+                    json.dumps({key: source.get(key) for key in ("_id", "current_version_id", "updated_at")}, sort_keys=True, default=str).encode()
+                ).hexdigest()
+            else:
+                opponent = await self.db.arbitration_drafts.find_one(
+                    {"_id": payload.source_pleading_document_id, "case_id": draft.get("case_id"), "deleted_at": {"$exists": False}}
+                )
+                version = await self.db.arbitration_draft_versions.find_one(
+                    {"draft_id": payload.source_pleading_document_id, "_id": source_version_id}
+                ) if source_version_id else None
+                if not opponent or not version:
+                    raise HTTPException(status_code=400, detail="Opponent pleading source/version is unavailable or outside case scope")
+                source_version_hash = version.get("version_hash") or immutable_version_hash(version)
         rows = [
             ArbitrationParagraphResponse(
                 draft_id=draft_id,
                 source_pleading_document_id=payload.source_pleading_document_id,
+                source_pleading_version_id=source_version_id,
+                source_pleading_version_hash=source_version_hash,
                 source_pleading_type=payload.source_pleading_type,
                 source_paragraph_number=number,
                 source_paragraph_text=text,
@@ -247,10 +313,59 @@ class ArbitrationDraftingService:
             for number, text in self._split_paragraphs(payload.text)
         ]
         saved = await self.repo.replace_paragraph_responses(draft_id, rows)
+        await replace_paragraph_position_projections(
+            self.db,
+            draft,
+            saved,
+            actor_id=_actor_id(current_user),
+        )
         draft = await self.repo.get_draft(draft_id)
         if draft:
             await self._emit("paragraphs_imported", draft, current_user, after={"count": len(saved), "source_type": payload.source_pleading_type})
         return {"draft_id": draft_id, "count": len(saved), "paragraph_responses": saved}
+
+    async def update_paragraph_response(
+        self, draft_id: str, response_id: str, payload: ArbitrationParagraphResponseUpdate, current_user: Any
+    ) -> Dict[str, Any]:
+        draft = await self._load_unlocked(draft_id)
+        supporting_ids = sorted(set(payload.supporting_source_ids))
+        if supporting_ids:
+            selected = await self.repo.list_references(draft_id)
+            ledger = await self.context_builder.rehydrate_selected_references(
+                draft,
+                [row for row in selected if str(row.get("source_id")) in supporting_ids],
+            )
+            if {str(row.get("source_id")) for row in ledger} != set(supporting_ids):
+                raise HTTPException(status_code=400, detail="One or more paragraph response sources are not authoritative and scoped")
+        missing = list(payload.missing_evidence)
+        if payload.response_type == ParagraphResponseType.DENY and not (payload.response_reason or "").strip():
+            raise HTTPException(status_code=422, detail="A denial requires a reason")
+        if not supporting_ids and payload.response_type in {ParagraphResponseType.DENY, ParagraphResponseType.REQUIRE_PROOF}:
+            missing = missing or ["Supporting response evidence not selected."]
+        updated = await self.repo.update_paragraph_response(
+            draft_id,
+            response_id,
+            {
+                **payload.model_dump(mode="json"),
+                "supporting_source_ids": supporting_ids,
+                "missing_evidence": missing,
+                "last_material_editor_id": _actor_id(current_user),
+                "updated_by": _actor_id(current_user),
+                "updated_at": datetime.utcnow(),
+            },
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Paragraph response not found")
+        await sync_paragraph_position_projection(
+            self.db,
+            draft,
+            updated,
+            actor_id=_actor_id(current_user),
+        )
+        if draft.get("case_id"):
+            await self.case_workspace.invalidate_readiness_approvals(str(draft["case_id"]), "paragraph_response_changed", current_user)
+        await self._emit("paragraph_response_updated", draft, current_user, after={"response_id": response_id})
+        return updated
 
     async def generate(
         self,
@@ -261,13 +376,25 @@ class ArbitrationDraftingService:
         run_type: GenerationRunType = GenerationRunType.FULL_DRAFT,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
-        await self.case_workspace.assert_case_ready_for_draft(draft)
+        await self.case_workspace.assert_case_ready_for_draft(draft, allow_standalone_working_draft=True)
         self._validate_section_key(draft, payload.section_key)
         context = await self._context(
             draft_id,
             current_user,
             include_unverified_graph_links=payload.include_unverified_graph_links,
         )
+        latest = await self.repo.latest_version(draft_id)
+        if run_type == GenerationRunType.SECTION_REGENERATION:
+            if not payload.section_key:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="section_key is required for section regeneration")
+            if not latest:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="A complete parent version is required before section regeneration",
+                )
+            context["source_ledger"] = self._merge_source_ledgers(
+                latest.get("source_ledger") or [], context.get("source_ledger") or []
+            )
         input_hash = stable_generation_input_hash(
             context,
             section_key=payload.section_key,
@@ -276,7 +403,6 @@ class ArbitrationDraftingService:
             run_type=run_type,
             draft_mode=payload.draft_mode,
         )
-        latest = await self.repo.latest_version(draft_id)
         latest_structured = (latest or {}).get("structured_output") or {}
         if latest and latest_structured.get("input_hash") == input_hash and latest_structured.get("prompt_version") == PROMPT_VERSION:
             await self._emit("generation_reused", draft, current_user, after={"version": latest.get("version"), "input_hash": input_hash})
@@ -305,6 +431,19 @@ class ArbitrationDraftingService:
             )
             if inspect.isawaitable(generated):
                 generated = await generated
+            parent_version_id = None
+            parent_version = None
+            if run_type == GenerationRunType.SECTION_REGENERATION:
+                generated = self._merge_regenerated_section(
+                    draft,
+                    context,
+                    latest or {},
+                    generated,
+                    str(payload.section_key),
+                    payload.additional_instruction,
+                )
+                parent_version_id = str((latest or {}).get("_id") or "") or None
+                parent_version = (latest or {}).get("version")
             safety_report = self.validator.validation_report(context, generated["full_markdown"])
             warnings = self._merge_warnings(context.get("context_warnings") or [], safety_report["warnings"])
             structured_output = {
@@ -334,8 +473,11 @@ class ArbitrationDraftingService:
                 ai_prompt_version=generated["ai_prompt_version"],
                 model=generated["model"],
                 generation_run_id=run["_id"],
+                parent_version_id=parent_version_id,
+                parent_version=parent_version,
                 created_by=_actor_id(current_user),
             ).model_dump(by_alias=True)
+            version["version_hash"] = immutable_version_hash(version)
             await self.repo.create_version(version)
             await self.repo.update_generation_run(
                 run["_id"],
@@ -397,6 +539,7 @@ class ArbitrationDraftingService:
             validation_status="blocked" if safety_report["approval_blockers"] else ("needs_review" if warnings else "passed"),
             created_by=_actor_id(current_user),
         ).model_dump(by_alias=True)
+        version["version_hash"] = immutable_version_hash(version)
         await self.repo.create_version(version)
         await self.repo.update_draft(draft_id, {"current_version": version_no, "updated_at": datetime.utcnow(), "updated_by": _actor_id(current_user)})
         await self._emit("version_saved", draft, current_user, after={"version": version_no})
@@ -419,12 +562,27 @@ class ArbitrationDraftingService:
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
         latest = await self.repo.latest_version(draft_id)
+        enforce_author_approver_separation(
+            current_user,
+            [draft.get("created_by"), draft.get("updated_by"), (latest or {}).get("created_by")],
+            gate="final draft approval",
+        )
         blockers = ((latest or {}).get("structured_output") or {}).get("approval_blockers") or []
         if blockers:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"message": "Legal drafting safety blockers must be resolved before approval", "blockers": blockers},
             )
+        if (latest or {}).get("validation_status") != "passed" or (latest or {}).get("missing_evidence"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Only a fully validated immutable version can be approved",
+                    "validation_status": (latest or {}).get("validation_status"),
+                    "missing_evidence": (latest or {}).get("missing_evidence") or [],
+                },
+            )
+        version_hash = (latest or {}).get("version_hash") or immutable_version_hash(latest or {})
         updated = await self.repo.update_draft(
             draft_id,
             {
@@ -432,6 +590,12 @@ class ArbitrationDraftingService:
                 "is_locked": True,
                 "approved_by": _actor_id(current_user),
                 "approved_at": datetime.utcnow(),
+                "approved_version_id": (latest or {}).get("_id"),
+                "approved_version": (latest or {}).get("version"),
+                "approved_version_hash": version_hash,
+                "readiness_approval_receipt_id": (await self.case_workspace.require_readiness_approval(
+                    await self.case_workspace.get_case(str(draft.get("case_id"))), draft
+                )).get("_id"),
                 "updated_at": datetime.utcnow(),
             },
         )
@@ -445,6 +609,11 @@ class ArbitrationDraftingService:
             {
                 "status": ArbitrationDraftStatus.UNDER_REVIEW.value,
                 "is_locked": False,
+                "approved_by": None,
+                "approved_at": None,
+                "approved_version_id": None,
+                "approved_version": None,
+                "approved_version_hash": None,
                 "updated_at": datetime.utcnow(),
                 "updated_by": _actor_id(current_user),
                 "return_reason": reason,
@@ -455,21 +624,85 @@ class ArbitrationDraftingService:
 
     async def export(self, draft_id: str, fmt: str, current_user: Any) -> bytes:
         draft = await self._load(draft_id)
-        latest = await self.repo.latest_version(draft_id)
-        if not latest:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No draft version available to export")
-        content = self.exporter.build_docx(latest) if fmt == "docx" else self.exporter.build_pdf(latest)
+        if not draft.get("case_id"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Standalone drafts can only be downloaded through the watermarked preview export",
+            )
+        if str(draft.get("status") or "") not in {
+            ArbitrationDraftStatus.APPROVED.value,
+            ArbitrationDraftStatus.EXPORTED.value,
+        } or not draft.get("is_locked"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft must be approved and locked before filing export")
+        approved_version_no = draft.get("approved_version")
+        approved_version = await self.repo.get_version(draft_id, int(approved_version_no or 0)) if approved_version_no else None
+        if not approved_version or str(approved_version.get("_id")) != str(draft.get("approved_version_id")):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved immutable draft version is unavailable")
+        version_hash = approved_version.get("version_hash") or immutable_version_hash(approved_version)
+        if version_hash != draft.get("approved_version_hash"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved draft version hash does not match")
+        if approved_version.get("validation_status") != "passed" or approved_version.get("missing_evidence"):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved draft version has unresolved validation issues")
+        case = await self.case_workspace.get_case(str(draft.get("case_id")))
+        enforce_author_approver_separation(
+            current_user,
+            [draft.get("created_by"), draft.get("updated_by"), approved_version.get("created_by")],
+            gate="filing export authorization",
+        )
+        receipt = await self.case_workspace.require_readiness_approval(case, draft)
+        audit = await self.case_workspace.citation_audit(str(draft.get("case_id")), draft_ids={draft_id})
+        if not audit.get("ok"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"message": "Citation or exhibit audit blocks filing export", "issues": audit.get("issues") or []},
+            )
+        authorization = {
+            "_id": str(uuid.uuid4()),
+            "gate": "filing_export",
+            "case_id": str(draft.get("case_id")),
+            "draft_id": draft_id,
+            "draft_version_id": approved_version.get("_id"),
+            "draft_version_hash": version_hash,
+            "readiness_approval_receipt_id": receipt.get("_id"),
+            "citation_audit_hash": hashlib.sha256(
+                json.dumps(audit, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest(),
+            "authorized_by": _actor_id(current_user),
+            "authorized_at": datetime.utcnow(),
+            "format": fmt,
+        }
+        existing_authorization = await self.db.arbitration_export_authorizations.find_one(
+            {"draft_id": draft_id, "draft_version_hash": version_hash, "format": fmt}
+        )
+        if existing_authorization:
+            authorization = existing_authorization
+        else:
+            await self.db.arbitration_export_authorizations.insert_one(_jsonable(authorization))
+        content = self.exporter.build_docx(approved_version) if fmt == "docx" else self.exporter.build_pdf(approved_version)
         await self.repo.update_draft(
             draft_id,
             {
                 "status": ArbitrationDraftStatus.EXPORTED.value,
                 "exported_by": _actor_id(current_user),
                 "exported_at": datetime.utcnow(),
+                "export_authorization_id": authorization["_id"],
                 "updated_at": datetime.utcnow(),
             },
         )
         await self._emit("exported", draft, current_user, after={"format": fmt})
         return content
+
+    async def preview_export(self, draft_id: str, fmt: str, current_user: Any) -> bytes:
+        await self._load(draft_id)
+        latest = await self.repo.latest_version(draft_id)
+        if not latest:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No draft version available to preview")
+        preview = {
+            **latest,
+            "full_markdown": "# DRAFT — NOT APPROVED FOR FILING\n\n" + str(latest.get("full_markdown") or ""),
+        }
+        await self._emit("preview_exported", await self._load(draft_id), current_user, after={"format": fmt})
+        return self.exporter.build_docx(preview) if fmt == "docx" else self.exporter.build_pdf(preview)
 
     async def get_run(self, draft_id: str, run_id: str) -> Dict[str, Any]:
         await self._load(draft_id)
@@ -562,6 +795,97 @@ class ArbitrationDraftingService:
         except Exception:
             return []
         return out
+
+    @staticmethod
+    def _merge_source_ledgers(
+        parent_ledger: List[Dict[str, Any]],
+        current_ledger: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        merged = [dict(row) for row in parent_ledger or []]
+        seen = {
+            (str(row.get("source_type") or ""), str(row.get("source_id") or ""), str(row.get("source_hash") or ""))
+            for row in merged
+        }
+        next_number = max(
+            [int(str(row.get("source_key") or "S0")[1:]) for row in merged if str(row.get("source_key") or "").startswith("S") and str(row.get("source_key"))[1:].isdigit()]
+            or [0]
+        ) + 1
+        for row in current_ledger or []:
+            key = (str(row.get("source_type") or ""), str(row.get("source_id") or ""), str(row.get("source_hash") or ""))
+            if key in seen:
+                continue
+            appended = dict(row)
+            appended["source_key"] = f"S{next_number}"
+            next_number += 1
+            merged.append(appended)
+            seen.add(key)
+        return merged
+
+    def _merge_regenerated_section(
+        self,
+        draft: Dict[str, Any],
+        context: Dict[str, Any],
+        parent: Dict[str, Any],
+        generated: Dict[str, Any],
+        section_key: str,
+        additional_instruction: Optional[str],
+    ) -> Dict[str, Any]:
+        parent_sections = [dict(section) for section in parent.get("sections") or []]
+        replacement = next(
+            (dict(section) for section in generated.get("sections") or [] if section.get("key") == section_key),
+            None,
+        )
+        if not parent_sections or replacement is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Section regeneration requires a complete parent section set and a generated replacement",
+            )
+        replaced = False
+        complete_sections: List[Dict[str, Any]] = []
+        for section in parent_sections:
+            if section.get("key") == section_key:
+                complete_sections.append(replacement)
+                replaced = True
+            else:
+                complete_sections.append(section)
+        if not replaced:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Section '{section_key}' does not exist in the immutable parent version",
+            )
+        parent_keys = [str(section.get("key")) for section in parent_sections]
+        complete_keys = [str(section.get("key")) for section in complete_sections]
+        if complete_keys != parent_keys:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Section regeneration changed parent section ordering")
+        annexures: List[Dict[str, Any]] = []
+        annexure_seen = set()
+        for annexure in [*(parent.get("annexures") or []), *(generated.get("annexures") or [])]:
+            key = (str(annexure.get("source_id") or ""), str(annexure.get("citation") or ""))
+            if key in annexure_seen:
+                continue
+            annexure_seen.add(key)
+            annexures.append(dict(annexure))
+        structured = {
+            **((parent.get("structured_output") or {})),
+            **(generated.get("structured_output") or {}),
+            "section_keys": complete_keys,
+            "section_key": section_key,
+            "section_regeneration": True,
+            "parent_version_id": parent.get("_id"),
+            "parent_version": parent.get("version"),
+        }
+        return {
+            **generated,
+            "sections": complete_sections,
+            "full_markdown": self.generator._markdown(
+                draft,
+                complete_sections,
+                context,
+                additional_instruction=additional_instruction,
+            ),
+            "structured_output": structured,
+            "annexures": annexures,
+        }
 
     def _validate_section_key(self, draft: Dict[str, Any], section_key: Optional[str]) -> None:
         if not section_key:
