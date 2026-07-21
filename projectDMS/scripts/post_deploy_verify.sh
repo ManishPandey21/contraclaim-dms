@@ -74,6 +74,7 @@ get_env() {
   if [[ -f "$BACKEND_ENV_FILE" ]]; then
     grep -E "^${key}=" "$BACKEND_ENV_FILE" | tail -n 1 | cut -d= -f2- | sed 's/^"//; s/"$//' || true
   fi
+  return 0
 }
 
 http_check() {
