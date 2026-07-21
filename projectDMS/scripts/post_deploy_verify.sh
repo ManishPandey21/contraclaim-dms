@@ -166,13 +166,7 @@ else
   warn "mongosh or DATABASE_URL unavailable; relying on backend /health/ready for MongoDB verification"
 fi
 
-redis_password=$(get_env REDIS_PASSWORD)
-redis_cmd=(redis-cli -h localhost)
-if [[ -n "$redis_password" ]]; then
-  redis_cmd+=(-a "$redis_password")
-fi
-redis_cmd+=(ping)
-if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T redis "${redis_cmd[@]}" >/tmp/redis_ping.out 2>&1; then
+if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T redis sh -lc 'if [ -n "${REDIS_PASSWORD:-}" ]; then redis-cli -a "$REDIS_PASSWORD" ping; else redis-cli ping; fi' >/tmp/redis_ping.out 2>&1; then
   pass "Redis ping succeeded"
 else
   fail "Redis ping failed"
