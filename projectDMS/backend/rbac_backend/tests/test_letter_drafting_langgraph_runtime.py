@@ -6,6 +6,7 @@ from langgraph.types import Command
 
 from rbac_backend.services.letter_drafting.drafting_queue import DraftingQueue
 from rbac_backend.services.letter_drafting.langgraph_engine import (
+    MongoDraftCheckpointStore,
     _redacted_checkpoint_values,
     build_drafting_graph,
 )
@@ -67,6 +68,35 @@ def test_checkpoint_history_redacts_unapproved_content():
 
 def test_dedicated_queue_uses_a_drafting_specific_metadata_key():
     assert DraftingQueue._job_key("run-1") == "letter_drafting_job:run-1"
+
+
+def test_mongodb_checkpoint_store_relies_on_saver_constructor_indexes(monkeypatch):
+    """langgraph-checkpoint-mongodb 0.4 creates indexes in its constructor."""
+    import rbac_backend.services.letter_drafting.langgraph_engine as runtime
+
+    created = {}
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            created["client"] = self
+
+        def close(self):
+            created["closed"] = True
+
+    class FakeSaver:
+        def __init__(self, client, **kwargs):
+            created["saver_client"] = client
+            created["saver_kwargs"] = kwargs
+
+    monkeypatch.setattr(runtime, "MongoClient", FakeClient)
+    monkeypatch.setattr(runtime, "MongoDBSaver", FakeSaver)
+    monkeypatch.setattr(runtime.settings, "DATABASE_URL", "mongodb://mongo1:27017/contraclaim")
+
+    store = MongoDraftCheckpointStore()
+    assert created["saver_client"] is created["client"]
+    assert created["saver_kwargs"]["checkpoint_collection_name"] == "letter_draft_langgraph_checkpoints"
+    store.close()
+    assert created["closed"] is True
 
 
 def test_question_and_strategy_gates_interrupt_before_prepare_execution():

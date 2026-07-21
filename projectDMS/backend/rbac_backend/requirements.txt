@@ -93,6 +93,9 @@ wrapt==1.17.3
 # package installs every optional provider and makes a clean Docker resolver
 # backtrack across unrelated cloud/HuggingFace dependencies.
 pydantic-ai-slim[openai]==1.1.0
+# pydantic-ai 1.1 imports the private ``opentelemetry._events`` module, which
+# was removed by later API releases. Keep the provider runtime importable.
+opentelemetry-api==1.37.0
 griffe==1.14.0
 bleach==6.1.0
 langchain-core==1.5.0
@@ -102,8 +105,10 @@ langchain-text-splitters==1.1.2
 langgraph==1.2.9
 langgraph-checkpoint-mongodb==0.4.0
 langchain-openai==1.0.1
-langchain-qdrant==1.1.0
-qdrant-client==1.15.1
+# 1.0 keeps the LangChain Core 1.x contract while supporting the production
+# Qdrant 1.12 server; the 1.1 package forces a newer incompatible client.
+langchain-qdrant==1.0.0
+qdrant-client==1.12.2
 llama-index-core==0.14.22
 llama-index-embeddings-openai==0.6.0
 llama-index-vector-stores-mongodb==0.10.1
