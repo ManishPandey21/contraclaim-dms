@@ -14,6 +14,12 @@ from rbac_backend.initial_data.seed_catalog import (
 from rbac_backend.migrations import MIGRATIONS, Migration, MigrationResult, MigrationRunner
 from rbac_backend.migrations.v20260705_0001_arbitration_hardening_indexes import upgrade as upgrade_arbitration_hardening
 from rbac_backend.migrations.v20260721_0002_arbitration_workflow_foundation import ensure_compatible_index
+from rbac_backend.migrations.v20260722_0001_langgraph_checkpoint_ttl_compatibility import (
+    DEFAULT_TTL_INDEX,
+    LEGACY_CHECKPOINT_TTL_INDEX,
+    TTL_SECONDS,
+    upgrade as upgrade_langgraph_ttl,
+)
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -205,3 +211,69 @@ async def test_workflow_migration_rejects_incompatible_existing_index():
             unique=True,
             background=True,
         )
+
+
+@pytest.mark.asyncio
+async def test_langgraph_ttl_migration_replaces_compatible_named_index():
+    class _TTLCollection:
+        def __init__(self, indexes=None):
+            self.indexes = dict(indexes or {})
+            self.dropped = []
+
+        async def index_information(self):
+            return self.indexes
+
+        async def drop_index(self, name):
+            self.dropped.append(name)
+            self.indexes.pop(name, None)
+
+        async def create_index(self, keys, **kwargs):
+            self.indexes[DEFAULT_TTL_INDEX] = {
+                "key": [(keys, 1)],
+                "expireAfterSeconds": kwargs["expireAfterSeconds"],
+            }
+            return DEFAULT_TTL_INDEX
+
+    class _TTLDb:
+        def __init__(self):
+            self.collections = {
+                "arbitration_langgraph_checkpoints": _TTLCollection(
+                    {
+                        LEGACY_CHECKPOINT_TTL_INDEX: {
+                            "key": [("created_at", 1)],
+                            "expireAfterSeconds": TTL_SECONDS,
+                        }
+                    }
+                ),
+                "arbitration_langgraph_checkpoint_writes": _TTLCollection(),
+            }
+
+        def __getitem__(self, name):
+            return self.collections[name]
+
+    db = _TTLDb()
+    result = await upgrade_langgraph_ttl(db, dry_run=False)
+
+    assert result.status == "applied"
+    assert db.collections["arbitration_langgraph_checkpoints"].dropped == [LEGACY_CHECKPOINT_TTL_INDEX]
+    assert DEFAULT_TTL_INDEX in db.collections["arbitration_langgraph_checkpoints"].indexes
+    assert DEFAULT_TTL_INDEX in db.collections["arbitration_langgraph_checkpoint_writes"].indexes
+
+
+@pytest.mark.asyncio
+async def test_langgraph_ttl_migration_rejects_incompatible_ttl():
+    class _TTLCollection:
+        async def index_information(self):
+            return {
+                LEGACY_CHECKPOINT_TTL_INDEX: {
+                    "key": [("created_at", 1)],
+                    "expireAfterSeconds": 60,
+                }
+            }
+
+    class _TTLDb:
+        def __getitem__(self, name):
+            return _TTLCollection()
+
+    with pytest.raises(RuntimeError, match="Incompatible checkpoint TTL index"):
+        await upgrade_langgraph_ttl(_TTLDb(), dry_run=False)

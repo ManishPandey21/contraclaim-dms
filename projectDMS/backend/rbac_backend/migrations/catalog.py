@@ -43,6 +43,10 @@ from .v20260721_0002_arbitration_workflow_foundation import DESCRIPTION as ARB_W
 from .v20260721_0002_arbitration_workflow_foundation import NAME as ARB_WORKFLOW_NAME
 from .v20260721_0002_arbitration_workflow_foundation import VERSION as ARB_WORKFLOW_VERSION
 from .v20260721_0002_arbitration_workflow_foundation import upgrade as upgrade_arbitration_workflow
+from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import DESCRIPTION as LANGGRAPH_TTL_DESCRIPTION
+from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import NAME as LANGGRAPH_TTL_NAME
+from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import VERSION as LANGGRAPH_TTL_VERSION
+from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import upgrade as upgrade_langgraph_ttl
 
 
 MIGRATIONS = [
@@ -99,5 +103,11 @@ MIGRATIONS = [
         name=ARB_WORKFLOW_NAME,
         description=ARB_WORKFLOW_DESCRIPTION,
         upgrade=upgrade_arbitration_workflow,
+    ),
+    Migration(
+        version=LANGGRAPH_TTL_VERSION,
+        name=LANGGRAPH_TTL_NAME,
+        description=LANGGRAPH_TTL_DESCRIPTION,
+        upgrade=upgrade_langgraph_ttl,
     ),
 ]
