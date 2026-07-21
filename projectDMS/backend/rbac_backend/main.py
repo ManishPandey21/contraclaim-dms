@@ -127,6 +127,7 @@ app.add_middleware(
         "X-Request-ID",
         "X-Requested-With",
         "X-Step-Up-Token",
+        "Idempotency-Key",
     ],
     expose_headers=["X-Request-ID", "Content-Disposition"],
 )
