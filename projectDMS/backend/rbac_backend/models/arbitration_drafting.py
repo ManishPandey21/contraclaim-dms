@@ -832,6 +832,8 @@ class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
     required_human_role: Optional[str] = None
     fallback_available: bool = False
     last_checkpoint_at: Optional[datetime] = None
+    checkpoint_sync_status: Optional[str] = None
+    checkpoint_sync_state_version: Optional[int] = None
     updated_at: Optional[datetime] = None
     document_manifest_hash: Optional[str] = None
     opponent_pleading_snapshot_hash: Optional[str] = None
@@ -847,6 +849,10 @@ class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
     validation_blockers: List[Dict[str, Any]] = Field(default_factory=list)
     approval_receipt_ids: Dict[str, str] = Field(default_factory=dict)
     targeted_questions: List[Dict[str, Any]] = Field(default_factory=list)
+    fallback_reason: Optional[str] = None
+    fallback_from_engine: Optional[str] = None
+    fallback_input_snapshot_id: Optional[str] = None
+    fallback_input_snapshot_hash: Optional[str] = None
 
 
 class ArbitrationWorkflowResumeRequest(BaseModel):

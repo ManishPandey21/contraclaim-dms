@@ -1,6 +1,8 @@
 # Arbitration Pleadings Workflow Audit and LangGraph Implementation Plan
 
 > Implementation status (verified 2026-07-22): P0-01 through P0-08 are implemented locally behind fail-safe v2 rollout controls; no Phase 0 code item is currently open, but production-like migration and authorization acceptance remain pending. The next functional cleanup has also started: authoritative paragraph responses now materialize server-owned, reviewable, read-only defence/rejoinder projections, closing new draft-bound duplicate writes. Historical ambiguous rows still require a conservative audit/backfill. See `ARBITRATION_LANGGRAPH_IMPLEMENTATION_PROGRESS.md` and `docs/architecture/arbitration_langgraph_operations_runbook.md`.
+>
+> Phase 2 status (implemented 2026-07-22; production-like acceptance pending): the official graph skeleton, minimal typed checkpoints, durable gates/APIs, checkpoint redaction/retention, UI polling/timeline, pre-side-effect CAS enforcement, idempotent and cumulative checkpoint recovery, passive cancellation checkpointing, recoverable checkpoint-sync markers, and immutable-snapshot-bound v2 fallback are implemented and locally tested. The acceptance requirement to kill/restart at every graph node and human gate has not yet been completed against production MongoDB; only the document-selection restart path has production evidence.
 
 **Audit date:** 2026-07-21
 **Scope:** Statement of Claim (SoC), Statement of Defence (SoD), Counterclaim, and Rejoinder
@@ -618,6 +620,8 @@ Changes:
 **Fallback:** `arbitration_v2` remains the only authoritative engine; LangGraph mode is off.
 
 ### Phase 2 — Official graph skeleton and durable human gates
+
+> Current implementation: complete in source with local gate-sequence/recovery tests. Production-like restart-at-every-node/gate, TTL-expiry, and authenticated step-up/tenant acceptance remain open; LangGraph is not primary.
 
 **Objective:** Introduce durable state without moving domain algorithms.
 

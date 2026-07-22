@@ -1,5 +1,5 @@
 import React from "react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -11,6 +11,9 @@ const listMatrixRowsMock = vi.fn();
 const listArbitrationCasesMock = vi.fn();
 const getArbitrationReadinessMock = vi.fn();
 const runArbitrationAgentMock = vi.fn();
+const createArbitrationWorkflowMock = vi.fn();
+const getArbitrationWorkflowEventsMock = vi.fn();
+const getArbitrationWorkflowStateMock = vi.fn();
 
 vi.mock("@/services/arbitration-cases-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/arbitration-cases-api")>();
@@ -28,6 +31,12 @@ vi.mock("@/services/arbitration-cases-api", async (importOriginal) => {
 vi.mock("@/services/arbitration-drafting-api", () => ({
   createArbitrationDraft: vi.fn(),
   prepareArbitrationDraftFromCase: vi.fn(),
+  createArbitrationWorkflow: (...args: unknown[]) => createArbitrationWorkflowMock(...args),
+  getArbitrationWorkflowEvents: (...args: unknown[]) => getArbitrationWorkflowEventsMock(...args),
+  getArbitrationWorkflowState: (...args: unknown[]) => getArbitrationWorkflowStateMock(...args),
+  resumeArbitrationWorkflow: vi.fn(),
+  approveArbitrationWorkflowGate: vi.fn(),
+  cancelArbitrationWorkflow: vi.fn(),
 }));
 
 vi.mock("@/services/enhanced-api", () => ({
@@ -86,6 +95,24 @@ const renderWorkspace = () =>
     </MemoryRouter>,
   );
 
+beforeAll(() => {
+  class ResizeObserverMock {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  Object.defineProperty(globalThis, "ResizeObserver", {
+    configurable: true,
+    value: ResizeObserverMock,
+  });
+  Object.defineProperties(Element.prototype, {
+    hasPointerCapture: { configurable: true, value: vi.fn(() => false) },
+    setPointerCapture: { configurable: true, value: vi.fn() },
+    releasePointerCapture: { configurable: true, value: vi.fn() },
+    scrollIntoView: { configurable: true, value: vi.fn() },
+  });
+});
+
 describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -95,6 +122,8 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     listArbitrationCasesMock.mockResolvedValue([CASE]);
     getArbitrationReadinessMock.mockResolvedValue(READINESS);
     runArbitrationAgentMock.mockResolvedValue({ agent_type: "claim-identification", created_records: [] });
+    getArbitrationWorkflowEventsMock.mockResolvedValue([]);
+    getArbitrationWorkflowStateMock.mockResolvedValue(null);
   });
 
   it("passes agent options (interest rate, mode) into agent runs from the dashboard", async () => {
@@ -162,5 +191,65 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     // The jurisdiction-specific add-row fields appear.
     expect(screen.getByText(/Check type/)).toBeInTheDocument();
     expect(screen.getByText("Limitation status")).toBeInTheDocument();
+  });
+
+  it("loads and renders the durable workflow event timeline", async () => {
+    const dashboard = {
+      ...DASHBOARD,
+      drafts: [
+        {
+          _id: "draft-1",
+          case_id: "case-1",
+          title: "EOT Statement of Claim",
+          draft_type: "statement_of_claim",
+          status: "draft",
+        },
+      ],
+    };
+    getArbitrationCaseDashboardMock.mockResolvedValue(dashboard);
+    createArbitrationWorkflowMock.mockResolvedValue({
+      run_id: "run-1",
+      case_id: "case-1",
+      draft_id: "draft-1",
+      pleading_type: "statement_of_claim",
+      engine: "langgraph_v1",
+      rollout_mode: "canary",
+      status: "awaiting_matrix_review",
+      current_node: "matrix_review_gate",
+      next_action: "review_matrices",
+      state_version: 1,
+      progress: 40,
+      blockers: [],
+      fallback_available: true,
+      matrix_revision_hash: "matrix-hash",
+    });
+    getArbitrationWorkflowEventsMock.mockResolvedValue([
+      {
+        _id: "event-1",
+        event_type: "workflow_created",
+        created_at: "2026-07-22T10:00:00Z",
+      },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={["/arbitration/cases/case-1"]}>
+        <Routes>
+          <Route path="/arbitration/cases/:caseId" element={<ArbitrationCaseWorkspacePage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(getArbitrationCaseDashboardMock).toHaveBeenCalledWith("case-1"));
+
+    const linkedDraftLabel = screen.getByText("Linked draft");
+    const linkedDraftSelect = linkedDraftLabel.parentElement?.querySelector("button");
+    expect(linkedDraftSelect).toBeTruthy();
+    await userEvent.click(linkedDraftSelect as HTMLButtonElement);
+    await userEvent.click(await screen.findByText(/EOT Statement of Claim \(Statement Of Claim\)/i));
+    await userEvent.type(screen.getByPlaceholderText("Comma-separated scoped document IDs"), "doc-1");
+    await userEvent.click(screen.getByRole("button", { name: "Start governed workflow" }));
+
+    expect(await screen.findByLabelText("Workflow timeline")).toBeInTheDocument();
+    expect(await screen.findByText(/workflow created/i)).toBeInTheDocument();
+    expect(getArbitrationWorkflowEventsMock).toHaveBeenCalledWith("case-1", "run-1");
   });
 });

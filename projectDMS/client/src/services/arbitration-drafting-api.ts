@@ -120,6 +120,8 @@ export interface ArbitrationWorkflowState {
   blockers: Array<Record<string, unknown>>;
   required_human_role?: string | null;
   fallback_available: boolean;
+  checkpoint_sync_status?: string | null;
+  checkpoint_sync_state_version?: number | null;
   document_manifest_hash?: string | null;
   matrix_revision_hash?: string | null;
   readiness_artifact_hash?: string | null;
@@ -129,6 +131,10 @@ export interface ArbitrationWorkflowState {
   validation_blockers?: Array<Record<string, unknown>>;
   approval_receipt_ids?: Record<string, string>;
   targeted_questions?: Array<{ question_id: string; prompt: string; required?: boolean }>;
+  fallback_reason?: string | null;
+  fallback_from_engine?: string | null;
+  fallback_input_snapshot_id?: string | null;
+  fallback_input_snapshot_hash?: string | null;
 }
 
 export interface ArbitrationWorkflowCreatePayload {

@@ -41,6 +41,14 @@ GATE_TRANSITIONS = {
     "export": ("completed", "complete", "completed", 100),
 }
 
+RESUMABLE_GATES = {
+    "document_selection_gate": "document_selection",
+    "material_question_gate": "material_question",
+    "matrix_review_gate": "matrix_review",
+}
+
+TERMINAL_WORKFLOW_STATUSES = {"completed", "cancelled", "failed"}
+
 
 class ArbitrationWorkflowService:
     def __init__(self, db: Any) -> None:
@@ -50,6 +58,77 @@ class ArbitrationWorkflowService:
         self.domain = ArbitrationWorkflowDomain(db)
         self.drafting = ArbitrationDraftingService(db)
         self.validation = ArbitrationValidationOrchestrator()
+
+    @staticmethod
+    def _assert_state_version(run: Dict[str, Any], expected_version: int) -> None:
+        current_version = int(run.get("state_version") or 0)
+        if current_version != int(expected_version):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Stale arbitration workflow state version",
+                    "current_state_version": current_version,
+                },
+            )
+
+    async def _sync_langgraph_checkpoint(
+        self,
+        run: Dict[str, Any],
+        update: Dict[str, Any],
+        *,
+        traverse: bool = True,
+    ) -> None:
+        if run.get("engine") != "langgraph_v1":
+            return
+        from .langgraph_engine import LangGraphArbitrationEngine
+
+        try:
+            engine = LangGraphArbitrationEngine(self.db)
+            if traverse:
+                await engine.checkpoint_transition(run, update)
+            else:
+                await engine.checkpoint_state_update(run, update)
+        except Exception as exc:
+            run.update(
+                {
+                    "checkpoint_sync_status": "pending",
+                    "checkpoint_sync_state_version": run.get("state_version"),
+                    "checkpoint_sync_error_code": type(exc).__name__,
+                }
+            )
+            await self.db.arbitration_workflow_runs.update_one(
+                {"_id": run["_id"], "state_version": run.get("state_version")},
+                {
+                    "$set": {
+                        "checkpoint_sync_status": "pending",
+                        "checkpoint_sync_state_version": run.get("state_version"),
+                        "checkpoint_sync_error_code": type(exc).__name__,
+                    }
+                },
+            )
+            await self.repository.append_event(
+                run["_id"],
+                "checkpoint_sync_pending",
+                data={"state_version": run.get("state_version"), "error_code": type(exc).__name__},
+            )
+            return
+        run.update(
+            {
+                "checkpoint_sync_status": "synced",
+                "checkpoint_sync_state_version": run.get("state_version"),
+                "checkpoint_sync_error_code": None,
+            }
+        )
+        await self.db.arbitration_workflow_runs.update_one(
+            {"_id": run["_id"], "state_version": run.get("state_version")},
+            {
+                "$set": {
+                    "checkpoint_sync_status": "synced",
+                    "checkpoint_sync_state_version": run.get("state_version"),
+                    "checkpoint_sync_error_code": None,
+                }
+            },
+        )
 
     async def create(
         self,
@@ -128,6 +207,7 @@ class ArbitrationWorkflowService:
         run = await self.repository.get_run(run_id)
         if not run or str(run.get("case_id")) != case_id:
             raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        self._assert_state_version(run, payload.state_version)
         artifact_field = GATE_ARTIFACT_FIELDS.get(gate)
         transition = GATE_TRANSITIONS.get(gate)
         if not artifact_field or not transition:
@@ -280,15 +360,12 @@ class ArbitrationWorkflowService:
             },
             event=f"{gate}_approved",
         )
-        if updated.get("engine") == "langgraph_v1":
-            flag = {
-                "document_selection": "documents_selected", "matrix_review": "matrices_approved",
-                "readiness": "readiness_approved", "plan": "plan_approved", "legal_review": "legal_review_approved",
-                "draft": "draft_approved", "export": "export_authorized",
-            }[gate]
-            from .langgraph_engine import LangGraphArbitrationEngine
-
-            await LangGraphArbitrationEngine(self.db).checkpoint_transition(updated, {flag: True})
+        flag = {
+            "document_selection": "documents_selected", "matrix_review": "matrices_approved",
+            "readiness": "readiness_approved", "plan": "plan_approved", "legal_review": "legal_review_approved",
+            "draft": "draft_approved", "export": "export_authorized",
+        }[gate]
+        await self._sync_langgraph_checkpoint(updated, {flag: True})
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event=f"{gate}_approved"
         )
@@ -298,12 +375,32 @@ class ArbitrationWorkflowService:
         run = await self.repository.get_run(run_id)
         if not run or str(run.get("case_id")) != case_id:
             raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
-        if payload.gate not in str(run.get("current_node") or ""):
+        self._assert_state_version(run, payload.state_version)
+        if str(run.get("status")) in TERMINAL_WORKFLOW_STATUSES:
+            raise HTTPException(status_code=409, detail="Terminal arbitration workflows cannot be resumed")
+        current_node = str(run.get("current_node") or "")
+        expected_gate = RESUMABLE_GATES.get(current_node)
+        if not expected_gate:
+            raise HTTPException(status_code=409, detail="Workflow is not waiting at a resumable human gate")
+        if payload.gate != expected_gate:
             raise HTTPException(status_code=409, detail="Resume gate does not match the paused workflow node")
+        if payload.selected_document_ids and current_node != "document_selection_gate":
+            raise HTTPException(status_code=422, detail="Documents can only be selected at the document selection gate")
+        if (payload.answers or payload.directions) and current_node != "material_question_gate":
+            raise HTTPException(status_code=422, detail="User directions can only be supplied at the material question gate")
+        if current_node == "document_selection_gate" and not payload.selected_document_ids:
+            raise HTTPException(status_code=422, detail="At least one scoped document is required to continue")
+        if current_node == "matrix_review_gate" and payload.decision != "refresh":
+            raise HTTPException(status_code=422, detail="Matrix review resume only supports decision=refresh")
         update: Dict[str, Any] = {"status": "running", "next_action": "poll", "required_human_role": None}
-        if str(run.get("current_node")) == "material_question_gate":
+        if current_node == "material_question_gate":
             required = {str(item.get("question_id")) for item in run.get("targeted_questions") or [] if item.get("required")}
+            submitted = {str(key) for key in (payload.answers or {})}
             supplied = {str(key) for key, value in (payload.answers or {}).items() if str(value).strip()}
+            known = {str(item.get("question_id")) for item in run.get("targeted_questions") or []}
+            unknown = submitted - known
+            if unknown:
+                raise HTTPException(status_code=422, detail={"unknown_question_ids": sorted(unknown)})
             if required - supplied:
                 raise HTTPException(status_code=422, detail={"missing_required_question_ids": sorted(required - supplied)})
             answer_snapshot = await self.repository.create_snapshot(
@@ -321,7 +418,7 @@ class ArbitrationWorkflowService:
                     "last_material_editor_id": _actor_id(current_user),
                 }
             )
-        elif str(run.get("current_node")) == "matrix_review_gate" and payload.gate == "matrix_review":
+        elif current_node == "matrix_review_gate":
             analysis = await self.domain.analyze(run, parallel=True)
             case = await self.cases.get_case(case_id)
             readiness = await self.cases._readiness_artifact_state(case, str(run.get("pleading_type")))
@@ -371,14 +468,13 @@ class ArbitrationWorkflowService:
                 "question_snapshot_id": question_snapshot["_id"], "question_snapshot_hash": question_snapshot["snapshot_hash"],
             })
         updated = await self.repository.transition(run_id, payload.state_version, update, event="workflow_resumed")
-        if updated.get("engine") == "langgraph_v1" and str(run.get("current_node")) in {"document_selection_gate", "material_question_gate"}:
-            from .langgraph_engine import LangGraphArbitrationEngine
-
-            await LangGraphArbitrationEngine(self.db).checkpoint_transition(
-                updated, {
+        if current_node in {"document_selection_gate", "material_question_gate"}:
+            await self._sync_langgraph_checkpoint(
+                updated,
+                {
                     "documents_selected": bool(updated.get("documents_selected")),
                     "user_direction_complete": str(updated.get("current_node")) != "material_question_gate",
-                }
+                },
             )
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="resumed"
@@ -386,16 +482,27 @@ class ArbitrationWorkflowService:
         return self.public_state(updated)
 
     async def cancel(self, case_id: str, run_id: str, payload: Any, current_user: Any) -> Dict[str, Any]:
-        await self.get(case_id, run_id)
+        run = await self.repository.get_run(run_id)
+        if not run or str(run.get("case_id")) != case_id:
+            raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        self._assert_state_version(run, payload.state_version)
+        if str(run.get("status")) in TERMINAL_WORKFLOW_STATUSES:
+            raise HTTPException(status_code=409, detail="Terminal arbitration workflows cannot be cancelled")
         updated = await self.repository.transition(
             run_id, payload.state_version,
             {"status": "cancelled", "current_node": "cancelled", "next_action": "cancelled", "fallback_available": False, "cancellation_reason": payload.reason},
             event="workflow_cancelled",
         )
-        if updated.get("engine") == "langgraph_v1":
-            from .langgraph_engine import LangGraphArbitrationEngine
-
-            await LangGraphArbitrationEngine(self.db).checkpoint_transition(updated, {"cancellation_requested": True})
+        await self._sync_langgraph_checkpoint(
+            updated,
+            {
+                "cancellation_requested": True,
+                "execution_status": "cancelled",
+                "current_node": "cancelled",
+                "next_action": "cancelled",
+            },
+            traverse=False,
+        )
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="cancelled"
         )
@@ -410,11 +517,27 @@ class ArbitrationWorkflowService:
         run = await self.repository.get_run(run_id)
         if not run or str(run.get("case_id")) != case_id:
             raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        self._assert_state_version(run, payload.state_version)
+        if run.get("engine") != "langgraph_v1":
+            raise HTTPException(status_code=409, detail="Only LangGraph arbitration workflows can use the v2 fallback")
         if run.get("authoritative_effects"):
             raise HTTPException(status_code=409, detail="Fallback is prohibited after an authoritative effect")
+        input_snapshot = await self.db.arbitration_workflow_snapshots.find_one(
+            {"_id": run.get("input_snapshot_id"), "run_id": run_id, "kind": "input"}
+        )
+        if not input_snapshot or input_snapshot.get("snapshot_hash") != run.get("input_snapshot_hash"):
+            raise HTTPException(status_code=409, detail="Immutable workflow input snapshot is missing or has drifted")
         updated = await self.repository.transition(
             run_id, payload.state_version,
-            {"engine": "arbitration_v2", "status": "fallback_v2", "current_node": "v2_fallback", "next_action": "resume_v2", "fallback_reason": payload.reason, "fallback_available": False},
+            {
+                "engine": "arbitration_v2",
+                "engine_version": ArbitrationV2WorkflowEngine.version,
+                "fallback_from_engine": "langgraph_v1",
+                "fallback_input_snapshot_id": input_snapshot["_id"],
+                "fallback_input_snapshot_hash": input_snapshot["snapshot_hash"],
+                "fallback_reason": payload.reason,
+                "fallback_available": False,
+            },
             event="workflow_fallback_v2",
         )
         await observability_registry.record_arbitration_workflow(
@@ -430,11 +553,13 @@ class ArbitrationWorkflowService:
                 "_id", "case_id", "draft_id", "pleading_type", "engine", "rollout_mode", "status",
                 "current_node", "next_action", "state_version", "graph_version", "state_schema_version",
                 "progress", "blockers", "required_human_role", "fallback_available", "last_checkpoint_at",
+                "checkpoint_sync_status", "checkpoint_sync_state_version",
                 "created_at", "updated_at", "document_manifest_hash", "opponent_pleading_snapshot_hash",
                 "evidence_snapshot_hash", "matrix_revision_set_id", "matrix_revision_hash",
                 "readiness_artifact_hash", "plan_id", "plan_hash", "draft_version_id", "draft_version_hash",
                 "validation_status", "validation_blockers",
                 "targeted_questions",
+                "fallback_reason", "fallback_from_engine", "fallback_input_snapshot_id", "fallback_input_snapshot_hash",
             )
         } | {
             "run_id": run.get("_id"),

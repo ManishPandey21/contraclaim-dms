@@ -79,6 +79,7 @@ import {
   cancelArbitrationWorkflow,
   createArbitrationWorkflow,
   createArbitrationDraft,
+  getArbitrationWorkflowEvents,
   getArbitrationWorkflowState,
   prepareArbitrationDraftFromCase,
   resumeArbitrationWorkflow,
@@ -327,6 +328,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   const [queuedExport, setQueuedExport] = useState<BundleExport | null>(null);
   const [queueingExport, setQueueingExport] = useState<BundleExportFormat | null>(null);
   const [workflow, setWorkflow] = useState<ArbitrationWorkflowState | null>(null);
+  const [workflowEvents, setWorkflowEvents] = useState<Array<Record<string, unknown>>>([]);
   const [workflowDraftId, setWorkflowDraftId] = useState("");
   const [workflowDocumentIds, setWorkflowDocumentIds] = useState("");
   const [workflowOpponentDraftId, setWorkflowOpponentDraftId] = useState("");
@@ -393,10 +395,24 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   useEffect(() => {
     if (!caseId || !workflow?.run_id || ["completed", "cancelled", "failed"].includes(workflow.status)) return;
     const timer = window.setInterval(() => {
-      getArbitrationWorkflowState(caseId, workflow.run_id).then(setWorkflow).catch(() => undefined);
+      Promise.all([
+        getArbitrationWorkflowState(caseId, workflow.run_id),
+        getArbitrationWorkflowEvents(caseId, workflow.run_id),
+      ]).then(([state, events]) => {
+        setWorkflow(state);
+        setWorkflowEvents(events);
+      }).catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(timer);
   }, [caseId, workflow?.run_id, workflow?.status]);
+
+  useEffect(() => {
+    if (!caseId || !workflow?.run_id) {
+      setWorkflowEvents([]);
+      return;
+    }
+    getArbitrationWorkflowEvents(caseId, workflow.run_id).then(setWorkflowEvents).catch(() => undefined);
+  }, [caseId, workflow?.run_id, workflow?.state_version]);
 
   const updateCaseForm = (key: keyof CaseFormState, value: string) => {
     setForm((prev) => {
@@ -1184,6 +1200,17 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     ) : null}
                     {workflow.plan_hash ? <div className="break-all text-xs text-muted-foreground">Plan: {workflow.plan_hash}</div> : null}
                     {workflow.draft_version_hash ? <div className="break-all text-xs text-muted-foreground">Version: {workflow.draft_version_hash}</div> : null}
+                    {workflowEvents.length ? (
+                      <div className="space-y-1 rounded border bg-muted/30 p-2" aria-label="Workflow timeline">
+                        <div className="text-xs font-medium">Workflow timeline</div>
+                        {workflowEvents.slice(-8).reverse().map((event, index) => (
+                          <div key={String(event._id || `${event.event_type || "event"}-${index}`)} className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <span>{pretty(String(event.event_type || "workflow_event"))}</span>
+                            <span>{event.created_at ? new Date(String(event.created_at)).toLocaleString() : ""}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="flex gap-2">
                       {!['completed', 'cancelled', 'failed'].includes(workflow.status) ? (
                         <Button size="sm" onClick={continueWorkflow} disabled={workflowBusy}>Review / continue</Button>
