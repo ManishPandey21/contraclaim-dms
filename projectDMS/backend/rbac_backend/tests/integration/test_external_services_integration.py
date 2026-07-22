@@ -43,17 +43,18 @@ def _require_live_external_services(*names: str) -> None:
 
 
 def _create_smoke_pdf(target: Path) -> None:
-    target.write_bytes(
-        b"%PDF-1.4\n"
-        b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n"
-        b"2 0 obj<</Type/Pages/Count 1/Kids[3 0 R]>>endobj\n"
-        b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 300]/Contents 4 0 R>>endobj\n"
-        b"4 0 obj<</Length 90>>stream\n"
-        b"BT /F1 12 Tf 72 230 Td (Integration Smoke Letter INT-SMOKE-001) Tj ET\n"
-        b"endstream endobj\n"
-        b"xref\n0 5\n0000000000 65535 f \n"
-        b"trailer<</Root 1 0 R/Size 5>>\nstartxref\n256\n%%EOF\n"
-    )
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    document = canvas.Canvas(str(target), pagesize=letter)
+    document.setTitle("External integration smoke letter")
+    document.setFont("Helvetica", 12)
+    document.drawString(72, 740, "Date: 29-04-2026")
+    document.drawString(72, 720, "Letter No.: INT-SMOKE-001")
+    document.drawString(72, 700, "Subject: External OpenAI integration verification")
+    document.drawString(72, 680, "Full content: Integration Smoke Letter")
+    document.showPage()
+    document.save()
 
 
 class _FakeOpenAIFilesAPI:
