@@ -66,7 +66,7 @@ class _FakeOpenAIFilesAPI:
         assert filename.endswith(".pdf")
         assert payload
         assert mime_type == "application/pdf"
-        assert purpose == "assistants"
+        assert purpose == "user_data"
 
         file_id = f"file-{len(self._uploads) + 1}"
         self._uploads[file_id] = payload
@@ -106,12 +106,44 @@ class _FakeOpenAIChatCompletionsAPI:
         )
 
 
+class _FakeOpenAIResponsesAPI:
+    def __init__(self, files_api: _FakeOpenAIFilesAPI) -> None:
+        self._files_api = files_api
+
+    async def create(
+        self,
+        *,
+        model: str,
+        input: list[dict[str, Any]],
+        max_output_tokens: int,
+        temperature: float,
+        store: bool,
+    ) -> Any:
+        assert model == "gpt-4o"
+        assert max_output_tokens == 4096
+        assert temperature == 0.1
+        assert store is False
+        assert input[0]["content"][0]["type"] == "input_text"
+        file_part = input[0]["content"][1]
+        assert file_part["type"] == "input_file"
+        assert file_part["file_id"] in self._files_api._uploads
+        return SimpleNamespace(
+            output_text=(
+                "Date: 29-04-2026\n"
+                "Letter No.: INT-SMOKE-001\n"
+                "Subject: External OpenAI integration verification\n"
+                "Full content: Integration Smoke Letter"
+            )
+        )
+
+
 class _FakeAsyncOpenAI:
     def __init__(self, *, api_key: str, timeout: float) -> None:
         assert api_key == "test-openai-key"
         assert timeout == 60.0
         files_api = _FakeOpenAIFilesAPI()
         self.files = files_api
+        self.responses = _FakeOpenAIResponsesAPI(files_api)
         self.chat = SimpleNamespace(completions=_FakeOpenAIChatCompletionsAPI(files_api))
 
 

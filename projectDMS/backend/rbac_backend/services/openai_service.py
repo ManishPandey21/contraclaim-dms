@@ -66,7 +66,7 @@ class OpenAIService:
                 try:
                     response = await self._client.files.create(
                         file=(safe_filename, file_handle, mime_type),
-                        purpose="assistants"
+                        purpose="user_data"
                     )
                 finally:
                     await loop.run_in_executor(None, file_handle.close)
@@ -95,25 +95,26 @@ class OpenAIService:
         try:
             extraction_prompt = self._get_extraction_prompt()
             
-            response = await self._client.chat.completions.create(
+            response = await self._client.responses.create(
                 model=self._get_model_name(),
-                messages=[
+                input=[
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": extraction_prompt},
-                            {"type": "file", "file": {"file_id": file_id}}
+                            {"type": "input_text", "text": extraction_prompt},
+                            {"type": "input_file", "file_id": file_id},
                         ]
                     }
                 ],
-                max_tokens=max(getattr(self.config, "max_output_tokens", 4096), 4096),
-                temperature=0.1
+                max_output_tokens=max(getattr(self.config, "max_output_tokens", 4096), 4096),
+                temperature=0.1,
+                store=False,
             )
-            
-            if not response.choices or not response.choices[0].message.content:
+
+            content = getattr(response, "output_text", None)
+            if not content:
                 raise DocumentProcessingError("No content extracted from document")
 
-            content = response.choices[0].message.content
             normalized_content = self._normalize_message_content(content)
             if not normalized_content.strip():
                 raise DocumentProcessingError("No textual content extracted from document")
