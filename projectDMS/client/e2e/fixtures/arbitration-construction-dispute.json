@@ -188,6 +188,13 @@
       "status": "draft"
     },
     {
+      "_id": "draft-counterclaim",
+      "case_id": "case-metro-eot-001",
+      "draft_type": "counterclaim",
+      "title": "Counterclaim - Liquidated Damages",
+      "status": "draft"
+    },
+    {
       "_id": "draft-rejoinder",
       "case_id": "case-metro-eot-001",
       "draft_type": "rejoinder",

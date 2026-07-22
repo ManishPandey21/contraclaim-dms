@@ -184,3 +184,13 @@ Application rollback is configuration-first:
 - Redis duplicate/lease/visibility recovery, actual Redis stop/restart, bounded 40-job load, Qdrant outage/recovery, TTL expiry/resume, isolated restore, and cleanup passed in production.
 - Live Qdrant vector round trip passes. Live OpenAI PDF extraction and FalkorDB vector storage fail; S3/model outage and sustained end-to-end load remain pending.
 - Production runtime remains `arbitration_v2`, rollout `off`, primary `0`, and acceptance `false`.
+## Monitoring assets
+
+Provision `config/monitoring/arbitration-langgraph-dashboard.json` in Grafana and
+load `config/monitoring/arbitration-langgraph-alerts.yml` into Prometheus. The
+dashboard intentionally uses bounded labels only; run, tenant, evidence and
+draft identifiers remain in the access-controlled audit repositories rather
+than metrics. Treat any critical rollout alert, evidence ratio below 1, terminal
+export block, unresolved checkpoint sync, or invalid acceptance receipt as a
+fail-closed condition. Do not enable or expand primary rollout until the formal
+acceptance receipt resolves for the tenant/project scope.

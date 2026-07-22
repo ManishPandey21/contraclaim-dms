@@ -24,6 +24,12 @@ from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationWorkflowFallbackRequest,
     ArbitrationWorkflowResumeRequest,
     GenerationRunType,
+    ArbitrationProductionAcceptanceRequest,
+)
+from backend.rbac_backend.services.arbitration_drafting.acceptance import (
+    acceptance_hash,
+    sign_acceptance,
+    verify_acceptance_receipt,
 )
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
 from backend.rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
@@ -172,8 +178,8 @@ class _FakeCollection:
                 if not any(self._matches(row, branch) for branch in expected):
                     return False
                 continue
-            if key == "deleted_at" and isinstance(expected, dict) and expected.get("$exists") is False:
-                if "deleted_at" in row:
+            if isinstance(expected, dict) and "$exists" in expected:
+                if bool(expected["$exists"]) != (key in row):
                     return False
                 continue
             actual = row.get(key)
@@ -311,6 +317,8 @@ class _FakeDb:
         self.arbitration_workflow_effects = _FakeCollection([])
         self.arbitration_workflow_events = _FakeCollection([])
         self.arbitration_plans = _FakeCollection([])
+        self.arbitration_production_acceptance_receipts = _FakeCollection([])
+        self.arbitration_analysis_leases = _FakeCollection([])
         self.arbitration_drafts = _FakeCollection(
             [
                 {
@@ -353,6 +361,14 @@ class _FakeDb:
                     "subject": "Delay notice",
                     "filename": "delay-notice.txt",
                     "filepath_local": __file__,
+                },
+                {
+                    "_id": "doc-review",
+                    "organization_id": "org-1",
+                    "project_id": "project-1",
+                    "subject": "Unreviewed note",
+                    "filename": "unreviewed-note.txt",
+                    "summary": "Authoritative source awaiting matrix review.",
                 },
                 {
                     "_id": "doc-evidence-1",
@@ -416,8 +432,17 @@ class _FakeDb:
 
 
 class _FakeUser:
-    id = "user-1"
-    email = "user@example.test"
+    def __init__(self, user_id="user-1", *, roles=None):
+        self.id = user_id
+        self.email = f"{user_id}@example.test"
+        self.roles = roles or [
+            "legal_reviewer",
+            "senior_legal_approver",
+            "contract_reviewer",
+            "delay_reviewer",
+            "quantum_reviewer",
+            "export_authorizer",
+        ]
 
 
 def _authorize_filing_fixture(db: _FakeDb) -> None:
@@ -445,8 +470,45 @@ def _authorize_filing_fixture(db: _FakeDb) -> None:
             "matrix_revision_hash": artifact["matrix_revision_hash"],
             "evidence_snapshot_hash": artifact["evidence_snapshot_hash"],
             "artifact_hash": artifact["artifact_hash"],
+            "receipt_status": "committed",
             "approved_at": "2026-07-21T00:00:00",
         }
+    )
+    run = {
+        "_id": "workflow-filing-1",
+        "case_id": "case-1",
+        "draft_id": draft["_id"],
+        "pleading_type": "statement_of_claim",
+        "status": "completed",
+        "current_node": "complete",
+        "draft_version_id": version["_id"],
+        "draft_version_hash": version["version_hash"],
+        "readiness_artifact_hash": artifact["artifact_hash"],
+        "plan_hash": "approved-plan-hash",
+        "updated_at": "2026-07-21T00:00:00",
+    }
+    db.arbitration_workflow_runs.rows.append(run)
+    gate_hashes = {
+        "readiness": artifact["artifact_hash"],
+        "plan": run["plan_hash"],
+        "legal_review": version["version_hash"],
+        "draft": version["version_hash"],
+        "export": version["version_hash"],
+    }
+    db.arbitration_workflow_approvals.rows.extend(
+        [
+            {
+                "_id": f"workflow-{gate}-receipt",
+                "run_id": run["_id"],
+                "case_id": "case-1",
+                "draft_id": draft["_id"],
+                "gate": gate,
+                "artifact_hash": artifact_hash,
+                "decision": "approved",
+                "receipt_status": "committed",
+            }
+            for gate, artifact_hash in gate_hashes.items()
+        ]
     )
 
 
@@ -1160,7 +1222,7 @@ def test_matrix_review_assignment_creates_task_and_blocks_readiness():
                 action="assign",
                 reviewer_role="legal",
                 reviewer_user_id="reviewer-1",
-                required_roles=["legal"],
+                required_roles=["legal", "quantum"],
                 comment="Please review entitlement.",
             ),
             _FakeUser(),
@@ -1169,7 +1231,7 @@ def test_matrix_review_assignment_creates_task_and_blocks_readiness():
 
     assert reviewed["review_status"] == "under_review"
     assert reviewed["approval_status"] == "needs_review"
-    assert reviewed["review_required_roles"] == ["legal"]
+    assert reviewed["review_required_roles"] == ["legal", "quantum"]
     assert reviewed["review_comments"][0]["comment"] == "Please review entitlement."
     assert db.tasks.rows[-1]["resource_type"] == "arbitration_matrix_row"
     assert db.tasks.rows[-1]["assigned_to"] == "reviewer-1"
@@ -1189,7 +1251,10 @@ def test_matrix_review_approval_requires_all_roles_then_closes_task():
             "review_status": "under_review",
             "review_required_roles": ["legal", "quantum"],
             "review_completed_roles": [],
-            "review_assignments": [{"reviewer_role": "legal", "status": "assigned"}],
+            "review_assignments": [
+                {"reviewer_role": "legal", "reviewer_user_id": "user-1", "status": "assigned"},
+                {"reviewer_role": "quantum", "reviewer_user_id": "user-2", "status": "assigned"},
+            ],
             "approval_status": "needs_review",
             "verification_status": "needs_review",
             "readiness_status": "needs_review",
@@ -1223,7 +1288,7 @@ def test_matrix_review_approval_requires_all_roles_then_closes_task():
             "claim-matrix",
             "claim-row-multirole",
             ArbitrationMatrixReviewRequest(action="approve", reviewer_role="quantum", comment="Quantum support checked."),
-            _FakeUser(),
+            _FakeUser("user-2"),
         )
     )
 
@@ -1905,9 +1970,8 @@ def test_filing_bundle_zip_embeds_exhibit_files_in_volumes(tmp_path):
     by_exhibit = {entry["exhibit_id"]: entry for entry in manifest_entries}
     assert by_exhibit["C-1"]["error"] is None
     assert by_exhibit["C-1"]["size"] == len(b"%PDF-1.4 exhibit-bytes")
-    # C-2's source (doc-review) has no stored file: recorded, not silently dropped.
-    assert by_exhibit["C-2"]["error"]
-    assert by_exhibit["C-2"]["path"] is None
+    # Unapproved matrix sources are excluded from the authoritative filing set.
+    assert "C-2" not in by_exhibit
 
 
 def test_citation_audit_flags_missing_exhibit_file_and_invalid_pin_cite():
@@ -2719,7 +2783,10 @@ def test_phase6_primary_requires_receipt_health_and_explicit_scope():
         "ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS": "",
         "ARBITRATION_ENGINE_ROLLOUT_PAUSED": False,
     }
-    health = {"primary_cutover": {"eligible": True}}
+    health = {
+        "primary_cutover": {"eligible": True},
+        "acceptance_receipt": {"valid_for_scope": True},
+    }
     selector = ArbitrationEngineSelector(SimpleNamespace(**base))
 
     accepted = selector.select(
@@ -2744,7 +2811,10 @@ def test_phase6_primary_requires_receipt_health_and_explicit_scope():
         tenant_id="org-accepted",
         project_id="project-1",
         request_hash="request",
-        rollout_health={"primary_cutover": {"eligible": False}},
+        rollout_health={
+            "primary_cutover": {"eligible": False},
+            "acceptance_receipt": {"valid_for_scope": True},
+        },
     )
     missing_receipt = ArbitrationEngineSelector(
         SimpleNamespace(**{**base, "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID": ""})
@@ -2896,10 +2966,18 @@ def test_phase6_cutover_health_requires_all_pleading_types_receipt_and_v2_window
         {
             "_id": f"run-{index}",
             "pleading_type": pleading_types[index % len(pleading_types)],
-            "engine": "arbitration_v2",
+            "engine": "langgraph_v1",
             "status": "completed",
+            "_acceptance_receipts_valid": True,
             "checkpoint_sync_status": "synced",
             "updated_at": now,
+            "draft_version_hash": "a" * 64,
+            "validation_artifact_set_hash": "b" * 64,
+            "readiness_approval_receipt_id": f"readiness-{index}",
+            "plan_approval_receipt_id": f"plan-{index}",
+            "legal_review_approval_receipt_id": f"legal-{index}",
+            "draft_approval_receipt_id": f"draft-{index}",
+            "export_approval_receipt_id": f"export-{index}",
         }
         for index in range(20)
     ]
@@ -2931,6 +3009,15 @@ def test_phase6_cutover_health_requires_all_pleading_types_receipt_and_v2_window
     assert ready["status"] == "ready"
     assert ready["primary_cutover"]["eligible"] is True
     assert ready["primary_cutover"]["missing_pleading_types"] == []
+
+    synthetic_ids_only = build_rollout_health(
+        [{key: value for key, value in run.items() if key != "_acceptance_receipts_valid"} for run in runs],
+        events,
+        now=now,
+        config=config,
+    )
+    assert synthetic_ids_only["primary_cutover"]["eligible"] is False
+    assert synthetic_ids_only["sample"]["accepted_langgraph_workflows"] == 0
 
     incomplete = build_rollout_health(
         [run for run in runs if run["pleading_type"] != "rejoinder"],
@@ -3405,7 +3492,11 @@ def test_official_arbitration_graph_resumes_through_every_human_gate_with_minima
     validate_checkpoint_state(dict(state.values))
 
     resume_steps = [
-        ({"documents_selected": True}, "material_question_gate"),
+        ({
+            "documents_selected": True,
+            "analysis_artifact_set_id": "analysis-set-1",
+            "analysis_artifact_set_hash": "analysis-set-hash",
+        }, "material_question_gate"),
         ({"user_direction_complete": True}, "matrix_review_gate"),
         ({"matrices_approved": True}, "readiness_approval_gate"),
         ({"readiness_approved": True, "plan_id": "plan-1", "plan_hash": "plan-hash"}, "plan_approval_gate"),
@@ -3532,7 +3623,7 @@ def test_langgraph_cancellation_checkpoint_does_not_traverse_downstream_nodes():
     assert state.values["execution_status"] == "cancelled"
     assert state.values["current_node"] == "cancelled"
     assert state.values["cancellation_requested"] is True
-    assert state.next == ("document_selection_gate",)
+    assert state.next == ()
 
 
 def test_lagging_checkpoint_replays_cumulative_gate_receipts_to_current_gate():
@@ -4224,14 +4315,241 @@ def test_exporter_renders_markdown_tables_and_contents():
     assert "Claim Summary" in document_xml
 
 
-def test_arbitration_construction_e2e_fixture_covers_soc_sod_and_rejoinder():
+def test_arbitration_construction_fixture_contains_all_four_governed_routes():
     fixture_path = Path(__file__).resolve().parents[3] / "client" / "e2e" / "fixtures" / "arbitration-construction-dispute.json"
     data = json.loads(fixture_path.read_text(encoding="utf-8"))
 
     draft_types = {draft["draft_type"] for draft in data["drafts"]}
-    assert {"statement_of_claim", "statement_of_defence", "rejoinder"}.issubset(draft_types)
+    assert {"statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder"} == draft_types
     assert data["case"]["dispute_type"] == "eot_delay"
     assert data["matrices"]["document-index"]
     assert data["matrices"]["claim-matrix"]
     assert data["matrices"]["defence-matrix"]
     assert data["matrices"]["rejoinder-matrix"]
+
+
+def test_matrix_multispecialty_approval_rejects_same_actor_reuse():
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append({
+        "_id": "claim-row-separation",
+        "case_id": "case-1",
+        "review_status": "under_review",
+        "review_required_roles": ["legal", "quantum"],
+        "review_completed_roles": [],
+        "review_assignments": [
+            {"reviewer_role": "legal", "reviewer_user_id": "user-1", "status": "assigned"},
+            {"reviewer_role": "quantum", "reviewer_user_id": "user-1", "status": "assigned"},
+        ],
+    })
+    service = ArbitrationCaseWorkspaceService(db)
+
+    asyncio.run(service.review_matrix_row(
+        "case-1", "claim-matrix", "claim-row-separation",
+        ArbitrationMatrixReviewRequest(action="approve", reviewer_role="legal"),
+        _FakeUser("user-1"),
+    ))
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.review_matrix_row(
+            "case-1", "claim-matrix", "claim-row-separation",
+            ArbitrationMatrixReviewRequest(action="approve", reviewer_role="quantum"),
+            _FakeUser("user-1"),
+        ))
+    assert exc_info.value.status_code == 409
+
+
+def test_case_linked_full_generation_requires_governed_approved_plan(monkeypatch):
+    db = _FakeDb()
+    service = ArbitrationDraftingService(db)
+
+    async def ready(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(service.case_workspace, "assert_case_ready_for_draft", ready)
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.generate("draft-1", ArbitrationGenerateRequest(), _FakeUser()))
+    assert exc_info.value.status_code == 409
+    assert "approved pleading-plan workflow gate" in str(exc_info.value.detail)
+
+
+def test_readiness_fails_closed_when_approved_source_is_missing():
+    db = _FakeDb()
+    db.documents.rows = [row for row in db.documents.rows if row.get("_id") != "doc-1"]
+    readiness = asyncio.run(ArbitrationCaseWorkspaceService(db).readiness("case-1"))
+    assert readiness["status"] == "blocked"
+    assert any(check["check_key"] == "authoritative_source_resolution" for check in readiness["blockers"])
+
+
+def test_pending_approval_is_committed_only_after_run_cas_reference():
+    db = _FakeDb()
+    run = {
+        "_id": "run-pending-recovery",
+        "case_id": "case-1",
+        "status": "awaiting_plan_approval",
+        "plan_approval_receipt_id": "receipt-pending",
+    }
+    receipt = {
+        "_id": "receipt-pending",
+        "run_id": run["_id"],
+        "gate": "plan",
+        "receipt_status": "pending",
+    }
+    db.arbitration_workflow_runs.rows.append(run)
+    db.arbitration_workflow_approvals.rows.append(receipt)
+
+    asyncio.run(ArbitrationWorkflowRepository(db).reconcile_pending_approvals(run))
+    assert receipt["receipt_status"] == "committed"
+    assert receipt["committed_at"] is not None
+
+    orphan = {"_id": "orphan", "run_id": run["_id"], "gate": "draft", "receipt_status": "pending"}
+    db.arbitration_workflow_approvals.rows.append(orphan)
+    asyncio.run(ArbitrationWorkflowRepository(db).reconcile_pending_approvals(run))
+    assert orphan["receipt_status"] == "pending"
+
+
+def test_missing_checkpoint_is_reconstructed_from_redacted_run_ledger():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    db = _FakeDb()
+    saver = memory.InMemorySaver()
+    engine = LangGraphArbitrationEngine(db, checkpointer=saver)
+    run = {
+        "_id": "run-post-ttl",
+        "thread_id": "arbitration:run-post-ttl",
+        "case_id": "case-1",
+        "draft_id": "draft-1",
+        "pleading_type": "statement_of_claim",
+        "state_version": 5,
+        "status": "awaiting_matrix_review",
+        "documents_selected": True,
+        "material_questions_required": False,
+        "analysis_artifact_set_id": "analysis-set",
+        "analysis_artifact_set_hash": "analysis-hash",
+        "matrix_review_approval_receipt_id": "matrix-receipt",
+    }
+
+    asyncio.run(engine.checkpoint_transition(run, {"matrices_approved": True}))
+    state = build_arbitration_graph(checkpointer=saver).get_state(
+        {"configurable": {"thread_id": run["thread_id"]}}
+    )
+    assert state.next == ("readiness_approval_gate",)
+    assert state.values["analysis_artifact_set_id"] == "analysis-set"
+    assert "full_markdown" not in state.values
+
+
+def test_formal_acceptance_receipt_rejects_forgery_expiry_and_wrong_scope():
+    now = datetime.now(timezone.utc)
+    receipt = {
+        "_id": "acceptance-1",
+        "status": "accepted",
+        "criteria": {str(index): "passed" for index in range(1, 15)},
+        "evidence_hashes": {str(index): f"{index:064x}" for index in range(1, 15)},
+        "stakeholder_signoffs": ["security", "legal"],
+        "organization_ids": ["org-1"],
+        "project_ids": ["project-1"],
+        "accepted_at": now,
+        "expires_at": now + timedelta(days=30),
+    }
+    receipt["receipt_hash"] = acceptance_hash(receipt)
+    receipt["server_signature"] = sign_acceptance(receipt["receipt_hash"])
+
+    assert verify_acceptance_receipt(
+        receipt, receipt_id="acceptance-1", receipt_hash=receipt["receipt_hash"],
+        organization_id="org-1", project_id="project-1", now=now,
+    )
+    assert not verify_acceptance_receipt(
+        {**receipt, "server_signature": "0" * 64}, receipt_id="acceptance-1",
+        receipt_hash=receipt["receipt_hash"], organization_id="org-1", project_id="project-1", now=now,
+    )
+    assert not verify_acceptance_receipt(
+        receipt, receipt_id="acceptance-1", receipt_hash=receipt["receipt_hash"],
+        organization_id="org-other", project_id="project-1", now=now,
+    )
+    assert not verify_acceptance_receipt(
+        receipt, receipt_id="acceptance-1", receipt_hash=receipt["receipt_hash"],
+        organization_id="org-1", project_id="project-1", now=now + timedelta(days=31),
+    )
+
+
+def test_validator_blocks_fluent_unsupported_factual_assertion():
+    report = ArbitrationDraftValidator().validation_report(
+        {
+            "draft": {"case_id": "case-1", "draft_type": "statement_of_claim"},
+            "source_ledger": [{"source_key": "S1", "label": "Notice", "snippet": "Access was delayed."}],
+        },
+        "The contractor completed every required milestone before the employer terminated the contract without cause.",
+    )
+    assert any("factual assertions" in blocker for blocker in report["approval_blockers"])
+
+
+def test_filing_worker_refuses_matrix_drift_after_immutable_authorization():
+    db = _FakeDb()
+    _authorize_filing_fixture(db)
+    service = ArbitrationCaseWorkspaceService(db)
+    payload = asyncio.run(service.filing_bundle_payload("case-1"))
+    authorization = asyncio.run(service._authorize_filing_bundle(payload, "zip", _FakeUser("export-user")))
+    effect_key = f"arbitration_filing_bundle:{authorization['bundle_hash']}:zip"
+    db.arbitration_bundle_exports.rows.append({
+        "_id": "export-drift",
+        "case_id": "case-1",
+        "format": "zip",
+        "status": "queued",
+        "effect_key": effect_key,
+        "bundle_hash": authorization["bundle_hash"],
+        "export_authorization_id": authorization["_id"],
+    })
+    db.arbitration_document_index.rows[0]["title"] = "Mutated after authorization"
+
+    with pytest.raises((RuntimeError, HTTPException)) as exc_info:
+        asyncio.run(service.execute_filing_bundle_export_job(
+            "case-1", "export-drift", "zip", effect_key=effect_key,
+            lease_token="lease-drift", worker_name="test-worker",
+        ))
+    assert "drift" in str(exc_info.value).lower() or "current revision-bound" in str(exc_info.value).lower()
+
+
+def test_sod_without_counterclaim_and_counterclaim_route_are_conditionally_distinct():
+    db = _FakeDb()
+    db.arbitration_drafts.rows.extend([
+        {"_id": "draft-sod-route", "case_id": "case-1", "draft_type": "statement_of_defence"},
+        {"_id": "draft-counterclaim-route", "case_id": "case-1", "draft_type": "counterclaim"},
+    ])
+    db.arbitration_counterclaim_matrix.rows.append({
+        "_id": "counterclaim-route-row",
+        "case_id": "case-1",
+        "draft_id": "draft-counterclaim-route",
+        "counterclaim_no": "CC-1",
+        "approval_status": "approved",
+        "source_id": "doc-1",
+        "source_revision_id": "version-1",
+    })
+    engine = ArbitrationV2WorkflowEngine(db)
+
+    sod = asyncio.run(engine.create_workflow(
+        "case-1",
+        ArbitrationWorkflowCreateRequest(
+            draft_id="draft-sod-route",
+            pleading_type="statement_of_defence",
+            selected_document_ids=["doc-1"],
+            opponent_pleadings=[{"draft_id": "draft-1", "version_id": "version-1"}],
+        ),
+        _FakeUser(), idempotency_key="route-sod", request_hash="route-sod-hash",
+    ))
+    counterclaim = asyncio.run(engine.create_workflow(
+        "case-1",
+        ArbitrationWorkflowCreateRequest(
+            draft_id="draft-counterclaim-route",
+            pleading_type="counterclaim",
+            selected_document_ids=["doc-1"],
+        ),
+        _FakeUser(), idempotency_key="route-counterclaim", request_hash="route-counterclaim-hash",
+    ))
+
+    assert not any(
+        blocker.get("matrix") == "counterclaim-matrix"
+        for blocker in sod.get("blockers") or []
+    )
+    assert not any(
+        blocker.get("matrix") == "counterclaim-matrix"
+        for blocker in counterclaim.get("blockers") or []
+    )
+    assert sod["opponent_pleading_snapshot_hash"]
+    assert not counterclaim.get("opponent_pleading_snapshot_hash")

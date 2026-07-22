@@ -63,8 +63,12 @@ async def test_observability_registry_renders_prometheus_metrics():
         {"alerts": [{"severity": "critical", "code": "shadow_parity_rate"}]}
     )
     await registry.record_arbitration_fallback(from_engine="langgraph_v1", reason="operator_requested")
+    await registry.record_arbitration_runtime_event(signal="resume", node="legal_review_gate", reason="legal_review")
+    await registry.record_arbitration_runtime_value(signal="checkpoint_age_seconds", scope="workflow", value=12.5)
 
     rendered = registry.render_prometheus()
+    assert 'contractdms_arbitration_runtime_events_total{signal="resume",node="legal_review_gate",reason="legal_review"} 1' in rendered
+    assert 'contractdms_arbitration_runtime_value{signal="checkpoint_age_seconds",scope="workflow"} 12.500' in rendered
 
     assert "contractdms_http_requests_total" in rendered
     assert 'path="/api/documents/{id}"' in rendered

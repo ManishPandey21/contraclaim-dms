@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import datetime, timezone
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Sequence
 
 from fastapi import HTTPException, status
@@ -11,6 +13,7 @@ from .case_workspace import ArbitrationCaseWorkspaceService, _actor_id, _is_read
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import _collect, _jsonable
 from .workflow_repository import ArbitrationWorkflowRepository, artifact_hash
+from ...core.config import settings
 
 
 ANALYSIS_BRANCHES = (
@@ -39,11 +42,29 @@ ANALYSIS_BRANCH_MATRICES = {
     "expert_alignment": ("expert-alignment",),
 }
 
+ANALYSIS_FINDING_FIELDS = {
+    "document_understanding": ("title", "document_type", "exhibit_id", "relevance_note"),
+    "chronology": ("date", "event", "document_ref", "significance"),
+    "clause_interpretation": ("clause_number", "clause_text_excerpt", "interpretation"),
+    "jurisdiction": ("check_type", "scope_status", "basis"),
+    "limitation": ("limitation_status", "limitation_base_date", "limitation_expiry_date", "basis"),
+    "pre_arbitration_requirements": ("step", "required", "compliance_status", "contractual_requirement"),
+    "notices": ("notice_type", "notice_date", "compliance_status", "contractual_requirement"),
+    "pleading_position": ("issue", "claim_head", "defence", "claimant_reply", "admission_denial"),
+    "quantum": ("cost_head", "amount", "currency", "calculation_type"),
+    "expert_alignment": ("expert_type", "claim_no", "alignment_status", "verified_amount", "contradictions"),
+}
+
+DOCUMENT_SIGNAL_TERMS = (
+    "notice", "delay", "extension of time", "clause", "jurisdiction",
+    "limitation", "quantum", "payment", "expert", "counterclaim",
+)
+
 PLEADING_POSITION_MATRICES = {
     "statement_of_claim": ("claim-matrix",),
-    "statement_of_defence": ("defence-matrix", "counterclaim-matrix"),
+    "statement_of_defence": ("defence-matrix",),
     "counterclaim": ("counterclaim-matrix",),
-    "rejoinder": ("rejoinder-matrix", "defence-matrix", "counterclaim-matrix"),
+    "rejoinder": ("rejoinder-matrix", "defence-matrix"),
 }
 
 PLEADING_MATRIX_REQUIREMENTS = {
@@ -174,6 +195,82 @@ class ArbitrationWorkflowDomain:
         self.cases = ArbitrationCaseWorkspaceService(db)
         self.repository = ArbitrationWorkflowRepository(db)
 
+    @asynccontextmanager
+    async def _fanout_slot(self, run: Dict[str, Any], branch: str):
+        """Distributed bounded-concurrency lease scoped to tenant and project."""
+
+        collection = getattr(self.db, "arbitration_analysis_leases", None)
+        if collection is None:
+            # Lightweight test doubles may omit the operational collection.
+            yield
+            return
+        scope_hash = artifact_hash(
+            {
+                "organization_id": run.get("organization_id"),
+                "project_id": run.get("project_id"),
+            }
+        )[:32]
+        limit = max(1, int(settings.ARBITRATION_ENGINE_MAX_FANOUT_PER_SCOPE))
+        owner = f"{run.get('_id')}:{branch}:{uuid.uuid4()}"
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30.0
+        claimed_id = None
+        while claimed_id is None:
+            now = datetime.now(timezone.utc)
+            for slot in range(limit):
+                lease_id = f"arbitration-fanout:{scope_hash}:{slot}"
+                await collection.update_one(
+                    {"_id": lease_id},
+                    {
+                        "$setOnInsert": {
+                            "scope_hash": scope_hash,
+                            "slot": slot,
+                            "owner": None,
+                            "lease_expires_at": now,
+                        }
+                    },
+                    upsert=True,
+                )
+                claimed = await collection.find_one_and_update(
+                    {
+                        "_id": lease_id,
+                        "$or": [
+                            {"owner": None},
+                            {"lease_expires_at": {"$lte": now}},
+                        ],
+                    },
+                    {
+                        "$set": {
+                            "owner": owner,
+                            "run_id": str(run.get("_id")),
+                            "branch": branch,
+                            "lease_expires_at": now + timedelta(minutes=2),
+                            "updated_at": now,
+                        }
+                    },
+                    return_document=True,
+                )
+                if claimed and claimed.get("owner") == owner:
+                    claimed_id = lease_id
+                    break
+            if claimed_id is None:
+                if loop.time() >= deadline:
+                    raise TimeoutError("Tenant-scoped arbitration analysis concurrency lease timed out")
+                await asyncio.sleep(0.02)
+        try:
+            yield
+        finally:
+            await collection.update_one(
+                {"_id": claimed_id, "owner": owner},
+                {
+                    "$set": {
+                        "owner": None,
+                        "lease_expires_at": datetime.now(timezone.utc),
+                        "released_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
+
     async def capture_opponent_snapshot(
         self,
         run_id: str,
@@ -232,22 +329,96 @@ class ArbitrationWorkflowDomain:
         case_id = str(run["case_id"])
         pleading_type = str(run.get("pleading_type") or "")
         rows_by_matrix = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) for slug in MATRIX_COLLECTIONS}
-
+        case = await self.cases.get_case(case_id)
+        document_manifest = (
+            await self.db.arbitration_workflow_snapshots.find_one(
+                {"_id": run.get("document_manifest_id"), "run_id": str(run["_id"]), "kind": "document_manifest"}
+            )
+            if run.get("document_manifest_id")
+            else None
+        )
+        document_signals: List[Dict[str, Any]] = []
+        for item in ((document_manifest or {}).get("payload") or {}).get("documents") or []:
+            query = {"_id": item.get("document_id")}
+            if case.get("organization_id"):
+                query["organization_id"] = case.get("organization_id")
+            if case.get("project_id"):
+                query["project_id"] = case.get("project_id")
+            record = await self.db.documents.find_one(query)
+            if not record:
+                document_signals.append({"document_id": item.get("document_id"), "resolution_status": "missing_or_out_of_scope"})
+                continue
+            searchable = " ".join(
+                str(record.get(key) or "")
+                for key in ("subject", "filename", "summary", "ocrText", "text", "text_enriched")
+            ).lower()
+            document_signals.append(
+                {
+                    "document_id": item.get("document_id"),
+                    "version_id": record.get("current_version_id"),
+                    "sha256": record.get("sha256"),
+                    "updated_at": record.get("updated_at"),
+                    "content_digest": artifact_hash(searchable),
+                    "signals": [term for term in DOCUMENT_SIGNAL_TERMS if term in searchable],
+                    "resolution_status": "resolved",
+                }
+            )
+        opponent_snapshot = (
+            await self.db.arbitration_workflow_snapshots.find_one(
+                {"_id": run.get("opponent_pleading_snapshot_id"), "run_id": str(run["_id"]), "kind": "opponent_pleading"}
+            )
+            if run.get("opponent_pleading_snapshot_id")
+            else None
+        )
         async def branch(name: str) -> Dict[str, Any]:
             # Branches never mutate matrix rows. Their only write is an immutable,
             # explicitly non-authoritative analysis artifact.
-            matrices = _branch_matrices(name, pleading_type)
-            selected: List[Dict[str, Any]] = []
-            for matrix in matrices:
-                rows = rows_by_matrix.get(matrix) or []
-                for row in rows:
-                    selected.append(_canonical_row(matrix, row))
-            selected.sort(key=lambda row: (row["matrix"], row["row_id"], row["payload_hash"]))
+            async with self._fanout_slot(run, name):
+                matrices = _branch_matrices(name, pleading_type)
+                selected: List[Dict[str, Any]] = []
+                findings: List[Dict[str, Any]] = []
+                allowed_fields = ANALYSIS_FINDING_FIELDS[name]
+                for matrix in matrices:
+                    rows = rows_by_matrix.get(matrix) or []
+                    for row in rows:
+                        canonical = _canonical_row(matrix, row)
+                        selected.append(canonical)
+                        findings.append(
+                            {
+                                "matrix": matrix,
+                                "row_id": canonical["row_id"],
+                                "source_revision_ids": canonical["source_revision_ids"],
+                                "evidence_status": canonical["evidence_status"],
+                                "facts": {key: row.get(key) for key in allowed_fields if row.get(key) not in (None, "", [])},
+                            }
+                        )
+                selected.sort(key=lambda row: (row["matrix"], row["row_id"], row["payload_hash"]))
+                findings.sort(key=lambda row: (row["matrix"], row["row_id"]))
+                opponent_inputs = []
+                if name == "pleading_position":
+                    opponent_inputs = [
+                        {
+                            "draft_type": item.get("draft_type"),
+                            "version_id": item.get("version_id"),
+                            "version_hash": item.get("version_hash"),
+                            "paragraph_count": item.get("paragraph_count"),
+                            "paragraphs_hash": item.get("paragraphs_hash"),
+                        }
+                        for item in ((opponent_snapshot or {}).get("payload") or {}).get("pleadings") or []
+                    ]
             payload = {
                 "branch": name,
                 "pleading_type": pleading_type,
                 "matrices": list(matrices),
                 "rows": selected,
+                "findings": findings,
+                "document_signals": document_signals if name == "document_understanding" else [],
+                "opponent_pleadings": opponent_inputs,
+                "analysis_summary": {
+                    "row_count": len(selected),
+                    "supported_rows": sum(1 for row in selected if row.get("evidence_status") == "supported"),
+                    "needs_review_rows": sum(1 for row in selected if row.get("evidence_status") != "supported"),
+                },
                 "authoritative": False,
                 "review_status": "needs_review",
                 "input_snapshot_hash": run.get("input_snapshot_hash"),
@@ -289,6 +460,14 @@ class ArbitrationWorkflowDomain:
                 }
             )
         if OPPONENT_REQUIREMENTS.get(pleading_type):
+            if not opponent_snapshot:
+                blockers.append(
+                    {
+                        "code": "opponent_pleading_snapshot_required",
+                        "pleading_types": sorted(OPPONENT_REQUIREMENTS[pleading_type]),
+                        "message": "Required immutable opponent pleading snapshot is unavailable",
+                    }
+                )
             missing_paragraphs = [
                 item.get("draft_type")
                 for item in ((opponent_snapshot or {}).get("payload") or {}).get("pleadings") or []

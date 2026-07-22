@@ -14,6 +14,7 @@ const runArbitrationAgentMock = vi.fn();
 const createArbitrationWorkflowMock = vi.fn();
 const getArbitrationWorkflowEventsMock = vi.fn();
 const getArbitrationWorkflowStateMock = vi.fn();
+const listArbitrationWorkflowsMock = vi.fn();
 
 vi.mock("@/services/arbitration-cases-api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/services/arbitration-cases-api")>();
@@ -34,6 +35,7 @@ vi.mock("@/services/arbitration-drafting-api", () => ({
   createArbitrationWorkflow: (...args: unknown[]) => createArbitrationWorkflowMock(...args),
   getArbitrationWorkflowEvents: (...args: unknown[]) => getArbitrationWorkflowEventsMock(...args),
   getArbitrationWorkflowState: (...args: unknown[]) => getArbitrationWorkflowStateMock(...args),
+  listArbitrationWorkflows: (...args: unknown[]) => listArbitrationWorkflowsMock(...args),
   resumeArbitrationWorkflow: vi.fn(),
   approveArbitrationWorkflowGate: vi.fn(),
   cancelArbitrationWorkflow: vi.fn(),
@@ -124,6 +126,7 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     runArbitrationAgentMock.mockResolvedValue({ agent_type: "claim-identification", created_records: [] });
     getArbitrationWorkflowEventsMock.mockResolvedValue([]);
     getArbitrationWorkflowStateMock.mockResolvedValue(null);
+    listArbitrationWorkflowsMock.mockResolvedValue([]);
   });
 
   it("passes agent options (interest rate, mode) into agent runs from the dashboard", async () => {
@@ -251,5 +254,40 @@ describe("ArbitrationCaseWorkspacePage (matrices section)", () => {
     expect(await screen.findByLabelText("Workflow timeline")).toBeInTheDocument();
     expect(await screen.findByText(/workflow created/i)).toBeInTheDocument();
     expect(getArbitrationWorkflowEventsMock).toHaveBeenCalledWith("case-1", "run-1");
+  });
+
+  it("restores the latest active workflow and timeline after a page reload", async () => {
+    listArbitrationWorkflowsMock.mockResolvedValue([{
+      run_id: "run-restored",
+      case_id: "case-1",
+      draft_id: "draft-1",
+      pleading_type: "statement_of_claim",
+      engine: "langgraph_v1",
+      status: "awaiting_legal_review",
+      current_node: "legal_review_gate",
+      next_action: "legal_review",
+      state_version: 7,
+      progress: 85,
+      blockers: [],
+      fallback_available: true,
+    }]);
+    getArbitrationWorkflowEventsMock.mockResolvedValue([{
+      _id: "event-restored",
+      event_type: "validation_completed",
+      created_at: "2026-07-22T11:00:00Z",
+    }]);
+
+    render(
+      <MemoryRouter initialEntries={["/arbitration/cases/case-1"]}>
+        <Routes>
+          <Route path="/arbitration/cases/:caseId" element={<ArbitrationCaseWorkspacePage />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(listArbitrationWorkflowsMock).toHaveBeenCalledWith("case-1", true));
+    expect(await screen.findByLabelText("Workflow timeline")).toBeInTheDocument();
+    expect(await screen.findByText(/validation completed/i)).toBeInTheDocument();
+    expect(getArbitrationWorkflowEventsMock).toHaveBeenCalledWith("case-1", "run-restored");
   });
 });

@@ -617,12 +617,39 @@ class ArbitrationContextBuilder:
             )
         except Exception:
             return []
+        case = await self.db.arbitration_cases.find_one({"_id": case_id}) or {}
         out: List[Dict[str, Any]] = []
         for row in rows:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             if not row.get("source_id"):
                 context_warnings.append(f"Document index row has no source id and was skipped: {row.get('title') or row.get('_id')}")
+                continue
+            authoritative = None
+            authoritative_collection = None
+            for collection_name in ("documents", "letters"):
+                collection = getattr(self.db, collection_name, None)
+                if collection is None:
+                    continue
+                query: Dict[str, Any] = {"_id": str(row.get("source_id"))}
+                for scope_key in ("organization_id", "project_id"):
+                    if case.get(scope_key):
+                        query[scope_key] = case.get(scope_key)
+                authoritative = await collection.find_one(query)
+                if authoritative:
+                    authoritative_collection = collection_name
+                    break
+            if not authoritative:
+                context_warnings.append(
+                    f"Approved document source is missing or outside the case scope and was skipped: {row.get('source_id')}"
+                )
+                continue
+            recorded_revision = str(row.get("source_revision_id") or row.get("current_version_id") or "")
+            current_revision = str(authoritative.get("current_version_id") or authoritative.get("version_id") or "")
+            if recorded_revision and current_revision and recorded_revision != current_revision:
+                context_warnings.append(
+                    f"Approved document source revision drifted and was skipped: {row.get('source_id')}"
+                )
                 continue
             if include_review_sources and not (_status_values(row) & VERIFIED_SOURCE_STATUSES):
                 context_warnings.append(f"Review-only document index source included: {row.get('title') or row.get('exhibit_id')}")
@@ -634,10 +661,18 @@ class ArbitrationContextBuilder:
                 "source_type": row.get("source_type") or "document",
                 "allowed_use": allowed,
                 "permitted_uses": sorted(set([allowed, *[_allowed_use(item, allowed) for item in _as_list(row.get("permitted_uses"))]])),
-                "label": row.get("title") or row.get("document_type") or exhibit_id or "Case document",
-                "citation": exhibit_id or row.get("letter_no") or row.get("title"),
-                "snippet": condense(row.get("relevance_note") or row.get("summary") or row.get("document_type"), 650),
-                "page_numbers": row.get("page_numbers") or [],
+                "label": authoritative.get("subject") or authoritative.get("filename") or row.get("title") or row.get("document_type") or exhibit_id or "Case document",
+                "citation": exhibit_id or authoritative.get("letterNo") or row.get("letter_no") or authoritative.get("filename") or row.get("title"),
+                "snippet": condense(
+                    authoritative.get("summary")
+                    or authoritative.get("ocrText")
+                    or authoritative.get("text")
+                    or authoritative.get("text_enriched")
+                    or row.get("relevance_note")
+                    or row.get("document_type"),
+                    650,
+                ),
+                "page_numbers": authoritative.get("page_numbers") or row.get("page_numbers") or [],
                 "clause_number": None,
                 "letter_no": row.get("letter_no"),
                 "verification_status": row.get("verification_status") or row.get("human_approval_status") or "approved",
@@ -657,6 +692,10 @@ class ArbitrationContextBuilder:
                     "claim_tags": row.get("claim_tags") or [],
                     "risk_flags": row.get("risk_flags") or [],
                     "exhibit_id": exhibit_id,
+                    "authoritative_collection": authoritative_collection,
+                    "authoritative_revision_id": current_revision or None,
+                    "authoritative_updated_at": authoritative.get("updated_at"),
+                    "authoritative_sha256": authoritative.get("sha256"),
                 },
                 "source_hash": "",
             }

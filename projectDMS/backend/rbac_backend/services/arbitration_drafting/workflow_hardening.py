@@ -33,6 +33,14 @@ PHASE6_REQUIRED_PLEADING_TYPES = (
     "rejoinder",
 )
 
+ACCEPTED_WORKFLOW_RECEIPT_FIELDS = (
+    "readiness_approval_receipt_id",
+    "plan_approval_receipt_id",
+    "legal_review_approval_receipt_id",
+    "draft_approval_receipt_id",
+    "export_approval_receipt_id",
+)
+
 
 def _dimension(authoritative: Any, candidate: Any) -> Dict[str, Any]:
     if authoritative is None or candidate is None:
@@ -105,6 +113,16 @@ def build_rollout_health(
     now = now or datetime.now(timezone.utc)
     total = len(run_rows)
     graph_runs = sum(1 for run in run_rows if run.get("engine") == "langgraph_v1")
+    accepted_graph_runs = [
+        run
+        for run in run_rows
+        if run.get("engine") == "langgraph_v1"
+        and run.get("status") == "completed"
+        and run.get("_acceptance_receipts_valid") is True
+        and all(run.get(field) for field in ACCEPTED_WORKFLOW_RECEIPT_FIELDS)
+        and run.get("draft_version_hash")
+        and run.get("validation_artifact_set_hash")
+    ]
     failed = sum(1 for run in run_rows if run.get("status") == "failed")
     fallbacks = sum(1 for event in event_rows if event.get("event_type") == "workflow_fallback_v2")
     shadow_events = [
@@ -168,7 +186,7 @@ def build_rollout_health(
     if len(shadow_events) >= minimum_sample and parity_rate < float(getattr(config, "ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT", 99.0)):
         alert("shadow_parity_rate", "critical", parity_rate, getattr(config, "ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT", 99.0))
 
-    enough_data = total >= minimum_sample and len(shadow_events) >= minimum_sample
+    enough_data = len(accepted_graph_runs) >= minimum_sample and len(shadow_events) >= minimum_sample
     health_status = (
         "blocked"
         if any(item["severity"] == "critical" for item in alerts)
@@ -176,7 +194,7 @@ def build_rollout_health(
     )
     pleading_type_counts = {
         pleading_type: sum(
-            1 for run in run_rows if str(run.get("pleading_type") or "") == pleading_type
+            1 for run in accepted_graph_runs if str(run.get("pleading_type") or "") == pleading_type
         )
         for pleading_type in PHASE6_REQUIRED_PLEADING_TYPES
     }
@@ -239,6 +257,7 @@ def build_rollout_health(
         "sample": {
             "workflows": total,
             "langgraph_workflows": graph_runs,
+            "accepted_langgraph_workflows": len(accepted_graph_runs),
             "shadow_comparisons": len(shadow_events),
         },
         "rates": {

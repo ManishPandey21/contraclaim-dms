@@ -29,6 +29,9 @@ _AMOUNT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _DATE_RE = re.compile(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4})\b")
+_CLAUSE_RE = re.compile(r"\b(?:clause|article|section)\s+[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*\b", re.IGNORECASE)
+_ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z&.'-]+(?:\s+[A-Z][A-Za-z&.'-]+){1,4}\b")
+_RELIEF_RE = re.compile(r"\b(?:award|declaration|injunction|specific performance|interest|costs|damages|compensation)\b", re.IGNORECASE)
 
 
 def _issue(
@@ -262,8 +265,21 @@ class ArbitrationValidationOrchestrator:
         after_amounts = set(_AMOUNT_RE.findall(after))
         before_dates = set(_DATE_RE.findall(before))
         after_dates = set(_DATE_RE.findall(after))
-        if not after_sources.issubset(before_sources) or not after_amounts.issubset(before_amounts) or not after_dates.issubset(before_dates):
-            raise ValueError("Bounded remediation attempted to add a source, amount, or date")
+        before_clauses = {item.lower() for item in _CLAUSE_RE.findall(before)}
+        after_clauses = {item.lower() for item in _CLAUSE_RE.findall(after)}
+        before_entities = set(_ENTITY_RE.findall(before))
+        after_entities = set(_ENTITY_RE.findall(after))
+        before_relief = {item.lower() for item in _RELIEF_RE.findall(before)}
+        after_relief = {item.lower() for item in _RELIEF_RE.findall(after)}
+        if (
+            not after_sources.issubset(before_sources)
+            or not after_amounts.issubset(before_amounts)
+            or not after_dates.issubset(before_dates)
+            or not after_clauses.issubset(before_clauses)
+            or not after_entities.issubset(before_entities)
+            or not after_relief.issubset(before_relief)
+        ):
+            raise ValueError("Bounded remediation attempted to add a source, amount, date, clause, entity, party, or relief")
         return {
             "full_markdown": after,
             "sections": [
@@ -279,4 +295,7 @@ class ArbitrationValidationOrchestrator:
             "source_keys_preserved": True,
             "amounts_preserved": True,
             "dates_preserved": True,
+            "clauses_preserved": True,
+            "entities_and_parties_preserved": True,
+            "relief_preserved": True,
         }

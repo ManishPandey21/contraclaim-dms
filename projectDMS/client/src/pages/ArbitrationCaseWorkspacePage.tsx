@@ -81,6 +81,7 @@ import {
   createArbitrationDraft,
   getArbitrationWorkflowEvents,
   getArbitrationWorkflowState,
+  listArbitrationWorkflows,
   prepareArbitrationDraftFromCase,
   resumeArbitrationWorkflow,
 } from "@/services/arbitration-drafting-api";
@@ -387,6 +388,19 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
   useEffect(() => {
     if (caseId) loadWorkspace();
   }, [caseId, loadWorkspace]);
+
+  useEffect(() => {
+    let active = true;
+    setWorkflow(null);
+    setWorkflowEvents([]);
+    if (!caseId) return () => { active = false; };
+    listArbitrationWorkflows(caseId, true)
+      .then((runs) => {
+        if (active && runs.length) setWorkflow(runs[0]);
+      })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [caseId]);
 
   useEffect(() => {
     setMatrixForm({});

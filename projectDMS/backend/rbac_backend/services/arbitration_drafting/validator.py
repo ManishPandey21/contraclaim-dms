@@ -11,6 +11,21 @@ _AMOUNT_RE = re.compile(
     r"\b(?:INR|USD|EUR|GBP|AED|SAR|QAR|\u20b9|\$|\u20ac|\u00a3)\s*[0-9][0-9,]*(?:\.\d+)?\b",
     flags=re.IGNORECASE,
 )
+_CLAUSE_RE = re.compile(r"\b(?:clause|article|section)\s+[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*\b", re.IGNORECASE)
+_ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z&.'-]+(?:\s+[A-Z][A-Za-z&.'-]+){1,4}\b")
+_FACTUAL_VERB_RE = re.compile(
+    r"\b(?:was|were|caused|failed|delayed|issued|submitted|notified|incurred|paid|completed|breached|withheld|terminated)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_NON_ENTITY_PHRASES = {
+    "statement of claim",
+    "statement of defence",
+    "statement of defense",
+    "relief sought",
+    "evidence required",
+    "legal review",
+}
 
 
 def _flatten_text(value: Any) -> str:
@@ -61,6 +76,42 @@ class ArbitrationDraftValidator:
         unsupported_dates = sorted(date for date in date_matches if date not in supported_text)
         if unsupported_dates:
             message = f"Draft includes dates not present in selected evidence or draft inputs: {', '.join(unsupported_dates[:5])}."
+            warnings.append(message)
+            approval_blockers.append(message)
+
+        clause_refs = {item.group(0) for item in _CLAUSE_RE.finditer(markdown)}
+        unsupported_clauses = sorted(ref for ref in clause_refs if ref.lower() not in supported_text.lower())
+        if unsupported_clauses:
+            message = f"Draft includes clause references not present in selected evidence or draft inputs: {', '.join(unsupported_clauses[:5])}."
+            warnings.append(message)
+            approval_blockers.append(message)
+
+        entity_refs = {
+            item.group(0).strip()
+            for item in _ENTITY_RE.finditer(markdown)
+            if item.group(0).strip().lower() not in _NON_ENTITY_PHRASES
+        }
+        unsupported_entities = sorted(ref for ref in entity_refs if ref.lower() not in supported_text.lower())
+        if unsupported_entities:
+            message = f"Draft includes party or entity names not present in selected evidence or draft inputs: {', '.join(unsupported_entities[:5])}."
+            warnings.append(message)
+            approval_blockers.append(message)
+
+        unsupported_assertions: List[str] = []
+        for sentence in _SENTENCE_RE.split(markdown):
+            normalized = " ".join(sentence.strip().split())
+            if (
+                len(normalized) >= 40
+                and _FACTUAL_VERB_RE.search(normalized)
+                and not _SOURCE_CITATION_RE.search(normalized)
+                and "[Evidence required]" not in normalized
+            ):
+                unsupported_assertions.append(normalized[:180])
+        if unsupported_assertions:
+            message = (
+                "Draft contains factual assertions without a same-sentence source citation or an [Evidence required] marker: "
+                + "; ".join(unsupported_assertions[:3])
+            )
             warnings.append(message)
             approval_blockers.append(message)
 

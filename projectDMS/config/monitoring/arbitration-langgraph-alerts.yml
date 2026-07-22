@@ -1,0 +1,37 @@
+groups:
+  - name: arbitration-langgraph
+    rules:
+      - alert: ArbitrationWorkflowCriticalAlert
+        expr: max by (code) (contractdms_arbitration_workflow_alert{severity="critical"}) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Arbitration workflow rollout is blocked"
+      - alert: ArbitrationExportDeadLetter
+        expr: increase(contractdms_arbitration_runtime_events_total{signal="export_blocked"}[15m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "A governed filing export reached terminal failure"
+      - alert: ArbitrationExportLeaseRecoverySpike
+        expr: increase(contractdms_arbitration_runtime_events_total{signal="lease_expiry_recovery"}[15m]) > 3
+        labels: { severity: warning }
+        annotations:
+          summary: "Filing export visibility leases are expiring repeatedly"
+      - alert: ArbitrationCheckpointStale
+        expr: contractdms_arbitration_runtime_value{signal="checkpoint_age_seconds"} > 900
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Arbitration checkpoint has not advanced for 15 minutes"
+      - alert: ArbitrationQueueLagHigh
+        expr: contractdms_arbitration_runtime_value{signal="filing_export_queue_lag_seconds"} > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Filing export queue lag exceeds five minutes"
+      - alert: ArbitrationEvidenceGroundingLow
+        expr: contractdms_arbitration_runtime_value{signal="evidence_grounded_ratio"} < 1
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "An arbitration workflow contains unresolved evidence"
