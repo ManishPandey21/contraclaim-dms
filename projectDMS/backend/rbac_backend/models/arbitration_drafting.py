@@ -849,6 +849,15 @@ class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
     draft_version_hash: Optional[str] = None
     validation_status: Optional[str] = None
     validation_blockers: List[Dict[str, Any]] = Field(default_factory=list)
+    validation_warnings: List[Dict[str, Any]] = Field(default_factory=list)
+    validation_artifact_set_id: Optional[str] = None
+    validation_artifact_set_hash: Optional[str] = None
+    validation_report_id: Optional[str] = None
+    validation_report_hash: Optional[str] = None
+    validation_route: Optional[str] = None
+    remediation_artifact_id: Optional[str] = None
+    remediation_artifact_hash: Optional[str] = None
+    remediation_cycle: int = 0
     approval_receipt_ids: Dict[str, str] = Field(default_factory=dict)
     targeted_questions: List[Dict[str, Any]] = Field(default_factory=list)
     fallback_reason: Optional[str] = None
@@ -894,6 +903,8 @@ class ArbitrationPlan(BaseModel):
     status: str = "needs_review"
     issues: List[Dict[str, Any]] = Field(default_factory=list)
     positions: List[Dict[str, Any]] = Field(default_factory=list)
+    paragraph_mapping: List[Dict[str, Any]] = Field(default_factory=list)
+    claim_theory: List[Dict[str, Any]] = Field(default_factory=list)
     legal_basis: List[Dict[str, Any]] = Field(default_factory=list)
     burden_of_proof: List[Dict[str, Any]] = Field(default_factory=list)
     anticipated_arguments: List[Dict[str, Any]] = Field(default_factory=list)
@@ -902,6 +913,7 @@ class ArbitrationPlan(BaseModel):
     evidentiary_gaps: List[Dict[str, Any]] = Field(default_factory=list)
     relief_requested: List[Dict[str, Any]] = Field(default_factory=list)
     section_structure: List[Dict[str, Any]] = Field(default_factory=list)
+    section_source_mapping: List[Dict[str, Any]] = Field(default_factory=list)
     source_mapping: List[Dict[str, Any]] = Field(default_factory=list)
     decisions: Dict[str, Any] = Field(default_factory=dict)
     created_by: Optional[str] = None

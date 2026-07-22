@@ -12,7 +12,7 @@ from ...models.arbitration_drafting import (
 )
 from .case_workspace import ArbitrationCaseWorkspaceService, _actor_id
 from .engines import ArbitrationEngineSelector, ArbitrationV2WorkflowEngine, canonical_workflow_request_hash
-from .workflow_repository import ArbitrationWorkflowRepository
+from .workflow_repository import ArbitrationWorkflowRepository, artifact_hash
 from .workflow_domain import ArbitrationWorkflowDomain
 from .approval_policy import enforce_author_approver_separation, enforce_gate_role
 from ...models.arbitration_drafting import ArbitrationReadinessApprovalRequest, ArbitrationGenerateRequest
@@ -45,6 +45,7 @@ RESUMABLE_GATES = {
     "document_selection_gate": "document_selection",
     "material_question_gate": "material_question",
     "matrix_review_gate": "matrix_review",
+    "legal_review_gate": "legal_review",
 }
 
 TERMINAL_WORKFLOW_STATUSES = {"completed", "cancelled", "failed"}
@@ -58,6 +59,237 @@ class ArbitrationWorkflowService:
         self.domain = ArbitrationWorkflowDomain(db)
         self.drafting = ArbitrationDraftingService(db)
         self.validation = ArbitrationValidationOrchestrator()
+
+    @staticmethod
+    def _validation_dependencies(run: Dict[str, Any]) -> Dict[str, str]:
+        return {
+            key: str(run.get(key))
+            for key in (
+                "input_snapshot_hash",
+                "document_manifest_hash",
+                "evidence_snapshot_hash",
+                "opponent_pleading_snapshot_hash",
+                "matrix_revision_hash",
+                "readiness_artifact_hash",
+                "plan_hash",
+            )
+            if run.get(key)
+        }
+
+    async def _persist_validation(
+        self,
+        run: Dict[str, Any],
+        version: Dict[str, Any],
+        *,
+        remediation_cycle: int,
+    ) -> Dict[str, Any]:
+        report = await self.validation.evaluate(
+            version,
+            dependency_hashes=self._validation_dependencies(run),
+            remediation_cycle=remediation_cycle,
+        )
+        artifact_refs = []
+        for artifact in report.get("artifacts") or []:
+            branch = str(artifact["branch"])
+            snapshot = await self.repository.create_snapshot(
+                run_id=str(run["_id"]),
+                kind=f"validation_{branch}",
+                payload=artifact,
+                effect_key=(
+                    f"{run['_id']}:validation:{report['validation_input_hash']}:"
+                    f"{branch}:{artifact['artifact_hash']}"
+                ),
+            )
+            artifact_refs.append(
+                {
+                    "branch": branch,
+                    "snapshot_id": snapshot["_id"],
+                    "snapshot_hash": snapshot["snapshot_hash"],
+                    "artifact_hash": artifact["artifact_hash"],
+                    "status": artifact["status"],
+                }
+            )
+        report_snapshot = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="validation_report",
+            payload={
+                key: value
+                for key, value in report.items()
+                if key not in {"artifacts"}
+            },
+            effect_key=f"{run['_id']}:validation-report:{report['validation_input_hash']}:{report['report_hash']}",
+        )
+        stable_artifact_refs = [
+            {
+                "branch": item["branch"],
+                "artifact_hash": item["artifact_hash"],
+                "status": item["status"],
+            }
+            for item in sorted(artifact_refs, key=lambda item: item["branch"])
+        ]
+        artifact_set_hash = artifact_hash(
+            {
+                "schema_version": report["schema_version"],
+                "validation_input_hash": report["validation_input_hash"],
+                "version_hash": report["version_hash"],
+                "report_hash": report["report_hash"],
+                "artifacts": stable_artifact_refs,
+            }
+        )
+        artifact_set_payload = {
+            "schema_version": report["schema_version"],
+            "validation_input_hash": report["validation_input_hash"],
+            "version_hash": report["version_hash"],
+            "report_hash": report["report_hash"],
+            "artifact_set_hash": artifact_set_hash,
+            "report_snapshot_id": report_snapshot["_id"],
+            "report_snapshot_hash": report_snapshot["snapshot_hash"],
+            "artifacts": sorted(artifact_refs, key=lambda item: item["branch"]),
+            "authoritative": False,
+        }
+        artifact_set = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="validation_artifact_set",
+            payload=artifact_set_payload,
+            effect_key=f"{run['_id']}:validation-set:{report['validation_input_hash']}:{report['report_hash']}",
+        )
+        return {
+            **report,
+            "validation_report_id": report_snapshot["_id"],
+            "validation_report_snapshot_hash": report_snapshot["snapshot_hash"],
+            "validation_artifact_set_id": artifact_set["_id"],
+            "validation_artifact_set_hash": artifact_set_hash,
+            "validation_artifact_set_snapshot_hash": artifact_set["snapshot_hash"],
+            "validation_artifact_refs": artifact_refs,
+        }
+
+    async def _create_remediated_candidate(
+        self,
+        run: Dict[str, Any],
+        version: Dict[str, Any],
+        report: Dict[str, Any],
+        current_user: Any,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        remediation = self.validation.remediate(version, report)
+        if not remediation:
+            return version, report
+        cycle = int(report.get("remediation_cycle") or 0) + 1
+        input_hash = artifact_hash(
+            {
+                "policy": report.get("remediation_policy"),
+                "report_hash": report.get("report_hash"),
+                "version_hash": report.get("version_hash"),
+                "cycle": cycle,
+            }
+        )
+        effect_key = f"{run['_id']}:remediate:{input_hash}"
+        effect = await self.repository.claim_effect(
+            run_id=str(run["_id"]),
+            effect_key=effect_key,
+            effect_type="draft_remediation",
+            input_hash=input_hash,
+        )
+        if effect.get("status") == "completed":
+            output = effect.get("output_refs") or {}
+            remediated = await self.db.arbitration_draft_versions.find_one(
+                {"_id": output.get("draft_version_id"), "draft_id": str(run["draft_id"])}
+            )
+            if not remediated:
+                raise HTTPException(status_code=409, detail="Completed remediation effect references a missing immutable version")
+            remediated_hash = remediated.get("version_hash") or immutable_version_hash(remediated)
+            if remediated_hash != output.get("draft_version_hash"):
+                raise HTTPException(status_code=409, detail="Completed remediation effect output hash does not match its immutable version")
+        else:
+            if not effect.get("_claimed_now"):
+                raise HTTPException(status_code=409, detail="Draft remediation effect is already in progress")
+            try:
+                version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
+                structured = {
+                    **(version.get("structured_output") or {}),
+                    "workflow_remediation": {
+                        "policy": report.get("remediation_policy"),
+                        "cycle": cycle,
+                        "applied_fixes": remediation["applied_fixes"],
+                        "parent_version_hash": report.get("version_hash"),
+                    },
+                }
+                remediated = {
+                    **version,
+                    "_id": str(uuid.uuid4()),
+                    "version": version_number,
+                    "sections": remediation["sections"],
+                    "full_markdown": remediation["full_markdown"],
+                    "structured_output": structured,
+                    "parent_version_id": version.get("_id"),
+                    "parent_version": version.get("version"),
+                    "generation_run_id": None,
+                    "created_by": _actor_id(current_user),
+                    "created_at": datetime.now(timezone.utc),
+                }
+                remediated["version_hash"] = immutable_version_hash(remediated)
+                await self.drafting.repo.create_version(remediated)
+                await self.drafting.repo.update_draft(
+                    str(run["draft_id"]),
+                    {
+                        "current_version": version_number,
+                        "updated_at": datetime.now(timezone.utc),
+                        "updated_by": _actor_id(current_user),
+                    },
+                )
+                remediated_hash = remediated["version_hash"]
+                await self.repository.complete_effect(
+                    effect_key,
+                    {"draft_version_id": remediated["_id"], "draft_version_hash": remediated_hash},
+                )
+            except Exception as exc:
+                await self.repository.fail_effect(effect_key, error_code=type(exc).__name__)
+                raise
+        remediation_artifact = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="draft_remediation",
+            payload={
+                "policy": report.get("remediation_policy"),
+                "cycle": cycle,
+                "parent_version_id": version.get("_id"),
+                "parent_version_hash": report.get("version_hash"),
+                "draft_version_id": remediated.get("_id"),
+                "draft_version_hash": remediated_hash,
+                "applied_fixes": remediation["applied_fixes"],
+                "before_content_hash": remediation["before_content_hash"],
+                "after_content_hash": remediation["after_content_hash"],
+                "source_keys_preserved": remediation["source_keys_preserved"],
+                "amounts_preserved": remediation["amounts_preserved"],
+                "dates_preserved": remediation["dates_preserved"],
+            },
+            effect_key=f"{run['_id']}:remediation-artifact:{input_hash}",
+        )
+        return remediated, {
+            "remediation_artifact_id": remediation_artifact["_id"],
+            "remediation_artifact_hash": remediation_artifact["snapshot_hash"],
+            "remediation_cycle": cycle,
+        }
+
+    async def _validate_with_bounded_remediation(
+        self,
+        run: Dict[str, Any],
+        version: Dict[str, Any],
+        current_user: Any,
+    ) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+        cycle = 0
+        remediation_refs: Dict[str, Any] = {}
+        report = await self._persist_validation(run, version, remediation_cycle=cycle)
+        while report.get("route") == "remediate":
+            remediated, refs = await self._create_remediated_candidate(run, version, report, current_user)
+            if remediated.get("_id") == version.get("_id"):
+                report = self.validation.bounded_remediation(
+                    {**report, "remediation_candidates": [], "termination_reason": "no_safe_automatic_remediation"}
+                )
+                break
+            version = remediated
+            remediation_refs = refs
+            cycle = int(refs["remediation_cycle"])
+            report = await self._persist_validation(run, version, remediation_cycle=cycle)
+        return version, report, remediation_refs
 
     @staticmethod
     def _assert_state_version(run: Dict[str, Any], expected_version: int) -> None:
@@ -240,6 +472,19 @@ class ArbitrationWorkflowService:
             current_hash = (current_version or {}).get("version_hash") or immutable_version_hash(current_version or {})
             if current_hash != run.get("draft_version_hash"):
                 raise HTTPException(status_code=409, detail="Draft version drifted; review the current immutable version")
+            if gate == "legal_review" and (
+                run.get("validation_status") != "passed"
+                or run.get("validation_blockers")
+                or not run.get("validation_artifact_set_hash")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Workflow validation blockers must be resolved in a new immutable candidate before legal approval",
+                        "validation_status": run.get("validation_status"),
+                        "blockers": run.get("validation_blockers") or [],
+                    },
+                )
         expected_hash = str(run.get(artifact_field) or "")
         if not expected_hash or expected_hash != payload.artifact_hash:
             raise HTTPException(status_code=409, detail="Approval artifact hash is stale or does not match the workflow state")
@@ -272,10 +517,36 @@ class ArbitrationWorkflowService:
         }
         receipt = await self.repository.record_approval(receipt)
         if payload.decision != "approved":
+            if gate == "plan":
+                await self.db.arbitration_plans.update_one(
+                    {"_id": run.get("plan_id"), "run_id": run_id, "plan_hash": run.get("plan_hash")},
+                    {
+                        "$set": {
+                            "status": payload.decision,
+                            "review_receipt_id": receipt["_id"],
+                            "reviewed_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+            rejection_update = (
+                {
+                    "status": "awaiting_legal_review",
+                    "current_node": "legal_review_gate",
+                    "next_action": "revise_draft",
+                    "required_human_role": "drafter",
+                }
+                if gate in {"legal_review", "draft"}
+                else {
+                    "status": "awaiting_matrix_review",
+                    "current_node": "matrix_review_gate",
+                    "next_action": "review_matrices",
+                    "required_human_role": "legal_reviewer",
+                }
+            )
             updated = await self.repository.transition(
                 run_id,
                 payload.state_version,
-                {"status": "awaiting_matrix_review", "current_node": "matrix_review_gate", "next_action": "review_matrices", "required_human_role": "legal"},
+                rejection_update,
                 event=f"{gate}_{payload.decision}",
             )
             return self.public_state(updated)
@@ -300,6 +571,21 @@ class ArbitrationWorkflowService:
         elif gate == "plan":
             if not run.get("draft_id"):
                 raise HTTPException(status_code=409, detail="A case-linked draft is required before the approved plan can be generated")
+            plan = await self.db.arbitration_plans.find_one(
+                {"_id": run.get("plan_id"), "run_id": run_id, "plan_hash": run.get("plan_hash")}
+            )
+            if not plan:
+                raise HTTPException(status_code=409, detail="Approved pleading plan artifact is missing or has drifted")
+            await self.db.arbitration_plans.update_one(
+                {"_id": plan["_id"], "run_id": run_id, "plan_hash": run.get("plan_hash")},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "approval_receipt_id": receipt["_id"],
+                        "approved_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
             effect_key = f"{run_id}:generate:{run['plan_hash']}"
             effect = await self.repository.claim_effect(
                 run_id=run_id,
@@ -321,7 +607,12 @@ class ArbitrationWorkflowService:
                 if not effect.get("_claimed_now"):
                     raise HTTPException(status_code=409, detail="Draft generation effect is already in progress")
                 try:
-                    await self.drafting.generate(str(run["draft_id"]), ArbitrationGenerateRequest(), current_user)
+                    await self.drafting.generate(
+                        str(run["draft_id"]),
+                        ArbitrationGenerateRequest(),
+                        current_user,
+                        pleading_plan=plan,
+                    )
                     version = await self.drafting.repo.latest_version(str(run["draft_id"]))
                     if not version:
                         raise HTTPException(status_code=409, detail="Draft generation did not create an immutable version")
@@ -333,12 +624,13 @@ class ArbitrationWorkflowService:
                 except Exception as exc:
                     await self.repository.fail_effect(effect_key, error_code=type(exc).__name__)
                     raise
-            validation = self.validation.bounded_remediation(await self.validation.evaluate(version))
-            validation_snapshot = await self.repository.create_snapshot(
-                run_id=run_id, kind="validation_report", payload=validation,
-                effect_key=f"{run_id}:validation:{version_hash}",
+            version, validation, remediation_refs = await self._validate_with_bounded_remediation(
+                run, version, current_user
             )
+            version_hash = version.get("version_hash") or immutable_version_hash(version)
             status_value, node, next_action, progress = "awaiting_legal_review", "legal_review_gate", "legal_review", 85
+            if validation.get("status") != "passed":
+                next_action = "revise_draft"
             transition_update.update(
                 {
                     "draft_version_id": version.get("_id"), "draft_version_hash": version_hash,
@@ -346,9 +638,14 @@ class ArbitrationWorkflowService:
                     "artifact_authors": {**(run.get("artifact_authors") or {}), "draft_version_hash": version.get("created_by")},
                     "validation_status": validation.get("status"),
                     "validation_blockers": validation.get("blockers") or [],
-                    "validation_report_id": validation_snapshot["_id"],
+                    "validation_warnings": validation.get("warnings") or [],
+                    "validation_artifact_set_id": validation["validation_artifact_set_id"],
+                    "validation_artifact_set_hash": validation["validation_artifact_set_hash"],
+                    "validation_report_id": validation["validation_report_id"],
                     "validation_report_hash": validation["report_hash"],
+                    "validation_route": validation.get("route"),
                     "remediation_cycle": validation.get("remediation_cycle", 0),
+                    **remediation_refs,
                 }
             )
         elif gate == "draft":
@@ -364,7 +661,15 @@ class ArbitrationWorkflowService:
                 "current_node": node,
                 "next_action": next_action,
                 "progress": progress,
-                "required_human_role": None if status_value in {"running", "completed"} else "senior_legal",
+                "required_human_role": (
+                    None
+                    if status_value in {"running", "completed"}
+                    else "drafter"
+                    if next_action == "revise_draft"
+                    else "legal_reviewer"
+                    if node == "legal_review_gate"
+                    else "senior_legal"
+                ),
                 f"{gate}_approval_receipt_id": receipt["_id"],
                 **transition_update,
             },
@@ -402,6 +707,8 @@ class ArbitrationWorkflowService:
             raise HTTPException(status_code=422, detail="At least one scoped document is required to continue")
         if current_node == "matrix_review_gate" and payload.decision != "refresh":
             raise HTTPException(status_code=422, detail="Matrix review resume only supports decision=refresh")
+        if current_node == "legal_review_gate" and payload.decision != "refresh_candidate":
+            raise HTTPException(status_code=422, detail="Legal review resume only supports decision=refresh_candidate")
         update: Dict[str, Any] = {"status": "running", "next_action": "poll", "required_human_role": None}
         if current_node == "material_question_gate":
             required = {str(item.get("question_id")) for item in run.get("targeted_questions") or [] if item.get("required")}
@@ -441,6 +748,42 @@ class ArbitrationWorkflowService:
                     "matrix_revision_set_id": analysis["revision_set_id"], "matrix_revision_hash": analysis["revision_hash"],
                     "readiness_artifact_id": readiness["matrix_revision_set_id"], "readiness_artifact_hash": readiness["artifact_hash"],
                     "blockers": analysis["blockers"], "last_material_editor_id": _actor_id(current_user),
+                }
+            )
+        elif current_node == "legal_review_gate":
+            if not run.get("draft_id"):
+                raise HTTPException(status_code=409, detail="Workflow has no case-linked draft")
+            candidate = await self.drafting.repo.latest_version(str(run["draft_id"]))
+            if not candidate:
+                raise HTTPException(status_code=409, detail="No immutable draft candidate is available for validation")
+            candidate, validation, remediation_refs = await self._validate_with_bounded_remediation(
+                run, candidate, current_user
+            )
+            candidate_hash = candidate.get("version_hash") or immutable_version_hash(candidate)
+            update.update(
+                {
+                    "status": "awaiting_legal_review",
+                    "current_node": "legal_review_gate",
+                    "next_action": "legal_review" if validation.get("status") == "passed" else "revise_draft",
+                    "required_human_role": "legal_reviewer" if validation.get("status") == "passed" else "drafter",
+                    "progress": 85,
+                    "draft_version_id": candidate.get("_id"),
+                    "draft_version_hash": candidate_hash,
+                    "artifact_authors": {
+                        **(run.get("artifact_authors") or {}),
+                        "draft_version_hash": candidate.get("created_by"),
+                    },
+                    "validation_status": validation.get("status"),
+                    "validation_blockers": validation.get("blockers") or [],
+                    "validation_warnings": validation.get("warnings") or [],
+                    "validation_artifact_set_id": validation["validation_artifact_set_id"],
+                    "validation_artifact_set_hash": validation["validation_artifact_set_hash"],
+                    "validation_report_id": validation["validation_report_id"],
+                    "validation_report_hash": validation["report_hash"],
+                    "validation_route": validation.get("route"),
+                    "remediation_cycle": validation.get("remediation_cycle", 0),
+                    "last_material_editor_id": candidate.get("created_by") or run.get("last_material_editor_id"),
+                    **remediation_refs,
                 }
             )
         if payload.selected_document_ids:
@@ -489,6 +832,20 @@ class ArbitrationWorkflowService:
                     "documents_selected": bool(updated.get("documents_selected")),
                     "user_direction_complete": str(updated.get("current_node")) != "material_question_gate",
                 },
+            )
+        elif current_node == "legal_review_gate":
+            await self._sync_langgraph_checkpoint(
+                updated,
+                {
+                    "draft_generated": True,
+                    "validation_complete": True,
+                    "validation_artifact_set_id": str(updated.get("validation_artifact_set_id") or ""),
+                    "validation_artifact_set_hash": str(updated.get("validation_artifact_set_hash") or ""),
+                    "validation_status": str(updated.get("validation_status") or ""),
+                    "validation_route": str(updated.get("validation_route") or ""),
+                    "remediation_cycle": int(updated.get("remediation_cycle") or 0),
+                },
+                traverse=False,
             )
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="resumed"
@@ -572,12 +929,19 @@ class ArbitrationWorkflowService:
                 "evidence_snapshot_hash", "analysis_artifact_set_id", "analysis_artifact_set_hash",
                 "matrix_revision_set_id", "matrix_revision_hash",
                 "readiness_artifact_hash", "plan_id", "plan_hash", "draft_version_id", "draft_version_hash",
-                "validation_status", "validation_blockers",
+                "validation_status",
+                "validation_artifact_set_id", "validation_artifact_set_hash",
+                "validation_report_id", "validation_report_hash", "validation_route",
+                "remediation_artifact_id", "remediation_artifact_hash",
                 "targeted_questions",
                 "fallback_reason", "fallback_from_engine", "fallback_input_snapshot_id", "fallback_input_snapshot_hash",
             )
         } | {
             "run_id": run.get("_id"),
+            "blockers": list(run.get("blockers") or []),
+            "validation_blockers": list(run.get("validation_blockers") or []),
+            "validation_warnings": list(run.get("validation_warnings") or []),
+            "remediation_cycle": int(run.get("remediation_cycle") or 0),
             "approval_receipt_ids": {
                 gate: run.get(f"{gate}_approval_receipt_id")
                 for gate in GATE_ARTIFACT_FIELDS if run.get(f"{gate}_approval_receipt_id")

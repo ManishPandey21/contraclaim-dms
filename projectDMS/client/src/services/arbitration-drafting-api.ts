@@ -134,6 +134,15 @@ export interface ArbitrationWorkflowState {
   draft_version_hash?: string | null;
   validation_status?: string | null;
   validation_blockers?: Array<Record<string, unknown>>;
+  validation_warnings?: Array<Record<string, unknown>>;
+  validation_artifact_set_id?: string | null;
+  validation_artifact_set_hash?: string | null;
+  validation_report_id?: string | null;
+  validation_report_hash?: string | null;
+  validation_route?: "remediate" | "human_revision" | "legal_review" | string | null;
+  remediation_artifact_id?: string | null;
+  remediation_artifact_hash?: string | null;
+  remediation_cycle?: number;
   approval_receipt_ids?: Record<string, string>;
   targeted_questions?: Array<{ question_id: string; prompt: string; required?: boolean }>;
   fallback_reason?: string | null;

@@ -3,6 +3,8 @@
 > Implementation status (verified 2026-07-22): P0-01 through P0-08 are implemented locally behind fail-safe v2 rollout controls; no Phase 0 code item is currently open, but production-like migration and authorization acceptance remain pending. The next functional cleanup has also started: authoritative paragraph responses now materialize server-owned, reviewable, read-only defence/rejoinder projections, closing new draft-bound duplicate writes. Historical ambiguous rows still require a conservative audit/backfill. See `ARBITRATION_LANGGRAPH_IMPLEMENTATION_PROGRESS.md` and `docs/architecture/arbitration_langgraph_operations_runbook.md`.
 >
 > Phase 2 status (implemented 2026-07-22; production-like acceptance pending): the official graph skeleton, minimal typed checkpoints, durable gates/APIs, checkpoint redaction/retention, UI polling/timeline, pre-side-effect CAS enforcement, idempotent and cumulative checkpoint recovery, passive cancellation checkpointing, recoverable checkpoint-sync markers, and immutable-snapshot-bound v2 fallback are implemented and locally tested. The acceptance requirement to kill/restart at every graph node and human gate has not yet been completed against production MongoDB; only the document-selection restart path has production evidence.
+>
+> Phase 4 status (implemented 2026-07-22; production-like acceptance pending): the `phase4-v1` graph and state schema `2` now bind a versioned plan, idempotent generated candidate, eight parallel validation artifacts, a deterministic validation report/artifact-set hash, conditional revision/remediation/legal-review routing, and capped no-new-source/value citation deduplication. A blocked candidate cannot receive legal approval; counsel must create and explicitly revalidate a new immutable candidate. Parent lineage and existing complete-section regeneration are preserved. Local unit and `InMemorySaver` acceptance is complete; production-image, real-Mongo node-by-node restart, load, authenticated browser, and primary-rollout acceptance are not.
 
 **Audit date:** 2026-07-21
 **Scope:** Statement of Claim (SoC), Statement of Defence (SoD), Counterclaim, and Rejoinder
@@ -657,6 +659,8 @@ Changes:
 **Fallback:** v2 consumes the same snapshot; shadow graph writes only non-authoritative artifacts.
 
 ### Phase 4 — Plan, drafting, validation, and bounded remediation nodes
+
+> Current implementation: complete in source with local unit, graph-gate, and frontend build coverage. Plans include explicit issue/paragraph/claim/relief/section/source mappings and per-run versions. Eight validation branches persist immutable non-authoritative artifacts plus a report and artifact-set hash tied to the exact draft/dependency hashes. Hard blockers route to human revision and are enforced before the legal-review receipt. The only automatic remediation removes adjacent duplicate copies of an existing citation, creates one parent-linked immutable candidate, and records hash-based proof that no source, amount, or date was added. Production-like checkpoint migration/restart, load, and authenticated legal-review acceptance remain open; LangGraph is not primary.
 
 **Objective:** Move orchestration boundaries around the proven generator and validator.
 

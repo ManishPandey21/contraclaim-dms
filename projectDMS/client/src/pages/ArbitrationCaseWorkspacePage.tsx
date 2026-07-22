@@ -663,6 +663,12 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
           gate: "material_question",
           answers: workflowAnswers,
         }));
+      } else if (workflow.current_node === "legal_review_gate" && workflow.validation_status !== "passed") {
+        setWorkflow(await resumeArbitrationWorkflow(caseId, workflow.run_id, {
+          state_version: workflow.state_version,
+          gate: "legal_review",
+          decision: "refresh_candidate",
+        }));
       } else {
         const gateByNode: Record<string, { gate: string; hash?: string | null; role: string }> = {
           matrix_review_gate: { gate: "matrix_review", hash: workflow.matrix_revision_hash, role: "legal_reviewer" },
@@ -1184,6 +1190,22 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     {(workflow.blockers || []).length > 0 ? (
                       <div className="text-xs text-amber-700">{workflow.blockers.length} blocker(s) require review.</div>
                     ) : null}
+                    {(workflow.validation_blockers || []).length > 0 ? (
+                      <div className="space-y-1 rounded border border-red-200 bg-red-50 p-2 text-xs text-red-800">
+                        <div className="font-medium">Draft validation blockers</div>
+                        {workflow.validation_blockers.map((blocker, index) => (
+                          <div key={`${String(blocker.code || "validation")}-${index}`}>
+                            {String(blocker.message || blocker.code || "Validation blocker")}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {workflow.validation_status ? (
+                      <div className="text-xs text-muted-foreground">
+                        Validation: {pretty(workflow.validation_status)}
+                        {workflow.remediation_cycle ? ` - remediation cycle ${workflow.remediation_cycle}` : ""}
+                      </div>
+                    ) : null}
                     {workflow.current_node === "material_question_gate" ? (
                       <div className="space-y-2">
                         {(workflow.targeted_questions || []).map((question) => (
@@ -1213,7 +1235,11 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                     ) : null}
                     <div className="flex gap-2">
                       {!['completed', 'cancelled', 'failed'].includes(workflow.status) ? (
-                        <Button size="sm" onClick={continueWorkflow} disabled={workflowBusy}>Review / continue</Button>
+                        <Button size="sm" onClick={continueWorkflow} disabled={workflowBusy}>
+                          {workflow.current_node === "legal_review_gate" && workflow.validation_status !== "passed"
+                            ? "Revalidate candidate"
+                            : "Review / continue"}
+                        </Button>
                       ) : null}
                       <Button
                         size="sm"

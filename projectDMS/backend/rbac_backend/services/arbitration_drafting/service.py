@@ -86,6 +86,7 @@ def stable_generation_input_hash(
         "claim_heads": context.get("claim_heads") or [],
         "paragraph_responses": context.get("paragraph_responses") or [],
         "missing_evidence": context.get("missing_evidence") or [],
+        "pleading_plan_hash": (context.get("pleading_plan") or {}).get("plan_hash"),
         "section_key": section_key,
         "additional_instruction": additional_instruction,
         "include_unverified_graph_links": include_unverified_graph_links,
@@ -374,6 +375,7 @@ class ArbitrationDraftingService:
         current_user: Any,
         *,
         run_type: GenerationRunType = GenerationRunType.FULL_DRAFT,
+        pleading_plan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         await self.case_workspace.assert_case_ready_for_draft(draft, allow_standalone_working_draft=True)
@@ -383,6 +385,8 @@ class ArbitrationDraftingService:
             current_user,
             include_unverified_graph_links=payload.include_unverified_graph_links,
         )
+        if pleading_plan:
+            context["pleading_plan"] = dict(pleading_plan)
         latest = await self.repo.latest_version(draft_id)
         if run_type == GenerationRunType.SECTION_REGENERATION:
             if not payload.section_key:

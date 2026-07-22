@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 
 from .case_workspace import ArbitrationCaseWorkspaceService, _actor_id, _is_ready_row
 from .matrix_registry import MATRIX_COLLECTIONS
-from .repository import _jsonable
+from .repository import _collect, _jsonable
 from .workflow_repository import ArbitrationWorkflowRepository, artifact_hash
 
 
@@ -368,24 +368,71 @@ class ArbitrationWorkflowDomain:
             "counterclaim": ["introduction", "jurisdiction", "facts", "legal_basis", "causation", "quantum", "relief"],
             "rejoinder": ["introduction", "paragraph_replies", "defence_rebuttal", "counterclaim_reply", "relief"],
         }.get(str(run.get("pleading_type")), [])
+        claim_rows = rows["claim-matrix"] + rows["counterclaim-matrix"]
+        position_rows = rows["defence-matrix"] + rows["counterclaim-matrix"] + rows["rejoinder-matrix"]
+
+        def source_revisions(*slugs: str) -> List[str]:
+            return sorted(
+                {
+                    str(source_revision_id)
+                    for slug in slugs
+                    for row in rows[slug]
+                    for source_revision_id in row.get("source_revision_ids") or []
+                    if source_revision_id
+                }
+            )
+
+        section_sources = {
+            "introduction": source_revisions("document-index"),
+            "jurisdiction": source_revisions("clause-matrix", "jurisdiction-matrix", "notice-compliance"),
+            "facts": source_revisions("chronology-matrix", "document-index"),
+            "claims": source_revisions("claim-matrix", "issue-matrix"),
+            "legal_basis": source_revisions("counterclaim-matrix", "clause-matrix"),
+            "causation": source_revisions("claim-matrix", "counterclaim-matrix", "chronology-matrix"),
+            "preliminary_objections": source_revisions("defence-matrix", "jurisdiction-matrix"),
+            "paragraph_responses": source_revisions("defence-matrix", "issue-matrix"),
+            "paragraph_replies": source_revisions("rejoinder-matrix", "issue-matrix"),
+            "defences": source_revisions("defence-matrix", "issue-matrix"),
+            "defence_rebuttal": source_revisions("rejoinder-matrix", "defence-matrix"),
+            "counterclaim_reply": source_revisions("rejoinder-matrix", "counterclaim-matrix"),
+            "quantum": source_revisions("quantum-annexures", "claim-matrix", "counterclaim-matrix"),
+            "relief": source_revisions("claim-matrix", "counterclaim-matrix"),
+        }
         plan_payload = {
             "issues": rows["issue-matrix"],
-            "positions": rows["defence-matrix"] + rows["counterclaim-matrix"] + rows["rejoinder-matrix"],
+            "positions": position_rows,
+            "paragraph_mapping": [
+                {
+                    "matrix_row_id": row.get("_id"),
+                    "matrix_row_revision_id": row.get("matrix_row_revision_id"),
+                    "source_paragraph_number": row.get("source_paragraph_number") or row.get("paragraph_number"),
+                    "position": row.get("position") or row.get("response_type") or row.get("reply_type"),
+                    "source_revision_ids": row.get("source_revision_ids") or [],
+                }
+                for row in position_rows
+            ],
+            "claim_theory": claim_rows,
             "legal_basis": rows["clause-matrix"] + rows["jurisdiction-matrix"],
             "burden_of_proof": [{"issue_id": row.get("_id"), "burden": row.get("burden_of_proof")} for row in rows["issue-matrix"]],
             "anticipated_arguments": rows["defence-matrix"],
-            "causation_theory": [{"claim_id": row.get("_id"), "causation": row.get("causation")} for row in rows["claim-matrix"] + rows["counterclaim-matrix"]],
+            "causation_theory": [{"claim_id": row.get("_id"), "causation": row.get("causation")} for row in claim_rows],
             "quantum_theory": rows["quantum-annexures"],
             "evidentiary_gaps": list(run.get("blockers") or []),
-            "relief_requested": [{"claim_id": row.get("_id"), "relief": row.get("relief") or row.get("relief_sought")} for row in rows["claim-matrix"] + rows["counterclaim-matrix"]],
+            "relief_requested": [{"claim_id": row.get("_id"), "relief": row.get("relief") or row.get("relief_sought")} for row in claim_rows],
             "section_structure": [{"order": index + 1, "key": key} for index, key in enumerate(structure)],
+            "section_source_mapping": [
+                {"section_key": key, "source_revision_ids": section_sources.get(key, [])}
+                for key in structure
+            ],
             "source_mapping": rows["document-index"],
             "decisions": {"new_matter": any(row.get("new_matter") for row in rows["rejoinder-matrix"]), "counterclaim": bool(rows["counterclaim-matrix"])},
         }
         plan_hash = artifact_hash(plan_payload)
+        existing_plans = await _collect(self.db.arbitration_plans.find({"run_id": run["_id"]}))
+        plan_version = max((int(item.get("version") or 0) for item in existing_plans), default=0) + 1
         plan = {
             "_id": f"plan_{plan_hash[:24]}", "run_id": run["_id"], "case_id": case_id,
-            "draft_id": run.get("draft_id"), "version": 1, "plan_hash": plan_hash,
+            "draft_id": run.get("draft_id"), "version": plan_version, "plan_hash": plan_hash,
             "status": "needs_review", **plan_payload, "created_by": _actor_id(current_user), "created_at": datetime.now(timezone.utc),
         }
         return await self.repository.create_plan(plan)
