@@ -1189,6 +1189,17 @@ class ArbitrationWorkflowService:
             else []
         )
         health = build_rollout_health(runs, events)
+        from .filing_export_queue import get_filing_export_queue
+
+        queue_health = await get_filing_export_queue().health()
+        health["filing_export_queue"] = queue_health
+        if not queue_health.get("ready"):
+            cutover = health.setdefault("primary_cutover", {})
+            blockers = list(cutover.get("blockers") or [])
+            if "filing_export_queue_not_ready" not in blockers:
+                blockers.append("filing_export_queue_not_ready")
+            cutover["blockers"] = blockers
+            cutover["eligible"] = False
         return health
 
     async def operations_health(self, case_id: str) -> Dict[str, Any]:

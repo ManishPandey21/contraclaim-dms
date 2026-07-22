@@ -371,6 +371,17 @@ class Settings(BaseSettings):
     DRAFTING_QUEUE_WORKERS: int = Field(default=1, ge=1, validation_alias="DRAFTING_QUEUE_WORKERS")
     DRAFTING_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=1800, ge=60, validation_alias="DRAFTING_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
     DRAFTING_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="DRAFTING_QUEUE_HEARTBEAT_SECONDS")
+    START_FILING_EXPORT_QUEUE_WORKERS: bool = Field(default=False, validation_alias="START_FILING_EXPORT_QUEUE_WORKERS")
+    FILING_EXPORT_QUEUE_ENABLED: bool = Field(default=False, validation_alias="FILING_EXPORT_QUEUE_ENABLED")
+    FILING_EXPORT_QUEUE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="FILING_EXPORT_QUEUE_REDIS_URL")
+    FILING_EXPORT_QUEUE_NAME: str = Field(default="arbitration_filing_export_queue", validation_alias="FILING_EXPORT_QUEUE_NAME")
+    FILING_EXPORT_QUEUE_PROCESSING_NAME: str = Field(default="arbitration_filing_export_processing", validation_alias="FILING_EXPORT_QUEUE_PROCESSING_NAME")
+    FILING_EXPORT_QUEUE_DEADLETTER_NAME: str = Field(default="arbitration_filing_export_deadletter", validation_alias="FILING_EXPORT_QUEUE_DEADLETTER_NAME")
+    FILING_EXPORT_QUEUE_MAX_RETRIES: int = Field(default=3, ge=1, le=20, validation_alias="FILING_EXPORT_QUEUE_MAX_RETRIES")
+    FILING_EXPORT_QUEUE_WORKERS: int = Field(default=2, ge=1, le=32, validation_alias="FILING_EXPORT_QUEUE_WORKERS")
+    FILING_EXPORT_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=300, ge=60, validation_alias="FILING_EXPORT_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
+    FILING_EXPORT_QUEUE_HEARTBEAT_SECONDS: int = Field(default=20, ge=5, validation_alias="FILING_EXPORT_QUEUE_HEARTBEAT_SECONDS")
+    FILING_EXPORT_QUEUE_METADATA_TTL_SECONDS: int = Field(default=604800, ge=3600, validation_alias="FILING_EXPORT_QUEUE_METADATA_TTL_SECONDS")
 
     # Contract OCR / clause chunking controls. OCR is performed page/batch-wise
     # during contract ingestion so large PDFs do not require one monolithic
@@ -620,6 +631,14 @@ class Settings(BaseSettings):
                     production_errors.append(
                         "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE=retired is reserved until a separate "
                         "v2 deprecation decision is implemented and accepted"
+                    )
+                filing_export_redis = str(
+                    self.FILING_EXPORT_QUEUE_REDIS_URL or self.APP_REDIS_URL or ""
+                ).strip()
+                if not self.FILING_EXPORT_QUEUE_ENABLED or not filing_export_redis:
+                    production_errors.append(
+                        "FILING_EXPORT_QUEUE_ENABLED=true and a Redis URL are required before primary "
+                        "arbitration rollout"
                     )
             if self.ALLOW_DEV_HEADERS:
                 production_errors.append("ALLOW_DEV_HEADERS must be false in production")

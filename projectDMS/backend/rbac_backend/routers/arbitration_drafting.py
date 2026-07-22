@@ -310,6 +310,7 @@ async def get_arbitration_workflow_operational_health(
 @router.get("/operations/workflows/{run_id}/checkpoints")
 async def get_redacted_arbitration_workflow_checkpoints(
     run_id: str,
+    request: Request,
     limit: int = 50,
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
@@ -320,6 +321,7 @@ async def get_redacted_arbitration_workflow_checkpoints(
     if not run:
         raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
     await _load_case_and_authorize(str(run.get("case_id")), Permissions.ARBITRATION_ADMIN, db, current_user, policy)
+    await require_step_up(request, current_user, action="arbitration.workflow.checkpoints")
     return await service.checkpoints(run_id, limit=limit)
 
 

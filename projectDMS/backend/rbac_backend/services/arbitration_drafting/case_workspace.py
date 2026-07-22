@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from ...models.arbitration_drafting import (
     ArbitrationAgentRun,
@@ -43,6 +44,7 @@ from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import enforce_author_approver_separation
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
 from .workflow_repository import ArbitrationWorkflowRepository
+from .filing_export_queue import get_filing_export_queue
 
 
 BLOCKING_READINESS_STATUSES = {
@@ -1514,14 +1516,48 @@ class ArbitrationCaseWorkspaceService:
         payload = await self.filing_bundle_payload(case_id)
         authorization = await self._authorize_filing_bundle(payload, normalized, current_user)
         bundle_hash = authorization["bundle_hash"]
+        effect_key = f"arbitration_filing_bundle:{bundle_hash}:{normalized}"
         existing = await self.db.arbitration_bundle_exports.find_one(
-            {"case_id": case_id, "format": normalized, "bundle_hash": bundle_hash, "status": {"$in": ["queued", "running", "completed"]}}
+            {"effect_key": effect_key}
         )
         if existing:
+            if existing.get("status") != "completed":
+                try:
+                    await get_filing_export_queue().enqueue(
+                        job_id=str(existing["_id"]),
+                        effect_key=effect_key,
+                        payload={
+                            "case_id": case_id,
+                            "export_id": str(existing["_id"]),
+                            "format": normalized,
+                            "effect_key": effect_key,
+                        },
+                    )
+                except Exception as exc:
+                    await self.db.arbitration_bundle_exports.update_one(
+                        {"_id": existing["_id"], "effect_key": effect_key, "status": {"$ne": "completed"}},
+                        {
+                            "$set": {
+                                "status": "queue_unavailable",
+                                "error": str(exc)[:2000],
+                                "updated_at": datetime.utcnow(),
+                            }
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Durable filing export queue is unavailable; no export job was accepted",
+                    ) from exc
+                existing = await self.db.arbitration_bundle_exports.find_one_and_update(
+                    {"_id": existing["_id"], "effect_key": effect_key, "status": {"$ne": "completed"}},
+                    {"$set": {"status": "queued", "error": None, "updated_at": datetime.utcnow()}},
+                    return_document=True,
+                ) or existing
             return self._public_bundle_export(existing)
         content_type, filename = BUNDLE_EXPORT_FORMATS[normalized]
+        export_id = str(uuid.uuid5(uuid.NAMESPACE_URL, effect_key))
         export = {
-            "_id": str(uuid.uuid4()),
+            "_id": export_id,
             "case_id": case_id,
             "format": normalized,
             "status": "queued",
@@ -1529,71 +1565,204 @@ class ArbitrationCaseWorkspaceService:
             "filename": filename,
             "content_length": 0,
             "bundle_hash": bundle_hash,
+            "effect_key": effect_key,
             "export_authorization_id": authorization["_id"],
+            "attempts": 0,
             "created_by": _actor_id(current_user),
             "created_at": datetime.utcnow(),
             "expires_at": datetime.utcnow() + timedelta(days=7),
         }
-        await self.db.arbitration_bundle_exports.insert_one(_jsonable(export))
-        job_id = await submit_background_job(
-            f"arbitration-filing-bundle:{normalized}",
-            self.execute_filing_bundle_export_job,
-            case_id,
-            export["_id"],
-            normalized,
-            priority=4,
-            max_retries=1,
-        )
+        try:
+            await self.db.arbitration_bundle_exports.insert_one(_jsonable(export))
+        except DuplicateKeyError:
+            existing = await self.db.arbitration_bundle_exports.find_one({"effect_key": effect_key})
+            if not existing:
+                raise
+            export = existing
+        try:
+            job_id = await get_filing_export_queue().enqueue(
+                job_id=str(export["_id"]),
+                effect_key=effect_key,
+                payload={
+                    "case_id": case_id,
+                    "export_id": str(export["_id"]),
+                    "format": normalized,
+                    "effect_key": effect_key,
+                },
+            )
+        except Exception as exc:
+            await self.db.arbitration_bundle_exports.update_one(
+                {"_id": export["_id"], "effect_key": effect_key, "status": {"$ne": "completed"}},
+                {"$set": {"status": "queue_unavailable", "error": str(exc)[:2000], "updated_at": datetime.utcnow()}},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Durable filing export queue is unavailable; no export job was accepted",
+            ) from exc
         updated = await self.db.arbitration_bundle_exports.find_one_and_update(
             {"_id": export["_id"], "case_id": case_id},
-            {"$set": {"background_job_id": job_id}},
+            {"$set": {"background_job_id": job_id, "status": "queued", "error": None, "updated_at": datetime.utcnow()}},
             return_document=True,
         )
         return self._public_bundle_export(updated or {**export, "background_job_id": job_id})
 
-    async def execute_filing_bundle_export_job(self, case_id: str, export_id: str, export_format: str) -> Dict[str, Any]:
+    async def execute_filing_bundle_export_job(
+        self,
+        case_id: str,
+        export_id: str,
+        export_format: str,
+        *,
+        effect_key: Optional[str] = None,
+        lease_token: Optional[str] = None,
+        lease_seconds: int = 300,
+        worker_name: str = "inline",
+    ) -> Dict[str, Any]:
         normalized = self._normalize_bundle_format(export_format)
-        await self.db.arbitration_bundle_exports.update_one(
-            {"_id": export_id, "case_id": case_id},
-            {"$set": {"status": "running", "started_at": datetime.utcnow()}},
+        existing = await self.db.arbitration_bundle_exports.find_one({"_id": export_id, "case_id": case_id})
+        if not existing:
+            raise RuntimeError("Filing bundle export record does not exist")
+        expected_effect = str(effect_key or existing.get("effect_key") or "")
+        if not expected_effect or str(existing.get("effect_key") or "") != expected_effect:
+            raise RuntimeError("Filing bundle export effect-key mismatch")
+        if existing.get("status") == "completed" and existing.get("content"):
+            return self._public_bundle_export(existing)
+        token = str(lease_token or uuid.uuid4())
+        now = datetime.utcnow()
+        lease_expires = now + timedelta(seconds=max(60, int(lease_seconds)))
+        claimed = await self.db.arbitration_bundle_exports.find_one_and_update(
+            {
+                "_id": export_id,
+                "case_id": case_id,
+                "effect_key": expected_effect,
+                "$or": [
+                    {"status": {"$in": ["queued", "retrying", "failed", "queue_unavailable"]}},
+                    {"execution_lease_expires_at": {"$lte": now}},
+                    {"execution_lease_token": token},
+                ],
+            },
+            {
+                "$set": {
+                    "status": "running",
+                    "started_at": now,
+                    "updated_at": now,
+                    "execution_lease_token": token,
+                    "execution_lease_expires_at": lease_expires,
+                    "worker_name": worker_name,
+                    "error": None,
+                },
+                "$inc": {"attempts": 1},
+            },
+            return_document=True,
         )
-        try:
-            content = await self._build_filing_bundle_export_content(case_id, normalized)
-            if len(content) > MAX_INLINE_BUNDLE_EXPORT_BYTES:
-                raise RuntimeError(
-                    f"Filing bundle export is {len(content)} bytes; inline export limit is {MAX_INLINE_BUNDLE_EXPORT_BYTES} bytes"
-                )
-            content_type, filename = BUNDLE_EXPORT_FORMATS[normalized]
-            updated = await self.db.arbitration_bundle_exports.find_one_and_update(
-                {"_id": export_id, "case_id": case_id},
-                {
-                    "$set": {
-                        "status": "completed",
-                        "content": content,
-                        "content_type": content_type,
-                        "filename": filename,
-                        "content_length": len(content),
-                        "completed_at": datetime.utcnow(),
-                    }
-                },
-                return_document=True,
+        if not claimed:
+            current = await self.db.arbitration_bundle_exports.find_one({"_id": export_id, "effect_key": expected_effect})
+            if current and current.get("status") == "completed" and current.get("content"):
+                return self._public_bundle_export(current)
+            raise TimeoutError("Filing bundle export effect is owned by another live lease")
+        content = await self._build_filing_bundle_export_content(case_id, normalized)
+        if len(content) > MAX_INLINE_BUNDLE_EXPORT_BYTES:
+            raise RuntimeError(
+                f"Filing bundle export is {len(content)} bytes; inline export limit is {MAX_INLINE_BUNDLE_EXPORT_BYTES} bytes"
             )
-            await observability_registry.record_arbitration_bundle_export(format=normalized, status="completed")
-            return self._public_bundle_export(updated or {})
-        except Exception as exc:
-            failed = await self.db.arbitration_bundle_exports.find_one_and_update(
-                {"_id": export_id, "case_id": case_id},
-                {
-                    "$set": {
-                        "status": "failed",
-                        "error": str(exc),
-                        "completed_at": datetime.utcnow(),
-                    }
-                },
-                return_document=True,
-            )
-            await observability_registry.record_arbitration_bundle_export(format=normalized, status="failed")
-            raise
+        content_type, filename = BUNDLE_EXPORT_FORMATS[normalized]
+        completed_at = datetime.utcnow()
+        updated = await self.db.arbitration_bundle_exports.find_one_and_update(
+            {
+                "_id": export_id,
+                "case_id": case_id,
+                "effect_key": expected_effect,
+                "execution_lease_token": token,
+                "status": "running",
+            },
+            {
+                "$set": {
+                    "status": "completed",
+                    "content": content,
+                    "content_sha256": hashlib.sha256(content).hexdigest(),
+                    "content_type": content_type,
+                    "filename": filename,
+                    "content_length": len(content),
+                    "completed_at": completed_at,
+                    "updated_at": completed_at,
+                    "execution_lease_token": None,
+                    "execution_lease_expires_at": None,
+                }
+            },
+            return_document=True,
+        )
+        if not updated:
+            current = await self.db.arbitration_bundle_exports.find_one({"_id": export_id, "effect_key": expected_effect})
+            if current and current.get("status") == "completed" and current.get("content"):
+                return self._public_bundle_export(current)
+            raise TimeoutError("Filing bundle export lost its Mongo effect lease before commit")
+        await observability_registry.record_arbitration_bundle_export(format=normalized, status="completed")
+        return self._public_bundle_export(updated)
+
+    async def heartbeat_filing_bundle_export_job(
+        self,
+        case_id: str,
+        export_id: str,
+        *,
+        effect_key: str,
+        lease_token: str,
+        lease_seconds: int,
+        worker_name: str,
+    ) -> None:
+        now = datetime.utcnow()
+        result = await self.db.arbitration_bundle_exports.update_one(
+            {
+                "_id": export_id,
+                "case_id": case_id,
+                "effect_key": effect_key,
+                "execution_lease_token": lease_token,
+                "status": "running",
+            },
+            {
+                "$set": {
+                    "execution_lease_expires_at": now + timedelta(seconds=max(60, int(lease_seconds))),
+                    "heartbeat_at": now,
+                    "updated_at": now,
+                    "worker_name": worker_name,
+                }
+            },
+        )
+        if not getattr(result, "matched_count", 0):
+            raise TimeoutError("Filing bundle export Mongo lease was lost")
+
+    async def record_filing_bundle_export_failure(
+        self,
+        case_id: str,
+        export_id: str,
+        *,
+        effect_key: str,
+        lease_token: str,
+        terminal: bool,
+        error: str,
+    ) -> None:
+        now = datetime.utcnow()
+        await self.db.arbitration_bundle_exports.update_one(
+            {
+                "_id": export_id,
+                "case_id": case_id,
+                "effect_key": effect_key,
+                "execution_lease_token": lease_token,
+                "status": "running",
+            },
+            {
+                "$set": {
+                    "status": "failed" if terminal else "retrying",
+                    "error": str(error)[:2000],
+                    "updated_at": now,
+                    "completed_at": now if terminal else None,
+                    "execution_lease_token": None,
+                    "execution_lease_expires_at": None,
+                }
+            },
+        )
+        await observability_registry.record_arbitration_bundle_export(
+            format=str((await self.db.arbitration_bundle_exports.find_one({"_id": export_id}) or {}).get("format") or "unknown"),
+            status="failed" if terminal else "retrying",
+        )
 
     async def _authorize_filing_bundle(self, payload: Dict[str, Any], export_format: str, current_user: Any) -> Dict[str, Any]:
         drafts = payload.get("drafts") or []
@@ -1675,6 +1844,7 @@ class ArbitrationCaseWorkspaceService:
     def _public_bundle_export(export: Dict[str, Any]) -> Dict[str, Any]:
         public = dict(export or {})
         public.pop("content", None)
+        public.pop("execution_lease_token", None)
         return public
 
     async def _filing_bundle_drafts(self, case_id: str) -> List[Dict[str, Any]]:

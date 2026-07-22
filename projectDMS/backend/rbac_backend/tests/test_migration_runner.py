@@ -25,6 +25,9 @@ from rbac_backend.migrations.v20260722_0002_arbitration_phase6_scope_index impor
     INDEX_NAME as ARB_PHASE6_SCOPE_INDEX_NAME,
     upgrade as upgrade_arbitration_phase6_scope,
 )
+from rbac_backend.migrations.v20260722_0003_arbitration_filing_export_effects import (
+    upgrade as upgrade_arbitration_export_effects,
+)
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -156,6 +159,28 @@ async def test_phase6_scope_migration_indexes_bounded_acceptance_query():
         ARB_PHASE6_SCOPE_INDEX_KEYS,
         {"name": ARB_PHASE6_SCOPE_INDEX_NAME, "background": True},
     ) in db.arbitration_workflow_runs.indexes
+
+
+@pytest.mark.asyncio
+async def test_filing_export_effect_migration_adds_unique_effect_and_lease_indexes():
+    db = _DB()
+
+    result = await upgrade_arbitration_export_effects(db, dry_run=False)
+
+    assert result.status == "applied"
+    assert (
+        [("effect_key", 1)],
+        {
+            "name": "arb_bundle_export_effect_unique",
+            "unique": True,
+            "partialFilterExpression": {"effect_key": {"$type": "string"}},
+            "background": True,
+        },
+    ) in db.arbitration_bundle_exports.indexes
+    assert (
+        [("status", 1), ("execution_lease_expires_at", 1)],
+        {"name": "arb_bundle_export_lease_recovery", "background": True},
+    ) in db.arbitration_bundle_exports.indexes
 
 
 def test_seed_catalog_digest_is_stable_and_validates_current_seeds():

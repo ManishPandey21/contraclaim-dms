@@ -32,6 +32,8 @@ try:
     from rbac_backend.services.audit_event_service import AuditEventService
     from rbac_backend.services.entitlement_service import EntitlementService
     from rbac_backend.services.permission_service import PermissionService
+    from rbac_backend.services.step_up_service import StepUpService
+    from rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 
     _IMPORTS_OK = True
 except Exception as exc:  # pragma: no cover - environment without httpx/TestClient
@@ -348,6 +350,36 @@ def test_case_patch_denies_cross_tenant(client):
     # Cross-tenant attempt must not have mutated anything.
     stored = client.db.arbitration_cases.rows[0]
     assert stored["title"] == "Org A EOT case (amended)"
+
+
+def test_checkpoint_operations_require_matching_step_up_and_tenant(client, monkeypatch):
+    async def _checkpoints(self, run_id, limit=50):
+        return [{"checkpoint_id": "redacted", "run_id": run_id}]
+
+    monkeypatch.setattr(ArbitrationWorkflowService, "checkpoints", _checkpoints)
+    route = "/api/arbitration/operations/workflows/workflow-a1/checkpoints"
+
+    org_a = client.as_user(ORG_A_USER)
+    assert org_a.get(route).status_code == 403
+
+    wrong_token = StepUpService().create_token(
+        user_id="user-org-B", action="arbitration.workflow.checkpoints"
+    )
+    assert org_a.get(route, headers={"x-step-up-token": wrong_token}).status_code == 403
+
+    valid_token = StepUpService().create_token(
+        user_id="user-org-A", action="arbitration.workflow.checkpoints"
+    )
+    accepted = org_a.get(route, headers={"x-step-up-token": valid_token})
+    assert accepted.status_code == 200
+    assert accepted.json()[0]["checkpoint_id"] == "redacted"
+
+    org_b_token = StepUpService().create_token(
+        user_id="user-org-B", action="arbitration.workflow.checkpoints"
+    )
+    assert client.as_user(ORG_B_USER).get(
+        route, headers={"x-step-up-token": org_b_token}
+    ).status_code == 404
 
 
 def test_matrix_rows_deny_cross_tenant(client):

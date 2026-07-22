@@ -168,6 +168,10 @@ class _FakeCollection:
 
     def _matches(self, row, query):
         for key, expected in query.items():
+            if key == "$or":
+                if not any(self._matches(row, branch) for branch in expected):
+                    return False
+                continue
             if key == "deleted_at" and isinstance(expected, dict) and expected.get("$exists") is False:
                 if "deleted_at" in row:
                     return False
@@ -183,6 +187,10 @@ class _FakeCollection:
                 continue
             if isinstance(expected, dict) and "$nin" in expected:
                 if actual in expected["$nin"]:
+                    return False
+                continue
+            if isinstance(expected, dict) and "$lte" in expected:
+                if actual is None or actual > expected["$lte"]:
                     return False
                 continue
             if actual != expected:
@@ -1267,23 +1275,81 @@ def test_queue_filing_bundle_export_persists_status_and_content(monkeypatch):
     _authorize_filing_fixture(db)
     service = ArbitrationCaseWorkspaceService(db)
 
-    async def fake_submit(name, func, *args, **kwargs):
-        assert name == "arbitration-filing-bundle:zip"
-        assert args[0] == "case-1"
-        return "job-export-1"
+    class _Queue:
+        async def enqueue(self, *, job_id, effect_key, payload):
+            assert job_id == payload["export_id"]
+            assert effect_key == payload["effect_key"]
+            assert payload["case_id"] == "case-1"
+            return job_id
 
-    monkeypatch.setattr(case_workspace_module, "submit_background_job", fake_submit)
+    monkeypatch.setattr(case_workspace_module, "get_filing_export_queue", lambda: _Queue())
 
     queued = asyncio.run(service.queue_filing_bundle_export("case-1", "zip", _FakeUser()))
     completed = asyncio.run(service.execute_filing_bundle_export_job("case-1", queued["_id"], "zip"))
     artifact = asyncio.run(service.get_filing_bundle_export_content("case-1", queued["_id"]))
 
     assert queued["status"] == "queued"
-    assert queued["background_job_id"] == "job-export-1"
+    assert queued["background_job_id"] == queued["_id"]
+    assert queued["effect_key"].startswith("arbitration_filing_bundle:")
     assert completed["status"] == "completed"
     assert completed["content_length"] > 0
     assert artifact["content"][:2] == b"PK"
     assert artifact["filename"] == "arbitration-case-bundle.zip"
+
+
+def test_filing_bundle_export_effect_is_idempotent_after_completion(monkeypatch):
+    db = _FakeDb()
+    _authorize_filing_fixture(db)
+    service = ArbitrationCaseWorkspaceService(db)
+
+    class _Queue:
+        async def enqueue(self, *, job_id, effect_key, payload):
+            return job_id
+
+    monkeypatch.setattr(case_workspace_module, "get_filing_export_queue", lambda: _Queue())
+    queued = asyncio.run(service.queue_filing_bundle_export("case-1", "zip", _FakeUser()))
+    first = asyncio.run(service.execute_filing_bundle_export_job("case-1", queued["_id"], "zip"))
+
+    async def should_not_rebuild(*args, **kwargs):
+        raise AssertionError("completed effect must not execute again")
+
+    monkeypatch.setattr(service, "_build_filing_bundle_export_content", should_not_rebuild)
+    second = asyncio.run(service.execute_filing_bundle_export_job("case-1", queued["_id"], "zip"))
+
+    assert first["status"] == second["status"] == "completed"
+    assert first["content_length"] == second["content_length"]
+    assert db.arbitration_bundle_exports.rows[0]["attempts"] == 1
+
+
+def test_existing_filing_export_fails_closed_when_durable_queue_is_unavailable(monkeypatch):
+    db = _FakeDb()
+    _authorize_filing_fixture(db)
+    service = ArbitrationCaseWorkspaceService(db)
+
+    class _AvailableQueue:
+        async def enqueue(self, *, job_id, effect_key, payload):
+            return job_id
+
+    class _UnavailableQueue:
+        async def enqueue(self, *, job_id, effect_key, payload):
+            raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(case_workspace_module, "get_filing_export_queue", lambda: _AvailableQueue())
+    queued = asyncio.run(service.queue_filing_bundle_export("case-1", "zip", _FakeUser()))
+    authorization = dict(db.arbitration_export_authorizations.rows[0])
+
+    async def _same_authorization(*args, **kwargs):
+        return authorization
+
+    monkeypatch.setattr(service, "_authorize_filing_bundle", _same_authorization)
+    monkeypatch.setattr(case_workspace_module, "get_filing_export_queue", lambda: _UnavailableQueue())
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(service.queue_filing_bundle_export("case-1", "zip", _FakeUser()))
+
+    assert exc_info.value.status_code == 503
+    stored = asyncio.run(db.arbitration_bundle_exports.find_one({"_id": queued["_id"]}))
+    assert stored["status"] == "queue_unavailable"
 
 
 class _FakeLLMGenerator:

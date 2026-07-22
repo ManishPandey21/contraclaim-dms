@@ -11,6 +11,10 @@ from .core.database import connect as connect_database, disconnect as disconnect
 from .services.background_jobs import start_background_services, stop_background_services
 from .services.contract_ingest_queue import start_contract_ingest_queue, stop_contract_ingest_queue
 from .services.letter_drafting.drafting_queue import start_drafting_queue, stop_drafting_queue
+from .services.arbitration_drafting.filing_export_queue import (
+    start_filing_export_queue,
+    stop_filing_export_queue,
+)
 from .services.runtime_state import get_runtime_state
 from .services.scheduler import start_scheduler, stop_scheduler
 
@@ -37,6 +41,8 @@ async def _run() -> None:
         await start_contract_ingest_queue()
     if settings.START_DRAFTING_QUEUE_WORKERS:
         await start_drafting_queue()
+    if settings.START_FILING_EXPORT_QUEUE_WORKERS:
+        await start_filing_export_queue()
     # H2: run the leader-locked cron scheduler here (set RUN_SCHEDULER=true on
     # the worker, false on the web tier, for a clean single-owner setup).
     scheduler = await start_scheduler()
@@ -50,6 +56,8 @@ async def _run() -> None:
             await stop_contract_ingest_queue()
         if settings.START_DRAFTING_QUEUE_WORKERS:
             await stop_drafting_queue()
+        if settings.START_FILING_EXPORT_QUEUE_WORKERS:
+            await stop_filing_export_queue()
         if settings.START_BACKGROUND_SERVICES:
             await stop_background_services()
         await disconnect_database()

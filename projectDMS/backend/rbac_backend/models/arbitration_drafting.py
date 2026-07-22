@@ -498,6 +498,8 @@ class ArbitrationBundleExport(BaseModel):
     format: ArbitrationBundleFormat
     status: str = "queued"
     background_job_id: Optional[str] = None
+    effect_key: Optional[str] = None
+    attempts: int = 0
     content_type: Optional[str] = None
     filename: Optional[str] = None
     content_length: int = 0

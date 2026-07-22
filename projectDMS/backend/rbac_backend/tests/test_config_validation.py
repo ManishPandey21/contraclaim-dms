@@ -364,6 +364,8 @@ def test_production_primary_arbitration_rollout_accepts_complete_phase6_controls
         ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
         ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="active",
         ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL="2099-12-31",
+        FILING_EXPORT_QUEUE_ENABLED=True,
+        FILING_EXPORT_QUEUE_REDIS_URL="redis://redis:6379/1",
     )
 
     settings.validate_runtime_configuration()
@@ -380,7 +382,27 @@ def test_production_primary_arbitration_rollout_rejects_unaccepted_v2_retirement
         ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
         ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="retired",
         ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL="2099-12-31",
+        FILING_EXPORT_QUEUE_ENABLED=True,
+        FILING_EXPORT_QUEUE_REDIS_URL="redis://redis:6379/1",
     )
 
     with pytest.raises(ValueError, match="separate v2 deprecation decision"):
+        settings.validate_runtime_configuration()
+
+
+def test_production_primary_arbitration_rollout_requires_durable_filing_export_queue():
+    settings = _production_settings(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="primary",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID="phase6-acceptance-2026-07-22",
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256="a" * 64,
+        ARBITRATION_ENGINE_PRIMARY_PERCENT=1,
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="active",
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL="2099-12-31",
+        FILING_EXPORT_QUEUE_ENABLED=False,
+    )
+
+    with pytest.raises(ValueError, match="FILING_EXPORT_QUEUE_ENABLED=true"):
         settings.validate_runtime_configuration()
