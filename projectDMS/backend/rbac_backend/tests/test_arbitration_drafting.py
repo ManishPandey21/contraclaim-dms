@@ -20,6 +20,8 @@ from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationPartyRole,
     ArbitrationDraftType,
     ArbitrationWorkflowApprovalRequest,
+    ArbitrationWorkflowFallbackRequest,
+    ArbitrationWorkflowResumeRequest,
     GenerationRunType,
 )
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
@@ -45,7 +47,12 @@ from backend.rbac_backend.services.arbitration_drafting.engines.policy import (
     canonical_workflow_request_hash,
 )
 from backend.rbac_backend.services.arbitration_drafting.engines.v2 import ArbitrationV2WorkflowEngine
-from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import validate_checkpoint_state
+from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import (
+    LangGraphArbitrationEngine,
+    build_arbitration_graph,
+    redact_checkpoint,
+    validate_checkpoint_state,
+)
 from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ArbitrationWorkflowDomain
 from backend.rbac_backend.services.arbitration_drafting.workflow_repository import ArbitrationWorkflowRepository
 from backend.rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
@@ -2814,6 +2821,361 @@ def test_checkpoint_state_rejects_raw_legal_content():
     )
     with pytest.raises(ValueError, match="Unsafe arbitration checkpoint fields"):
         validate_checkpoint_state({"run_id": "run-1", "evidence_text": "raw legal evidence"})
+    with pytest.raises(ValueError, match="Invalid arbitration checkpoint value types"):
+        validate_checkpoint_state({"run_id": {"raw": "draft content"}})
+    with pytest.raises(ValueError, match="Oversized arbitration checkpoint string fields"):
+        validate_checkpoint_state({"run_id": "x" * 1025})
+
+
+def test_official_arbitration_graph_resumes_through_every_human_gate_with_minimal_state():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    commands = pytest.importorskip("langgraph.types")
+    graph = build_arbitration_graph(checkpointer=memory.InMemorySaver())
+    config = {"configurable": {"thread_id": "arbitration-phase2-all-gates"}}
+    graph.invoke(
+        {
+            "run_id": "run-phase2",
+            "thread_id": "arbitration:run-phase2",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "graph_version": "v1",
+            "state_schema_version": 1,
+            "state_version": 1,
+            "input_snapshot_id": "snapshot-input",
+            "input_snapshot_hash": "input-hash",
+            "documents_selected": False,
+            "user_direction_complete": False,
+        },
+        config,
+    )
+
+    state = graph.get_state(config)
+    assert state.next == ("document_selection_gate",)
+    validate_checkpoint_state(dict(state.values))
+
+    resume_steps = [
+        ("documents_selected", "material_question_gate"),
+        ("user_direction_complete", "matrix_review_gate"),
+        ("matrices_approved", "readiness_approval_gate"),
+        ("readiness_approved", "plan_approval_gate"),
+        ("plan_approved", "legal_review_gate"),
+        ("legal_review_approved", "draft_approval_gate"),
+        ("draft_approved", "export_authorization_gate"),
+        ("export_authorized", None),
+    ]
+    for version, (flag, expected_gate) in enumerate(resume_steps, start=2):
+        graph.invoke(
+            commands.Command(
+                resume={"run_id": "run-phase2"},
+                update={flag: True, "state_version": version},
+            ),
+            config,
+        )
+        state = graph.get_state(config)
+        validate_checkpoint_state(dict(state.values))
+        if expected_gate:
+            assert state.next == (expected_gate,)
+        else:
+            assert state.next == ()
+            assert state.values["execution_status"] == "completed"
+
+    redacted = redact_checkpoint(dict(state.values))
+    assert redacted["run_id"] == "run-phase2"
+    assert redacted["input_snapshot_id"]["redacted"] is True
+    assert "snapshot-input" not in json.dumps(redacted)
+
+
+def test_langgraph_create_retry_reuses_checkpoint_and_state_version():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    db = _FakeDb()
+    engine = LangGraphArbitrationEngine(db, checkpointer=memory.InMemorySaver())
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+
+    async def create():
+        return await engine.create_workflow(
+            "case-1",
+            payload,
+            _FakeUser(),
+            idempotency_key="phase2-idempotent-create",
+            request_hash="phase2-request-hash",
+        )
+
+    first = asyncio.run(create())
+    second = asyncio.run(create())
+
+    assert first["_id"] == second["_id"]
+    assert first["state_version"] == second["state_version"] == 1
+    assert second.get("last_checkpoint_at") is not None
+    assert [event["event_type"] for event in db.arbitration_workflow_events.rows] == [
+        "workflow_created",
+    ]
+
+
+def test_langgraph_cancellation_checkpoint_does_not_traverse_downstream_nodes():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    db = _FakeDb()
+    saver = memory.InMemorySaver()
+    engine = LangGraphArbitrationEngine(db, checkpointer=saver)
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
+            _FakeUser(),
+            idempotency_key="phase2-cancel-checkpoint",
+            request_hash="phase2-cancel-request",
+        )
+    )
+    run.update(
+        {
+            "state_version": 2,
+            "status": "cancelled",
+            "current_node": "cancelled",
+            "next_action": "cancelled",
+        }
+    )
+
+    asyncio.run(
+        engine.checkpoint_state_update(
+            run,
+            {
+                "cancellation_requested": True,
+                "execution_status": "cancelled",
+                "current_node": "cancelled",
+                "next_action": "cancelled",
+            },
+        )
+    )
+    graph = build_arbitration_graph(checkpointer=saver)
+    state = graph.get_state({"configurable": {"thread_id": run["thread_id"]}})
+
+    assert state.values["execution_status"] == "cancelled"
+    assert state.values["current_node"] == "cancelled"
+    assert state.values["cancellation_requested"] is True
+    assert state.next == ("document_selection_gate",)
+
+
+def test_lagging_checkpoint_replays_cumulative_gate_receipts_to_current_gate():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    db = _FakeDb()
+    saver = memory.InMemorySaver()
+    engine = LangGraphArbitrationEngine(db, checkpointer=saver)
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
+            _FakeUser(),
+            idempotency_key="phase2-checkpoint-catchup",
+            request_hash="phase2-checkpoint-catchup-request",
+        )
+    )
+    run.update(
+        {
+            "state_version": 5,
+            "documents_selected": True,
+            "material_questions_required": True,
+            "user_direction_snapshot_id": "direction-snapshot",
+            "matrix_review_approval_receipt_id": "matrix-receipt",
+            "readiness_approval_receipt_id": "readiness-receipt",
+        }
+    )
+
+    asyncio.run(engine.checkpoint_transition(run, {}))
+    graph = build_arbitration_graph(checkpointer=saver)
+    state = graph.get_state({"configurable": {"thread_id": run["thread_id"]}})
+
+    assert state.next == ("plan_approval_gate",)
+    assert state.values["documents_selected"] is True
+    assert state.values["user_direction_complete"] is True
+    assert state.values["matrices_approved"] is True
+    assert state.values["readiness_approved"] is True
+    assert state.values["state_version"] == 5
+
+
+def test_checkpoint_failure_is_marked_pending_without_rolling_back_run(monkeypatch):
+    db = _FakeDb()
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-checkpoint-pending",
+            "case_id": "case-1",
+            "engine": "langgraph_v1",
+            "state_version": 4,
+            "status": "awaiting_matrix_review",
+        }
+    )
+
+    async def unavailable(*_args, **_kwargs):
+        raise RuntimeError("checkpoint database unavailable")
+
+    monkeypatch.setattr(LangGraphArbitrationEngine, "checkpoint_transition", unavailable)
+    service = ArbitrationWorkflowService(db)
+    asyncio.run(
+        service._sync_langgraph_checkpoint(
+            db.arbitration_workflow_runs.rows[0],
+            {"matrices_approved": True},
+        )
+    )
+
+    stored = db.arbitration_workflow_runs.rows[0]
+    assert stored["status"] == "awaiting_matrix_review"
+    assert stored["checkpoint_sync_status"] == "pending"
+    assert stored["checkpoint_sync_state_version"] == 4
+    assert stored["checkpoint_sync_error_code"] == "RuntimeError"
+    assert db.arbitration_workflow_events.rows[-1]["event_type"] == "checkpoint_sync_pending"
+
+
+def test_stale_resume_is_rejected_before_snapshot_or_event_side_effects():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
+            _FakeUser(),
+            idempotency_key=None,
+            request_hash="phase2-stale-resume",
+        )
+    )
+    asyncio.run(engine.repository.transition(run["_id"], 1, {"status": "awaiting_document_selection"}, event="advanced"))
+    snapshot_count = len(db.arbitration_workflow_snapshots.rows)
+    event_count = len(db.arbitration_workflow_events.rows)
+
+    with pytest.raises(HTTPException) as stale:
+        asyncio.run(
+            ArbitrationWorkflowService(db).resume(
+                "case-1",
+                run["_id"],
+                ArbitrationWorkflowResumeRequest(
+                    state_version=1,
+                    gate="document_selection",
+                    selected_document_ids=["doc-1"],
+                ),
+                _FakeUser(),
+            )
+        )
+
+    assert stale.value.status_code == 409
+    assert len(db.arbitration_workflow_snapshots.rows) == snapshot_count
+    assert len(db.arbitration_workflow_events.rows) == event_count
+
+
+def test_stale_plan_approval_is_rejected_before_receipt_or_generation_effect():
+    db = _FakeDb()
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-stale-plan",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_plan_approval",
+            "current_node": "plan_approval_gate",
+            "state_version": 2,
+            "plan_hash": "p" * 64,
+            "authoritative_effects": [],
+        }
+    )
+
+    with pytest.raises(HTTPException) as stale:
+        asyncio.run(
+            ArbitrationWorkflowService(db).approve_gate(
+                "case-1",
+                "run-stale-plan",
+                "plan",
+                ArbitrationWorkflowApprovalRequest(
+                    state_version=1,
+                    artifact_hash="p" * 64,
+                    reviewer_role="senior_legal_approver",
+                ),
+                _FakeUser(),
+            )
+        )
+
+    assert stale.value.status_code == 409
+    assert db.arbitration_workflow_approvals.rows == []
+    assert db.arbitration_workflow_effects.rows == []
+
+
+def test_resume_requires_exact_gate_and_rejects_document_changes_after_selection():
+    db = _FakeDb()
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-matrix-refresh",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_matrix_review",
+            "current_node": "matrix_review_gate",
+            "state_version": 1,
+        }
+    )
+    service = ArbitrationWorkflowService(db)
+
+    with pytest.raises(HTTPException) as partial_gate:
+        asyncio.run(
+            service.resume(
+                "case-1",
+                "run-matrix-refresh",
+                ArbitrationWorkflowResumeRequest(state_version=1, gate="review", decision="refresh"),
+                _FakeUser(),
+            )
+        )
+    assert partial_gate.value.status_code == 409
+
+    with pytest.raises(HTTPException) as late_documents:
+        asyncio.run(
+            service.resume(
+                "case-1",
+                "run-matrix-refresh",
+                ArbitrationWorkflowResumeRequest(
+                    state_version=1,
+                    gate="matrix_review",
+                    decision="refresh",
+                    selected_document_ids=["doc-1"],
+                ),
+                _FakeUser(),
+            )
+        )
+    assert late_documents.value.status_code == 422
+
+
+def test_force_v2_fallback_preserves_gate_and_binds_original_input_snapshot():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
+            _FakeUser(),
+            idempotency_key=None,
+            request_hash="phase2-fallback",
+        )
+    )
+    stored = db.arbitration_workflow_runs.rows[0]
+    stored["engine"] = "langgraph_v1"
+    original_node = stored["current_node"]
+    original_status = stored["status"]
+
+    updated = asyncio.run(
+        ArbitrationWorkflowService(db).fallback(
+            "case-1",
+            run["_id"],
+            ArbitrationWorkflowFallbackRequest(state_version=1, reason="Checkpoint service unavailable"),
+            _FakeUser(),
+        )
+    )
+
+    assert updated["engine"] == "arbitration_v2"
+    assert updated["current_node"] == original_node
+    assert updated["status"] == original_status
+    assert updated["fallback_from_engine"] == "langgraph_v1"
+    assert updated["fallback_input_snapshot_id"] == run["input_snapshot_id"]
+    assert updated["fallback_input_snapshot_hash"] == run["input_snapshot_hash"]
 
 
 def test_parallel_and_serial_matrix_analysis_have_identical_revision_hash():

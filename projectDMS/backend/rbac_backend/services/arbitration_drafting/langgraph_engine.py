@@ -20,21 +20,24 @@ from pymongo import MongoClient
 from ...core.config import settings
 from .engines.v2 import ArbitrationV2WorkflowEngine
 
-try:  # Import stays optional while rollout mode is off; CI/runtime parity is an acceptance gate.
+try:  # Core graph stays independently testable when the optional Mongo plugin is absent.
     from langgraph.checkpoint.base import BaseCheckpointSaver
-    from langgraph.checkpoint.mongodb import MongoDBSaver
     from langgraph.graph import END, START, StateGraph
     from langgraph.types import Command, interrupt
 
     LANGGRAPH_RUNTIME_AVAILABLE = True
 except Exception:  # pragma: no cover - exercised in dependency-parity smoke tests
     BaseCheckpointSaver = Any  # type: ignore[assignment,misc]
-    MongoDBSaver = None  # type: ignore[assignment]
     StateGraph = None  # type: ignore[assignment]
     Command = None  # type: ignore[assignment]
     START = "__start__"
     END = "__end__"
     LANGGRAPH_RUNTIME_AVAILABLE = False
+
+try:  # Deployment capability is separate from the in-memory graph capability.
+    from langgraph.checkpoint.mongodb import MongoDBSaver
+except Exception:  # pragma: no cover - covered by runtime dependency-parity checks
+    MongoDBSaver = None  # type: ignore[assignment]
 
 
 class ArbitrationGraphState(TypedDict, total=False):
@@ -88,6 +91,29 @@ class ArbitrationGraphState(TypedDict, total=False):
 
 ALLOWED_CHECKPOINT_KEYS = frozenset(ArbitrationGraphState.__annotations__)
 RAW_CHECKPOINT_KEY_FRAGMENTS = {"text", "content", "prompt", "evidence", "markdown", "opponent_pleading"}
+BOOLEAN_CHECKPOINT_KEYS = {
+    "documents_selected",
+    "material_questions_required",
+    "user_direction_complete",
+    "documents_analyzed",
+    "chronology_analyzed",
+    "clause_analysis_complete",
+    "pleading_position_complete",
+    "quantum_analysis_complete",
+    "matrices_approved",
+    "readiness_approved",
+    "plan_approved",
+    "legal_review_approved",
+    "draft_approved",
+    "export_authorized",
+    "cancellation_requested",
+}
+INTEGER_CHECKPOINT_KEYS = {
+    "state_schema_version",
+    "state_version",
+    "remediation_cycle",
+    "retry_budget_remaining",
+}
 
 
 def validate_checkpoint_state(state: Dict[str, Any]) -> None:
@@ -101,6 +127,25 @@ def validate_checkpoint_state(state: Dict[str, Any]) -> None:
     }
     if unknown or raw_keys:
         raise ValueError(f"Unsafe arbitration checkpoint fields: {sorted(unknown | raw_keys)}")
+    invalid_types = []
+    oversized_strings = []
+    for key, value in state.items():
+        if value is None:
+            continue
+        if key in BOOLEAN_CHECKPOINT_KEYS:
+            if not isinstance(value, bool):
+                invalid_types.append(key)
+        elif key in INTEGER_CHECKPOINT_KEYS:
+            if not isinstance(value, int) or isinstance(value, bool):
+                invalid_types.append(key)
+        elif not isinstance(value, str):
+            invalid_types.append(key)
+        elif len(value) > 1024:
+            oversized_strings.append(key)
+    if invalid_types:
+        raise ValueError(f"Invalid arbitration checkpoint value types: {sorted(invalid_types)}")
+    if oversized_strings:
+        raise ValueError(f"Oversized arbitration checkpoint string fields: {sorted(oversized_strings)}")
     encoded = json.dumps(state, sort_keys=True, default=str).encode("utf-8")
     if len(encoded) > int(settings.ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES):
         raise ValueError("Arbitration checkpoint exceeds configured size limit")
@@ -202,17 +247,31 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         self.checkpointer = checkpointer
 
     async def create_workflow(self, *args: Any, **kwargs: Any) -> dict:
-        if not LANGGRAPH_RUNTIME_AVAILABLE:
+        if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
             raise HTTPException(status_code=503, detail="Official arbitration LangGraph checkpoint runtime is unavailable")
+        existing_run = None
+        idempotency_key = kwargs.get("idempotency_key")
+        if idempotency_key and args:
+            existing_run = await self.repository.get_by_idempotency_key(str(args[0]), str(idempotency_key))
         run = await super().create_workflow(*args, **kwargs)
-        run = await self.repository.transition(
-            run["_id"], run["state_version"], {"engine": self.name, "engine_version": self.version}, event="langgraph_selected"
-        )
+        if existing_run and run.get("engine") != self.name:
+            # Idempotency binds the original engine decision as well as inputs;
+            # a later rollout-policy change must not convert an existing run.
+            return run
+        if run.get("engine") != self.name:
+            run = await self.repository.transition(
+                run["_id"], run["state_version"], {"engine": self.name, "engine_version": self.version}, event="langgraph_selected"
+            )
+        elif run.get("last_checkpoint_at"):
+            # A retried 202 create with the same idempotency key must not append
+            # another graph execution or advance the workflow state version.
+            return run
         state: ArbitrationGraphState = {
             key: run[key]
             for key in ALLOWED_CHECKPOINT_KEYS
             if key in run
         }
+        state["run_id"] = str(run["_id"])
         state["execution_status"] = "running"
         state["documents_selected"] = bool(run.get("documents_selected"))
         state["material_questions_required"] = bool(run.get("material_questions_required"))
@@ -222,9 +281,32 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         return await self.get_state(run["_id"])
 
     async def checkpoint_transition(self, run: Dict[str, Any], update: Dict[str, Any]) -> None:
-        if not LANGGRAPH_RUNTIME_AVAILABLE:
+        if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
             raise HTTPException(status_code=503, detail="Official arbitration LangGraph checkpoint runtime is unavailable")
-        await self._checkpoint(run, resume_update=update)
+        await self._checkpoint(run, resume_update={**self._cumulative_gate_state(run), **update})
+
+    async def checkpoint_state_update(self, run: Dict[str, Any], update: Dict[str, Any]) -> None:
+        """Persist terminal/operational state without traversing the graph."""
+        if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
+            raise HTTPException(status_code=503, detail="Official arbitration LangGraph checkpoint runtime is unavailable")
+        await self._checkpoint(run, resume_update=update, traverse=False)
+
+    @staticmethod
+    def _cumulative_gate_state(run: Dict[str, Any]) -> Dict[str, bool]:
+        """Replays every completed gate so a lagging checkpoint can catch up."""
+        return {
+            "documents_selected": bool(run.get("documents_selected")),
+            "user_direction_complete": (
+                not bool(run.get("material_questions_required"))
+                or bool(run.get("user_direction_snapshot_id"))
+            ),
+            "matrices_approved": bool(run.get("matrix_review_approval_receipt_id")),
+            "readiness_approved": bool(run.get("readiness_approval_receipt_id")),
+            "plan_approved": bool(run.get("plan_approval_receipt_id")),
+            "legal_review_approved": bool(run.get("legal_review_approval_receipt_id")),
+            "draft_approved": bool(run.get("draft_approval_receipt_id")),
+            "export_authorized": bool(run.get("export_approval_receipt_id")),
+        }
 
     async def _checkpoint(
         self,
@@ -232,6 +314,7 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         *,
         initial_state: Optional[Dict[str, Any]] = None,
         resume_update: Optional[Dict[str, Any]] = None,
+        traverse: bool = True,
     ) -> None:
         store = None
         checkpointer = self.checkpointer
@@ -243,16 +326,29 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
             config = {"configurable": {"thread_id": run["thread_id"]}}
             if initial_state is not None:
                 validate_checkpoint_state(initial_state)
-                await asyncio.to_thread(graph.invoke, initial_state, config)
+                existing = await asyncio.to_thread(graph.get_state, config)
+                existing_values = dict(getattr(existing, "values", {}) or {})
+                if existing_values:
+                    # Recovery path for a process that checkpointed successfully
+                    # but exited before it recorded last_checkpoint_at on the run.
+                    validate_checkpoint_state(existing_values)
+                else:
+                    await asyncio.to_thread(graph.invoke, initial_state, config)
             else:
-                safe_update = {key: value for key, value in (resume_update or {}).items() if key in ALLOWED_CHECKPOINT_KEYS}
+                unsafe_keys = set(resume_update or {}).difference(ALLOWED_CHECKPOINT_KEYS)
+                if unsafe_keys:
+                    raise ValueError(f"Unsafe arbitration checkpoint fields: {sorted(unsafe_keys)}")
+                safe_update = dict(resume_update or {})
                 safe_update["state_version"] = int(run.get("state_version") or 1)
                 validate_checkpoint_state(safe_update)
-                await asyncio.to_thread(
-                    graph.invoke,
-                    Command(resume={"run_id": run["_id"]}, update=safe_update),
-                    config,
-                )
+                if traverse:
+                    await asyncio.to_thread(
+                        graph.invoke,
+                        Command(resume={"run_id": run["_id"]}, update=safe_update),
+                        config,
+                    )
+                else:
+                    await asyncio.to_thread(graph.update_state, config, safe_update)
             checkpoint = await asyncio.to_thread(graph.get_state, config)
             values = dict(getattr(checkpoint, "values", {}) or {})
             validate_checkpoint_state(values)
