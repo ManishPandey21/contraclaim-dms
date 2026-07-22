@@ -53,7 +53,7 @@ from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import 
     redact_checkpoint,
     validate_checkpoint_state,
 )
-from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ArbitrationWorkflowDomain
+from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ANALYSIS_BRANCHES, ArbitrationWorkflowDomain
 from backend.rbac_backend.services.arbitration_drafting.workflow_repository import ArbitrationWorkflowRepository
 from backend.rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
@@ -515,6 +515,41 @@ def test_matrix_change_invalidates_revision_bound_readiness_receipt():
             "approved_at": "2026-07-21T00:00:00",
         }
     )
+    db.arbitration_workflow_approvals.rows.extend(
+        [
+            {
+                "_id": "matrix-gate-receipt",
+                "run_id": "run-drift",
+                "case_id": "case-1",
+                "gate": "matrix_review",
+                "artifact_hash": "matrix-hash-old",
+            },
+            {
+                "_id": "plan-gate-receipt",
+                "run_id": "run-drift",
+                "case_id": "case-1",
+                "gate": "plan",
+                "artifact_hash": "plan-hash-old",
+            },
+        ]
+    )
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-drift",
+            "case_id": "case-1",
+            "status": "awaiting_plan_approval",
+            "current_node": "plan_approval_gate",
+            "next_action": "approve_plan",
+            "state_version": 7,
+            "matrix_review_approval_receipt_id": "matrix-gate-receipt",
+            "readiness_approval_receipt_id": "receipt-current",
+            "plan_approval_receipt_id": "plan-gate-receipt",
+            "matrix_revision_set_id": "mrs-old",
+            "matrix_revision_hash": "matrix-hash-old",
+            "analysis_artifact_set_id": "analysis-old",
+            "analysis_artifact_set_hash": "analysis-hash-old",
+        }
+    )
     asyncio.run(
         service.create_matrix_row(
             "case-1",
@@ -527,6 +562,15 @@ def test_matrix_change_invalidates_revision_bound_readiness_receipt():
     assert receipt["invalidated_at"] is not None
     assert receipt["invalidation_reason"] == "matrix_dependency_changed"
     assert db.arbitration_cases.rows[0]["readiness_approval_receipt_id"] is None
+    run = db.arbitration_workflow_runs.rows[0]
+    assert run["state_version"] == 8
+    assert run["current_node"] == "matrix_review_gate"
+    assert run["status"] == "awaiting_matrix_review"
+    assert run["matrix_review_approval_receipt_id"] is None
+    assert run["readiness_approval_receipt_id"] is None
+    assert run["plan_approval_receipt_id"] is None
+    assert run["analysis_artifact_set_hash"] is None
+    assert db.arbitration_workflow_events.rows[-1]["event_type"] == "workflow_dependencies_invalidated"
 
 
 def test_standalone_draft_can_preview_but_cannot_be_approved_or_filed():
@@ -2568,10 +2612,14 @@ def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
     )
     assert first["_id"] == second["_id"]
     assert len(db.arbitration_workflow_runs.rows) == 1
-    assert len(db.arbitration_workflow_snapshots.rows) == 5
+    assert len(db.arbitration_workflow_snapshots.rows) == 16
     assert {row["kind"] for row in db.arbitration_workflow_snapshots.rows} == {
-        "input", "document_manifest", "matrix_revision_set", "evidence_manifest", "material_questions"
+        "input", "document_manifest", "analysis_artifact", "analysis_artifact_set",
+        "matrix_revision_set", "evidence_manifest", "material_questions"
     }
+    analysis_artifacts = [row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "analysis_artifact"]
+    assert len(analysis_artifacts) == 10
+    assert all(row["payload"]["authoritative"] is False for row in analysis_artifacts)
     manifest = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "document_manifest")
     assert manifest["payload"]["documents"][0]["document_id"] == "doc-1"
     assert "ocrText" not in json.dumps(manifest, default=str)
@@ -2605,7 +2653,7 @@ def test_concurrent_v2_workflow_create_reuses_run_and_snapshot_rows():
 
     assert first["_id"] == second["_id"]
     assert len(db.arbitration_workflow_runs.rows) == 1
-    assert len(db.arbitration_workflow_snapshots.rows) == 5
+    assert len(db.arbitration_workflow_snapshots.rows) == 16
     assert len(db.arbitration_workflow_events.rows) == 1
 
 
@@ -2636,6 +2684,7 @@ def test_v2_adapter_is_semantically_stable_for_same_immutable_inputs():
         "input_snapshot_hash",
         "document_manifest_hash",
         "evidence_snapshot_hash",
+        "analysis_artifact_set_hash",
         "matrix_revision_hash",
         "readiness_artifact_hash",
         "question_snapshot_hash",
@@ -3186,6 +3235,21 @@ def test_parallel_and_serial_matrix_analysis_have_identical_revision_hash():
     serial = asyncio.run(domain.analyze(run, parallel=False))
     assert parallel["revision_hash"] == serial["revision_hash"]
     assert parallel["revision_set_id"] == serial["revision_set_id"]
+    assert parallel["analysis_artifact_set_hash"] == serial["analysis_artifact_set_hash"]
+    assert [item["branch"] for item in parallel["analysis_artifacts"]] == sorted(ANALYSIS_BRANCHES)
+
+    matrix_snapshot = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "matrix_revision_set")
+    assert matrix_snapshot["payload"]["authoritative"] is False
+    assert matrix_snapshot["payload"]["review_status"] == "needs_review"
+    assert all("source_revision_ids" in row and "evidence_status" in row for row in matrix_snapshot["payload"]["rows"])
+
+    branch_snapshots = [row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "analysis_artifact"]
+    chronology = next(row for row in branch_snapshots if row["payload"]["branch"] == "chronology")
+    documents = next(row for row in branch_snapshots if row["payload"]["branch"] == "document_understanding")
+    assert chronology["payload"]["matrices"] == ["chronology-matrix"]
+    assert {row["matrix"] for row in chronology["payload"]["rows"]} <= {"chronology-matrix"}
+    assert documents["payload"]["matrices"] == ["document-index"]
+    assert {row["matrix"] for row in documents["payload"]["rows"]} <= {"document-index"}
 
 
 def test_sod_workflow_requires_immutable_opponent_version():
@@ -3208,7 +3272,13 @@ def test_rejoinder_workflow_pins_both_soc_and_sod_versions():
         ]
     )
     db.arbitration_draft_versions.rows.append(
-        {"_id": "version-sod", "draft_id": "draft-sod", "version": 1, "version_hash": "sod-version-hash"}
+        {
+            "_id": "version-sod",
+            "draft_id": "draft-sod",
+            "version": 1,
+            "version_hash": "sod-version-hash",
+            "full_markdown": "1. The Respondent denies late access.\n\n2. The Respondent counterclaims delay damages.",
+        }
     )
     payload = ArbitrationWorkflowCreateRequest(
         draft_id="draft-rejoinder",
@@ -3229,6 +3299,11 @@ def test_rejoinder_workflow_pins_both_soc_and_sod_versions():
         "statement_of_claim", "statement_of_defence"
     }
     assert run["opponent_pleading_snapshot_hash"] == snapshot["snapshot_hash"]
+    assert all(item["parse_status"] == "parsed" for item in snapshot["payload"]["pleadings"])
+    assert all(item["paragraph_count"] >= 1 for item in snapshot["payload"]["pleadings"])
+    sod = next(item for item in snapshot["payload"]["pleadings"] if item["draft_type"] == "statement_of_defence")
+    assert [paragraph["number"] for paragraph in sod["paragraphs"]] == ["1", "2"]
+    assert all(paragraph["paragraph_hash"] for paragraph in sod["paragraphs"])
 
 
 def test_reviewer_policy_rejects_wrong_role_and_author_self_approval():

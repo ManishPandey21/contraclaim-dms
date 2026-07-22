@@ -13,6 +13,12 @@ from pymongo.errors import DuplicateKeyError
 from .repository import _collect, _jsonable
 
 
+DOWNSTREAM_APPROVAL_GATES = ("matrix_review", "readiness", "plan", "legal_review", "draft", "export")
+DOWNSTREAM_APPROVAL_FIELDS = tuple(f"{gate}_approval_receipt_id" for gate in DOWNSTREAM_APPROVAL_GATES)
+EARLY_OR_REVIEW_NODES = {"document_selection_gate", "material_question_gate", "matrix_review_gate"}
+TERMINAL_WORKFLOW_STATUSES = {"completed", "cancelled", "failed"}
+
+
 def artifact_hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(_jsonable(value), sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
@@ -194,6 +200,87 @@ class ArbitrationWorkflowRepository:
 
     async def list_events(self, run_id: str, limit: int = 500) -> List[Dict[str, Any]]:
         return await _collect(self.db.arbitration_workflow_events.find({"run_id": run_id}).sort("created_at", 1).limit(limit))
+
+    async def invalidate_case_dependencies(
+        self,
+        case_id: str,
+        *,
+        reason: str,
+        actor_id: Optional[str],
+    ) -> int:
+        """Invalidate downstream gate receipts and rewind active runs after drift.
+
+        Immutable snapshots, plans, and draft versions remain available for audit;
+        only their authority in the active workflow is removed. The CAS increment
+        also makes any already-open review/approval request stale.
+        """
+
+        now = datetime.now(timezone.utc)
+        await self.db.arbitration_workflow_approvals.update_many(
+            {
+                "case_id": case_id,
+                "gate": {"$in": list(DOWNSTREAM_APPROVAL_GATES)},
+                "invalidated_at": None,
+            },
+            {
+                "$set": {
+                    "invalidated_at": now,
+                    "invalidated_by": actor_id,
+                    "invalidation_reason": reason,
+                }
+            },
+        )
+        runs = await _collect(
+            self.db.arbitration_workflow_runs.find(
+                {"case_id": case_id, "status": {"$nin": sorted(TERMINAL_WORKFLOW_STATUSES)}}
+            )
+        )
+        invalidated = 0
+        for run in runs:
+            current_node = str(run.get("current_node") or "")
+            update: Dict[str, Any] = {
+                **{field: None for field in DOWNSTREAM_APPROVAL_FIELDS},
+                "analysis_artifact_set_id": None,
+                "analysis_artifact_set_hash": None,
+                "matrix_revision_set_id": None,
+                "matrix_revision_hash": None,
+                "readiness_artifact_id": None,
+                "readiness_artifact_hash": None,
+                "dependency_drift_reason": reason,
+                "dependency_drift_at": now,
+                "updated_at": now,
+            }
+            if current_node not in EARLY_OR_REVIEW_NODES:
+                update.update(
+                    {
+                        "status": "awaiting_matrix_review",
+                        "current_node": "matrix_review_gate",
+                        "next_action": "review_matrices",
+                        "required_human_role": "legal_reviewer",
+                        "progress": 40,
+                    }
+                )
+            expected_version = int(run.get("state_version") or 0)
+            changed = await self.db.arbitration_workflow_runs.find_one_and_update(
+                {"_id": run["_id"], "state_version": expected_version},
+                {"$set": _jsonable(update), "$inc": {"state_version": 1}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if not changed:
+                continue
+            invalidated += 1
+            await self.append_event(
+                str(run["_id"]),
+                "workflow_dependencies_invalidated",
+                actor_id=actor_id,
+                data={
+                    "reason": reason,
+                    "previous_state_version": expected_version,
+                    "state_version": changed.get("state_version"),
+                    "routed_to": changed.get("current_node"),
+                },
+            )
+        return invalidated
 
     async def record_approval(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
         query = {

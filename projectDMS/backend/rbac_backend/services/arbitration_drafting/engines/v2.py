@@ -92,10 +92,6 @@ class ArbitrationV2WorkflowEngine:
             run_id, case_id, str(payload.pleading_type), payload.opponent_draft_id, payload.opponent_version_id,
             payload.opponent_pleadings,
         )
-        analysis = await self.domain.analyze(
-            {"_id": run_id, "case_id": case_id, "draft_id": payload.draft_id, "pleading_type": payload.pleading_type},
-            parallel=True,
-        )
         rows = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=payload.draft_id) for slug in MATRIX_COLLECTIONS}
         evidence_manifest = await self.cases._authoritative_evidence_manifest(case, rows)
         evidence_snapshot = await self.repository.create_snapshot(
@@ -105,6 +101,19 @@ class ArbitrationV2WorkflowEngine:
             effect_key=f"{run_id}:snapshot:evidence:{artifact_hash(evidence_manifest)}",
         )
         readiness_artifact = await self.cases._readiness_artifact_state(case, str(payload.pleading_type))
+        analysis = await self.domain.analyze(
+            {
+                "_id": run_id,
+                "case_id": case_id,
+                "draft_id": payload.draft_id,
+                "pleading_type": payload.pleading_type,
+                "input_snapshot_hash": input_snapshot["snapshot_hash"],
+                "evidence_snapshot_hash": readiness_artifact["evidence_snapshot_hash"],
+                "opponent_pleading_snapshot_id": (opponent_snapshot or {}).get("_id"),
+                "opponent_pleading_snapshot_hash": (opponent_snapshot or {}).get("snapshot_hash"),
+            },
+            parallel=True,
+        )
         questions = self.domain.material_questions(analysis["blockers"], str(payload.pleading_type))
         question_snapshot = await self.repository.create_snapshot(
             run_id=run_id, kind="material_questions", payload={"questions": questions}, effect_key=f"{run_id}:snapshot:questions"
@@ -138,6 +147,8 @@ class ArbitrationV2WorkflowEngine:
             "opponent_pleading_snapshot_hash": (opponent_snapshot or {}).get("snapshot_hash"),
             "evidence_snapshot_id": evidence_snapshot["_id"],
             "evidence_snapshot_hash": readiness_artifact["evidence_snapshot_hash"],
+            "analysis_artifact_set_id": analysis["analysis_artifact_set_id"],
+            "analysis_artifact_set_hash": analysis["analysis_artifact_set_hash"],
             "matrix_revision_set_id": analysis["revision_set_id"],
             "matrix_revision_hash": analysis["revision_hash"],
             "readiness_artifact_id": readiness_artifact["matrix_revision_set_id"],

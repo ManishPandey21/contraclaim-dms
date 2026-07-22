@@ -639,6 +639,8 @@ Changes:
 
 ### Phase 3 — Evidence fan-out, deterministic merge, and type routing
 
+> Current implementation: complete in source with local deterministic-parity, idempotency, immutable opponent-paragraph parsing, and dependency-drift invalidation tests. Ten typed branches persist non-authoritative immutable artifacts; branch-content hashes, rather than random snapshot IDs, determine the stable artifact-set hash. Every merged row records source-revision IDs, a matrix-row revision ID, and evidence status. Historical rows with absent/unversioned sources remain explicitly `missing`/`needs_review`; production bounded-concurrency/load and data-quality acceptance remain open, and LangGraph is not primary.
+
 **Objective:** Make evidence/matrix preparation parallel, typed, and replay-safe.
 
 Changes:

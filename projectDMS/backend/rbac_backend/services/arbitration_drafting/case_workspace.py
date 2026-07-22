@@ -42,6 +42,7 @@ from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import enforce_author_approver_separation
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
+from .workflow_repository import ArbitrationWorkflowRepository
 
 
 BLOCKING_READINESS_STATUSES = {
@@ -842,15 +843,21 @@ class ArbitrationCaseWorkspaceService:
 
     async def invalidate_readiness_approvals(self, case_id: str, reason: str, current_user: Any) -> None:
         now = datetime.utcnow()
+        actor_id = _actor_id(current_user)
         await self.db.arbitration_workflow_approvals.update_many(
             {"case_id": case_id, "gate": "readiness", "invalidated_at": None},
             {
                 "$set": {
                     "invalidated_at": now,
-                    "invalidated_by": _actor_id(current_user),
+                    "invalidated_by": actor_id,
                     "invalidation_reason": reason,
                 }
             },
+        )
+        await ArbitrationWorkflowRepository(self.db).invalidate_case_dependencies(
+            case_id,
+            reason=reason,
+            actor_id=actor_id,
         )
         await self.db.arbitration_cases.update_one(
             {"_id": case_id},
