@@ -458,6 +458,16 @@ async def ensure_indexes(db):
     )
     await db.arbitration_bundle_exports.create_index("background_job_id", background=True)
     await db.arbitration_bundle_exports.create_index("expires_at", background=True)
+    await db.arbitration_bundle_exports.create_index(
+        "effect_key",
+        unique=True,
+        partialFilterExpression={"effect_key": {"$type": "string"}},
+        background=True,
+    )
+    await db.arbitration_bundle_exports.create_index(
+        [("status", 1), ("execution_lease_expires_at", 1)],
+        background=True,
+    )
 
     # Matter chronology builder
     await db.matter_chronologies.create_index(

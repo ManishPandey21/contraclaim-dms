@@ -175,6 +175,8 @@ export interface BundleExport {
   format: BundleExportFormat;
   status: "queued" | "running" | "completed" | "failed" | string;
   background_job_id?: string | null;
+  effect_key?: string | null;
+  attempts?: number;
   content_type?: string | null;
   filename?: string | null;
   content_length?: number;

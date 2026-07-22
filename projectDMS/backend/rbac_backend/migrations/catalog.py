@@ -51,6 +51,10 @@ from .v20260722_0002_arbitration_phase6_scope_index import DESCRIPTION as ARB_PH
 from .v20260722_0002_arbitration_phase6_scope_index import NAME as ARB_PHASE6_SCOPE_NAME
 from .v20260722_0002_arbitration_phase6_scope_index import VERSION as ARB_PHASE6_SCOPE_VERSION
 from .v20260722_0002_arbitration_phase6_scope_index import upgrade as upgrade_arbitration_phase6_scope
+from .v20260722_0003_arbitration_filing_export_effects import DESCRIPTION as ARB_EXPORT_EFFECT_DESCRIPTION
+from .v20260722_0003_arbitration_filing_export_effects import NAME as ARB_EXPORT_EFFECT_NAME
+from .v20260722_0003_arbitration_filing_export_effects import VERSION as ARB_EXPORT_EFFECT_VERSION
+from .v20260722_0003_arbitration_filing_export_effects import upgrade as upgrade_arbitration_export_effects
 
 
 MIGRATIONS = [
@@ -119,5 +123,11 @@ MIGRATIONS = [
         name=ARB_PHASE6_SCOPE_NAME,
         description=ARB_PHASE6_SCOPE_DESCRIPTION,
         upgrade=upgrade_arbitration_phase6_scope,
+    ),
+    Migration(
+        version=ARB_EXPORT_EFFECT_VERSION,
+        name=ARB_EXPORT_EFFECT_NAME,
+        description=ARB_EXPORT_EFFECT_DESCRIPTION,
+        upgrade=upgrade_arbitration_export_effects,
     ),
 ]

@@ -1690,6 +1690,7 @@ const ArbitrationCaseWorkspacePage: React.FC = () => {
                 </div>
                 <div className="mt-1 text-xs text-muted-foreground">
                   {queuedExport.content_length ? `${queuedExport.content_length} bytes` : queuedExport.background_job_id || "Queued"}
+                  {queuedExport.attempts ? ` · attempt ${queuedExport.attempts}` : ""}
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <Button size="sm" variant="outline" onClick={refreshQueuedExport}>
