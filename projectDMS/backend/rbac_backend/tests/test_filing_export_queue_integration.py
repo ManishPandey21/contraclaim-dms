@@ -19,7 +19,14 @@ from rbac_backend.services.arbitration_drafting import filing_export_queue as qu
 from rbac_backend.services.arbitration_drafting.filing_export_queue import FilingExportQueue
 
 
-REDIS_URL = os.getenv("FILING_EXPORT_REDIS_INTEGRATION_URL", "").strip()
+REDIS_URL = (
+    os.getenv("FILING_EXPORT_REDIS_INTEGRATION_URL", "").strip()
+    or (
+        str(settings.FILING_EXPORT_QUEUE_REDIS_URL or settings.APP_REDIS_URL or "").strip()
+        if settings.FILING_EXPORT_QUEUE_ENABLED
+        else ""
+    )
+)
 pytestmark = pytest.mark.skipif(not REDIS_URL, reason="real Redis integration URL not configured")
 
 
