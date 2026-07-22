@@ -62,6 +62,8 @@ class ArbitrationGraphState(TypedDict, total=False):
     evidence_snapshot_hash: str
     opponent_pleading_snapshot_id: str
     opponent_pleading_snapshot_hash: str
+    analysis_artifact_set_id: str
+    analysis_artifact_set_hash: str
     matrix_revision_set_id: str
     matrix_revision_hash: str
     readiness_artifact_id: str

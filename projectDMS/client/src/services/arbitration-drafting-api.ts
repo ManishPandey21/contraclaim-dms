@@ -123,6 +123,11 @@ export interface ArbitrationWorkflowState {
   checkpoint_sync_status?: string | null;
   checkpoint_sync_state_version?: number | null;
   document_manifest_hash?: string | null;
+  evidence_snapshot_hash?: string | null;
+  opponent_pleading_snapshot_hash?: string | null;
+  analysis_artifact_set_id?: string | null;
+  analysis_artifact_set_hash?: string | null;
+  matrix_revision_set_id?: string | null;
   matrix_revision_hash?: string | null;
   readiness_artifact_hash?: string | null;
   plan_hash?: string | null;

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence
 
 from fastapi import HTTPException, status
 
@@ -25,20 +26,40 @@ ANALYSIS_BRANCHES = (
     "expert_alignment",
 )
 
+ANALYSIS_BRANCH_MATRICES = {
+    "document_understanding": ("document-index",),
+    "chronology": ("chronology-matrix",),
+    "clause_interpretation": ("clause-matrix",),
+    "jurisdiction": ("jurisdiction-matrix",),
+    "limitation": ("claim-matrix", "defence-matrix", "counterclaim-matrix", "jurisdiction-matrix"),
+    "pre_arbitration_requirements": ("jurisdiction-matrix", "notice-compliance"),
+    "notices": ("notice-compliance",),
+    "pleading_position": ("issue-matrix",),
+    "quantum": ("quantum-annexures",),
+    "expert_alignment": ("expert-alignment",),
+}
+
+PLEADING_POSITION_MATRICES = {
+    "statement_of_claim": ("claim-matrix",),
+    "statement_of_defence": ("defence-matrix", "counterclaim-matrix"),
+    "counterclaim": ("counterclaim-matrix",),
+    "rejoinder": ("rejoinder-matrix", "defence-matrix", "counterclaim-matrix"),
+}
+
 PLEADING_MATRIX_REQUIREMENTS = {
     "statement_of_claim": (
         "document-index", "chronology-matrix", "clause-matrix", "issue-matrix", "claim-matrix",
         "jurisdiction-matrix", "notice-compliance", "quantum-annexures", "expert-alignment",
     ),
     "statement_of_defence": (
-        "document-index", "defence-matrix", "issue-matrix", "jurisdiction-matrix",
+        "document-index", "chronology-matrix", "defence-matrix", "issue-matrix", "jurisdiction-matrix",
         "quantum-annexures",
     ),
     "counterclaim": (
-        "document-index", "chronology-matrix", "clause-matrix", "counterclaim-matrix",
+        "document-index", "chronology-matrix", "clause-matrix", "issue-matrix", "counterclaim-matrix",
         "jurisdiction-matrix", "notice-compliance", "quantum-annexures",
     ),
-    "rejoinder": ("document-index", "rejoinder-matrix", "defence-matrix", "issue-matrix"),
+    "rejoinder": ("document-index", "chronology-matrix", "rejoinder-matrix", "defence-matrix", "issue-matrix"),
 }
 
 OPPONENT_REQUIREMENTS = {
@@ -47,7 +68,52 @@ OPPONENT_REQUIREMENTS = {
 }
 
 
+def _source_revision_ids(row: Dict[str, Any]) -> List[str]:
+    revisions = {
+        str(value).strip()
+        for key in (
+            "source_revision_id",
+            "source_version_id",
+            "source_document_version_id",
+            "source_pleading_version_id",
+            "current_version_id",
+            "chronology_event_id",
+            "clause_source_id",
+        )
+        for value in [row.get(key)]
+        if value is not None and str(value).strip()
+    }
+    for key in ("source_revision_ids", "evidence_ids", "supporting_source_ids", "source_ids"):
+        values = row.get(key) or []
+        if isinstance(values, (str, int)):
+            values = [values]
+        revisions.update(str(value).strip() for value in values if str(value).strip())
+    source_id = str(row.get("source_id") or "").strip()
+    if source_id:
+        discriminator = (
+            row.get("source_hash")
+            or row.get("source_version_id")
+            or row.get("current_version_id")
+            or row.get("revision")
+            or "unversioned"
+        )
+        revisions.add(f"{source_id}@{discriminator}")
+    return sorted(revisions)
+
+
+def _evidence_status(row: Dict[str, Any], source_revision_ids: Sequence[str]) -> str:
+    if not source_revision_ids:
+        return "missing"
+    if not _is_ready_row(row) or any(str(value).endswith("@unversioned") for value in source_revision_ids):
+        return "needs_review"
+    return "supported"
+
+
 def _canonical_row(matrix: str, row: Dict[str, Any]) -> Dict[str, Any]:
+    source_revision_ids = _source_revision_ids(row)
+    payload_hash = artifact_hash(
+        {key: value for key, value in row.items() if key not in {"approval_log", "review_comments", "review_assignments"}}
+    )
     return {
         "matrix": matrix,
         "row_id": str(row.get("_id") or ""),
@@ -55,18 +121,51 @@ def _canonical_row(matrix: str, row: Dict[str, Any]) -> Dict[str, Any]:
         "revision": int(row.get("revision") or 1),
         "source_id": row.get("source_id"),
         "source_hash": row.get("source_hash"),
+        "source_revision_ids": source_revision_ids,
+        "evidence_status": _evidence_status(row, source_revision_ids),
+        "matrix_row_revision_id": f"{matrix}:{row.get('_id') or 'unassigned'}:{payload_hash}",
         "updated_at": row.get("updated_at"),
-        "payload_hash": artifact_hash({key: value for key, value in row.items() if key not in {"approval_log", "review_comments", "review_assignments"}}),
+        "payload_hash": payload_hash,
     }
 
 
 def deterministic_merge(branch_results: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-    rows: List[Dict[str, Any]] = []
+    unique: Dict[tuple[str, str, str], Dict[str, Any]] = {}
     for branch in branch_results:
         for row in branch.get("rows") or []:
-            rows.append(_jsonable(row))
+            canonical = _jsonable(row)
+            unique[(str(canonical.get("matrix")), str(canonical.get("row_id")), str(canonical.get("payload_hash")))] = canonical
+    rows = list(unique.values())
     rows.sort(key=lambda row: (str(row.get("matrix") or ""), str(row.get("row_id") or ""), str(row.get("payload_hash") or "")))
     return {"rows": rows, "revision_hash": artifact_hash(rows), "revision_set_id": f"mrs_{artifact_hash(rows)[:24]}"}
+
+
+def _opponent_paragraphs(version: Dict[str, Any]) -> List[Dict[str, str]]:
+    raw = str(version.get("full_markdown") or version.get("markdown") or version.get("text") or "").strip()
+    if not raw and version.get("sections"):
+        sections = version.get("sections")
+        values = sections.values() if isinstance(sections, dict) else sections
+        raw = "\n\n".join(
+            str(item.get("markdown") or item.get("text") or item.get("content") or item)
+            if isinstance(item, dict)
+            else str(item)
+            for item in values
+        )
+    chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", raw) if chunk.strip()]
+    paragraphs: List[Dict[str, str]] = []
+    for index, chunk in enumerate(chunks, start=1):
+        match = re.match(r"^(?:#{1,6}\s*)?(\d+(?:\.\d+)*)[\).\s-]+(.+)$", chunk, flags=re.S)
+        number = match.group(1) if match else str(index)
+        text = re.sub(r"\s+", " ", match.group(2) if match else chunk).strip()[:8000]
+        paragraphs.append({"number": number, "text": text, "paragraph_hash": artifact_hash({"number": number, "text": text})})
+    return paragraphs
+
+
+def _branch_matrices(branch: str, pleading_type: str) -> tuple[str, ...]:
+    matrices = list(ANALYSIS_BRANCH_MATRICES[branch])
+    if branch == "pleading_position":
+        matrices.extend(PLEADING_POSITION_MATRICES.get(pleading_type, ()))
+    return tuple(dict.fromkeys(matrices))
 
 
 class ArbitrationWorkflowDomain:
@@ -115,8 +214,12 @@ class ArbitrationWorkflowDomain:
                 {
                     "draft_id": selected_draft_id, "version_id": str(version.get("_id")), "version": version.get("version"),
                     "version_hash": version.get("version_hash") or artifact_hash(version), "draft_type": str(draft.get("draft_type")),
+                    "paragraphs": _opponent_paragraphs(version),
                 }
             )
+            snapshots[-1]["paragraph_count"] = len(snapshots[-1]["paragraphs"])
+            snapshots[-1]["paragraphs_hash"] = artifact_hash(snapshots[-1]["paragraphs"])
+            snapshots[-1]["parse_status"] = "parsed" if snapshots[-1]["paragraphs"] else "missing_content"
         present_types = {item["draft_type"] for item in snapshots}
         missing_types = set(required or ()).difference(present_types)
         if missing_types:
@@ -127,37 +230,134 @@ class ArbitrationWorkflowDomain:
 
     async def analyze(self, run: Dict[str, Any], *, parallel: bool = True) -> Dict[str, Any]:
         case_id = str(run["case_id"])
+        pleading_type = str(run.get("pleading_type") or "")
         rows_by_matrix = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) for slug in MATRIX_COLLECTIONS}
 
         async def branch(name: str) -> Dict[str, Any]:
-            # Branches are read-only projections over authoritative matrices.
-            selected = []
-            for matrix, rows in rows_by_matrix.items():
+            # Branches never mutate matrix rows. Their only write is an immutable,
+            # explicitly non-authoritative analysis artifact.
+            matrices = _branch_matrices(name, pleading_type)
+            selected: List[Dict[str, Any]] = []
+            for matrix in matrices:
+                rows = rows_by_matrix.get(matrix) or []
                 for row in rows:
                     selected.append(_canonical_row(matrix, row))
-            return {"branch": name, "rows": selected}
+            selected.sort(key=lambda row: (row["matrix"], row["row_id"], row["payload_hash"]))
+            payload = {
+                "branch": name,
+                "pleading_type": pleading_type,
+                "matrices": list(matrices),
+                "rows": selected,
+                "authoritative": False,
+                "review_status": "needs_review",
+                "input_snapshot_hash": run.get("input_snapshot_hash"),
+                "evidence_snapshot_hash": run.get("evidence_snapshot_hash"),
+                "opponent_pleading_snapshot_hash": run.get("opponent_pleading_snapshot_hash"),
+            }
+            branch_hash = artifact_hash(payload)
+            snapshot = await self.repository.create_snapshot(
+                run_id=str(run["_id"]),
+                kind="analysis_artifact",
+                payload=payload,
+                effect_key=f"{run['_id']}:analysis:{name}:{branch_hash}",
+            )
+            return {
+                "branch": name,
+                "rows": selected,
+                "artifact_id": snapshot["_id"],
+                "artifact_hash": snapshot["snapshot_hash"],
+                "authoritative": False,
+            }
 
         if parallel:
             branch_results = await asyncio.gather(*(branch(name) for name in ANALYSIS_BRANCHES))
         else:
             branch_results = [await branch(name) for name in ANALYSIS_BRANCHES]
-        # De-duplicate projections emitted by independent analytical views.
-        unique: Dict[tuple[str, str, str], Dict[str, Any]] = {}
-        for result in branch_results:
-            for row in result["rows"]:
-                unique[(row["matrix"], row["row_id"], row["payload_hash"])] = row
-        merged = deterministic_merge([{"rows": list(unique.values())}])
-        required = PLEADING_MATRIX_REQUIREMENTS.get(str(run.get("pleading_type")), ())
+        merged = deterministic_merge(branch_results)
+        required = PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
         blockers = [
             {"code": "missing_required_matrix", "matrix": slug, "message": f"No approved {slug} row is available"}
             for slug in required if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
         ]
+        opponent_snapshot = None
+        if run.get("opponent_pleading_snapshot_id"):
+            opponent_snapshot = await self.db.arbitration_workflow_snapshots.find_one(
+                {
+                    "_id": run.get("opponent_pleading_snapshot_id"),
+                    "run_id": str(run["_id"]),
+                    "kind": "opponent_pleading",
+                }
+            )
+        if OPPONENT_REQUIREMENTS.get(pleading_type):
+            missing_paragraphs = [
+                item.get("draft_type")
+                for item in ((opponent_snapshot or {}).get("payload") or {}).get("pleadings") or []
+                if not item.get("paragraph_count")
+            ]
+            if missing_paragraphs:
+                blockers.append(
+                    {
+                        "code": "opponent_paragraph_parse_required",
+                        "pleading_types": sorted(str(item) for item in missing_paragraphs),
+                        "message": "Required immutable opponent pleading versions contain no parseable paragraphs",
+                    }
+                )
+        artifact_refs = [
+            {
+                "branch": result["branch"],
+                "artifact_id": result["artifact_id"],
+                "artifact_hash": result["artifact_hash"],
+                "authoritative": False,
+            }
+            for result in sorted(branch_results, key=lambda item: item["branch"])
+        ]
+        artifact_set_payload = {
+            "pleading_type": pleading_type,
+            "artifacts": artifact_refs,
+            "authoritative": False,
+        }
+        artifact_set_hash = artifact_hash(
+            {
+                "pleading_type": pleading_type,
+                "artifacts": [
+                    {
+                        "branch": item["branch"],
+                        "artifact_hash": item["artifact_hash"],
+                        "authoritative": item["authoritative"],
+                    }
+                    for item in artifact_refs
+                ],
+                "authoritative": False,
+            }
+        )
+        artifact_set_payload["artifact_set_hash"] = artifact_set_hash
+        artifact_set = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="analysis_artifact_set",
+            payload=artifact_set_payload,
+            effect_key=f"{run['_id']}:analysis-set:{artifact_set_hash}",
+        )
         snapshot = await self.repository.create_snapshot(
             run_id=str(run["_id"]), kind="matrix_revision_set",
-            payload={"revision_set_id": merged["revision_set_id"], "rows": merged["rows"], "required_matrices": list(required)},
+            payload={
+                "revision_set_id": merged["revision_set_id"],
+                "rows": merged["rows"],
+                "required_matrices": list(required),
+                "analysis_artifact_set_id": artifact_set["_id"],
+                "analysis_artifact_set_hash": artifact_set_hash,
+                "authoritative": False,
+                "review_status": "needs_review",
+            },
             effect_key=f"{run['_id']}:snapshot:matrix:{merged['revision_hash']}",
         )
-        return {**merged, "snapshot_id": snapshot["_id"], "blockers": blockers}
+        return {
+            **merged,
+            "snapshot_id": snapshot["_id"],
+            "analysis_artifact_set_id": artifact_set["_id"],
+            "analysis_artifact_set_hash": artifact_set_hash,
+            "analysis_artifacts": artifact_refs,
+            "blockers": blockers,
+        }
 
     async def build_plan(self, run: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         case_id = str(run["case_id"])

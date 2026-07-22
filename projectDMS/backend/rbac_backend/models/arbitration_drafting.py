@@ -838,6 +838,8 @@ class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
     document_manifest_hash: Optional[str] = None
     opponent_pleading_snapshot_hash: Optional[str] = None
     evidence_snapshot_hash: Optional[str] = None
+    analysis_artifact_set_id: Optional[str] = None
+    analysis_artifact_set_hash: Optional[str] = None
     matrix_revision_set_id: Optional[str] = None
     matrix_revision_hash: Optional[str] = None
     readiness_artifact_hash: Optional[str] = None

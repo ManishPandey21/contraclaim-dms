@@ -215,6 +215,11 @@ class ArbitrationWorkflowService:
         if gate == "matrix_review":
             current_analysis = await self.domain.analyze(run, parallel=True)
             if current_analysis["revision_hash"] != run.get("matrix_revision_hash"):
+                await self.repository.invalidate_case_dependencies(
+                    case_id,
+                    reason="matrix_revision_hash_changed",
+                    actor_id=_actor_id(current_user),
+                )
                 raise HTTPException(status_code=409, detail="Matrix revision set drifted; refresh the workflow before approval")
             if current_analysis["blockers"]:
                 raise HTTPException(status_code=409, detail={"message": "Required pleading matrices are incomplete", "blockers": current_analysis["blockers"]})
@@ -222,6 +227,11 @@ class ArbitrationWorkflowService:
             case = await self.cases.get_case(case_id)
             current_readiness = await self.cases._readiness_artifact_state(case, str(run.get("pleading_type")))
             if current_readiness["artifact_hash"] != run.get("readiness_artifact_hash"):
+                await self.repository.invalidate_case_dependencies(
+                    case_id,
+                    reason="readiness_dependency_hash_changed",
+                    actor_id=_actor_id(current_user),
+                )
                 raise HTTPException(status_code=409, detail="Readiness evidence or matrix state drifted; refresh the workflow")
         elif gate in {"legal_review", "draft", "export"}:
             if not run.get("draft_id"):
@@ -426,6 +436,8 @@ class ArbitrationWorkflowService:
                 {
                     "status": "awaiting_matrix_review", "current_node": "matrix_review_gate", "next_action": "review_matrices",
                     "required_human_role": "legal_reviewer", "progress": 40,
+                    "analysis_artifact_set_id": analysis["analysis_artifact_set_id"],
+                    "analysis_artifact_set_hash": analysis["analysis_artifact_set_hash"],
                     "matrix_revision_set_id": analysis["revision_set_id"], "matrix_revision_hash": analysis["revision_hash"],
                     "readiness_artifact_id": readiness["matrix_revision_set_id"], "readiness_artifact_hash": readiness["artifact_hash"],
                     "blockers": analysis["blockers"], "last_material_editor_id": _actor_id(current_user),
@@ -457,6 +469,8 @@ class ArbitrationWorkflowService:
             )
             update.update({
                 "documents_selected": True, "document_manifest_id": snapshot["_id"], "document_manifest_hash": snapshot["snapshot_hash"],
+                "analysis_artifact_set_id": analysis["analysis_artifact_set_id"],
+                "analysis_artifact_set_hash": analysis["analysis_artifact_set_hash"],
                 "matrix_revision_set_id": analysis["revision_set_id"], "matrix_revision_hash": analysis["revision_hash"],
                 "readiness_artifact_id": readiness["matrix_revision_set_id"], "readiness_artifact_hash": readiness["artifact_hash"],
                 "status": "awaiting_user_direction" if questions else "awaiting_matrix_review",
@@ -555,7 +569,8 @@ class ArbitrationWorkflowService:
                 "progress", "blockers", "required_human_role", "fallback_available", "last_checkpoint_at",
                 "checkpoint_sync_status", "checkpoint_sync_state_version",
                 "created_at", "updated_at", "document_manifest_hash", "opponent_pleading_snapshot_hash",
-                "evidence_snapshot_hash", "matrix_revision_set_id", "matrix_revision_hash",
+                "evidence_snapshot_hash", "analysis_artifact_set_id", "analysis_artifact_set_hash",
+                "matrix_revision_set_id", "matrix_revision_hash",
                 "readiness_artifact_hash", "plan_id", "plan_hash", "draft_version_id", "draft_version_hash",
                 "validation_status", "validation_blockers",
                 "targeted_questions",
