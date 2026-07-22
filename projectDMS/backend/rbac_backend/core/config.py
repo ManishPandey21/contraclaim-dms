@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+from datetime import date
 from typing import Any, ClassVar, Optional, Dict
 
 from dotenv import load_dotenv
@@ -228,6 +230,16 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_GRAPH_VERSION: str = Field(default="phase4-v1", validation_alias="ARBITRATION_ENGINE_GRAPH_VERSION")
     ARBITRATION_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=2, ge=1, validation_alias="ARBITRATION_ENGINE_STATE_SCHEMA_VERSION")
     ARBITRATION_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="ARBITRATION_ENGINE_PRODUCTION_ACCEPTED")
+    ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID: str = Field(default="", validation_alias="ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID")
+    ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256: str = Field(default="", validation_alias="ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256")
+    ARBITRATION_ENGINE_PRIMARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_PRIMARY_PERCENT")
+    ARBITRATION_ENGINE_PRIMARY_TENANT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_PRIMARY_TENANT_IDS")
+    ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS")
+    ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY: bool = Field(default=True, validation_alias="ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY")
+    ARBITRATION_ENGINE_MIN_PLEADING_TYPE_SAMPLE: int = Field(default=1, ge=1, le=1000, validation_alias="ARBITRATION_ENGINE_MIN_PLEADING_TYPE_SAMPLE")
+    ARBITRATION_ENGINE_ACCEPTANCE_WINDOW_RUNS: int = Field(default=500, ge=20, le=10000, validation_alias="ARBITRATION_ENGINE_ACCEPTANCE_WINDOW_RUNS")
+    ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE: str = Field(default="active", validation_alias="ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE")
+    ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL: str = Field(default="", validation_alias="ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL")
     ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES")
     ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS")
     ARBITRATION_ENGINE_RETRY_BUDGET: int = Field(default=3, ge=0, le=20, validation_alias="ARBITRATION_ENGINE_RETRY_BUDGET")
@@ -548,6 +560,13 @@ class Settings(BaseSettings):
             raise ValueError("ARBITRATION_ENGINE_DEFAULT must be arbitration_v2 or langgraph_v1")
         if arbitration_rollout not in {"off", "shadow", "canary", "primary", "forced_v2"}:
             raise ValueError("ARBITRATION_ENGINE_ROLLOUT_MODE must be off, shadow, canary, primary, or forced_v2")
+        arbitration_v2_compatibility = str(
+            getattr(self, "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE", "active") or "active"
+        ).lower()
+        if arbitration_v2_compatibility not in {"active", "read_replay_only", "retired"}:
+            raise ValueError(
+                "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE must be active, read_replay_only, or retired"
+            )
 
         environment = str(getattr(self, "ENVIRONMENT", "development") or "development").lower()
         if environment == "production":
@@ -560,6 +579,48 @@ class Settings(BaseSettings):
                 production_errors.append(
                     "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=true is required before primary arbitration LangGraph cutover"
                 )
+            if arbitration_rollout == "primary":
+                if arbitration_engine_default != "langgraph_v1":
+                    production_errors.append(
+                        "ARBITRATION_ENGINE_DEFAULT=langgraph_v1 is required for primary arbitration rollout"
+                    )
+                receipt_id = str(self.ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID or "").strip()
+                receipt_hash = str(self.ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256 or "").strip().lower()
+                if not receipt_id or not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
+                    production_errors.append(
+                        "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID and a 64-character "
+                        "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256 are required for primary rollout"
+                    )
+                primary_scoped = bool(
+                    str(self.ARBITRATION_ENGINE_PRIMARY_TENANT_IDS or "").strip()
+                    or str(self.ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS or "").strip()
+                    or int(self.ARBITRATION_ENGINE_PRIMARY_PERCENT or 0) > 0
+                )
+                if not primary_scoped:
+                    production_errors.append(
+                        "Primary arbitration rollout requires an explicit tenant/project allowlist or "
+                        "ARBITRATION_ENGINE_PRIMARY_PERCENT greater than zero"
+                    )
+                compatibility_until = str(self.ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL or "").strip()
+                try:
+                    compatibility_date = date.fromisoformat(compatibility_until)
+                except ValueError:
+                    compatibility_date = None
+                if compatibility_date is None or compatibility_date < date.today():
+                    production_errors.append(
+                        "ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL must be a current or future ISO date "
+                        "during primary rollout"
+                    )
+                if not self.ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY:
+                    production_errors.append(
+                        "ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=true is required for primary "
+                        "arbitration rollout in production"
+                    )
+                if arbitration_v2_compatibility == "retired":
+                    production_errors.append(
+                        "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE=retired is reserved until a separate "
+                        "v2 deprecation decision is implemented and accepted"
+                    )
             if self.ALLOW_DEV_HEADERS:
                 production_errors.append("ALLOW_DEV_HEADERS must be false in production")
             if self.RBAC_ENTITLEMENT_FAIL_OPEN:

@@ -20,6 +20,11 @@ from rbac_backend.migrations.v20260722_0001_langgraph_checkpoint_ttl_compatibili
     TTL_SECONDS,
     upgrade as upgrade_langgraph_ttl,
 )
+from rbac_backend.migrations.v20260722_0002_arbitration_phase6_scope_index import (
+    INDEX_KEYS as ARB_PHASE6_SCOPE_INDEX_KEYS,
+    INDEX_NAME as ARB_PHASE6_SCOPE_INDEX_NAME,
+    upgrade as upgrade_arbitration_phase6_scope,
+)
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -128,6 +133,29 @@ def test_migration_catalog_versions_are_unique_and_sorted():
     versions = [migration.version for migration in MIGRATIONS]
     assert versions == sorted(versions)
     assert len(versions) == len(set(versions))
+
+
+@pytest.mark.asyncio
+async def test_phase6_scope_migration_indexes_bounded_acceptance_query():
+    db = _DB()
+
+    dry_run = await upgrade_arbitration_phase6_scope(db, dry_run=True)
+    applied = await upgrade_arbitration_phase6_scope(db, dry_run=False)
+
+    assert dry_run.operations == [
+        {
+            "operation": "create_index",
+            "collection": "arbitration_workflow_runs",
+            "keys": ARB_PHASE6_SCOPE_INDEX_KEYS,
+            "name": ARB_PHASE6_SCOPE_INDEX_NAME,
+            "unique": False,
+        }
+    ]
+    assert applied.status == "applied"
+    assert (
+        ARB_PHASE6_SCOPE_INDEX_KEYS,
+        {"name": ARB_PHASE6_SCOPE_INDEX_NAME, "background": True},
+    ) in db.arbitration_workflow_runs.indexes
 
 
 def test_seed_catalog_digest_is_stable_and_validates_current_seeds():

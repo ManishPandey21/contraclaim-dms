@@ -47,6 +47,10 @@ from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import DESCRIPTION a
 from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import NAME as LANGGRAPH_TTL_NAME
 from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import VERSION as LANGGRAPH_TTL_VERSION
 from .v20260722_0001_langgraph_checkpoint_ttl_compatibility import upgrade as upgrade_langgraph_ttl
+from .v20260722_0002_arbitration_phase6_scope_index import DESCRIPTION as ARB_PHASE6_SCOPE_DESCRIPTION
+from .v20260722_0002_arbitration_phase6_scope_index import NAME as ARB_PHASE6_SCOPE_NAME
+from .v20260722_0002_arbitration_phase6_scope_index import VERSION as ARB_PHASE6_SCOPE_VERSION
+from .v20260722_0002_arbitration_phase6_scope_index import upgrade as upgrade_arbitration_phase6_scope
 
 
 MIGRATIONS = [
@@ -109,5 +113,11 @@ MIGRATIONS = [
         name=LANGGRAPH_TTL_NAME,
         description=LANGGRAPH_TTL_DESCRIPTION,
         upgrade=upgrade_langgraph_ttl,
+    ),
+    Migration(
+        version=ARB_PHASE6_SCOPE_VERSION,
+        name=ARB_PHASE6_SCOPE_NAME,
+        description=ARB_PHASE6_SCOPE_DESCRIPTION,
+        upgrade=upgrade_arbitration_phase6_scope,
     ),
 ]

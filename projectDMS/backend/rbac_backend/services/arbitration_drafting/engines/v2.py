@@ -35,6 +35,7 @@ class ArbitrationV2WorkflowEngine:
         idempotency_key: Optional[str],
         request_hash: str,
         rollout_mode: str = "off",
+        rollout_decision: Optional[dict[str, Any]] = None,
     ) -> dict:
         case = await self.cases.get_case(case_id)
         if idempotency_key:
@@ -131,6 +132,11 @@ class ArbitrationV2WorkflowEngine:
             "engine": self.name,
             "engine_version": self.version,
             "rollout_mode": rollout_mode,
+            "rollout_policy_version": (rollout_decision or {}).get("policy_version", "phase6-v1"),
+            "rollout_decision_reason": (rollout_decision or {}).get("reason", "policy"),
+            "rollout_decision_hash": (rollout_decision or {}).get("decision_hash"),
+            "acceptance_receipt_sha256": (rollout_decision or {}).get("acceptance_receipt_sha256"),
+            "v2_compatibility_mode": (rollout_decision or {}).get("v2_compatibility_mode", "active"),
             "graph_version": str(settings.ARBITRATION_ENGINE_GRAPH_VERSION),
             "state_schema_version": int(settings.ARBITRATION_ENGINE_STATE_SCHEMA_VERSION),
             "status": ("awaiting_user_direction" if questions else "awaiting_matrix_review") if has_documents else "awaiting_document_selection",

@@ -814,6 +814,11 @@ class ArbitrationWorkflowAccepted(BaseModel):
     draft_id: Optional[str] = None
     engine: str
     rollout_mode: str
+    rollout_policy_version: Optional[str] = None
+    rollout_decision_reason: Optional[str] = None
+    rollout_decision_hash: Optional[str] = None
+    acceptance_receipt_sha256: Optional[str] = None
+    v2_compatibility_mode: Optional[str] = None
     status: ArbitrationWorkflowStatus
     current_node: str
     next_action: str

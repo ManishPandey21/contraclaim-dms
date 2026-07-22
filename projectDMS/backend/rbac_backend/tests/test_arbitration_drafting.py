@@ -2637,6 +2637,106 @@ def test_phase5_rollout_pause_and_force_v2_scope_override_canary():
     assert paused_decision.reason == "rollout_paused"
 
 
+def test_phase6_primary_requires_receipt_health_and_explicit_scope():
+    base = {
+        "ARBITRATION_ENGINE_DEFAULT": "langgraph_v1",
+        "ARBITRATION_ENGINE_ROLLOUT_MODE": "primary",
+        "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED": True,
+        "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID": "phase6-acceptance",
+        "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256": "b" * 64,
+        "ARBITRATION_ENGINE_PRIMARY_TENANT_IDS": "org-accepted",
+        "ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS": "",
+        "ARBITRATION_ENGINE_PRIMARY_PERCENT": 0,
+        "ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY": True,
+        "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE": "active",
+        "ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS": "",
+        "ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS": "",
+        "ARBITRATION_ENGINE_ROLLOUT_PAUSED": False,
+    }
+    health = {"primary_cutover": {"eligible": True}}
+    selector = ArbitrationEngineSelector(SimpleNamespace(**base))
+
+    accepted = selector.select(
+        tenant_id="org-accepted",
+        project_id="project-1",
+        request_hash="request",
+        rollout_health=health,
+    )
+    repeated = selector.select(
+        tenant_id="org-accepted",
+        project_id="project-1",
+        request_hash="request",
+        rollout_health=health,
+    )
+    outside_scope = selector.select(
+        tenant_id="org-other",
+        project_id="project-1",
+        request_hash="request",
+        rollout_health=health,
+    )
+    unhealthy = selector.select(
+        tenant_id="org-accepted",
+        project_id="project-1",
+        request_hash="request",
+        rollout_health={"primary_cutover": {"eligible": False}},
+    )
+    missing_receipt = ArbitrationEngineSelector(
+        SimpleNamespace(**{**base, "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID": ""})
+    ).select(
+        tenant_id="org-accepted",
+        project_id="project-1",
+        request_hash="request",
+        rollout_health=health,
+    )
+
+    assert accepted.engine == "langgraph_v1"
+    assert accepted.reason == "primary_scope_match"
+    assert accepted.policy_version == "phase6-v1"
+    assert accepted.decision_hash == repeated.decision_hash
+    assert len(accepted.decision_hash) == 64
+    assert outside_scope.engine == "arbitration_v2"
+    assert outside_scope.reason == "primary_scope_miss"
+    assert unhealthy.reason == "primary_health_not_ready"
+    assert missing_receipt.reason == "primary_acceptance_receipt_missing"
+
+
+def test_phase6_read_replay_only_mode_freezes_new_v2_scope_misses():
+    config = SimpleNamespace(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="primary",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID="phase6-acceptance",
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256="c" * 64,
+        ARBITRATION_ENGINE_PRIMARY_TENANT_IDS="org-accepted",
+        ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS="",
+        ARBITRATION_ENGINE_PRIMARY_PERCENT=0,
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=False,
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="read_replay_only",
+        ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS="",
+        ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS="",
+        ARBITRATION_ENGINE_ROLLOUT_PAUSED=False,
+    )
+
+    decision = ArbitrationEngineSelector(config).select(
+        tenant_id="org-outside",
+        project_id="project-1",
+        request_hash="request",
+    )
+
+    assert decision.engine == "unavailable"
+    assert decision.reason == "v2_new_runs_frozen"
+
+    paused = ArbitrationEngineSelector(
+        SimpleNamespace(**{**config.__dict__, "ARBITRATION_ENGINE_ROLLOUT_PAUSED": True})
+    ).select(
+        tenant_id="org-accepted",
+        project_id="project-1",
+        request_hash="request",
+    )
+    assert paused.engine == "unavailable"
+    assert paused.reason == "v2_new_runs_frozen"
+
+
 @pytest.mark.parametrize(
     "pleading_type",
     ["statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder"],
@@ -2716,6 +2816,65 @@ def test_phase5_rollout_health_blocks_threshold_breaches_without_identifiers():
     rendered = json.dumps(health)
     assert "run-" not in rendered
     assert "org-" not in rendered
+
+
+def test_phase6_cutover_health_requires_all_pleading_types_receipt_and_v2_window():
+    now = datetime.now(timezone.utc)
+    pleading_types = [
+        "statement_of_claim",
+        "statement_of_defence",
+        "counterclaim",
+        "rejoinder",
+    ]
+    runs = [
+        {
+            "_id": f"run-{index}",
+            "pleading_type": pleading_types[index % len(pleading_types)],
+            "engine": "arbitration_v2",
+            "status": "completed",
+            "checkpoint_sync_status": "synced",
+            "updated_at": now,
+        }
+        for index in range(20)
+    ]
+    events = [
+        {
+            "run_id": f"run-{index}",
+            "event_type": "shadow_comparison",
+            "data": {"overall_status": "match"},
+        }
+        for index in range(20)
+    ]
+    config = SimpleNamespace(
+        ARBITRATION_ENGINE_MAX_PAUSE_HOURS=72,
+        ARBITRATION_ENGINE_MIN_ACCEPTANCE_SAMPLE=20,
+        ARBITRATION_ENGINE_MAX_FAILURE_RATE_PERCENT=2,
+        ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT=4,
+        ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT=99,
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID="phase6-acceptance",
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256="d" * 64,
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
+        ARBITRATION_ENGINE_MIN_PLEADING_TYPE_SAMPLE=1,
+        ARBITRATION_ENGINE_ROLLOUT_PAUSED=False,
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="active",
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL=(now + timedelta(days=180)).date().isoformat(),
+    )
+
+    ready = build_rollout_health(runs, events, now=now, config=config)
+    assert ready["status"] == "ready"
+    assert ready["primary_cutover"]["eligible"] is True
+    assert ready["primary_cutover"]["missing_pleading_types"] == []
+
+    incomplete = build_rollout_health(
+        [run for run in runs if run["pleading_type"] != "rejoinder"],
+        events,
+        now=now,
+        config=config,
+    )
+    assert incomplete["primary_cutover"]["eligible"] is False
+    assert "pleading_type_coverage_incomplete" in incomplete["primary_cutover"]["blockers"]
+    assert incomplete["primary_cutover"]["missing_pleading_types"] == ["rejoinder"]
 
 
 def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
