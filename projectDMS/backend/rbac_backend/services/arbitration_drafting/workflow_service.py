@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from time import perf_counter
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
@@ -18,6 +19,8 @@ from .approval_policy import enforce_author_approver_separation, enforce_gate_ro
 from ...models.arbitration_drafting import ArbitrationReadinessApprovalRequest, ArbitrationGenerateRequest
 from .service import ArbitrationDraftingService, immutable_version_hash
 from .workflow_validation import ArbitrationValidationOrchestrator
+from .workflow_hardening import build_rollout_health, build_shadow_comparison
+from .repository import _collect
 from ..observability import observability_registry
 
 
@@ -59,6 +62,232 @@ class ArbitrationWorkflowService:
         self.domain = ArbitrationWorkflowDomain(db)
         self.drafting = ArbitrationDraftingService(db)
         self.validation = ArbitrationValidationOrchestrator()
+
+    @staticmethod
+    def _shadow_vector(
+        run: Dict[str, Any],
+        *,
+        matrix_revision_hash: Optional[str] = None,
+        readiness_artifact_hash: Optional[str] = None,
+        blockers: Optional[list[Dict[str, Any]]] = None,
+        questions: Optional[list[Dict[str, Any]]] = None,
+        current_node: Optional[str] = None,
+        evidence_set_hash: Optional[str] = None,
+        section_coverage_hash: Optional[str] = None,
+        citation_validity_hash: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        blocker_rows = blockers if blockers is not None else list(run.get("blockers") or [])
+        question_rows = questions if questions is not None else list(run.get("targeted_questions") or [])
+        validation_blockers = list(run.get("validation_blockers") or [])
+        approval_gates = sorted(
+            gate
+            for gate in GATE_ARTIFACT_FIELDS
+            if run.get(f"{gate}_approval_receipt_id")
+        )
+        return {
+            "evidence_set": evidence_set_hash or run.get("evidence_snapshot_hash"),
+            "matrix_rows": matrix_revision_hash or run.get("matrix_revision_hash"),
+            "readiness": readiness_artifact_hash or run.get("readiness_artifact_hash"),
+            "section_coverage": section_coverage_hash,
+            "citation_validity": citation_validity_hash,
+            "validation_blockers": artifact_hash(
+                sorted(
+                    (str(item.get("branch") or "unknown"), str(item.get("code") or "unknown"))
+                    for item in validation_blockers
+                )
+            ) if run.get("validation_status") else None,
+            "human_interventions": artifact_hash(
+                {
+                    "blockers": sorted(str(item.get("code") or "unknown") for item in blocker_rows),
+                    "questions": sorted(str(item.get("question_id") or "unknown") for item in question_rows),
+                    "approval_gates": approval_gates,
+                    "current_node": current_node or run.get("current_node"),
+                }
+            ),
+        }
+
+    async def _shadow_artifact_metrics(self, run: Dict[str, Any]) -> Dict[str, Optional[str]]:
+        evidence_set_hash = None
+        if run.get("evidence_snapshot_id"):
+            snapshot = await self.db.arbitration_workflow_snapshots.find_one(
+                {
+                    "_id": run.get("evidence_snapshot_id"),
+                    "run_id": str(run["_id"]),
+                    "kind": "evidence_manifest",
+                }
+            )
+            if snapshot:
+                evidence_set_hash = artifact_hash((snapshot.get("payload") or {}).get("evidence") or [])
+
+        plan = None
+        if run.get("plan_id"):
+            plan = await self.db.arbitration_plans.find_one(
+                {"_id": run.get("plan_id"), "run_id": str(run["_id"])}
+            )
+        version = None
+        if run.get("draft_version_id") and run.get("draft_id"):
+            version = await self.db.arbitration_draft_versions.find_one(
+                {"_id": run.get("draft_version_id"), "draft_id": str(run.get("draft_id"))}
+            )
+        section_coverage_hash = None
+        if plan or version:
+            planned = [
+                str(item.get("key") or "")
+                for item in (plan or {}).get("section_structure") or []
+                if isinstance(item, dict) and item.get("key")
+            ]
+            raw_sections = (version or {}).get("sections") or {}
+            if isinstance(raw_sections, dict):
+                drafted = sorted(str(value) for value in raw_sections)
+            else:
+                drafted = sorted(
+                    str(item.get("section_key") or item.get("title") or index)
+                    if isinstance(item, dict)
+                    else str(index)
+                    for index, item in enumerate(raw_sections)
+                )
+            section_coverage_hash = artifact_hash(
+                {
+                    "planned": planned,
+                    "drafted": drafted,
+                    "missing": sorted(set(planned).difference(drafted)),
+                    "source_mapped": sorted(
+                        str(item.get("section_key"))
+                        for item in (plan or {}).get("section_source_mapping") or []
+                        if isinstance(item, dict) and item.get("section_key")
+                    ),
+                }
+            )
+
+        citation_validity_hash = None
+        if run.get("validation_status"):
+            report = None
+            if run.get("validation_report_id"):
+                report = await self.db.arbitration_workflow_snapshots.find_one(
+                    {
+                        "_id": run.get("validation_report_id"),
+                        "run_id": str(run["_id"]),
+                        "kind": "validation_report",
+                    }
+                )
+            validation_blockers = list(run.get("validation_blockers") or [])
+            citation_validity_hash = artifact_hash(
+                {
+                    "status": run.get("validation_status"),
+                    "validation_input_hash": ((report or {}).get("payload") or {}).get("validation_input_hash"),
+                    "citation_blocker_codes": sorted(
+                        str(item.get("code") or "unknown")
+                        for item in validation_blockers
+                        if str(item.get("branch") or "") in {"citations", "exhibits", "source_drift"}
+                    ),
+                }
+            )
+        return {
+            "evidence_set_hash": evidence_set_hash,
+            "section_coverage_hash": section_coverage_hash,
+            "citation_validity_hash": citation_validity_hash,
+        }
+
+    async def _record_shadow_comparison(
+        self,
+        run: Dict[str, Any],
+        *,
+        authoritative_latency_ms: Optional[float] = None,
+    ) -> None:
+        if str(run.get("rollout_mode")) != "shadow":
+            return
+        effect_key = f"{run['_id']}:shadow-comparison:{int(run.get('state_version') or 0)}"
+        existing = await self.db.arbitration_workflow_snapshots.find_one({"effect_key": effect_key})
+        if existing:
+            return
+        started = perf_counter()
+        candidate_analysis = await self.domain.analyze(run, parallel=False)
+        from .langgraph_engine import LangGraphArbitrationEngine
+
+        graph_projection = await LangGraphArbitrationEngine(self.db).shadow_route_projection(run)
+        case = await self.cases.get_case(str(run["case_id"]))
+        candidate_readiness = await self.cases._readiness_artifact_state(case, str(run.get("pleading_type")))
+        candidate_questions = self.domain.material_questions(
+            candidate_analysis.get("blockers") or [], str(run.get("pleading_type"))
+        )
+        artifact_metrics = await self._shadow_artifact_metrics(run)
+        candidate_latency_ms = (perf_counter() - started) * 1000
+        authoritative = self._shadow_vector(run, **artifact_metrics)
+        candidate = self._shadow_vector(
+            run,
+            matrix_revision_hash=candidate_analysis.get("revision_hash"),
+            readiness_artifact_hash=candidate_readiness.get("artifact_hash"),
+            blockers=candidate_analysis.get("blockers") or [],
+            questions=candidate_questions,
+            current_node=str(graph_projection.get("projected_node") or "unknown"),
+            **artifact_metrics,
+        )
+        comparison = build_shadow_comparison(
+            pleading_type=str(run.get("pleading_type")),
+            state_version=int(run.get("state_version") or 0),
+            authoritative=authoritative,
+            candidate=candidate,
+            authoritative_latency_ms=authoritative_latency_ms,
+            candidate_latency_ms=candidate_latency_ms if authoritative_latency_ms is not None else None,
+        )
+        snapshot = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="shadow_comparison",
+            payload=comparison,
+            effect_key=effect_key,
+        )
+        await self.repository.append_event(
+            str(run["_id"]),
+            "shadow_comparison",
+            data={
+                "comparison_hash": comparison["comparison_hash"],
+                "snapshot_id": snapshot["_id"],
+                "overall_status": comparison["overall_status"],
+                "evaluated_dimensions": comparison["evaluated_dimensions"],
+                "mismatch_dimensions": comparison["mismatch_dimensions"],
+                "authoritative_writes": False,
+            },
+        )
+        await observability_registry.record_arbitration_shadow_comparison(comparison)
+
+    async def _record_shadow_safely(
+        self,
+        run: Dict[str, Any],
+        *,
+        authoritative_latency_ms: Optional[float] = None,
+    ) -> None:
+        try:
+            await self._record_shadow_comparison(run, authoritative_latency_ms=authoritative_latency_ms)
+        except Exception as exc:
+            failure_key = (
+                f"{run['_id']}:shadow-comparison-failure:"
+                f"{int(run.get('state_version') or 0)}:{type(exc).__name__}"
+            )
+            if await self.db.arbitration_workflow_snapshots.find_one({"effect_key": failure_key}):
+                return
+            failure = await self.repository.create_snapshot(
+                run_id=str(run["_id"]),
+                kind="shadow_comparison_failure",
+                payload={
+                    "schema_version": 1,
+                    "state_version": int(run.get("state_version") or 0),
+                    "error_code": type(exc).__name__,
+                    "authoritative_writes": False,
+                },
+                effect_key=failure_key,
+            )
+            await self.repository.append_event(
+                str(run["_id"]),
+                "shadow_comparison_failed",
+                data={
+                    "error_code": type(exc).__name__,
+                    "snapshot_id": failure["_id"],
+                    "authoritative_writes": False,
+                },
+            )
+            await observability_registry.record_arbitration_workflow(
+                engine="langgraph_v1", status="shadow_failed", node=str(run.get("current_node")), event="shadow_failed"
+            )
 
     @staticmethod
     def _validation_dependencies(run: Dict[str, Any]) -> Dict[str, str]:
@@ -388,6 +617,7 @@ class ArbitrationWorkflowService:
             engine = LangGraphArbitrationEngine(self.db)
         else:
             engine = ArbitrationV2WorkflowEngine(self.db)
+        authoritative_started = perf_counter()
         run = await engine.create_workflow(
             case_id,
             payload,
@@ -396,23 +626,14 @@ class ArbitrationWorkflowService:
             request_hash=request_hash,
             rollout_mode=decision.rollout_mode,
         )
+        authoritative_latency_ms = (perf_counter() - authoritative_started) * 1000
         if payload.requested_engine and payload.requested_engine != decision.engine:
             await self.repository.append_event(
                 run["_id"], "client_engine_request_ignored", actor_id=_actor_id(current_user),
                 data={"requested": payload.requested_engine, "selected": decision.engine},
             )
         if decision.shadow:
-            serial = await self.domain.analyze(run, parallel=False)
-            await self.repository.append_event(
-                run["_id"], "shadow_comparison",
-                data={
-                    "authoritative_engine": "arbitration_v2", "candidate_engine": "langgraph_v1",
-                    "parallel_revision_hash": run.get("matrix_revision_hash"),
-                    "serial_revision_hash": serial.get("revision_hash"),
-                    "parity": run.get("matrix_revision_hash") == serial.get("revision_hash"),
-                    "authoritative_writes": False,
-                },
-            )
+            await self._record_shadow_safely(run, authoritative_latency_ms=authoritative_latency_ms)
         await observability_registry.record_arbitration_workflow(
             engine=str(run.get("engine")), status=str(run.get("status")), node=str(run.get("current_node")), event="created"
         )
@@ -549,6 +770,7 @@ class ArbitrationWorkflowService:
                 rejection_update,
                 event=f"{gate}_{payload.decision}",
             )
+            await self._record_shadow_safely(updated)
             return self.public_state(updated)
         status_value, node, next_action, progress = transition
         transition_update: Dict[str, Any] = {}
@@ -684,6 +906,7 @@ class ArbitrationWorkflowService:
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event=f"{gate}_approved"
         )
+        await self._record_shadow_safely(updated)
         return self.public_state(updated)
 
     async def resume(self, case_id: str, run_id: str, payload: Any, current_user: Any) -> Dict[str, Any]:
@@ -850,6 +1073,7 @@ class ArbitrationWorkflowService:
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="resumed"
         )
+        await self._record_shadow_safely(updated)
         return self.public_state(updated)
 
     async def cancel(self, case_id: str, run_id: str, payload: Any, current_user: Any) -> Dict[str, Any]:
@@ -914,7 +1138,22 @@ class ArbitrationWorkflowService:
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="fallback_v2"
         )
+        await observability_registry.record_arbitration_fallback(
+            from_engine="langgraph_v1", reason="operator_requested"
+        )
         return self.public_state(updated)
+
+    async def operations_health(self, case_id: str) -> Dict[str, Any]:
+        runs = await _collect(self.db.arbitration_workflow_runs.find({"case_id": case_id}))
+        run_ids = [str(run.get("_id")) for run in runs if run.get("_id")]
+        events = (
+            await _collect(self.db.arbitration_workflow_events.find({"run_id": {"$in": run_ids}}))
+            if run_ids
+            else []
+        )
+        health = build_rollout_health(runs, events)
+        await observability_registry.record_arbitration_workflow_health(health)
+        return health
 
     @staticmethod
     def public_state(run: Dict[str, Any]) -> Dict[str, Any]:

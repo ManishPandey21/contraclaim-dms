@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,11 @@ from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
 from backend.rbac_backend.services.arbitration_drafting.workflow_validation import (
     VALIDATION_BRANCHES,
     ArbitrationValidationOrchestrator,
+)
+from backend.rbac_backend.services.arbitration_drafting.workflow_hardening import (
+    SHADOW_DIMENSIONS,
+    build_rollout_health,
+    build_shadow_comparison,
 )
 from backend.rbac_backend.models.arbitration_drafting import ArbitrationWorkflowCreateRequest
 
@@ -2604,6 +2610,114 @@ def test_arbitration_engine_policy_is_server_authoritative_and_deterministic():
     assert decision.reason == "canary_match"
 
 
+def test_phase5_rollout_pause_and_force_v2_scope_override_canary():
+    base = {
+        "ARBITRATION_ENGINE_DEFAULT": "langgraph_v1",
+        "ARBITRATION_ENGINE_ROLLOUT_MODE": "canary",
+        "ARBITRATION_ENGINE_CANARY_PERCENT": 100,
+        "ARBITRATION_ENGINE_CANARY_TENANT_IDS": "",
+        "ARBITRATION_ENGINE_CANARY_PROJECT_IDS": "",
+        "ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS": "org-blocked",
+        "ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS": "project-blocked",
+        "ARBITRATION_ENGINE_ROLLOUT_PAUSED": False,
+        "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED": False,
+    }
+    tenant_decision = ArbitrationEngineSelector(SimpleNamespace(**base)).select(
+        tenant_id="org-blocked", project_id="project-1", request_hash="request"
+    )
+    project_decision = ArbitrationEngineSelector(SimpleNamespace(**base)).select(
+        tenant_id="org-1", project_id="project-blocked", request_hash="request"
+    )
+    paused_decision = ArbitrationEngineSelector(
+        SimpleNamespace(**{**base, "ARBITRATION_ENGINE_ROLLOUT_PAUSED": True})
+    ).select(tenant_id="org-1", project_id="project-1", request_hash="request")
+
+    assert tenant_decision.engine == project_decision.engine == paused_decision.engine == "arbitration_v2"
+    assert tenant_decision.reason == project_decision.reason == "tenant_or_project_forced_v2"
+    assert paused_decision.reason == "rollout_paused"
+
+
+@pytest.mark.parametrize(
+    "pleading_type",
+    ["statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder"],
+)
+def test_phase5_shadow_comparison_is_redacted_and_covers_required_dimensions(pleading_type):
+    vector = {
+        "evidence_set": "evidence-hash",
+        "matrix_rows": "matrix-hash",
+        "readiness": "readiness-hash",
+        "section_coverage": "section-hash",
+        "citation_validity": "citation-hash",
+        "validation_blockers": "blocker-hash",
+        "human_interventions": "intervention-hash",
+    }
+    comparison = build_shadow_comparison(
+        pleading_type=pleading_type,
+        state_version=4,
+        authoritative=vector,
+        candidate=dict(vector),
+        authoritative_latency_ms=10.5,
+        candidate_latency_ms=12.5,
+    )
+
+    assert comparison["overall_status"] == "match"
+    assert comparison["authoritative_writes"] is False
+    assert tuple(comparison["dimensions"]) == SHADOW_DIMENSIONS
+    assert comparison["dimensions"]["output_latency"]["status"] == "measured"
+    assert "text" not in json.dumps(comparison).lower()
+
+
+def test_phase5_rollout_health_blocks_threshold_breaches_without_identifiers():
+    now = datetime.now(timezone.utc)
+    runs = [
+        {
+            "_id": f"run-{index}",
+            "engine": "langgraph_v1" if index < 10 else "arbitration_v2",
+            "status": "failed" if index == 0 else "awaiting_matrix_review" if index == 1 else "completed",
+            "checkpoint_sync_status": "pending" if index == 2 else "synced",
+            "updated_at": now - timedelta(hours=80) if index == 1 else now,
+        }
+        for index in range(20)
+    ]
+    events = [
+        {
+            "run_id": f"run-{index}",
+            "event_type": "shadow_comparison",
+            "data": {"overall_status": "match" if index < 18 else "mismatch"},
+        }
+        for index in range(20)
+    ] + [{"run_id": "run-3", "event_type": "workflow_fallback_v2"}]
+    config = SimpleNamespace(
+        ARBITRATION_ENGINE_MAX_PAUSE_HOURS=72,
+        ARBITRATION_ENGINE_MIN_ACCEPTANCE_SAMPLE=20,
+        ARBITRATION_ENGINE_MAX_FAILURE_RATE_PERCENT=2,
+        ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT=4,
+        ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT=99,
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=False,
+        ARBITRATION_ENGINE_ROLLOUT_PAUSED=False,
+    )
+
+    health = build_rollout_health(runs, events, now=now, config=config)
+
+    assert health["status"] == "blocked"
+    assert health["rates"] == {
+        "workflow_failure_percent": 5.0,
+        "fallback_percent": 5.0,
+        "shadow_parity_percent": 90.0,
+        "unresolved_source_drift_percent": 0.0,
+    }
+    assert {alert["code"] for alert in health["alerts"]} == {
+        "checkpoint_sync_pending",
+        "stale_paused_workflow",
+        "workflow_failure_rate",
+        "fallback_rate",
+        "shadow_parity_rate",
+    }
+    rendered = json.dumps(health)
+    assert "run-" not in rendered
+    assert "org-" not in rendered
+
+
 def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
     db = _FakeDb()
     engine = ArbitrationV2WorkflowEngine(db)
@@ -2638,6 +2752,149 @@ def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
     manifest = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "document_manifest")
     assert manifest["payload"]["documents"][0]["document_id"] == "doc-1"
     assert "ocrText" not in json.dumps(manifest, default=str)
+
+
+def test_phase5_shadow_milestone_is_idempotent_non_authoritative_and_auditable():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key="shadow-1", request_hash=request_hash,
+            rollout_mode="shadow",
+        )
+    )
+    service = ArbitrationWorkflowService(db)
+
+    asyncio.run(service._record_shadow_safely(run, authoritative_latency_ms=10.0))
+    snapshot_count = len(db.arbitration_workflow_snapshots.rows)
+    event_count = len(db.arbitration_workflow_events.rows)
+    asyncio.run(service._record_shadow_safely(run, authoritative_latency_ms=10.0))
+
+    comparisons = [row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "shadow_comparison"]
+    assert len(comparisons) == 1
+    assert comparisons[0]["payload"]["authoritative_writes"] is False
+    assert comparisons[0]["payload"]["overall_status"] == "match"
+    assert len(db.arbitration_workflow_snapshots.rows) == snapshot_count
+    assert len(db.arbitration_workflow_events.rows) == event_count
+    event = next(row for row in db.arbitration_workflow_events.rows if row["event_type"] == "shadow_comparison")
+    assert event["data"]["comparison_hash"] == comparisons[0]["payload"]["comparison_hash"]
+    assert all(
+        row["payload"].get("authoritative") is False
+        for row in db.arbitration_workflow_snapshots.rows
+        if row["kind"] == "analysis_artifact"
+    )
+    assert "Notice records" not in json.dumps(comparisons[0], default=str)
+
+    health = asyncio.run(service.operations_health("case-1"))
+    assert health["sample"]["shadow_comparisons"] == 1
+    assert "shadow-1" not in json.dumps(health)
+
+
+def test_phase5_shadow_failure_is_isolated_redacted_and_idempotent(monkeypatch):
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key="shadow-failure-1",
+            request_hash=request_hash, rollout_mode="shadow",
+        )
+    )
+
+    async def fail_projection(_self, _run):
+        raise RuntimeError("raw provider detail must not be persisted")
+
+    monkeypatch.setattr(LangGraphArbitrationEngine, "shadow_route_projection", fail_projection)
+    service = ArbitrationWorkflowService(db)
+    asyncio.run(service._record_shadow_safely(run, authoritative_latency_ms=10.0))
+    asyncio.run(service._record_shadow_safely(run, authoritative_latency_ms=10.0))
+
+    failures = [
+        row for row in db.arbitration_workflow_snapshots.rows
+        if row["kind"] == "shadow_comparison_failure"
+    ]
+    events = [
+        row for row in db.arbitration_workflow_events.rows
+        if row["event_type"] == "shadow_comparison_failed"
+    ]
+    assert len(failures) == len(events) == 1
+    assert failures[0]["payload"]["error_code"] == "RuntimeError"
+    assert failures[0]["payload"]["authoritative_writes"] is False
+    assert "provider detail" not in json.dumps(failures[0], default=str)
+    assert run["engine"] == "arbitration_v2"
+
+
+def test_phase5_shadow_artifact_metrics_hash_actual_evidence_sections_and_citations():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1", pleading_type="statement_of_claim", selected_document_ids=["doc-1"]
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1", payload, _FakeUser(), idempotency_key="shadow-artifacts-1",
+            request_hash=request_hash, rollout_mode="shadow",
+        )
+    )
+    db.arbitration_plans.rows.append(
+        {
+            "_id": "plan-shadow",
+            "run_id": run["_id"],
+            "section_structure": [{"order": 1, "key": "introduction"}, {"order": 2, "key": "claims"}],
+            "section_source_mapping": [
+                {"section_key": "introduction", "source_revision_ids": ["doc-1@v1"]},
+                {"section_key": "claims", "source_revision_ids": ["claim-1@v1"]},
+            ],
+        }
+    )
+    db.arbitration_draft_versions.rows.append(
+        {"_id": "version-shadow", "draft_id": "draft-1", "sections": {"introduction": {"markdown": "Redacted"}}}
+    )
+    report = asyncio.run(
+        ArbitrationWorkflowRepository(db).create_snapshot(
+            run_id=run["_id"],
+            kind="validation_report",
+            payload={"validation_input_hash": "validation-input-hash"},
+            effect_key=f"{run['_id']}:phase5-validation-report",
+        )
+    )
+    run.update(
+        {
+            "plan_id": "plan-shadow",
+            "draft_version_id": "version-shadow",
+            "validation_status": "passed",
+            "validation_report_id": report["_id"],
+            "validation_blockers": [],
+        }
+    )
+    service = ArbitrationWorkflowService(db)
+
+    first = asyncio.run(service._shadow_artifact_metrics(run))
+    db.arbitration_draft_versions.rows[-1]["sections"]["claims"] = {"markdown": "Redacted"}
+    second = asyncio.run(service._shadow_artifact_metrics(run))
+
+    assert first["evidence_set_hash"]
+    assert first["section_coverage_hash"] != second["section_coverage_hash"]
+    assert first["citation_validity_hash"]
+    assert "Redacted" not in json.dumps(first)
 
 
 def test_concurrent_v2_workflow_create_reuses_run_and_snapshot_rows():

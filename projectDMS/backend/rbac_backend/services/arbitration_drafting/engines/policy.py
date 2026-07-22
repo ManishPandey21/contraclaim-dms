@@ -37,6 +37,12 @@ class ArbitrationEngineSelector:
         default = str(getattr(self.config, "ARBITRATION_ENGINE_DEFAULT", "arbitration_v2") or "arbitration_v2").lower()
         if mode not in VALID_MODES:
             mode = "off"
+        forced_tenant = tenant_id in _items(getattr(self.config, "ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS", ""))
+        forced_project = project_id in _items(getattr(self.config, "ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS", ""))
+        if forced_tenant or forced_project:
+            return ArbitrationEngineDecision("arbitration_v2", "forced_v2", reason="tenant_or_project_forced_v2")
+        if bool(getattr(self.config, "ARBITRATION_ENGINE_ROLLOUT_PAUSED", False)):
+            return ArbitrationEngineDecision("arbitration_v2", "forced_v2", reason="rollout_paused")
         if mode in {"off", "forced_v2"} or default != "langgraph_v1":
             return ArbitrationEngineDecision("arbitration_v2", mode, reason="default_off_or_v2")
         if mode == "shadow":

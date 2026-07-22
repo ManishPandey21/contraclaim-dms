@@ -222,6 +222,9 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
     ARBITRATION_ENGINE_CANARY_TENANT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_TENANT_IDS")
     ARBITRATION_ENGINE_CANARY_PROJECT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_PROJECT_IDS")
+    ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS")
+    ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS")
+    ARBITRATION_ENGINE_ROLLOUT_PAUSED: bool = Field(default=False, validation_alias="ARBITRATION_ENGINE_ROLLOUT_PAUSED")
     ARBITRATION_ENGINE_GRAPH_VERSION: str = Field(default="phase4-v1", validation_alias="ARBITRATION_ENGINE_GRAPH_VERSION")
     ARBITRATION_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=2, ge=1, validation_alias="ARBITRATION_ENGINE_STATE_SCHEMA_VERSION")
     ARBITRATION_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="ARBITRATION_ENGINE_PRODUCTION_ACCEPTED")
@@ -234,6 +237,11 @@ class Settings(BaseSettings):
         le=3,
         validation_alias="ARBITRATION_ENGINE_MAX_REMEDIATION_CYCLES",
     )
+    ARBITRATION_ENGINE_MIN_ACCEPTANCE_SAMPLE: int = Field(default=20, ge=1, le=10000, validation_alias="ARBITRATION_ENGINE_MIN_ACCEPTANCE_SAMPLE")
+    ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT: float = Field(default=99.0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT")
+    ARBITRATION_ENGINE_MAX_FAILURE_RATE_PERCENT: float = Field(default=2.0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_MAX_FAILURE_RATE_PERCENT")
+    ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT: float = Field(default=5.0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT")
+    ARBITRATION_ENGINE_MAX_PAUSE_HOURS: float = Field(default=72.0, ge=1, le=8760, validation_alias="ARBITRATION_ENGINE_MAX_PAUSE_HOURS")
     ARBITRATION_REVIEWER_ROLE_MATRIX: str = Field(default="", validation_alias="ARBITRATION_REVIEWER_ROLE_MATRIX")
     
     # FalkorDB / RedisGraph configuration

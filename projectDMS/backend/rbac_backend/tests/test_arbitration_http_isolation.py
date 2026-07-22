@@ -214,6 +214,17 @@ class _FakeDb:
         )
         self.arbitration_readiness_checks = _FakeCollection([])
         self.arbitration_workflow_approvals = _FakeCollection([])
+        self.arbitration_workflow_runs = _FakeCollection(
+            [
+                {
+                    "_id": "workflow-a1",
+                    "case_id": "case-a1",
+                    "engine": "arbitration_v2",
+                    "status": "awaiting_matrix_review",
+                }
+            ]
+        )
+        self.arbitration_workflow_events = _FakeCollection([])
         self.arbitration_bundle_exports = _FakeCollection([])
         self.arbitration_drafts = _FakeCollection(
             [
@@ -366,6 +377,18 @@ def test_agent_runs_and_exhibit_list_deny_cross_tenant(client):
     assert client.as_user(ORG_B_USER).get("/api/arbitration/cases/case-a1/agent-runs").status_code == 404
     assert client.as_user(ORG_B_USER).get("/api/arbitration/cases/case-a1/exhibit-list").status_code == 404
     assert client.as_user(ORG_B_USER).get("/api/arbitration/cases/case-a1/readiness").status_code == 404
+
+
+def test_phase5_operational_health_is_case_scoped_and_identifier_free(client):
+    same = client.as_user(ORG_A_USER).get(
+        "/api/arbitration/cases/case-a1/workflows/operations/health"
+    )
+    assert same.status_code == 200
+    assert same.json()["sample"]["workflows"] == 1
+    assert "workflow-a1" not in same.text
+    assert client.as_user(ORG_B_USER).get(
+        "/api/arbitration/cases/case-a1/workflows/operations/health"
+    ).status_code == 404
 
 
 def test_draft_detail_denies_cross_tenant(client):

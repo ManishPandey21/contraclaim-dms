@@ -296,6 +296,17 @@ async def force_v2_arbitration_workflow(
     return ArbitrationWorkflowStateResponse(**await ArbitrationWorkflowService(db).fallback(case_id, run_id, payload, current_user))
 
 
+@router.get("/cases/{case_id}/workflows/operations/health")
+async def get_arbitration_workflow_operational_health(
+    case_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await _load_case_and_authorize(case_id, Permissions.ARBITRATION_ADMIN, db, current_user, policy)
+    return await ArbitrationWorkflowService(db).operations_health(case_id)
+
+
 @router.get("/operations/workflows/{run_id}/checkpoints")
 async def get_redacted_arbitration_workflow_checkpoints(
     run_id: str,

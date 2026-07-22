@@ -43,6 +43,10 @@ class ObservabilityRegistry:
     _arbitration_readiness_score: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _arbitration_missing_evidence: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _arbitration_workflow_events_total: Dict[Tuple[str, str, str, str], int] = field(default_factory=dict)
+    _arbitration_shadow_comparisons_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
+    _arbitration_shadow_latency_ms: Dict[Tuple[str, str], float] = field(default_factory=dict)
+    _arbitration_workflow_alerts: Dict[Tuple[str, str], float] = field(default_factory=dict)
+    _arbitration_fallbacks_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _vector_store_failures_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _dependency_health: Dict[str, float] = field(default_factory=dict)
 
@@ -160,6 +164,34 @@ class ObservabilityRegistry:
         async with self._lock:
             self._arbitration_workflow_events_total[key] = self._arbitration_workflow_events_total.get(key, 0) + 1
 
+    async def record_arbitration_shadow_comparison(self, comparison: Dict[str, object]) -> None:
+        pleading_type = str(comparison.get("pleading_type") or "unknown")
+        async with self._lock:
+            for dimension, value in (comparison.get("dimensions") or {}).items():
+                status = str((value or {}).get("status") or "unknown")
+                key = (pleading_type, str(dimension), status)
+                self._arbitration_shadow_comparisons_total[key] = self._arbitration_shadow_comparisons_total.get(key, 0) + 1
+            latency = (comparison.get("dimensions") or {}).get("output_latency") or {}
+            for engine, field in (("arbitration_v2", "authoritative_ms"), ("langgraph_v1", "candidate_ms")):
+                if field in latency:
+                    self._arbitration_shadow_latency_ms[(engine, pleading_type)] = float(latency[field])
+
+    async def record_arbitration_workflow_health(self, health: Dict[str, object]) -> None:
+        active = {
+            (str(item.get("severity") or "unknown"), str(item.get("code") or "unknown"))
+            for item in health.get("alerts") or []
+        }
+        async with self._lock:
+            known = set(self._arbitration_workflow_alerts) | active
+            self._arbitration_workflow_alerts = {key: 1.0 if key in active else 0.0 for key in known}
+
+    async def record_arbitration_fallback(self, *, from_engine: str, reason: str) -> None:
+        # Reasons are intentionally categorized; operator-entered fallback text
+        # must never become a high-cardinality or sensitive metric label.
+        key = (str(from_engine or "unknown"), str(reason or "unknown"))
+        async with self._lock:
+            self._arbitration_fallbacks_total[key] = self._arbitration_fallbacks_total.get(key, 0) + 1
+
     async def record_vector_store_failure(self, *, operation: str, namespace: str | None = None) -> None:
         """Count a Qdrant operation that failed while the store was enabled.
 
@@ -190,6 +222,9 @@ class ObservabilityRegistry:
             "arbitration_agent_run_total": sum(self._arbitration_agent_runs_total.values()),
             "arbitration_bundle_export_total": sum(self._arbitration_bundle_exports_total.values()),
             "arbitration_workflow_event_total": sum(self._arbitration_workflow_events_total.values()),
+            "arbitration_shadow_comparison_total": sum(self._arbitration_shadow_comparisons_total.values()),
+            "arbitration_fallback_total": sum(self._arbitration_fallbacks_total.values()),
+            "arbitration_workflow_active_alerts": sum(1 for value in self._arbitration_workflow_alerts.values() if value),
             "vector_store_failure_total": sum(self._vector_store_failures_total.values()),
             "dependency_health": dict(self._dependency_health),
         }
@@ -335,6 +370,43 @@ class ObservabilityRegistry:
         for (engine, workflow_status, node, event), value in sorted(self._arbitration_workflow_events_total.items()):
             labels = _labels((("engine", engine), ("status", workflow_status), ("node", node), ("event", event)))
             lines.append(f"contractdms_arbitration_workflow_events_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_shadow_comparisons_total Redacted v2-vs-graph comparison dimensions by pleading type and result.",
+                "# TYPE contractdms_arbitration_shadow_comparisons_total counter",
+            ]
+        )
+        for (pleading_type, dimension, result), value in sorted(self._arbitration_shadow_comparisons_total.items()):
+            labels = _labels((("pleading_type", pleading_type), ("dimension", dimension), ("result", result)))
+            lines.append(f"contractdms_arbitration_shadow_comparisons_total{labels} {value}")
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_shadow_latency_ms Latest shadow execution latency by engine and pleading type.",
+                "# TYPE contractdms_arbitration_shadow_latency_ms gauge",
+            ]
+        )
+        for (engine, pleading_type), value in sorted(self._arbitration_shadow_latency_ms.items()):
+            labels = _labels((("engine", engine), ("pleading_type", pleading_type)))
+            lines.append(f"contractdms_arbitration_shadow_latency_ms{labels} {value:.3f}")
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_workflow_alert Active arbitration rollout alert, 1 active / 0 clear.",
+                "# TYPE contractdms_arbitration_workflow_alert gauge",
+            ]
+        )
+        for (severity, code), value in sorted(self._arbitration_workflow_alerts.items()):
+            labels = _labels((("severity", severity), ("code", code)))
+            lines.append(f"contractdms_arbitration_workflow_alert{labels} {value:.0f}")
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_workflow_fallbacks_total Arbitration workflow fallbacks by source engine and bounded reason category.",
+                "# TYPE contractdms_arbitration_workflow_fallbacks_total counter",
+            ]
+        )
+        for (from_engine, reason), value in sorted(self._arbitration_fallbacks_total.items()):
+            labels = _labels((("from_engine", from_engine), ("reason", reason)))
+            lines.append(f"contractdms_arbitration_workflow_fallbacks_total{labels} {value}")
 
         lines.extend(
             [
