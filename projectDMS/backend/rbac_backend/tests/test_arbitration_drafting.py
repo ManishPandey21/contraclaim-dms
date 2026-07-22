@@ -60,7 +60,12 @@ from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import 
     redact_checkpoint,
     validate_checkpoint_state,
 )
-from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ANALYSIS_BRANCHES, ArbitrationWorkflowDomain
+from backend.rbac_backend.services.arbitration_drafting.graph_commands import classify_retry
+from backend.rbac_backend.services.arbitration_drafting.workflow_domain import (
+    ANALYSIS_BRANCHES,
+    ANALYSIS_NODE_BRANCHES,
+    ArbitrationWorkflowDomain,
+)
 from backend.rbac_backend.services.arbitration_drafting.workflow_repository import ArbitrationWorkflowRepository
 from backend.rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
@@ -3576,11 +3581,183 @@ def test_langgraph_create_retry_reuses_checkpoint_and_state_version():
     second = asyncio.run(create())
 
     assert first["_id"] == second["_id"]
-    assert first["state_version"] == second["state_version"] == 1
+    # The graph-owned merge command performs one authoritative CAS after the
+    # five read-only analysis nodes; an idempotent retry must reuse that state.
+    assert first["state_version"] == second["state_version"] == 2
     assert second.get("last_checkpoint_at") is not None
     assert [event["event_type"] for event in db.arbitration_workflow_events.rows] == [
         "workflow_created",
+        "graph_analysis_merged",
     ]
+
+
+def test_langgraph_create_does_not_execute_the_v2_workflow_adapter(monkeypatch):
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+
+    async def forbidden_v2_create(*_args, **_kwargs):
+        raise AssertionError("LangGraph must not execute the complete v2 workflow adapter")
+
+    monkeypatch.setattr(ArbitrationV2WorkflowEngine, "create_workflow", forbidden_v2_create)
+    db = _FakeDb()
+    saver = memory.InMemorySaver()
+    engine = LangGraphArbitrationEngine(db, checkpointer=saver)
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(
+                draft_id="draft-1",
+                pleading_type="statement_of_claim",
+                selected_document_ids=["doc-1"],
+            ),
+            _FakeUser(),
+            idempotency_key="graph-owned-create",
+            request_hash="graph-owned-create-hash",
+        )
+    )
+
+    assert not issubclass(LangGraphArbitrationEngine, ArbitrationV2WorkflowEngine)
+    assert run["engine"] == "langgraph_v1"
+    node_results = [
+        row
+        for row in db.arbitration_workflow_snapshots.rows
+        if row.get("kind") == "analysis_node_result"
+    ]
+    assert {row["payload"]["node"] for row in node_results} == set(ANALYSIS_NODE_BRANCHES)
+    assert sum(len(row["payload"]["branches"]) for row in node_results) == len(ANALYSIS_BRANCHES)
+    node_effects = {
+        row.get("effect_type")
+        for row in db.arbitration_workflow_effects.rows
+        if str(row.get("effect_type") or "").startswith("graph_node:")
+    }
+    assert {
+        "graph_node:validate_intake",
+        "graph_node:capture_input_snapshot",
+        "graph_node:merge_evidence_and_matrices",
+        *(f"graph_node:{node}" for node in ANALYSIS_NODE_BRANCHES),
+    }.issubset(node_effects)
+    checkpoint = build_arbitration_graph(checkpointer=saver).get_state(
+        {"configurable": {"thread_id": run["thread_id"]}}
+    )
+    before_version = int(run["state_version"])
+    replay = asyncio.run(
+        engine.command_executor.execute(
+            "merge_evidence_and_matrices",
+            dict(checkpoint.values),
+        )
+    )
+    assert replay["matrix_revision_hash"] == run["matrix_revision_hash"]
+    assert db.arbitration_workflow_runs.rows[0]["state_version"] == before_version
+    assert sum(
+        1
+        for row in db.arbitration_workflow_effects.rows
+        if row.get("effect_type") == "graph_node:merge_evidence_and_matrices"
+    ) == 1
+
+
+def test_graph_node_retry_classification_is_transient_only():
+    assert classify_retry(TimeoutError("provider timeout")) == "transient"
+    assert classify_retry(ConnectionError("dependency unavailable")) == "transient"
+    assert classify_retry(HTTPException(status_code=503, detail="unavailable")) == "transient"
+    assert classify_retry(HTTPException(status_code=409, detail="artifact drift")) == "permanent"
+    assert classify_retry(ValueError("invalid immutable input")) == "permanent"
+
+
+def test_langgraph_export_authorization_does_not_mark_run_complete_before_export_effect(monkeypatch):
+    db = _FakeDb()
+    version = db.arbitration_draft_versions.rows[0]
+    version["version_hash"] = immutable_version_hash(version)
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-export-node-owned",
+            "thread_id": "arbitration:run-export-node-owned",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "langgraph_v1",
+            "status": "awaiting_export_authorization",
+            "current_node": "export_authorization_gate",
+            "next_action": "authorize_export",
+            "state_version": 7,
+            "draft_version_id": version["_id"],
+            "draft_version_hash": version["version_hash"],
+            "validation_status": "passed",
+            "validation_blockers": [],
+            "authoritative_effects": [],
+            "created_by": "draft-author",
+            "last_material_editor_id": "draft-author",
+        }
+    )
+    observed = {}
+
+    async def capture_checkpoint(_engine, run, update):
+        observed.update({"status": run["status"], "node": run["current_node"], **update})
+
+    monkeypatch.setattr(LangGraphArbitrationEngine, "checkpoint_transition", capture_checkpoint)
+    state = asyncio.run(
+        ArbitrationWorkflowService(db).approve_gate(
+            "case-1",
+            "run-export-node-owned",
+            "export",
+            ArbitrationWorkflowApprovalRequest(
+                state_version=7,
+                artifact_hash=version["version_hash"],
+                reviewer_role="export_authorizer",
+            ),
+            _FakeUser("export-approver"),
+        )
+    )
+
+    assert observed == {
+        "status": "running",
+        "node": "create_filing_export",
+        "export_authorized": True,
+    }
+    assert state["status"] == "running"
+    assert state["current_node"] == "create_filing_export"
+    assert not state.get("filing_export_id")
+
+
+def test_langgraph_matrix_refresh_rebinds_evidence_and_reexecutes_node_effects():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    db = _FakeDb()
+    db.arbitration_claim_matrix.rows.append(
+        {
+            "_id": "claim-refresh",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "claim_head": "Late access",
+            "approval_status": "approved",
+            "readiness_status": "ready",
+            "source_id": "doc-1",
+            "source_revision_id": "version-1",
+        }
+    )
+    engine = LangGraphArbitrationEngine(db, checkpointer=memory.InMemorySaver())
+    run = asyncio.run(
+        engine.create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(
+                draft_id="draft-1",
+                pleading_type="statement_of_claim",
+                selected_document_ids=["doc-1"],
+            ),
+            _FakeUser(),
+            idempotency_key="graph-refresh",
+            request_hash="graph-refresh-hash",
+        )
+    )
+    prior_evidence_hash = run["evidence_snapshot_hash"]
+    prior_matrix_hash = run["matrix_revision_hash"]
+    prior_effect_count = len(db.arbitration_workflow_effects.rows)
+    db.arbitration_claim_matrix.rows[0]["claim_head"] = "Late access and prolongation"
+    db.arbitration_claim_matrix.rows[0]["revision"] = 2
+
+    refreshed = asyncio.run(engine.refresh_analysis(run, actor_id="reviewer-1"))
+
+    assert refreshed["evidence_snapshot_hash"] != prior_evidence_hash
+    assert refreshed["matrix_revision_hash"] != prior_matrix_hash
+    assert refreshed["current_node"] in {"material_question_gate", "matrix_review_gate"}
+    assert len(db.arbitration_workflow_effects.rows) >= prior_effect_count + len(ANALYSIS_NODE_BRANCHES) + 1
 
 
 def test_langgraph_cancellation_checkpoint_does_not_traverse_downstream_nodes():
@@ -3648,6 +3825,8 @@ def test_lagging_checkpoint_replays_cumulative_gate_receipts_to_current_gate():
             "user_direction_snapshot_id": "direction-snapshot",
             "matrix_review_approval_receipt_id": "matrix-receipt",
             "readiness_approval_receipt_id": "readiness-receipt",
+            "analysis_artifact_set_id": "analysis-catchup",
+            "analysis_artifact_set_hash": "analysis-catchup-hash",
             "plan_id": "plan-catchup",
             "plan_hash": "plan-catchup-hash",
         }
@@ -3814,19 +3993,19 @@ def test_resume_requires_exact_gate_and_rejects_document_changes_after_selection
 
 
 def test_force_v2_fallback_preserves_gate_and_binds_original_input_snapshot():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
     db = _FakeDb()
-    engine = ArbitrationV2WorkflowEngine(db)
+    engine = LangGraphArbitrationEngine(db, checkpointer=memory.InMemorySaver())
     run = asyncio.run(
         engine.create_workflow(
             "case-1",
             ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
             _FakeUser(),
-            idempotency_key=None,
+            idempotency_key="phase2-fallback",
             request_hash="phase2-fallback",
         )
     )
     stored = db.arbitration_workflow_runs.rows[0]
-    stored["engine"] = "langgraph_v1"
     original_node = stored["current_node"]
     original_status = stored["status"]
 
@@ -3845,6 +4024,55 @@ def test_force_v2_fallback_preserves_gate_and_binds_original_input_snapshot():
     assert updated["fallback_from_engine"] == "langgraph_v1"
     assert updated["fallback_input_snapshot_id"] == run["input_snapshot_id"]
     assert updated["fallback_input_snapshot_hash"] == run["input_snapshot_hash"]
+    assert updated["fallback_snapshot_binding_id"]
+    assert updated["fallback_snapshot_binding_hash"]
+    binding = next(
+        row
+        for row in db.arbitration_workflow_snapshots.rows
+        if row.get("_id") == updated["fallback_snapshot_binding_id"]
+    )
+    assert {item["kind"] for item in binding["payload"]["snapshots"]} == {
+        "input",
+        "document_manifest",
+        "evidence_manifest",
+    }
+
+
+def test_force_v2_fallback_cannot_overwrite_a_langgraph_candidate():
+    db = _FakeDb()
+    run = asyncio.run(
+        ArbitrationV2WorkflowEngine(db).create_workflow(
+            "case-1",
+            ArbitrationWorkflowCreateRequest(pleading_type="statement_of_claim"),
+            _FakeUser(),
+            idempotency_key="candidate-fallback",
+            request_hash="candidate-fallback-hash",
+        )
+    )
+    stored = db.arbitration_workflow_runs.rows[0]
+    stored.update(
+        {
+            "engine": "langgraph_v1",
+            "draft_version_id": "candidate-1",
+            "draft_version_hash": "candidate-hash",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            ArbitrationWorkflowService(db).fallback(
+                "case-1",
+                run["_id"],
+                ArbitrationWorkflowFallbackRequest(
+                    state_version=1,
+                    reason="Operator requested fallback after candidate creation",
+                ),
+                _FakeUser(),
+            )
+        )
+    assert exc_info.value.status_code == 409
+    assert stored["engine"] == "langgraph_v1"
+    assert stored["draft_version_id"] == "candidate-1"
 
 
 def test_parallel_and_serial_matrix_analysis_have_identical_revision_hash():
@@ -4478,6 +4706,33 @@ def test_validator_blocks_fluent_unsupported_factual_assertion():
         "The contractor completed every required milestone before the employer terminated the contract without cause.",
     )
     assert any("factual assertions" in blocker for blocker in report["approval_blockers"])
+
+
+def test_workflow_assertion_validation_persists_redacted_claim_source_spans():
+    orchestrator = ArbitrationValidationOrchestrator()
+    report = asyncio.run(orchestrator.evaluate(
+        {
+            "_id": "version-claim-spans",
+            "draft_id": "draft-1",
+            "version": 2,
+            "version_hash": "a" * 64,
+            "full_markdown": (
+                "The Employer issued the notice under Clause 14.2 on 2026-07-01 [S1].\n"
+                "The Contractor claimed USD 125,000 from Example Employer."
+            ),
+            "source_ledger": [{"source_key": "S1"}],
+        },
+        dependency_hashes={"matrix_revision_hash": "b" * 64},
+        branches=("assertions",),
+    ))
+
+    assert [artifact["branch"] for artifact in report["artifacts"]] == ["assertions"]
+    spans = report["artifacts"][0]["claim_source_spans"]
+    assert spans[0]["source_keys"] == ["S1"]
+    assert spans[0]["support_status"] == "supported"
+    assert spans[1]["support_status"] == "needs_review"
+    assert "text" not in spans[0]
+    assert any(issue["code"] == "unsupported_claim_span" for issue in report["blockers"])
 
 
 def test_filing_worker_refuses_matrix_drift_after_immutable_authorization():

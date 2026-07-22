@@ -19,7 +19,9 @@ from pymongo import MongoClient
 
 from ...core.config import settings
 from ..observability import observability_registry
-from .engines.v2 import ArbitrationV2WorkflowEngine
+from .graph_commands import ArbitrationGraphCommandExecutor, VALIDATION_NODE_BRANCH
+from .workflow_domain import ANALYSIS_NODE_BRANCHES
+from .workflow_repository import ArbitrationWorkflowRepository
 
 try:  # Core graph stays independently testable when the optional Mongo plugin is absent.
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -65,6 +67,16 @@ class ArbitrationGraphState(TypedDict, total=False):
     opponent_pleading_snapshot_hash: str
     analysis_artifact_set_id: str
     analysis_artifact_set_hash: str
+    analysis_documents_id: str
+    analysis_documents_hash: str
+    analysis_chronology_id: str
+    analysis_chronology_hash: str
+    analysis_clause_jurisdiction_notice_id: str
+    analysis_clause_jurisdiction_notice_hash: str
+    analysis_pleading_position_id: str
+    analysis_pleading_position_hash: str
+    analysis_quantum_expert_id: str
+    analysis_quantum_expert_hash: str
     matrix_revision_set_id: str
     matrix_revision_hash: str
     readiness_artifact_id: str
@@ -77,10 +89,28 @@ class ArbitrationGraphState(TypedDict, total=False):
     validation_artifact_set_hash: str
     validation_report_id: str
     validation_report_hash: str
+    validation_citations_id: str
+    validation_citations_hash: str
+    validation_assertions_id: str
+    validation_assertions_hash: str
+    validation_legal_structure_id: str
+    validation_legal_structure_hash: str
+    validation_new_matter_id: str
+    validation_new_matter_hash: str
+    validation_quantum_id: str
+    validation_quantum_hash: str
+    validation_duplication_id: str
+    validation_duplication_hash: str
+    validation_exhibits_id: str
+    validation_exhibits_hash: str
+    validation_source_drift_id: str
+    validation_source_drift_hash: str
     validation_status: str
     validation_route: str
     remediation_artifact_id: str
     remediation_artifact_hash: str
+    filing_export_id: str
+    filing_export_effect_key: str
     documents_selected: bool
     material_questions_required: bool
     user_direction_complete: bool
@@ -194,7 +224,11 @@ def _gate(kind: str, required_flag: str, next_status: str, next_action: str):
     return node
 
 
-def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = None):
+def build_arbitration_graph(
+    *,
+    checkpointer: Optional[BaseCheckpointSaver] = None,
+    executor: Optional[ArbitrationGraphCommandExecutor] = None,
+):
     if not LANGGRAPH_RUNTIME_AVAILABLE or StateGraph is None:
         raise RuntimeError("Official LangGraph MongoDB checkpoint dependencies are unavailable")
 
@@ -239,24 +273,35 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
 
         return run
 
+    def command_or(node: str, fallback: Any):
+        if executor is None:
+            return fallback
+
+        def run(state: ArbitrationGraphState) -> Dict[str, Any]:
+            update = executor.run_sync(node, dict(state))
+            validate_checkpoint_state({**state, **update})
+            return update
+
+        return run
+
     graph = StateGraph(ArbitrationGraphState)
-    graph.add_node("validate_intake", marker("validate_intake", execution_status="running", next_action="poll"))
-    graph.add_node("capture_input_snapshot", marker("capture_input_snapshot"))
+    graph.add_node("validate_intake", command_or("validate_intake", marker("validate_intake", execution_status="running", next_action="poll")))
+    graph.add_node("capture_input_snapshot", command_or("capture_input_snapshot", marker("capture_input_snapshot")))
     graph.add_node("document_selection_gate", _gate("document_selection_gate", "documents_selected", "awaiting_document_selection", "select_documents"))
-    graph.add_node("analyze_documents", artifact_marker("analyze_documents", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, documents_analyzed=True))
-    graph.add_node("analyze_chronology", artifact_marker("analyze_chronology", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, chronology_analyzed=True))
-    graph.add_node("analyze_clause_jurisdiction_notice", artifact_marker("analyze_clause_jurisdiction_notice", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, clause_analysis_complete=True))
-    graph.add_node("analyze_pleading_position", artifact_marker("analyze_pleading_position", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, pleading_position_complete=True))
-    graph.add_node("analyze_quantum_expert", artifact_marker("analyze_quantum_expert", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, quantum_analysis_complete=True))
-    graph.add_node("merge_evidence_and_matrices", marker("merge_evidence_and_matrices"))
+    graph.add_node("analyze_documents", command_or("analyze_documents", artifact_marker("analyze_documents", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, documents_analyzed=True)))
+    graph.add_node("analyze_chronology", command_or("analyze_chronology", artifact_marker("analyze_chronology", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, chronology_analyzed=True)))
+    graph.add_node("analyze_clause_jurisdiction_notice", command_or("analyze_clause_jurisdiction_notice", artifact_marker("analyze_clause_jurisdiction_notice", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, clause_analysis_complete=True)))
+    graph.add_node("analyze_pleading_position", command_or("analyze_pleading_position", artifact_marker("analyze_pleading_position", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, pleading_position_complete=True)))
+    graph.add_node("analyze_quantum_expert", command_or("analyze_quantum_expert", artifact_marker("analyze_quantum_expert", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, quantum_analysis_complete=True)))
+    graph.add_node("merge_evidence_and_matrices", command_or("merge_evidence_and_matrices", marker("merge_evidence_and_matrices")))
     graph.add_node("material_question_gate", _gate("material_question_gate", "user_direction_complete", "awaiting_user_direction", "answer_questions"))
     graph.add_node("matrix_review_gate", _gate("matrix_review_gate", "matrices_approved", "awaiting_matrix_review", "review_matrices"))
     graph.add_node("readiness_approval_gate", _gate("readiness_approval_gate", "readiness_approved", "awaiting_readiness_approval", "approve_readiness"))
-    graph.add_node("build_pleading_plan", artifact_marker("build_pleading_plan", "plan_id", "plan_hash"))
+    graph.add_node("build_pleading_plan", command_or("build_pleading_plan", artifact_marker("build_pleading_plan", "plan_id", "plan_hash")))
     graph.add_node("plan_approval_gate", _gate("plan_approval_gate", "plan_approved", "awaiting_plan_approval", "approve_plan"))
     graph.add_node(
         "generate_draft",
-        artifact_marker("generate_draft", "draft_version_id", "draft_version_hash", draft_generated=True),
+        command_or("generate_draft", artifact_marker("generate_draft", "draft_version_id", "draft_version_hash", draft_generated=True)),
     )
     validation_nodes = {
         "validate_citations": "citations_validated",
@@ -269,30 +314,32 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
         "validate_source_drift": "source_drift_validated",
     }
     for node, flag in validation_nodes.items():
-        graph.add_node(node, completion_marker(flag))
+        graph.add_node(node, command_or(node, completion_marker(flag)))
     graph.add_node(
         "merge_validation_artifacts",
-        artifact_marker(
+        command_or("merge_validation_artifacts", artifact_marker(
             "merge_validation_artifacts",
             "validation_artifact_set_id",
             "validation_artifact_set_hash",
             "validation_report_id",
             "validation_report_hash",
             validation_complete=True,
-        ),
+        )),
     )
     graph.add_node(
         "remediate_draft",
-        artifact_marker(
+        command_or("remediate_draft", artifact_marker(
             "remediate_draft",
             "remediation_artifact_id",
             "remediation_artifact_hash",
             validation_route="legal_review",
-        ),
+        )),
     )
     graph.add_node("legal_review_gate", _gate("legal_review_gate", "legal_review_approved", "awaiting_legal_review", "legal_review"))
     graph.add_node("draft_approval_gate", _gate("draft_approval_gate", "draft_approved", "awaiting_draft_approval", "approve_draft"))
+    graph.add_node("commit_draft_approval", command_or("commit_draft_approval", marker("commit_draft_approval")))
     graph.add_node("export_authorization_gate", _gate("export_authorization_gate", "export_authorized", "awaiting_export_authorization", "authorize_export"))
+    graph.add_node("create_filing_export", command_or("create_filing_export", marker("create_filing_export")))
     graph.add_node("complete", marker("complete", execution_status="completed", next_action="completed"))
     graph.add_node("cancelled", marker("cancelled", execution_status="cancelled", next_action="cancelled"))
     graph.add_edge(START, "validate_intake")
@@ -333,8 +380,10 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
         list(validation_nodes) + ["cancelled"],
     )
     graph.add_conditional_edges("legal_review_gate", continue_or_cancel, {"continue": "draft_approval_gate", "cancelled": "cancelled"})
-    graph.add_conditional_edges("draft_approval_gate", continue_or_cancel, {"continue": "export_authorization_gate", "cancelled": "cancelled"})
-    graph.add_conditional_edges("export_authorization_gate", continue_or_cancel, {"continue": "complete", "cancelled": "cancelled"})
+    graph.add_conditional_edges("draft_approval_gate", continue_or_cancel, {"continue": "commit_draft_approval", "cancelled": "cancelled"})
+    graph.add_conditional_edges("commit_draft_approval", continue_or_cancel, {"continue": "export_authorization_gate", "cancelled": "cancelled"})
+    graph.add_conditional_edges("export_authorization_gate", continue_or_cancel, {"continue": "create_filing_export", "cancelled": "cancelled"})
+    graph.add_conditional_edges("create_filing_export", continue_or_cancel, {"continue": "complete", "cancelled": "cancelled"})
     graph.add_edge("complete", END)
     graph.add_edge("cancelled", END)
     return graph.compile(checkpointer=checkpointer)
@@ -360,12 +409,14 @@ class MongoArbitrationCheckpointStore:
         self.client.close()
 
 
-class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
+class LangGraphArbitrationEngine:
     name = "langgraph_v1"
-    version = "2"
+    version = "3"
 
     def __init__(self, db: Any, *, checkpointer: Optional[BaseCheckpointSaver] = None) -> None:
-        super().__init__(db)
+        self.db = db
+        self.repository = ArbitrationWorkflowRepository(db)
+        self.command_executor = ArbitrationGraphCommandExecutor(db)
         self.checkpointer = checkpointer
 
     async def shadow_route_projection(self, run: Dict[str, Any]) -> Dict[str, Any]:
@@ -417,16 +468,24 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         idempotency_key = kwargs.get("idempotency_key")
         if idempotency_key and args:
             existing_run = await self.repository.get_by_idempotency_key(str(args[0]), str(idempotency_key))
-        run = await super().create_workflow(*args, **kwargs)
+        if len(args) < 3:
+            raise TypeError("create_workflow requires case_id, payload and current_user")
+        run = await self.command_executor.bootstrap_workflow(
+            str(args[0]),
+            args[1],
+            args[2],
+            idempotency_key=kwargs.get("idempotency_key"),
+            request_hash=str(kwargs.get("request_hash") or ""),
+            rollout_mode=str(kwargs.get("rollout_mode") or "off"),
+            rollout_decision=kwargs.get("rollout_decision"),
+        )
         if existing_run and run.get("engine") != self.name:
             # Idempotency binds the original engine decision as well as inputs;
             # a later rollout-policy change must not convert an existing run.
             return run
         if run.get("engine") != self.name:
-            run = await self.repository.transition(
-                run["_id"], run["state_version"], {"engine": self.name, "engine_version": self.version}, event="langgraph_selected"
-            )
-        elif run.get("last_checkpoint_at"):
+            return run
+        if run.get("last_checkpoint_at"):
             # A retried 202 create with the same idempotency key must not append
             # another graph execution or advance the workflow state version.
             return run
@@ -443,6 +502,71 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         state["retry_budget_remaining"] = int(settings.ARBITRATION_ENGINE_RETRY_BUDGET)
         await self._checkpoint(run, initial_state=state)
         return await self.get_state(run["_id"])
+
+    async def get_state(self, run_id: str) -> Dict[str, Any]:
+        run = await self.repository.get_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        return run
+
+    async def refresh_analysis(self, run: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
+        """Re-run the graph-owned analysis fan-out after matrix/source drift."""
+
+        bound = await self.command_executor.refresh_evidence_binding(run, actor_id=actor_id)
+        state: Dict[str, Any] = {
+            "run_id": str(bound["_id"]),
+            "thread_id": str(bound["thread_id"]),
+            "state_version": int(bound["state_version"]),
+        }
+        branch_outputs = await asyncio.gather(
+            *(self.command_executor.execute(node, state) for node in ANALYSIS_NODE_BRANCHES)
+        )
+        for output in branch_outputs:
+            state.update(output)
+        state.update(await self.command_executor.execute("merge_evidence_and_matrices", state))
+        updated = await self.get_state(str(bound["_id"]))
+        await self._checkpoint(
+            updated,
+            resume_update={**self._cumulative_gate_state(updated), **state},
+            traverse=False,
+        )
+        return updated
+
+    async def refresh_validation(self, run: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
+        """Validate a new immutable candidate through node-scoped branch effects."""
+
+        candidate = await self.command_executor.drafts.latest_version(str(run.get("draft_id") or ""))
+        if not candidate:
+            raise HTTPException(status_code=409, detail="No immutable draft candidate is available for validation")
+        current = await self.command_executor.prepare_validation_refresh(
+            run, candidate, actor_id=actor_id
+        )
+        state: Dict[str, Any] = {
+            "run_id": str(current["_id"]),
+            "thread_id": str(current["thread_id"]),
+            "state_version": int(current["state_version"]),
+            "draft_version_id": str(current["draft_version_id"]),
+            "draft_version_hash": str(current["draft_version_hash"]),
+        }
+        while True:
+            branch_outputs = await asyncio.gather(
+                *(self.command_executor.execute(node, state) for node in VALIDATION_NODE_BRANCH)
+            )
+            for output in branch_outputs:
+                state.update(output)
+            merged = await self.command_executor.execute("merge_validation_artifacts", state)
+            state.update(merged)
+            if str(merged.get("validation_route") or "") != "remediate":
+                break
+            remediation = await self.command_executor.execute("remediate_draft", state)
+            state.update(remediation)
+        updated = await self.get_state(str(current["_id"]))
+        await self._checkpoint(
+            updated,
+            resume_update={**self._cumulative_gate_state(updated), **state},
+            traverse=False,
+        )
+        return updated
 
     async def checkpoint_transition(self, run: Dict[str, Any], update: Dict[str, Any]) -> None:
         if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
@@ -481,6 +605,12 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         } | {
             key: run[key]
             for key in (
+                "analysis_artifact_set_id",
+                "analysis_artifact_set_hash",
+                "matrix_revision_set_id",
+                "matrix_revision_hash",
+                "readiness_artifact_id",
+                "readiness_artifact_hash",
                 "plan_id",
                 "plan_hash",
                 "draft_version_id",
@@ -546,7 +676,36 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
             store = MongoArbitrationCheckpointStore()
             checkpointer = store.saver
         try:
-            graph = build_arbitration_graph(checkpointer=checkpointer)
+            needs_node_execution = bool(initial_state is not None)
+            needs_node_execution = needs_node_execution or bool(
+                run.get("readiness_approval_receipt_id") and not run.get("plan_id")
+            )
+            needs_node_execution = needs_node_execution or bool(
+                run.get("plan_approval_receipt_id") and not run.get("draft_version_id")
+            )
+            needs_node_execution = needs_node_execution or bool(
+                run.get("draft_approval_receipt_id") and not run.get("draft_approval_committed_at")
+            )
+            needs_node_execution = needs_node_execution or bool(
+                run.get("export_approval_receipt_id") and not run.get("filing_export_id")
+            )
+            has_recovered_authoritative_cursor = bool(
+                run.get("plan_id")
+                or run.get("draft_version_id")
+                or run.get("validation_artifact_set_id")
+                or run.get("filing_export_id")
+            )
+            needs_node_execution = needs_node_execution or bool(
+                not has_recovered_authoritative_cursor
+                and run.get("documents_selected")
+                and not run.get("analysis_artifact_set_id")
+            )
+            executor = (
+                self.command_executor.bind_loop(asyncio.get_running_loop())
+                if needs_node_execution
+                else None
+            )
+            graph = build_arbitration_graph(checkpointer=checkpointer, executor=executor)
             config = {"configurable": {"thread_id": run["thread_id"]}}
             if initial_state is not None:
                 validate_checkpoint_state(initial_state)

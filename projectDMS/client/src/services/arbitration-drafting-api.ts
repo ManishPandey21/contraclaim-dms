@@ -148,12 +148,16 @@ export interface ArbitrationWorkflowState {
   remediation_artifact_id?: string | null;
   remediation_artifact_hash?: string | null;
   remediation_cycle?: number;
+  filing_export_id?: string | null;
+  filing_export_effect_key?: string | null;
   approval_receipt_ids?: Record<string, string>;
   targeted_questions?: Array<{ question_id: string; prompt: string; required?: boolean }>;
   fallback_reason?: string | null;
   fallback_from_engine?: string | null;
   fallback_input_snapshot_id?: string | null;
   fallback_input_snapshot_hash?: string | null;
+  fallback_snapshot_binding_id?: string | null;
+  fallback_snapshot_binding_hash?: string | null;
 }
 
 export interface ArbitrationWorkflowCreatePayload {

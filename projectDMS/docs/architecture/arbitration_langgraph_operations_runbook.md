@@ -31,7 +31,7 @@ Generic matrix create/update APIs cannot set approval, verification, readiness, 
 | `ARBITRATION_ENGINE_FORCE_V2_TENANT_IDS` | empty | Emergency tenant denylist; overrides canary/primary selection |
 | `ARBITRATION_ENGINE_FORCE_V2_PROJECT_IDS` | empty | Emergency project denylist; overrides canary/primary selection |
 | `ARBITRATION_ENGINE_ROLLOUT_PAUSED` | `false` | Global fail-safe; immediately selects v2 for new runs |
-| `ARBITRATION_ENGINE_GRAPH_VERSION` | `phase4-v1` | Persisted graph contract version |
+| `ARBITRATION_ENGINE_GRAPH_VERSION` | `phase6-node-owned-v1` | Persisted graph contract version; identifies node-owned authoritative commands |
 | `ARBITRATION_ENGINE_STATE_SCHEMA_VERSION` | `2` | Minimal checkpoint state schema |
 | `ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES` | `262144` | Fail-closed checkpoint size ceiling |
 | `ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS` | `30` | Checkpoint TTL |

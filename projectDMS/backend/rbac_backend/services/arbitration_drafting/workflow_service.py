@@ -704,7 +704,7 @@ class ArbitrationWorkflowService:
         if not artifact_field or not transition:
             raise HTTPException(status_code=400, detail="Unknown arbitration workflow approval gate")
         if gate == "matrix_review":
-            current_analysis = await self.domain.analyze(run, parallel=True)
+            current_analysis = await self.domain.inspect_matrix_revision(run)
             if current_analysis["revision_hash"] != run.get("matrix_revision_hash"):
                 await self.repository.invalidate_case_dependencies(
                     case_id,
@@ -811,6 +811,58 @@ class ArbitrationWorkflowService:
             await self.repository.commit_approval(str(receipt["_id"]), run_id)
             await self._record_shadow_safely(updated)
             return self.public_state(updated)
+        if run.get("engine") == "langgraph_v1":
+            status_value, node, next_action, progress = transition
+            if gate == "export":
+                # Authorization is a human receipt; completion belongs to the
+                # create_filing_export graph node after its idempotent effect.
+                status_value, node, next_action, progress = (
+                    "running",
+                    "create_filing_export",
+                    "poll",
+                    97,
+                )
+            updated = await self.repository.transition(
+                run_id,
+                payload.state_version,
+                {
+                    "status": status_value,
+                    "current_node": node,
+                    "next_action": next_action,
+                    "progress": progress,
+                    "required_human_role": (
+                        None
+                        if status_value in {"running", "completed"}
+                        else "legal_reviewer"
+                        if node == "legal_review_gate"
+                        else "senior_legal"
+                    ),
+                    f"{gate}_approval_receipt_id": receipt["_id"],
+                    "authoritative_effects": [
+                        *(run.get("authoritative_effects") or []),
+                        f"{gate}_approval",
+                    ],
+                },
+                event=f"{gate}_approved",
+            )
+            await self.repository.commit_approval(str(receipt["_id"]), run_id)
+            flag = {
+                "document_selection": "documents_selected",
+                "matrix_review": "matrices_approved",
+                "readiness": "readiness_approved",
+                "plan": "plan_approved",
+                "legal_review": "legal_review_approved",
+                "draft": "draft_approved",
+                "export": "export_authorized",
+            }[gate]
+            from .langgraph_engine import LangGraphArbitrationEngine
+
+            await LangGraphArbitrationEngine(self.db).checkpoint_transition(updated, {flag: True})
+            final = await self.repository.get_run(run_id)
+            if not final:
+                raise HTTPException(status_code=404, detail="Arbitration workflow run not found after graph approval")
+            await self._record_shadow_safely(final)
+            return self.public_state(final)
         status_value, node, next_action, progress = transition
         transition_update: Dict[str, Any] = {}
         if gate == "readiness":
@@ -992,6 +1044,32 @@ class ArbitrationWorkflowService:
             raise HTTPException(status_code=422, detail="Matrix review resume only supports decision=refresh")
         if current_node == "legal_review_gate" and payload.decision != "refresh_candidate":
             raise HTTPException(status_code=422, detail="Legal review resume only supports decision=refresh_candidate")
+        if run.get("engine") == "langgraph_v1" and current_node in {
+            "matrix_review_gate",
+            "legal_review_gate",
+        }:
+            # Refreshes are authoritative graph commands, not service-side
+            # replicas of analysis or validation. The engine records immutable
+            # inputs, node effects and CAS transitions before checkpoint sync.
+            from .langgraph_engine import LangGraphArbitrationEngine
+
+            engine = LangGraphArbitrationEngine(self.db)
+            if current_node == "matrix_review_gate":
+                updated = await engine.refresh_analysis(
+                    run, actor_id=_actor_id(current_user)
+                )
+            else:
+                updated = await engine.refresh_validation(
+                    run, actor_id=_actor_id(current_user)
+                )
+            await observability_registry.record_arbitration_workflow(
+                engine=str(updated.get("engine")),
+                status=str(updated.get("status")),
+                node=str(updated.get("current_node")),
+                event="resumed",
+            )
+            await self._record_shadow_safely(updated)
+            return self.public_state(updated)
         update: Dict[str, Any] = {"status": "running", "next_action": "poll", "required_human_role": None}
         if current_node == "material_question_gate":
             required = {str(item.get("question_id")) for item in run.get("targeted_questions") or [] if item.get("required")}
@@ -1085,28 +1163,43 @@ class ArbitrationWorkflowService:
                 payload={"documents": manifest},
                 effect_key=f"{run_id}:snapshot:documents:{payload.state_version}",
             )
-            analysis = await self.domain.analyze(run, parallel=True)
-            case = await self.cases.get_case(case_id)
-            readiness = await self.cases._readiness_artifact_state(case, str(run.get("pleading_type")))
-            questions = self.domain.material_questions(analysis["blockers"], str(run.get("pleading_type")))
-            question_snapshot = await self.repository.create_snapshot(
-                run_id=run_id, kind="material_questions", payload={"questions": questions},
-                effect_key=f"{run_id}:snapshot:questions:{analysis['revision_hash']}",
-            )
-            update.update({
-                "documents_selected": True, "document_manifest_id": snapshot["_id"], "document_manifest_hash": snapshot["snapshot_hash"],
-                "analysis_artifact_set_id": analysis["analysis_artifact_set_id"],
-                "analysis_artifact_set_hash": analysis["analysis_artifact_set_hash"],
-                "matrix_revision_set_id": analysis["revision_set_id"], "matrix_revision_hash": analysis["revision_hash"],
-                "readiness_artifact_id": readiness["matrix_revision_set_id"], "readiness_artifact_hash": readiness["artifact_hash"],
-                "status": "awaiting_user_direction" if questions else "awaiting_matrix_review",
-                "current_node": "material_question_gate" if questions else "matrix_review_gate",
-                "next_action": "answer_questions" if questions else "review_matrices",
-                "required_human_role": "legal_reviewer", "progress": 40, "blockers": analysis["blockers"],
-                "last_material_editor_id": _actor_id(current_user),
-                "targeted_questions": questions, "material_questions_required": bool(questions),
-                "question_snapshot_id": question_snapshot["_id"], "question_snapshot_hash": question_snapshot["snapshot_hash"],
-            })
+            if run.get("engine") == "langgraph_v1":
+                update.update(
+                    {
+                        "documents_selected": True,
+                        "document_manifest_id": snapshot["_id"],
+                        "document_manifest_hash": snapshot["snapshot_hash"],
+                        "status": "running",
+                        "current_node": "document_selection_gate",
+                        "next_action": "poll",
+                        "required_human_role": None,
+                        "progress": 25,
+                        "last_material_editor_id": _actor_id(current_user),
+                    }
+                )
+            else:
+                analysis = await self.domain.analyze(run, parallel=True)
+                case = await self.cases.get_case(case_id)
+                readiness = await self.cases._readiness_artifact_state(case, str(run.get("pleading_type")))
+                questions = self.domain.material_questions(analysis["blockers"], str(run.get("pleading_type")))
+                question_snapshot = await self.repository.create_snapshot(
+                    run_id=run_id, kind="material_questions", payload={"questions": questions},
+                    effect_key=f"{run_id}:snapshot:questions:{analysis['revision_hash']}",
+                )
+                update.update({
+                    "documents_selected": True, "document_manifest_id": snapshot["_id"], "document_manifest_hash": snapshot["snapshot_hash"],
+                    "analysis_artifact_set_id": analysis["analysis_artifact_set_id"],
+                    "analysis_artifact_set_hash": analysis["analysis_artifact_set_hash"],
+                    "matrix_revision_set_id": analysis["revision_set_id"], "matrix_revision_hash": analysis["revision_hash"],
+                    "readiness_artifact_id": readiness["matrix_revision_set_id"], "readiness_artifact_hash": readiness["artifact_hash"],
+                    "status": "awaiting_user_direction" if questions else "awaiting_matrix_review",
+                    "current_node": "material_question_gate" if questions else "matrix_review_gate",
+                    "next_action": "answer_questions" if questions else "review_matrices",
+                    "required_human_role": "legal_reviewer", "progress": 40, "blockers": analysis["blockers"],
+                    "last_material_editor_id": _actor_id(current_user),
+                    "targeted_questions": questions, "material_questions_required": bool(questions),
+                    "question_snapshot_id": question_snapshot["_id"], "question_snapshot_hash": question_snapshot["snapshot_hash"],
+                })
         updated = await self.repository.transition(run_id, payload.state_version, update, event="workflow_resumed")
         if current_node in {"document_selection_gate", "material_question_gate"}:
             await self._sync_langgraph_checkpoint(
@@ -1180,13 +1273,61 @@ class ArbitrationWorkflowService:
                 status_code=409,
                 detail="v2 fallback is no longer available for new writes under the configured compatibility mode",
             )
-        if run.get("authoritative_effects"):
-            raise HTTPException(status_code=409, detail="Fallback is prohibited after an authoritative effect")
+        protected_receipts = [
+            run.get(f"{gate}_approval_receipt_id")
+            for gate in ("legal_review", "draft", "export")
+            if run.get(f"{gate}_approval_receipt_id")
+        ]
+        if run.get("authoritative_effects") or run.get("draft_version_id") or protected_receipts:
+            raise HTTPException(
+                status_code=409,
+                detail="Fallback is prohibited after a LangGraph candidate, legal approval, draft approval, or export effect",
+            )
         input_snapshot = await self.db.arbitration_workflow_snapshots.find_one(
             {"_id": run.get("input_snapshot_id"), "run_id": run_id, "kind": "input"}
         )
         if not input_snapshot or input_snapshot.get("snapshot_hash") != run.get("input_snapshot_hash"):
             raise HTTPException(status_code=409, detail="Immutable workflow input snapshot is missing or has drifted")
+        fallback_refs = []
+        for kind, id_field, hash_field in (
+            ("input", "input_snapshot_id", "input_snapshot_hash"),
+            ("document_manifest", "document_manifest_id", "document_manifest_hash"),
+            ("evidence_manifest", "evidence_snapshot_id", "evidence_snapshot_hash"),
+            ("opponent_pleading", "opponent_pleading_snapshot_id", "opponent_pleading_snapshot_hash"),
+        ):
+            if not run.get(id_field):
+                continue
+            snapshot = await self.db.arbitration_workflow_snapshots.find_one(
+                {"_id": run.get(id_field), "run_id": run_id, "kind": kind}
+            )
+            if not snapshot or snapshot.get("snapshot_hash") != run.get(hash_field):
+                raise HTTPException(status_code=409, detail=f"Immutable fallback {kind} snapshot is missing or drifted")
+            fallback_refs.append(
+                {
+                    "kind": kind,
+                    "snapshot_id": snapshot["_id"],
+                    "snapshot_hash": snapshot["snapshot_hash"],
+                }
+            )
+        if run.get("matrix_revision_hash"):
+            current_matrix = await self.domain.inspect_matrix_revision(run)
+            if current_matrix.get("revision_hash") != run.get("matrix_revision_hash"):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Fallback is prohibited after matrix drift; start a new v2 workflow from reviewed inputs",
+                )
+        fallback_binding = await self.repository.create_snapshot(
+            run_id=run_id,
+            kind="fallback_snapshot_binding",
+            payload={
+                "source_engine": "langgraph_v1",
+                "target_engine": "arbitration_v2",
+                "snapshots": fallback_refs,
+                "matrix_revision_set_id": run.get("matrix_revision_set_id"),
+                "matrix_revision_hash": run.get("matrix_revision_hash"),
+            },
+            effect_key=f"{run_id}:fallback-binding:{run.get('input_snapshot_hash')}",
+        )
         updated = await self.repository.transition(
             run_id, payload.state_version,
             {
@@ -1195,6 +1336,8 @@ class ArbitrationWorkflowService:
                 "fallback_from_engine": "langgraph_v1",
                 "fallback_input_snapshot_id": input_snapshot["_id"],
                 "fallback_input_snapshot_hash": input_snapshot["snapshot_hash"],
+                "fallback_snapshot_binding_id": fallback_binding["_id"],
+                "fallback_snapshot_binding_hash": fallback_binding["snapshot_hash"],
                 "fallback_reason": payload.reason,
                 "fallback_available": False,
             },
@@ -1366,8 +1509,10 @@ class ArbitrationWorkflowService:
                 "validation_artifact_set_id", "validation_artifact_set_hash",
                 "validation_report_id", "validation_report_hash", "validation_route",
                 "remediation_artifact_id", "remediation_artifact_hash",
+                "filing_export_id", "filing_export_effect_key",
                 "targeted_questions",
                 "fallback_reason", "fallback_from_engine", "fallback_input_snapshot_id", "fallback_input_snapshot_hash",
+                "fallback_snapshot_binding_id", "fallback_snapshot_binding_hash",
             )
         } | {
             "run_id": run.get("_id"),

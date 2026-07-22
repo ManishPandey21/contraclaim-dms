@@ -868,12 +868,16 @@ class ArbitrationWorkflowStateResponse(ArbitrationWorkflowAccepted):
     remediation_artifact_id: Optional[str] = None
     remediation_artifact_hash: Optional[str] = None
     remediation_cycle: int = 0
+    filing_export_id: Optional[str] = None
+    filing_export_effect_key: Optional[str] = None
     approval_receipt_ids: Dict[str, str] = Field(default_factory=dict)
     targeted_questions: List[Dict[str, Any]] = Field(default_factory=list)
     fallback_reason: Optional[str] = None
     fallback_from_engine: Optional[str] = None
     fallback_input_snapshot_id: Optional[str] = None
     fallback_input_snapshot_hash: Optional[str] = None
+    fallback_snapshot_binding_id: Optional[str] = None
+    fallback_snapshot_binding_hash: Optional[str] = None
 
 
 class ArbitrationWorkflowResumeRequest(BaseModel):

@@ -29,6 +29,20 @@ ANALYSIS_BRANCHES = (
     "expert_alignment",
 )
 
+ANALYSIS_NODE_BRANCHES = {
+    "analyze_documents": ("document_understanding",),
+    "analyze_chronology": ("chronology",),
+    "analyze_clause_jurisdiction_notice": (
+        "clause_interpretation",
+        "jurisdiction",
+        "limitation",
+        "pre_arbitration_requirements",
+        "notices",
+    ),
+    "analyze_pleading_position": ("pleading_position",),
+    "analyze_quantum_expert": ("quantum", "expert_alignment"),
+}
+
 ANALYSIS_BRANCH_MATRICES = {
     "document_understanding": ("document-index",),
     "chronology": ("chronology-matrix",),
@@ -325,7 +339,7 @@ class ArbitrationWorkflowDomain:
         payload = {"pleadings": snapshots}
         return await self.repository.create_snapshot(run_id=run_id, kind="opponent_pleading", payload=payload, effect_key=f"{run_id}:snapshot:opponent")
 
-    async def analyze(self, run: Dict[str, Any], *, parallel: bool = True) -> Dict[str, Any]:
+    async def _analysis_context(self, run: Dict[str, Any]) -> Dict[str, Any]:
         case_id = str(run["case_id"])
         pleading_type = str(run.get("pleading_type") or "")
         rows_by_matrix = {slug: await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) for slug in MATRIX_COLLECTIONS}
@@ -370,95 +384,189 @@ class ArbitrationWorkflowDomain:
             if run.get("opponent_pleading_snapshot_id")
             else None
         )
-        async def branch(name: str) -> Dict[str, Any]:
-            # Branches never mutate matrix rows. Their only write is an immutable,
-            # explicitly non-authoritative analysis artifact.
-            async with self._fanout_slot(run, name):
-                matrices = _branch_matrices(name, pleading_type)
-                selected: List[Dict[str, Any]] = []
-                findings: List[Dict[str, Any]] = []
-                allowed_fields = ANALYSIS_FINDING_FIELDS[name]
-                for matrix in matrices:
-                    rows = rows_by_matrix.get(matrix) or []
-                    for row in rows:
-                        canonical = _canonical_row(matrix, row)
-                        selected.append(canonical)
-                        findings.append(
-                            {
-                                "matrix": matrix,
-                                "row_id": canonical["row_id"],
-                                "source_revision_ids": canonical["source_revision_ids"],
-                                "evidence_status": canonical["evidence_status"],
-                                "facts": {key: row.get(key) for key in allowed_fields if row.get(key) not in (None, "", [])},
-                            }
-                        )
-                selected.sort(key=lambda row: (row["matrix"], row["row_id"], row["payload_hash"]))
-                findings.sort(key=lambda row: (row["matrix"], row["row_id"]))
-                opponent_inputs = []
-                if name == "pleading_position":
-                    opponent_inputs = [
-                        {
-                            "draft_type": item.get("draft_type"),
-                            "version_id": item.get("version_id"),
-                            "version_hash": item.get("version_hash"),
-                            "paragraph_count": item.get("paragraph_count"),
-                            "paragraphs_hash": item.get("paragraphs_hash"),
-                        }
-                        for item in ((opponent_snapshot or {}).get("payload") or {}).get("pleadings") or []
-                    ]
-            payload = {
-                "branch": name,
-                "pleading_type": pleading_type,
-                "matrices": list(matrices),
-                "rows": selected,
-                "findings": findings,
-                "document_signals": document_signals if name == "document_understanding" else [],
-                "opponent_pleadings": opponent_inputs,
-                "analysis_summary": {
-                    "row_count": len(selected),
-                    "supported_rows": sum(1 for row in selected if row.get("evidence_status") == "supported"),
-                    "needs_review_rows": sum(1 for row in selected if row.get("evidence_status") != "supported"),
-                },
-                "authoritative": False,
-                "review_status": "needs_review",
-                "input_snapshot_hash": run.get("input_snapshot_hash"),
-                "evidence_snapshot_hash": run.get("evidence_snapshot_hash"),
-                "opponent_pleading_snapshot_hash": run.get("opponent_pleading_snapshot_hash"),
-            }
-            branch_hash = artifact_hash(payload)
-            snapshot = await self.repository.create_snapshot(
-                run_id=str(run["_id"]),
-                kind="analysis_artifact",
-                payload=payload,
-                effect_key=f"{run['_id']}:analysis:{name}:{branch_hash}",
-            )
-            return {
-                "branch": name,
-                "rows": selected,
-                "artifact_id": snapshot["_id"],
-                "artifact_hash": snapshot["snapshot_hash"],
-                "authoritative": False,
-            }
+        return {
+            "pleading_type": pleading_type,
+            "rows_by_matrix": rows_by_matrix,
+            "document_signals": document_signals,
+            "opponent_snapshot": opponent_snapshot,
+        }
 
-        if parallel:
-            branch_results = await asyncio.gather(*(branch(name) for name in ANALYSIS_BRANCHES))
-        else:
-            branch_results = [await branch(name) for name in ANALYSIS_BRANCHES]
+    async def _analyze_branch(
+        self,
+        run: Dict[str, Any],
+        name: str,
+        context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Execute one read-only evidence branch and persist only its immutable artifact."""
+
+        pleading_type = str(context["pleading_type"])
+        rows_by_matrix = context["rows_by_matrix"]
+        async with self._fanout_slot(run, name):
+            matrices = _branch_matrices(name, pleading_type)
+            selected: List[Dict[str, Any]] = []
+            findings: List[Dict[str, Any]] = []
+            allowed_fields = ANALYSIS_FINDING_FIELDS[name]
+            for matrix in matrices:
+                for row in rows_by_matrix.get(matrix) or []:
+                    canonical = _canonical_row(matrix, row)
+                    selected.append(canonical)
+                    findings.append(
+                        {
+                            "matrix": matrix,
+                            "row_id": canonical["row_id"],
+                            "source_revision_ids": canonical["source_revision_ids"],
+                            "evidence_status": canonical["evidence_status"],
+                            "facts": {
+                                key: row.get(key)
+                                for key in allowed_fields
+                                if row.get(key) not in (None, "", [])
+                            },
+                        }
+                    )
+            selected.sort(key=lambda row: (row["matrix"], row["row_id"], row["payload_hash"]))
+            findings.sort(key=lambda row: (row["matrix"], row["row_id"]))
+            opponent_inputs = []
+            if name == "pleading_position":
+                opponent_inputs = [
+                    {
+                        "draft_type": item.get("draft_type"),
+                        "version_id": item.get("version_id"),
+                        "version_hash": item.get("version_hash"),
+                        "paragraph_count": item.get("paragraph_count"),
+                        "paragraphs_hash": item.get("paragraphs_hash"),
+                    }
+                    for item in ((context.get("opponent_snapshot") or {}).get("payload") or {}).get("pleadings") or []
+                ]
+        payload = {
+            "branch": name,
+            "pleading_type": pleading_type,
+            "matrices": list(matrices),
+            "rows": selected,
+            "findings": findings,
+            "document_signals": context["document_signals"] if name == "document_understanding" else [],
+            "opponent_pleadings": opponent_inputs,
+            "analysis_summary": {
+                "row_count": len(selected),
+                "supported_rows": sum(1 for row in selected if row.get("evidence_status") == "supported"),
+                "needs_review_rows": sum(1 for row in selected if row.get("evidence_status") != "supported"),
+            },
+            "authoritative": False,
+            "review_status": "needs_review",
+            "input_snapshot_hash": run.get("input_snapshot_hash"),
+            "evidence_snapshot_hash": run.get("evidence_snapshot_hash"),
+            "opponent_pleading_snapshot_hash": run.get("opponent_pleading_snapshot_hash"),
+        }
+        branch_hash = artifact_hash(payload)
+        snapshot = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="analysis_artifact",
+            payload=payload,
+            effect_key=f"{run['_id']}:analysis:{name}:{branch_hash}",
+        )
+        return {
+            "branch": name,
+            "rows": selected,
+            "artifact_id": snapshot["_id"],
+            "artifact_hash": snapshot["snapshot_hash"],
+            "authoritative": False,
+        }
+
+    async def analyze_node(self, run: Dict[str, Any], node: str) -> Dict[str, Any]:
+        """Execute the bounded branch set owned by one official graph node."""
+
+        branch_names = ANALYSIS_NODE_BRANCHES.get(node)
+        if not branch_names:
+            raise ValueError(f"Unknown arbitration analysis node: {node}")
+        context = await self._analysis_context(run)
+        branch_results = await asyncio.gather(
+            *(self._analyze_branch(run, branch, context) for branch in branch_names)
+        )
+        refs = [
+            {
+                "branch": result["branch"],
+                "artifact_id": result["artifact_id"],
+                "artifact_hash": result["artifact_hash"],
+            }
+            for result in sorted(branch_results, key=lambda item: item["branch"])
+        ]
+        payload = {
+            "node": node,
+            "branches": refs,
+            "input_snapshot_hash": run.get("input_snapshot_hash"),
+            "evidence_snapshot_hash": run.get("evidence_snapshot_hash"),
+            "opponent_pleading_snapshot_hash": run.get("opponent_pleading_snapshot_hash"),
+            "authoritative": False,
+        }
+        node_hash = artifact_hash(payload)
+        snapshot = await self.repository.create_snapshot(
+            run_id=str(run["_id"]),
+            kind="analysis_node_result",
+            payload=payload,
+            effect_key=f"{run['_id']}:analysis-node:{node}:{node_hash}",
+        )
+        return {
+            "node": node,
+            "artifact_id": snapshot["_id"],
+            "artifact_hash": snapshot["snapshot_hash"],
+            "branches": refs,
+        }
+
+    async def merge_analysis_nodes(
+        self,
+        run: Dict[str, Any],
+        node_results: Dict[str, Dict[str, str]],
+    ) -> Dict[str, Any]:
+        """Verify every fan-out result and perform the sole deterministic merge."""
+
+        branch_results: List[Dict[str, Any]] = []
+        for node in ANALYSIS_NODE_BRANCHES:
+            ref = node_results.get(node) or {}
+            snapshot = await self.db.arbitration_workflow_snapshots.find_one(
+                {
+                    "_id": ref.get("artifact_id"),
+                    "run_id": str(run["_id"]),
+                    "kind": "analysis_node_result",
+                }
+            )
+            if not snapshot or snapshot.get("snapshot_hash") != ref.get("artifact_hash"):
+                raise HTTPException(status_code=409, detail=f"Analysis node artifact is missing or drifted: {node}")
+            for branch_ref in (snapshot.get("payload") or {}).get("branches") or []:
+                branch = await self.db.arbitration_workflow_snapshots.find_one(
+                    {
+                        "_id": branch_ref.get("artifact_id"),
+                        "run_id": str(run["_id"]),
+                        "kind": "analysis_artifact",
+                    }
+                )
+                if not branch or branch.get("snapshot_hash") != branch_ref.get("artifact_hash"):
+                    raise HTTPException(status_code=409, detail="Analysis branch artifact is missing or drifted")
+                branch_results.append(
+                    {
+                        "branch": branch_ref.get("branch"),
+                        "rows": list((branch.get("payload") or {}).get("rows") or []),
+                        "artifact_id": branch["_id"],
+                        "artifact_hash": branch["snapshot_hash"],
+                        "authoritative": False,
+                    }
+                )
+        context = await self._analysis_context(run)
+        return await self._merge_analysis_results(run, context, branch_results)
+
+    async def _merge_analysis_results(
+        self,
+        run: Dict[str, Any],
+        context: Dict[str, Any],
+        branch_results: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        pleading_type = str(context["pleading_type"])
+        rows_by_matrix = context["rows_by_matrix"]
         merged = deterministic_merge(branch_results)
         required = PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
         blockers = [
             {"code": "missing_required_matrix", "matrix": slug, "message": f"No approved {slug} row is available"}
             for slug in required if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
         ]
-        opponent_snapshot = None
-        if run.get("opponent_pleading_snapshot_id"):
-            opponent_snapshot = await self.db.arbitration_workflow_snapshots.find_one(
-                {
-                    "_id": run.get("opponent_pleading_snapshot_id"),
-                    "run_id": str(run["_id"]),
-                    "kind": "opponent_pleading",
-                }
-            )
+        opponent_snapshot = context.get("opponent_snapshot")
         if OPPONENT_REQUIREMENTS.get(pleading_type):
             if not opponent_snapshot:
                 blockers.append(
@@ -537,6 +645,45 @@ class ArbitrationWorkflowDomain:
             "analysis_artifacts": artifact_refs,
             "blockers": blockers,
         }
+
+    async def analyze(self, run: Dict[str, Any], *, parallel: bool = True) -> Dict[str, Any]:
+        """Compatibility entry point built from the same node-owned primitives."""
+
+        context = await self._analysis_context(run)
+        if parallel:
+            branch_results = await asyncio.gather(
+                *(self._analyze_branch(run, name, context) for name in ANALYSIS_BRANCHES)
+            )
+        else:
+            branch_results = [
+                await self._analyze_branch(run, name, context)
+                for name in ANALYSIS_BRANCHES
+            ]
+        return await self._merge_analysis_results(run, context, branch_results)
+
+    async def inspect_matrix_revision(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        """Read the current matrix revision without creating analysis effects."""
+
+        context = await self._analysis_context(run)
+        pleading_type = str(context["pleading_type"])
+        rows_by_matrix = context["rows_by_matrix"]
+        rows = [
+            _canonical_row(matrix, row)
+            for matrix in sorted(rows_by_matrix)
+            for row in rows_by_matrix[matrix]
+        ]
+        merged = deterministic_merge(({"rows": rows},))
+        required = PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
+        blockers = [
+            {
+                "code": "missing_required_matrix",
+                "matrix": slug,
+                "message": f"No approved {slug} row is available",
+            }
+            for slug in required
+            if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
+        ]
+        return {**merged, "blockers": blockers}
 
     async def build_plan(self, run: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         case_id = str(run["case_id"])

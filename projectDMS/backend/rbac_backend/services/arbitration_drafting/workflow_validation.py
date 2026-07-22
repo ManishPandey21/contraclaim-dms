@@ -34,6 +34,46 @@ _ENTITY_RE = re.compile(r"\b[A-Z][A-Za-z&.'-]+(?:\s+[A-Z][A-Za-z&.'-]+){1,4}\b")
 _RELIEF_RE = re.compile(r"\b(?:award|declaration|injunction|specific performance|interest|costs|damages|compensation)\b", re.IGNORECASE)
 
 
+def _claim_source_spans(markdown: str, source_keys: set[str]) -> List[Dict[str, Any]]:
+    """Build content-redacted, deterministic paragraph-to-source mappings."""
+
+    spans: List[Dict[str, Any]] = []
+    cursor = 0
+    for raw in markdown.splitlines(keepends=True):
+        text = raw.strip()
+        start = cursor + max(0, len(raw) - len(raw.lstrip()))
+        cursor += len(raw)
+        if len(text) < 20 or text.startswith("#"):
+            continue
+        cited = sorted(set(_CITATION_RE.findall(text)))
+        known = sorted(set(cited).intersection(source_keys))
+        fact_bearing = bool(
+            _AMOUNT_RE.search(text)
+            or _DATE_RE.search(text)
+            or _CLAUSE_RE.search(text)
+            or _ENTITY_RE.search(text)
+        )
+        status = (
+            "supported"
+            if known and len(known) == len(cited)
+            else "evidence_required"
+            if "[Evidence required]" in text
+            else "needs_review"
+        )
+        spans.append(
+            {
+                "span_id": f"claim_{len(spans) + 1}",
+                "start": start,
+                "end": start + len(text),
+                "text_hash": artifact_hash(text),
+                "source_keys": known,
+                "support_status": status,
+                "fact_bearing": fact_bearing,
+            }
+        )
+    return spans
+
+
 def _issue(
     branch: str,
     code: str,
@@ -74,6 +114,7 @@ class ArbitrationValidationOrchestrator:
         *,
         dependency_hashes: Optional[Dict[str, str]] = None,
         remediation_cycle: int = 0,
+        branches: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         markdown = str(version.get("full_markdown") or "")
         ledger = list(version.get("source_ledger") or [])
@@ -99,8 +140,16 @@ class ArbitrationValidationOrchestrator:
             }
         )
 
+        selected_branches = tuple(branches or VALIDATION_BRANCHES)
+        unknown_branches = set(selected_branches).difference(VALIDATION_BRANCHES)
+        if unknown_branches:
+            raise ValueError(f"Unknown arbitration validation branches: {sorted(unknown_branches)}")
+        if not selected_branches:
+            raise ValueError("At least one arbitration validation branch is required")
+
         async def validate_branch(branch: str) -> Dict[str, Any]:
             issues: List[Dict[str, Any]] = []
+            claim_source_spans: List[Dict[str, Any]] = []
             combined = [*existing_blockers, *existing_warnings]
             if branch == "citations":
                 issues.extend(
@@ -110,6 +159,7 @@ class ArbitrationValidationOrchestrator:
                 if not ledger and "[Evidence required]" not in markdown:
                     issues.append(_issue(branch, "missing_source_ledger", "Draft has no source ledger and no missing-evidence marker."))
             elif branch == "assertions":
+                claim_source_spans = _claim_source_spans(markdown, source_keys)
                 issues.extend(
                     _issue(branch, "missing_evidence", item)
                     for item in missing_evidence
@@ -120,6 +170,15 @@ class ArbitrationValidationOrchestrator:
                         issues.append(_issue(branch, "unsupported_assertion", item))
                 if str(version.get("validation_status") or "") == "blocked" and not existing_blockers:
                     issues.append(_issue(branch, "upstream_validation_blocked", "The immutable candidate is blocked by its generation-time validator."))
+                issues.extend(
+                    _issue(
+                        branch,
+                        "unsupported_claim_span",
+                        f"Fact-bearing claim span {span['span_id']} has no authoritative source link or evidence-required marker.",
+                    )
+                    for span in claim_source_spans
+                    if span["fact_bearing"] and span["support_status"] == "needs_review"
+                )
             elif branch == "legal_structure":
                 for item in combined:
                     lower = item.lower()
@@ -198,12 +257,13 @@ class ArbitrationValidationOrchestrator:
                 "version_hash": version_hash,
                 "status": branch_status,
                 "issues": normalized,
+                "claim_source_spans": claim_source_spans,
                 "authoritative": False,
             }
             artifact["artifact_hash"] = artifact_hash(artifact)
             return artifact
 
-        artifacts = await asyncio.gather(*(validate_branch(branch) for branch in VALIDATION_BRANCHES))
+        artifacts = await asyncio.gather(*(validate_branch(branch) for branch in selected_branches))
         all_issues = _dedupe_issues(issue for artifact in artifacts for issue in artifact["issues"])
         blockers = [issue for issue in all_issues if issue["severity"] == "blocker"]
         warnings = [issue for issue in all_issues if issue["severity"] == "warning"]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
@@ -11,6 +11,7 @@ from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
 from .repository import _collect, _jsonable
+from ...core.config import settings
 
 
 DOWNSTREAM_APPROVAL_GATES = ("matrix_review", "readiness", "plan", "legal_review", "draft", "export")
@@ -127,6 +128,8 @@ class ArbitrationWorkflowRepository:
         return stored
 
     async def claim_effect(self, *, run_id: str, effect_key: str, effect_type: str, input_hash: str) -> Dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        lease_token = str(uuid.uuid4())
         effect = {
             "_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -134,7 +137,11 @@ class ArbitrationWorkflowRepository:
             "effect_type": effect_type,
             "input_hash": input_hash,
             "status": "claimed",
-            "created_at": datetime.now(timezone.utc),
+            "attempt_count": 1,
+            "retryable": False,
+            "lease_expires_at": now + timedelta(minutes=5),
+            "lease_token": lease_token,
+            "created_at": now,
         }
         claimed_now = False
         try:
@@ -155,12 +162,65 @@ class ArbitrationWorkflowRepository:
             or stored.get("input_hash") != input_hash
         ):
             raise HTTPException(status_code=409, detail="Workflow effect key was reused with different input")
+        if not claimed_now and stored.get("status") in {"claimed", "failed"}:
+            lease_expires_at = stored.get("lease_expires_at")
+            if lease_expires_at and getattr(lease_expires_at, "tzinfo", None) is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=timezone.utc)
+            retry_budget = max(0, int(settings.ARBITRATION_ENGINE_RETRY_BUDGET))
+            retryable_failure = stored.get("status") == "failed" and bool(stored.get("retryable"))
+            expired_claim = stored.get("status") == "claimed" and (
+                lease_expires_at is None or lease_expires_at <= now
+            )
+            if (retryable_failure or expired_claim) and int(stored.get("attempt_count") or 1) <= retry_budget:
+                reclaimed = await self.db.arbitration_workflow_effects.find_one_and_update(
+                    {
+                        "effect_key": effect_key,
+                        "status": stored.get("status"),
+                        "attempt_count": int(stored.get("attempt_count") or 1),
+                    },
+                    {
+                        "$set": {
+                            "status": "claimed",
+                            "retryable": False,
+                            "lease_expires_at": now + timedelta(minutes=5),
+                            "lease_token": lease_token,
+                            "reclaimed_at": now,
+                        },
+                        "$inc": {"attempt_count": 1},
+                    },
+                    return_document=ReturnDocument.AFTER,
+                )
+                if reclaimed:
+                    stored = reclaimed
+                    claimed_now = True
         return {**stored, "_claimed_now": claimed_now}
 
-    async def complete_effect(self, effect_key: str, output: Dict[str, Any]) -> None:
+    async def renew_effect(self, effect_key: str, lease_token: str, *, lease_seconds: int = 300) -> bool:
+        result = await self.db.arbitration_workflow_effects.update_one(
+            {"effect_key": effect_key, "status": "claimed", "lease_token": lease_token},
+            {
+                "$set": {
+                    "lease_expires_at": datetime.now(timezone.utc)
+                    + timedelta(seconds=max(30, int(lease_seconds))),
+                    "heartbeat_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+        return bool(getattr(result, "modified_count", 0) or getattr(result, "matched_count", 0))
+
+    async def complete_effect(
+        self,
+        effect_key: str,
+        output: Dict[str, Any],
+        *,
+        lease_token: Optional[str] = None,
+    ) -> None:
         output_refs = _jsonable(output)
+        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
+        if lease_token:
+            query["lease_token"] = lease_token
         updated = await self.db.arbitration_workflow_effects.find_one_and_update(
-            {"effect_key": effect_key, "status": "claimed"},
+            query,
             {"$set": {"status": "completed", "output_refs": output_refs, "completed_at": datetime.now(timezone.utc)}},
             return_document=ReturnDocument.AFTER,
         )
@@ -175,14 +235,28 @@ class ArbitrationWorkflowRepository:
             return
         raise HTTPException(status_code=409, detail="Workflow effect cannot be completed from its current state")
 
-    async def fail_effect(self, effect_key: str, *, error_code: str) -> None:
+    async def fail_effect(
+        self,
+        effect_key: str,
+        *,
+        error_code: str,
+        retryable: bool = False,
+        retry_after_seconds: int = 0,
+        lease_token: Optional[str] = None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
+        if lease_token:
+            query["lease_token"] = lease_token
         await self.db.arbitration_workflow_effects.update_one(
-            {"effect_key": effect_key, "status": "claimed"},
+            query,
             {
                 "$set": {
                     "status": "failed",
                     "error_code": str(error_code),
-                    "failed_at": datetime.now(timezone.utc),
+                    "retryable": bool(retryable),
+                    "lease_expires_at": now + timedelta(seconds=max(0, int(retry_after_seconds))),
+                    "failed_at": now,
                 }
             },
         )
