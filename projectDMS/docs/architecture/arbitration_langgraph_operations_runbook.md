@@ -53,6 +53,16 @@ Generic matrix create/update APIs cannot set approval, verification, readiness, 
 | `ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE` | `active` | `active`, `read_replay_only`, or reserved fail-closed `retired` state |
 | `ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL` | empty | ISO date through which v2 read/replay compatibility is retained |
 | `ARBITRATION_REVIEWER_ROLE_MATRIX` | built-in policy | Optional `gate=role,role;gate=role` overrides |
+| `FILING_EXPORT_QUEUE_ENABLED` | `false` (`true` in production Compose) | Fail-closed switch for durable filing exports |
+| `FILING_EXPORT_QUEUE_REDIS_URL` | application Redis URL | Dedicated Redis database/connection for export delivery |
+| `FILING_EXPORT_QUEUE_NAME` | `arbitration_filing_export_queue` | Ready list |
+| `FILING_EXPORT_QUEUE_PROCESSING_NAME` | `arbitration_filing_export_processing` | Leased in-flight list |
+| `FILING_EXPORT_QUEUE_DEADLETTER_NAME` | `arbitration_filing_export_deadletter` | Exhausted/non-transient jobs |
+| `FILING_EXPORT_QUEUE_VISIBILITY_TIMEOUT_SECONDS` | `300` | Lease expiry before recovery may redeliver |
+| `FILING_EXPORT_QUEUE_HEARTBEAT_SECONDS` | `20` | Active worker lease renewal interval |
+| `FILING_EXPORT_QUEUE_MAX_RETRIES` | `3` | Bounded transient retry count |
+| `FILING_EXPORT_QUEUE_METADATA_TTL_SECONDS` | `604800` | Completed job metadata retention |
+| `START_FILING_EXPORT_QUEUE_WORKERS` | `false` (`true` on contract worker) | Ensures only worker processes consume exports |
 
 The client-provided `requested_engine` is advisory telemetry only and cannot select the authoritative engine. `primary` fails safe to `forced_v2` until production acceptance, receipt, scoped health, and pleading coverage are valid. Force-v2 tenant/project lists and the global pause switch take precedence over every rollout mode. Every decision stores the policy version, reason, deterministic decision hash, acceptance-receipt hash, and v2 compatibility mode; tenant and project identifiers are not copied into the decision audit event.
 
@@ -125,6 +135,15 @@ The operations checkpoint endpoint returns identifiers plus redacted hashes only
 5. Use force-v2 only with arbitration-admin permission and step-up authentication. Fallback is prohibited after a completed authoritative draft, approval, export, or equivalent effect.
 6. If checkpoint storage is unavailable, keep rollout `off` or `forced_v2`; do not enable a fail-open graph path.
 
+### Filing-export worker recovery
+
+1. Check ready, processing, and dead-letter lengths plus worker logs. Do not manually enqueue a different job ID for the same export.
+2. A worker atomically moves a job to processing and owns it with a lease token. Heartbeats extend only the matching token; stale workers cannot acknowledge or fail another delivery.
+3. If the worker or Redis connection dies, restart Redis/worker and let visibility recovery move only expired processing jobs back to ready. Active leases must not be stolen.
+4. Retry the same deterministic effect key. Mongo's unique effect record and deterministic export ID make a completed artifact reusable; an acknowledgement failure after the Mongo effect commits must not regenerate the file.
+5. Inspect dead-letter metadata before replay. Retry only infrastructure-transient failures; authorization, readiness, citation, exhibit, drift, or legal blockers require corrective human action.
+6. Cleanup drills must use namespaced keys/records and delete only those exact artifacts. Never flush a Redis database or remove a production data volume.
+
 ### Shadow or canary incident
 
 1. Set `ARBITRATION_ENGINE_ROLLOUT_PAUSED=true` for an immediate global stop on new graph selections, or add the affected tenant/project to the force-v2 lists.
@@ -159,8 +178,9 @@ Application rollback is configuration-first:
 - Phase 0 controls: implemented and locally unit-tested.
 - Workflow foundation, deterministic routing, plans, validation, APIs, and frontend: implemented and locally unit/build-tested.
 - Phase-5 source hardening: implemented with an official isolated graph shadow, eight-dimension redacted parity artifacts, bounded metrics, threshold alerts, force-v2 scopes, a global pause, and a case-scoped health report.
-- Phase-6 source controls: implemented with receipt-bound decisions, scoped health gating, all-pleading coverage, gradual primary scopes, persisted decision hashes, v2 compatibility states, and production startup guards. Primary activation and deprecation remain blocked pending Phase-5 acceptance and stakeholder sign-off.
-- Official LangGraph checkpoint lifecycle: implemented; production restart evidence currently covers document selection only, not every Phase-4 node/gate.
-- HTTP tenant isolation: production-image tests exist; authenticated two-account browser acceptance remains pending.
-- Redis recovery, external service integration, production-like load, TTL expiry timing, backup/restore, and authenticated browser flows: not completed in this implementation task.
-- Production deployment: not performed.
+- Phase-6 source controls are deployed. Primary activation remains blocked by incomplete all-pleading samples, external integration, every-node recovery, browser/legal acceptance, and stakeholder sign-off.
+- Official LangGraph checkpoint lifecycle is implemented; production restart evidence covers document selection and active post-TTL resume, not every Phase-4 node/gate.
+- Ten production-image signed-JWT two-account/step-up tests pass; a real signed-in browser and separated legal-review workflow remain pending.
+- Redis duplicate/lease/visibility recovery, actual Redis stop/restart, bounded 40-job load, Qdrant outage/recovery, TTL expiry/resume, isolated restore, and cleanup passed in production.
+- Live Qdrant vector round trip passes. Live OpenAI PDF extraction and FalkorDB vector storage fail; S3/model outage and sustained end-to-end load remain pending.
+- Production runtime remains `arbitration_v2`, rollout `off`, primary `0`, and acceptance `false`.
