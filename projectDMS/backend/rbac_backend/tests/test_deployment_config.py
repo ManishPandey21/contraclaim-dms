@@ -26,6 +26,7 @@ BACKEND_DOCKERFILE = REPO_ROOT / "backend" / "Dockerfile"
 NGINX_CONF = REPO_ROOT / "config" / "nginx-contraclaim.conf"
 HTTPD_CONF = REPO_ROOT / "config" / "httpd.conf"
 COMPOSE_PROD = REPO_ROOT / "docker-compose.prod.yml"
+COMPOSE_MONGO_REPLICA = REPO_ROOT / "docker-compose.mongo-replicaset.yml"
 
 
 def test_uvicorn_trusts_proxy_headers() -> None:
@@ -110,4 +111,22 @@ def test_falkordb_entrypoint_loads_graph_module() -> None:
     )
     assert "COMMAND INFO GRAPH.QUERY" in falkor_block, (
         "FalkorDB health must verify graph-command availability, not only PING"
+    )
+
+
+def test_mongo_replica_services_have_restore_safe_limits_and_replication_health() -> None:
+    text = COMPOSE_MONGO_REPLICA.read_text(encoding="utf-8")
+
+    assert "soft: 64000" in text and "hard: 64000" in text, (
+        "MongoDB restore/index builds exceed the container default of 1024 file "
+        "descriptors; every replica member must inherit the restore-safe nofile limit"
+    )
+    assert text.count("ulimits: *mongo-ulimits") == 3
+    assert "rs.status()" in text and "s.myState === 1" in text and "s.myState === 2" in text, (
+        "MongoDB health must require a PRIMARY or SECONDARY replica state; ping-only "
+        "health reports a recovering or isolated member as healthy"
+    )
+    mongo_init_block = text.split("\n  mongo-init:", 1)[1]
+    assert mongo_init_block.count("condition: service_started") == 3, (
+        "replica initialization must start before replication-aware health can pass"
     )

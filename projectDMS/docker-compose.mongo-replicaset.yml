@@ -1,9 +1,14 @@
 x-mongo-healthcheck: &mongo-healthcheck
-  test: ["CMD-SHELL", "mongosh --quiet --eval \"db.adminCommand('ping').ok\""]
+  test: ["CMD-SHELL", "mongosh --quiet --eval \"const s=rs.status(); quit((s.ok === 1 && (s.myState === 1 || s.myState === 2)) ? 0 : 1)\""]
   interval: 30s
   timeout: 5s
   retries: 10
   start_period: 30s
+
+x-mongo-ulimits: &mongo-ulimits
+  nofile:
+    soft: 64000
+    hard: 64000
 
 services:
   mongo1:
@@ -14,6 +19,7 @@ services:
       - mongo1_data:/data/db
     networks:
       - data-net
+    ulimits: *mongo-ulimits
     healthcheck: *mongo-healthcheck
     logging:
       driver: "json-file"
@@ -29,6 +35,7 @@ services:
       - mongo2_data:/data/db
     networks:
       - data-net
+    ulimits: *mongo-ulimits
     healthcheck: *mongo-healthcheck
     logging:
       driver: "json-file"
@@ -44,6 +51,7 @@ services:
       - mongo3_data:/data/db
     networks:
       - data-net
+    ulimits: *mongo-ulimits
     healthcheck: *mongo-healthcheck
     logging:
       driver: "json-file"
@@ -56,11 +64,11 @@ services:
     restart: "no"
     depends_on:
       mongo1:
-        condition: service_healthy
+        condition: service_started
       mongo2:
-        condition: service_healthy
+        condition: service_started
       mongo3:
-        condition: service_healthy
+        condition: service_started
     volumes:
       - ./scripts/mongo/init-replica-set.sh:/scripts/init-replica-set.sh:ro
     networks:
