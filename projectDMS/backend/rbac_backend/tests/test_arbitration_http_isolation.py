@@ -27,7 +27,7 @@ try:
     from fastapi.testclient import TestClient
 
     from rbac_backend.core.database import get_db
-    from rbac_backend.core.security import get_current_user
+    from rbac_backend.core.security import create_access_token, get_current_user
     from rbac_backend.main import app
     from rbac_backend.services.audit_event_service import AuditEventService
     from rbac_backend.services.entitlement_service import EntitlementService
@@ -253,6 +253,43 @@ class _FakeDb:
         self.project_memberships = _FakeCollection([])
         self.audit_events = _FakeCollection([])
         self.tasks = _FakeCollection([])
+        self.users = _FakeCollection(
+            [
+                {
+                    "_id": "user-org-A",
+                    "username": "user-org-A",
+                    "email": "user-org-A@example.com",
+                    "roles": ["orguser"],
+                    "organization_id": "org-A",
+                    "organizations": ["org-A"],
+                    "projects": [],
+                    "account_type": "client_user",
+                    "disabled": False,
+                },
+                {
+                    "_id": "user-org-B",
+                    "username": "user-org-B",
+                    "email": "user-org-B@example.com",
+                    "roles": ["orguser"],
+                    "organization_id": "org-B",
+                    "organizations": ["org-B"],
+                    "projects": [],
+                    "account_type": "client_user",
+                    "disabled": False,
+                },
+                {
+                    "_id": "user-root",
+                    "username": "user-root",
+                    "email": "user-root@example.com",
+                    "roles": ["superadmin"],
+                    "organization_id": None,
+                    "organizations": [],
+                    "projects": [],
+                    "account_type": "internal",
+                    "disabled": False,
+                },
+            ]
+        )
         # RBAC hardening: is_client_scope_allowed cross-checks that the request's
         # project actually belongs to the request's organization via db.projects
         # (fail-closed when the collection/rows are missing). Seed real ownership
@@ -312,8 +349,12 @@ def client(monkeypatch):
     app.dependency_overrides[get_db] = _override_db
 
     def _as(user_kwargs):
-        app.dependency_overrides[get_current_user] = lambda: _user(**user_kwargs)
-        return TestClient(app)  # no context manager -> startup events do not run
+        user = _user(**user_kwargs)
+        token = create_access_token({"sub": user.email, "user_id": user.id, "roles": user.roles})
+        return TestClient(
+            app,
+            headers={"Authorization": f"Bearer {token}"},
+        )  # no context manager -> startup events do not run
 
     try:
         yield SimpleNamespace(as_user=_as, db=db)
