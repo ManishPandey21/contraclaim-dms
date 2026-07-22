@@ -10,6 +10,10 @@ class ArbitrationEngineDecision:
     rollout_mode: str
     shadow: bool = False
     reason: str = "policy"
+    policy_version: str = "phase6-v1"
+    decision_hash: str = ""
+    acceptance_receipt_sha256: str | None = None
+    v2_compatibility_mode: str = "active"
 
 
 class ArbitrationWorkflowEngine(Protocol):

@@ -42,9 +42,19 @@ Generic matrix create/update APIs cannot set approval, verification, readiness, 
 | `ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT` | `5` | Fallback alert threshold |
 | `ARBITRATION_ENGINE_MAX_PAUSE_HOURS` | `72` | Stale human-interrupt warning threshold |
 | `ARBITRATION_ENGINE_PRODUCTION_ACCEPTED` | `false` | Required before `primary` can select LangGraph |
+| `ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID` | empty | Operator-controlled identifier for the signed Phase-6 acceptance record |
+| `ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256` | empty | SHA-256 binding engine decisions to the immutable acceptance record |
+| `ARBITRATION_ENGINE_PRIMARY_PERCENT` | `0` | Deterministic primary percentage, independent of canary scope |
+| `ARBITRATION_ENGINE_PRIMARY_TENANT_IDS` | empty | Explicit primary tenant allowlist |
+| `ARBITRATION_ENGINE_PRIMARY_PROJECT_IDS` | empty | Explicit primary project allowlist |
+| `ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY` | `true` | Fail closed unless the scoped acceptance window is cutover-eligible |
+| `ARBITRATION_ENGINE_MIN_PLEADING_TYPE_SAMPLE` | `1` | Minimum accepted sample for each of SoC, SoD, Counterclaim, and Rejoinder |
+| `ARBITRATION_ENGINE_ACCEPTANCE_WINDOW_RUNS` | `500` | Most-recent scoped runs used for cutover readiness |
+| `ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE` | `active` | `active`, `read_replay_only`, or reserved fail-closed `retired` state |
+| `ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL` | empty | ISO date through which v2 read/replay compatibility is retained |
 | `ARBITRATION_REVIEWER_ROLE_MATRIX` | built-in policy | Optional `gate=role,role;gate=role` overrides |
 
-The client-provided `requested_engine` is advisory telemetry only and cannot select the authoritative engine. `primary` silently fails safe to `forced_v2` until production acceptance is true. Force-v2 tenant/project lists and the global pause switch take precedence over every rollout mode.
+The client-provided `requested_engine` is advisory telemetry only and cannot select the authoritative engine. `primary` fails safe to `forced_v2` until production acceptance, receipt, scoped health, and pleading coverage are valid. Force-v2 tenant/project lists and the global pause switch take precedence over every rollout mode. Every decision stores the policy version, reason, deterministic decision hash, acceptance-receipt hash, and v2 compatibility mode; tenant and project identifiers are not copied into the decision audit event.
 
 ## Shadow contract and acceptance thresholds
 
@@ -59,7 +69,20 @@ In `shadow` mode, v2 remains authoritative. At each recorded workflow milestone,
 7. output latency; and
 8. human interventions and projected gate.
 
-`GET /api/arbitration/cases/{case_id}/workflows/operations/health` is case-scoped and requires `ARBITRATION_ADMIN`. It reports identifier-free sample counts, failure/fallback/parity/source-drift rates, checkpoint-sync and stale-pause signals, and threshold alerts. It returns `insufficient_data` until both workflow and shadow samples meet the configured minimum; this is not acceptance.
+`GET /api/arbitration/cases/{case_id}/workflows/operations/health` requires `ARBITRATION_ADMIN`. The case supplies the authorized tenant/project scope; the report evaluates that scope's bounded acceptance window and emits no identifiers. It reports sample counts, failure/fallback/parity/source-drift rates, checkpoint-sync and stale-pause signals, per-pleading coverage, receipt/retention validity, cutover blockers, and threshold alerts. It returns `insufficient_data` until both workflow and shadow samples meet the configured minimum; readiness is a necessary gate, not acceptance by itself.
+
+## Phase-6 controlled primary procedure
+
+1. Complete every deployment gate below for all four pleading types and preserve the evidence as an immutable acceptance record.
+2. Obtain operator, security, and legal stakeholder sign-off. Record a stable receipt ID and the SHA-256 of the exact accepted artifact.
+3. Set a future `ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL`; keep compatibility mode `active` while any tenant/project can still be routed to v2 or require fallback writes.
+4. Configure one explicit tenant or project allowlist entry, or a small non-zero primary percentage. Keep health enforcement enabled.
+5. Confirm the scoped operations-health response has `primary_cutover.eligible=true` before setting production acceptance true and rollout mode to `primary`.
+6. Expand one bounded scope at a time. Stop on any blocker or P0/P1 event using the global pause or force-v2 scope, preserving runs and checkpoints.
+7. Move to `read_replay_only` only after every new-run scope is LangGraph and the agreed parity/recovery window has passed. In this state, new v2 creation and graph-to-v2 fallback writes are rejected, while historical v2 records remain readable/replayable.
+8. Treat `retired` as a separate deprecation decision after the retention date and audit/legal approval. Production startup rejects it during primary rollout because v2 read/replay removal is not enabled by this implementation.
+
+Production startup rejects primary rollout unless LangGraph is the default, acceptance is true, the receipt and explicit scope are valid, health enforcement is enabled, and the v2 compatibility date is current. The repository defaults remain rollout `off`, acceptance `false`, empty primary scope, and v2 `active`.
 
 ## Deployment gates
 
@@ -136,6 +159,7 @@ Application rollback is configuration-first:
 - Phase 0 controls: implemented and locally unit-tested.
 - Workflow foundation, deterministic routing, plans, validation, APIs, and frontend: implemented and locally unit/build-tested.
 - Phase-5 source hardening: implemented with an official isolated graph shadow, eight-dimension redacted parity artifacts, bounded metrics, threshold alerts, force-v2 scopes, a global pause, and a case-scoped health report.
+- Phase-6 source controls: implemented with receipt-bound decisions, scoped health gating, all-pleading coverage, gradual primary scopes, persisted decision hashes, v2 compatibility states, and production startup guards. Primary activation and deprecation remain blocked pending Phase-5 acceptance and stakeholder sign-off.
 - Official LangGraph checkpoint lifecycle: implemented; production restart evidence currently covers document selection only, not every Phase-4 node/gate.
 - HTTP tenant isolation: production-image tests exist; authenticated two-account browser acceptance remains pending.
 - Redis recovery, external service integration, production-like load, TTL expiry timing, backup/restore, and authenticated browser flows: not completed in this implementation task.

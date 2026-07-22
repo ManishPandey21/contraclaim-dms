@@ -8,6 +8,7 @@ result is persisted in the workflow audit stream and exported as telemetry.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, Iterable
 
 from ...core.config import settings
@@ -23,6 +24,13 @@ SHADOW_DIMENSIONS = (
     "validation_blockers",
     "output_latency",
     "human_interventions",
+)
+
+PHASE6_REQUIRED_PLEADING_TYPES = (
+    "statement_of_claim",
+    "statement_of_defence",
+    "counterclaim",
+    "rejoinder",
 )
 
 
@@ -161,10 +169,71 @@ def build_rollout_health(
         alert("shadow_parity_rate", "critical", parity_rate, getattr(config, "ARBITRATION_ENGINE_MIN_SHADOW_PARITY_PERCENT", 99.0))
 
     enough_data = total >= minimum_sample and len(shadow_events) >= minimum_sample
+    health_status = (
+        "blocked"
+        if any(item["severity"] == "critical" for item in alerts)
+        else "ready" if enough_data else "insufficient_data"
+    )
+    pleading_type_counts = {
+        pleading_type: sum(
+            1 for run in run_rows if str(run.get("pleading_type") or "") == pleading_type
+        )
+        for pleading_type in PHASE6_REQUIRED_PLEADING_TYPES
+    }
+    minimum_pleading_type_sample = int(
+        getattr(config, "ARBITRATION_ENGINE_MIN_PLEADING_TYPE_SAMPLE", 1)
+    )
+    missing_pleading_types = [
+        pleading_type
+        for pleading_type, count in pleading_type_counts.items()
+        if count < minimum_pleading_type_sample
+    ]
+    production_accepted = bool(
+        getattr(config, "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED", False)
+    )
+    receipt_id_present = bool(
+        str(getattr(config, "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID", "") or "").strip()
+    )
+    receipt_hash = str(
+        getattr(config, "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256", "") or ""
+    ).strip().lower()
+    receipt_hash_valid = bool(re.fullmatch(r"[0-9a-f]{64}", receipt_hash))
+    compatibility_mode = str(
+        getattr(config, "ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE", "active") or "active"
+    ).strip().lower()
+    compatibility_until = str(
+        getattr(config, "ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL", "") or ""
+    ).strip()
+    try:
+        compatibility_date = datetime.fromisoformat(compatibility_until).date()
+    except ValueError:
+        compatibility_date = None
+    compatibility_retained = bool(
+        compatibility_date is not None
+        and compatibility_date >= now.date()
+        and compatibility_mode in {"active", "read_replay_only"}
+    )
+    require_health = bool(
+        getattr(config, "ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY", True)
+    )
+    cutover_blockers = []
+    if not production_accepted:
+        cutover_blockers.append("production_acceptance_false")
+    if not receipt_id_present or not receipt_hash_valid:
+        cutover_blockers.append("acceptance_receipt_missing_or_invalid")
+    if require_health and health_status != "ready":
+        cutover_blockers.append("rollout_health_not_ready")
+    if missing_pleading_types:
+        cutover_blockers.append("pleading_type_coverage_incomplete")
+    if bool(getattr(config, "ARBITRATION_ENGINE_ROLLOUT_PAUSED", False)):
+        cutover_blockers.append("rollout_paused")
+    if not compatibility_retained:
+        cutover_blockers.append("v2_compatibility_window_missing_or_expired")
+    primary_eligible = not cutover_blockers
     return {
         "schema_version": 1,
-        "status": "blocked" if any(item["severity"] == "critical" for item in alerts) else "ready" if enough_data else "insufficient_data",
-        "production_accepted": bool(getattr(config, "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED", False)),
+        "status": health_status,
+        "production_accepted": production_accepted,
         "rollout_paused": bool(getattr(config, "ARBITRATION_ENGINE_ROLLOUT_PAUSED", False)),
         "minimum_acceptance_sample": minimum_sample,
         "sample": {
@@ -182,6 +251,20 @@ def build_rollout_health(
             "checkpoint_sync_pending": checkpoint_pending,
             "stale_paused_workflows": stale_paused,
             "unresolved_source_drift": unresolved_drift,
+        },
+        "primary_cutover": {
+            "policy_version": "phase6-v1",
+            "eligible": primary_eligible,
+            "blockers": cutover_blockers,
+            "acceptance_receipt_present": receipt_id_present,
+            "acceptance_receipt_hash_valid": receipt_hash_valid,
+            "required_health_ready": require_health,
+            "minimum_pleading_type_sample": minimum_pleading_type_sample,
+            "pleading_type_samples": pleading_type_counts,
+            "missing_pleading_types": missing_pleading_types,
+            "v2_compatibility_mode": compatibility_mode,
+            "v2_compatibility_until": compatibility_until or None,
+            "v2_compatibility_retained": compatibility_retained,
         },
         "alerts": alerts,
     }

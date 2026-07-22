@@ -112,6 +112,11 @@ export interface ArbitrationWorkflowState {
   pleading_type: ArbitrationDraftType;
   engine: string;
   rollout_mode: string;
+  rollout_policy_version?: string | null;
+  rollout_decision_reason?: string | null;
+  rollout_decision_hash?: string | null;
+  acceptance_receipt_sha256?: string | null;
+  v2_compatibility_mode?: string | null;
   status: string;
   current_node: string;
   next_action: string;

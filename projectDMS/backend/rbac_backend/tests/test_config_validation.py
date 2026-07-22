@@ -333,3 +333,54 @@ def test_production_razorpay_fully_configured_passes():
 def test_production_noop_provider_needs_no_razorpay_config():
     settings = _production_settings(PAYMENT_PROVIDER="noop")
     settings.validate_runtime_configuration()
+
+
+def test_production_primary_arbitration_rollout_requires_phase6_cutover_controls():
+    settings = _production_settings(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="primary",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=False,
+    )
+
+    with pytest.raises(ValueError) as exc:
+        settings.validate_runtime_configuration()
+
+    message = str(exc.value)
+    assert "ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID" in message
+    assert "explicit tenant/project allowlist" in message
+    assert "ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL" in message
+    assert "ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=true" in message
+
+
+def test_production_primary_arbitration_rollout_accepts_complete_phase6_controls():
+    settings = _production_settings(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="primary",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID="phase6-acceptance-2026-07-22",
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256="a" * 64,
+        ARBITRATION_ENGINE_PRIMARY_TENANT_IDS="accepted-tenant",
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="active",
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL="2099-12-31",
+    )
+
+    settings.validate_runtime_configuration()
+
+
+def test_production_primary_arbitration_rollout_rejects_unaccepted_v2_retirement():
+    settings = _production_settings(
+        ARBITRATION_ENGINE_DEFAULT="langgraph_v1",
+        ARBITRATION_ENGINE_ROLLOUT_MODE="primary",
+        ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=True,
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID="phase6-acceptance-2026-07-22",
+        ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256="a" * 64,
+        ARBITRATION_ENGINE_PRIMARY_PERCENT=100,
+        ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY=True,
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE="retired",
+        ARBITRATION_ENGINE_V2_COMPATIBILITY_UNTIL="2099-12-31",
+    )
+
+    with pytest.raises(ValueError, match="separate v2 deprecation decision"):
+        settings.validate_runtime_configuration()

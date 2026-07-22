@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
+from ...core.config import settings
 from ...models.arbitration_drafting import (
     ArbitrationWorkflowApprovalRequest,
     ArbitrationWorkflowCreateRequest,
@@ -606,11 +607,26 @@ class ArbitrationWorkflowService:
             tenant_id=str(case.get("organization_id") or ""),
             project_id=str(case.get("project_id") or ""),
         )
+        rollout_health = None
+        if str(settings.ARBITRATION_ENGINE_ROLLOUT_MODE or "off").lower() == "primary":
+            rollout_health = await self._scoped_rollout_health(
+                organization_id=str(case.get("organization_id") or ""),
+                project_id=str(case.get("project_id") or ""),
+            )
         decision = ArbitrationEngineSelector().select(
             tenant_id=str(case.get("organization_id") or ""),
             project_id=str(case.get("project_id") or ""),
             request_hash=request_hash,
+            rollout_health=rollout_health,
         )
+        if decision.engine == "unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Arbitration workflow creation is temporarily unavailable under the Phase 6 compatibility policy",
+                    "reason": decision.reason,
+                },
+            )
         if decision.engine == "langgraph_v1":
             from .langgraph_engine import LangGraphArbitrationEngine
 
@@ -625,6 +641,13 @@ class ArbitrationWorkflowService:
             idempotency_key=idempotency_key,
             request_hash=request_hash,
             rollout_mode=decision.rollout_mode,
+            rollout_decision={
+                "policy_version": decision.policy_version,
+                "reason": decision.reason,
+                "decision_hash": decision.decision_hash,
+                "acceptance_receipt_sha256": decision.acceptance_receipt_sha256,
+                "v2_compatibility_mode": decision.v2_compatibility_mode,
+            },
         )
         authoritative_latency_ms = (perf_counter() - authoritative_started) * 1000
         if payload.requested_engine and payload.requested_engine != decision.engine:
@@ -1115,6 +1138,11 @@ class ArbitrationWorkflowService:
         self._assert_state_version(run, payload.state_version)
         if run.get("engine") != "langgraph_v1":
             raise HTTPException(status_code=409, detail="Only LangGraph arbitration workflows can use the v2 fallback")
+        if str(settings.ARBITRATION_ENGINE_V2_COMPATIBILITY_MODE or "active").lower() != "active":
+            raise HTTPException(
+                status_code=409,
+                detail="v2 fallback is no longer available for new writes under the configured compatibility mode",
+            )
         if run.get("authoritative_effects"):
             raise HTTPException(status_code=409, detail="Fallback is prohibited after an authoritative effect")
         input_snapshot = await self.db.arbitration_workflow_snapshots.find_one(
@@ -1143,8 +1171,17 @@ class ArbitrationWorkflowService:
         )
         return self.public_state(updated)
 
-    async def operations_health(self, case_id: str) -> Dict[str, Any]:
-        runs = await _collect(self.db.arbitration_workflow_runs.find({"case_id": case_id}))
+    async def _scoped_rollout_health(self, *, organization_id: str, project_id: str) -> Dict[str, Any]:
+        runs = await _collect(
+            self.db.arbitration_workflow_runs.find(
+                {"organization_id": organization_id, "project_id": project_id}
+            )
+        )
+        runs = sorted(
+            runs,
+            key=lambda row: str(row.get("created_at") or ""),
+            reverse=True,
+        )[: int(settings.ARBITRATION_ENGINE_ACCEPTANCE_WINDOW_RUNS)]
         run_ids = [str(run.get("_id")) for run in runs if run.get("_id")]
         events = (
             await _collect(self.db.arbitration_workflow_events.find({"run_id": {"$in": run_ids}}))
@@ -1152,6 +1189,14 @@ class ArbitrationWorkflowService:
             else []
         )
         health = build_rollout_health(runs, events)
+        return health
+
+    async def operations_health(self, case_id: str) -> Dict[str, Any]:
+        case = await self.cases.get_case(case_id)
+        health = await self._scoped_rollout_health(
+            organization_id=str(case.get("organization_id") or ""),
+            project_id=str(case.get("project_id") or ""),
+        )
         await observability_registry.record_arbitration_workflow_health(health)
         return health
 
@@ -1161,6 +1206,8 @@ class ArbitrationWorkflowService:
             key: run.get(key)
             for key in (
                 "_id", "case_id", "draft_id", "pleading_type", "engine", "rollout_mode", "status",
+                "rollout_policy_version", "rollout_decision_reason", "rollout_decision_hash",
+                "acceptance_receipt_sha256", "v2_compatibility_mode",
                 "current_node", "next_action", "state_version", "graph_version", "state_schema_version",
                 "progress", "blockers", "required_human_role", "fallback_available", "last_checkpoint_at",
                 "checkpoint_sync_status", "checkpoint_sync_state_version",

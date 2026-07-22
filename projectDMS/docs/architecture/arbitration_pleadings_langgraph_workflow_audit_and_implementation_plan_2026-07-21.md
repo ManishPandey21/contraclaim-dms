@@ -701,6 +701,8 @@ Changes:
 
 **Objective:** Make LangGraph primary only after evidence-based acceptance.
 
+> Current implementation (cutover controls source-complete 2026-07-22; production activation blocked): primary selection now requires the production-acceptance switch, an operator-managed acceptance receipt ID and SHA-256, an explicit tenant/project allowlist or deterministic percentage, a scoped healthy acceptance window, minimum samples for SoC, SoD, Counterclaim, and Rejoinder, and a current v2 compatibility-retention date. The bounded scope query has a dedicated `organization_id`/`project_id`/`created_at` index migration. Each selection persists an immutable policy version, reason, decision hash, receipt hash, and compatibility mode in the run and audit event. The admin health report is tenant/project scoped and exposes identifier-free cutover eligibility and blockers. `active`, `read_replay_only`, and reserved fail-closed `retired` compatibility states support staged v2 freeze; new out-of-scope v2 work fails closed after write compatibility is frozen. Production startup rejects primary mode without the full control set or with health enforcement disabled. Phase-5 production-like acceptance, operator recovery proof, and legal acceptance remain incomplete, so `ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=false`, rollout remains `off`, and no primary tenant/project has been enabled.
+
 Changes:
 
 1. Obtain explicit production acceptance and enable primary for selected tenants/projects.
@@ -709,6 +711,8 @@ Changes:
 4. Keep v2 read/replay compatibility through the agreed retention period.
 
 **Acceptance:** All global criteria in Section 14 are met, no P0/P1 issue remains open, operators can recover a paused/failed run, and legal stakeholders approve the audit trail and gates.
+
+**Implementation status:** Conditional rollout, audit, retention, and fail-closed controls are implemented and locally tested. The acceptance and activation steps are deliberately pending because Phase-5 infrastructure evidence is incomplete. v2 deprecation or removal is not authorized by this implementation.
 
 ## 12. Testing Requirements
 

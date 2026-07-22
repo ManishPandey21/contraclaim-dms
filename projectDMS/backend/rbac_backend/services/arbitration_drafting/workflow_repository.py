@@ -40,7 +40,12 @@ class ArbitrationWorkflowRepository:
         idempotency_key = payload.get("idempotency_key")
         if not idempotency_key:
             await self.db.arbitration_workflow_runs.insert_one(payload)
-            await self.append_event(run["_id"], "workflow_created", actor_id=run.get("created_by"), data={"engine": run.get("engine")})
+            await self.append_event(
+                run["_id"],
+                "workflow_created",
+                actor_id=run.get("created_by"),
+                data=self._creation_event_data(run),
+            )
             return run
 
         query = {"case_id": payload.get("case_id"), "idempotency_key": idempotency_key}
@@ -66,9 +71,23 @@ class ArbitrationWorkflowRepository:
                 run["_id"],
                 "workflow_created",
                 actor_id=run.get("created_by"),
-                data={"engine": run.get("engine")},
+                data=self._creation_event_data(run),
             )
         return stored
+
+    @staticmethod
+    def _creation_event_data(run: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist the bounded Phase-6 rollout decision without tenant identifiers."""
+
+        return {
+            "engine": run.get("engine"),
+            "rollout_mode": run.get("rollout_mode"),
+            "rollout_policy_version": run.get("rollout_policy_version"),
+            "rollout_decision_reason": run.get("rollout_decision_reason"),
+            "rollout_decision_hash": run.get("rollout_decision_hash"),
+            "acceptance_receipt_sha256": run.get("acceptance_receipt_sha256"),
+            "v2_compatibility_mode": run.get("v2_compatibility_mode"),
+        }
 
     async def create_snapshot(self, *, run_id: str, kind: str, payload: Dict[str, Any], effect_key: str) -> Dict[str, Any]:
         snapshot = {
