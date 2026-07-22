@@ -342,6 +342,48 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         super().__init__(db)
         self.checkpointer = checkpointer
 
+    async def shadow_route_projection(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute the official graph without Mongo or domain side effects.
+
+        The isolated in-memory thread proves routing/gate parity while all legal
+        artifacts remain the immutable records already referenced by ``run``.
+        """
+        if not LANGGRAPH_RUNTIME_AVAILABLE:
+            raise RuntimeError("Official arbitration LangGraph runtime is unavailable for shadow execution")
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        graph = build_arbitration_graph(checkpointer=InMemorySaver())
+        state: ArbitrationGraphState = {
+            key: run[key]
+            for key in ALLOWED_CHECKPOINT_KEYS
+            if key in run and run[key] is not None
+        }
+        state.update(self._cumulative_gate_state(run))
+        state.update(
+            {
+                "run_id": str(run["_id"]),
+                "thread_id": f"shadow:{run['_id']}:{int(run.get('state_version') or 0)}",
+                "execution_status": "running",
+                "state_version": int(run.get("state_version") or 0),
+                "documents_selected": bool(run.get("documents_selected")),
+                "material_questions_required": bool(run.get("material_questions_required")),
+                "retry_budget_remaining": int(settings.ARBITRATION_ENGINE_RETRY_BUDGET),
+            }
+        )
+        validate_checkpoint_state(state)
+        config = {"configurable": {"thread_id": state["thread_id"]}}
+        # The installed Mongo saver is synchronous, so shadow execution uses
+        # the same executor boundary as production checkpoint operations.
+        await asyncio.to_thread(graph.invoke, state, config)
+        snapshot = await asyncio.to_thread(graph.get_state, config)
+        interrupts = getattr(snapshot, "interrupts", ()) or ()
+        next_nodes = tuple(str(value) for value in (getattr(snapshot, "next", ()) or ()))
+        return {
+            "projected_node": next_nodes[0] if len(next_nodes) == 1 else str((snapshot.values or {}).get("current_node") or "unknown"),
+            "next_node_count": len(next_nodes),
+            "interrupt_count": len(interrupts),
+        }
+
     async def create_workflow(self, *args: Any, **kwargs: Any) -> dict:
         if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
             raise HTTPException(status_code=503, detail="Official arbitration LangGraph checkpoint runtime is unavailable")

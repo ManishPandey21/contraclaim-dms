@@ -51,6 +51,18 @@ async def test_observability_registry_renders_prometheus_metrics():
         score=67,
         missing_evidence_count=1,
     )
+    comparison = {
+        "pleading_type": "statement_of_claim",
+        "dimensions": {
+            "matrix_rows": {"status": "match"},
+            "output_latency": {"status": "measured", "authoritative_ms": 10.0, "candidate_ms": 12.0},
+        },
+    }
+    await registry.record_arbitration_shadow_comparison(comparison)
+    await registry.record_arbitration_workflow_health(
+        {"alerts": [{"severity": "critical", "code": "shadow_parity_rate"}]}
+    )
+    await registry.record_arbitration_fallback(from_engine="langgraph_v1", reason="operator_requested")
 
     rendered = registry.render_prometheus()
 
@@ -69,6 +81,11 @@ async def test_observability_registry_renders_prometheus_metrics():
     assert "contractdms_arbitration_bundle_exports_total" in rendered
     assert "contractdms_arbitration_readiness_score" in rendered
     assert "contractdms_arbitration_missing_evidence" in rendered
+    assert "contractdms_arbitration_shadow_comparisons_total" in rendered
+    assert 'dimension="matrix_rows"' in rendered
+    assert "contractdms_arbitration_shadow_latency_ms" in rendered
+    assert "contractdms_arbitration_workflow_alert" in rendered
+    assert "contractdms_arbitration_workflow_fallbacks_total" in rendered
 
 
 def test_observability_snapshot_counts_recorded_events():
@@ -80,3 +97,6 @@ def test_observability_snapshot_counts_recorded_events():
     assert snapshot["server_error_total"] == 0
     assert snapshot["audit_event_total"] == 0
     assert snapshot["admin_review_item_total"] == 0
+    assert snapshot["arbitration_shadow_comparison_total"] == 0
+    assert snapshot["arbitration_fallback_total"] == 0
+    assert snapshot["arbitration_workflow_active_alerts"] == 0
