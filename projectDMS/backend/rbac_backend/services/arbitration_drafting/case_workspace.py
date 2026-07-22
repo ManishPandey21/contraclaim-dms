@@ -41,7 +41,12 @@ from .agents import agent_run_metadata, run_arbitration_agent
 from .exporter import ArbitrationDraftExporter
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
-from .approval_policy import enforce_author_approver_separation
+from .approval_policy import (
+    enforce_author_approver_separation,
+    enforce_matrix_reviewer_role,
+    resolve_gate_role,
+)
+from .workflow_governance import require_governed_workflow_chain
 from .paragraph_positions import PARAGRAPH_POSITION_MATRICES, is_paragraph_position_projection
 from .workflow_repository import ArbitrationWorkflowRepository
 from .filing_export_queue import get_filing_export_queue
@@ -179,6 +184,21 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(_jsonable(value), sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _stable_runtime_projection(value: Any) -> Any:
+    """Remove response-only identifiers/timestamps from recomputed audit data."""
+
+    volatile = {"created_at", "updated_at", "generated_at", "last_checked_at"}
+    if isinstance(value, dict):
+        return {
+            key: _stable_runtime_projection(item)
+            for key, item in value.items()
+            if key not in volatile and not (key == "_id" and "check_key" in value)
+        }
+    if isinstance(value, list):
+        return [_stable_runtime_projection(item) for item in value]
+    return value
 
 
 def _is_positive(value: Any) -> bool:
@@ -414,12 +434,25 @@ class ArbitrationCaseWorkspaceService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Arbitration matrix row not found")
 
         action = str(getattr(payload.action, "value", payload.action))
-        role = str(getattr(payload.reviewer_role, "value", payload.reviewer_role) or "legal").lower()
+        claimed_role = str(getattr(payload.reviewer_role, "value", payload.reviewer_role) or "legal").lower()
         actor = _actor_id(current_user)
         now = datetime.utcnow()
-        required_roles = self._review_roles(payload.required_roles or row.get("review_required_roles") or self._default_review_roles(matrix_slug))
+        required_roles = self._review_roles(row.get("review_required_roles") or self._default_review_roles(matrix_slug))
+        requested_roles = self._review_roles(payload.required_roles)
+        if requested_roles and set(requested_roles) != set(required_roles):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Required matrix reviewer roles are server-controlled",
+            )
         completed_roles = self._review_roles(row.get("review_completed_roles") or [])
         assignments = list(row.get("review_assignments") or [])
+        if claimed_role not in required_roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Reviewer role is not required for this matrix row")
+        role = (
+            claimed_role
+            if action == "assign"
+            else enforce_matrix_reviewer_role(claimed_role, current_user, assignments)
+        )
         comments = list(row.get("review_comments") or [])
         approval_log = list(row.get("approval_log") or [])
 
@@ -431,6 +464,17 @@ class ArbitrationCaseWorkspaceService:
             enforce_author_approver_separation(
                 current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate=f"{matrix_slug} matrix review"
             )
+            prior_actors = {
+                str(item.get("actor_id") or "")
+                for item in approval_log
+                if item.get("action") == "approve"
+                and str(item.get("reviewer_role") or "").lower() != role
+            }
+            if len(required_roles) > 1 and actor and str(actor) in prior_actors:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Distinct reviewers are required for different matrix specialties",
+                )
 
         event = {
             "_id": str(uuid.uuid4()),
@@ -593,6 +637,7 @@ class ArbitrationCaseWorkspaceService:
         enforce_author_approver_separation(
             current_user, [row.get("created_by"), row.get("last_material_editor_id")], gate="rejoinder permission"
         )
+        approver_role = resolve_gate_role("legal_review", current_user)
         now = datetime.utcnow()
         receipt = {
             "_id": str(uuid.uuid4()),
@@ -611,8 +656,9 @@ class ArbitrationCaseWorkspaceService:
                 }
             ),
             "decision": "approved",
+            "receipt_status": "pending",
             "approver_id": actor,
-            "approver_role": "legal",
+            "approver_role": approver_role,
             "comment": payload.permission_notes,
             "approved_at": now,
         }
@@ -648,6 +694,11 @@ class ArbitrationCaseWorkspaceService:
                     }
                 },
             )
+        await self.db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt["_id"], "receipt_status": "pending"},
+            {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
+        )
+        receipt["receipt_status"] = "committed"
         await self.invalidate_readiness_approvals(case_id, "rejoinder_permission_changed", current_user)
         await self.readiness(case_id)
         return updated or row
@@ -687,6 +738,22 @@ class ArbitrationCaseWorkspaceService:
             draft_type = (draft or {}).get("draft_type")
         rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
         checks = self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
+        evidence_manifest = await self._authoritative_evidence_manifest(case, rows)
+        unresolved_sources = [item for item in evidence_manifest if item.get("resolution_status") != "resolved"]
+        if unresolved_sources:
+            first = unresolved_sources[0]
+            checks.append(
+                ArbitrationReadinessCheck(
+                    case_id=case_id,
+                    draft_id=draft_id,
+                    check_key="authoritative_source_resolution",
+                    check_group="documents",
+                    status=ReadinessCheckStatus.NEEDS_EVIDENCE,
+                    message=f"{len(unresolved_sources)} approved source(s) are missing, out of scope, or revision-drifted.",
+                    linked_matrix_row_id=str(first.get("matrix_row_id") or "") or None,
+                    updated_at=datetime.utcnow(),
+                ).model_dump(by_alias=True)
+            )
         ready_count = sum(1 for check in checks if check["status"] == ReadinessCheckStatus.READY.value)
         score = round((ready_count / max(len(checks), 1)) * 100)
         blockers = [check for check in checks if check["status"] in BLOCKING_READINESS_STATUSES]
@@ -706,6 +773,14 @@ class ArbitrationCaseWorkspaceService:
             status=response["status"],
             score=score,
             missing_evidence_count=missing_evidence_count,
+        )
+        await observability_registry.record_arbitration_runtime_value(
+            signal="evidence_grounded_ratio",
+            scope=str(draft_type or "case"),
+            value=(
+                sum(1 for item in evidence_manifest if item.get("resolution_status") == "resolved")
+                / max(len(evidence_manifest), 1)
+            ),
         )
         return response
 
@@ -736,6 +811,12 @@ class ArbitrationCaseWorkspaceService:
             )
         artifact = await self._readiness_artifact_state(case, draft_type)
         actor = _actor_id(current_user)
+        approver_role = resolve_gate_role("readiness", current_user)
+        if request.reviewer_role and str(request.reviewer_role).strip().lower() != approver_role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Readiness approver role must match the server-assigned identity role",
+            )
         if not actor:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Readiness approver identity is required")
         enforce_author_approver_separation(
@@ -753,7 +834,7 @@ class ArbitrationCaseWorkspaceService:
             evidence_snapshot_hash=artifact["evidence_snapshot_hash"],
             artifact_hash=artifact["artifact_hash"],
             approver_id=actor,
-            approver_role=str(request.reviewer_role or "legal"),
+            approver_role=approver_role,
             comment=request.comment,
         ).model_dump(by_alias=True)
         await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
@@ -775,6 +856,11 @@ class ArbitrationCaseWorkspaceService:
             },
             return_document=True,
         )
+        await self.db.arbitration_workflow_approvals.update_one(
+            {"_id": receipt["_id"], "receipt_status": "pending"},
+            {"$set": {"receipt_status": "committed", "committed_at": datetime.utcnow()}},
+        )
+        receipt["receipt_status"] = "committed"
         return {"case": updated, "readiness": readiness, "approval_receipt": receipt}
 
     async def assert_case_ready_for_draft(
@@ -819,6 +905,8 @@ class ArbitrationCaseWorkspaceService:
         receipts = await _collect(cursor)
         for receipt in receipts:
             if receipt.get("invalidated_at"):
+                continue
+            if receipt.get("receipt_status") != "committed":
                 continue
             if str(receipt.get("draft_type") or "") != draft_type:
                 continue
@@ -896,6 +984,15 @@ class ArbitrationCaseWorkspaceService:
                 )
         matrix_revision_hash = _canonical_hash(matrix_manifest)
         evidence_manifest = await self._authoritative_evidence_manifest(case, rows)
+        unresolved = [item for item in evidence_manifest if item.get("resolution_status") != "resolved"]
+        if unresolved:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": "Every approved evidence source must resolve to its authoritative tenant-scoped revision",
+                    "sources": unresolved,
+                },
+            )
         evidence_snapshot_hash = _canonical_hash(evidence_manifest)
         artifact_hash = _canonical_hash(
             {
@@ -925,15 +1022,31 @@ class ArbitrationCaseWorkspaceService:
             source_id = str(row.get("source_id"))
             authoritative = None
             for collection_name in ("documents", "letters"):
+                collection = getattr(self.db, collection_name, None)
+                if collection is None:
+                    continue
                 query = {"_id": source_id, **{key: value for key, value in scope.items() if value}}
-                authoritative = await self.db[collection_name].find_one(query)
+                authoritative = await collection.find_one(query)
                 if authoritative:
                     break
+            recorded_revision = str(row.get("source_revision_id") or row.get("current_version_id") or "")
+            authoritative_revision = str((authoritative or {}).get("current_version_id") or "")
+            recorded_sha = str(row.get("source_sha256") or "")
+            authoritative_sha = str((authoritative or {}).get("sha256") or "")
+            resolution_status = "resolved"
+            if not authoritative:
+                resolution_status = "missing_or_out_of_scope"
+            elif recorded_revision and authoritative_revision and recorded_revision != authoritative_revision:
+                resolution_status = "revision_drift"
+            elif recorded_sha and authoritative_sha and recorded_sha != authoritative_sha:
+                resolution_status = "content_drift"
             manifest.append(
                 {
                     "matrix_row_id": row.get("_id"),
                     "source_id": source_id,
                     "source_hash": row.get("source_hash"),
+                    "recorded_revision_id": recorded_revision or None,
+                    "resolution_status": resolution_status,
                     "authoritative": {
                         key: (authoritative or {}).get(key)
                         for key in ("_id", "sha256", "current_version_id", "updated_at", "page_count")
@@ -947,6 +1060,8 @@ class ArbitrationCaseWorkspaceService:
                 {
                     "matrix_row_id": row.get("_id"),
                     "source_id": row.get("clause_source_id") or row.get("source_id"),
+                    "resolution_status": "resolved",
+                    "authoritative_matrix_revision_id": row.get("row_revision_id") or row.get("updated_at") or row.get("_id"),
                     "clause_number": row.get("clause_number"),
                     "clause_text_excerpt": row.get("clause_text_excerpt"),
                     "updated_at": row.get("updated_at"),
@@ -970,10 +1085,25 @@ class ArbitrationCaseWorkspaceService:
         if not case_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Draft is not linked to an arbitration case")
         case = await self.get_case(str(case_id))
+        authoritative_manifest = await self._authoritative_evidence_manifest(
+            case,
+            {slug: await self.list_matrix_rows(str(case_id), slug) for slug in MATRIX_COLLECTIONS},
+        )
+        unresolved = [item for item in authoritative_manifest if item.get("resolution_status") != "resolved"]
+        if unresolved:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Draft preparation is blocked because an approved evidence source is missing or has drifted",
+            )
+        resolved_document_ids = {
+            str(item.get("source_id"))
+            for item in authoritative_manifest
+            if item.get("resolution_status") == "resolved"
+        }
         document_rows = [
             row
             for row in await self.list_matrix_rows(str(case_id), "document-index")
-            if row.get("source_id") and _is_ready_row(row)
+            if row.get("source_id") and str(row.get("source_id")) in resolved_document_ids and _is_ready_row(row)
         ]
         clause_rows = [row for row in await self.list_matrix_rows(str(case_id), "clause-matrix") if _is_ready_row(row)]
         claim_rows = [row for row in await self.list_matrix_rows(str(case_id), "claim-matrix") if _is_ready_row(row)]
@@ -1424,7 +1554,14 @@ class ArbitrationCaseWorkspaceService:
 
     async def filing_bundle_payload(self, case_id: str) -> Dict[str, Any]:
         dashboard = await self.dashboard(case_id)
-        matrices = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
+        matrices = {
+            slug: [
+                row
+                for row in await self.list_matrix_rows(case_id, slug)
+                if _is_ready_row(row, approval_key="status" if slug == "issue-matrix" else "approval_status")
+            ]
+            for slug in MATRIX_COLLECTIONS
+        }
         drafts = await self._filing_bundle_drafts(case_id)
         if not drafts:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No approved immutable draft versions are available for filing")
@@ -1439,7 +1576,7 @@ class ArbitrationCaseWorkspaceService:
             "bundle_version": "arbitration-filing-bundle.v1",
             "generated_at": datetime.utcnow(),
             "case": dashboard["case"],
-            "exhibit_list": await self.exhibit_list(case_id),
+            "exhibit_list": matrices.get("document-index") or [],
             "citation_audit": citation_audit,
             "matrix_counts": dashboard["matrix_counts"],
             "approved_counts": dashboard["approved_counts"],
@@ -1452,6 +1589,14 @@ class ArbitrationCaseWorkspaceService:
         payload = await self.filing_bundle_payload(case_id)
         if current_user is not None:
             await self._authorize_filing_bundle(payload, "zip", current_user)
+        exhibit_files = await self._collect_exhibit_files(payload.get("exhibit_list") or [])
+        return self._render_filing_bundle_zip(payload, exhibit_files)
+
+    def _render_filing_bundle_zip(
+        self,
+        payload: Dict[str, Any],
+        exhibit_files: List[Dict[str, Any]],
+    ) -> bytes:
         markdown = self._filing_bundle_markdown(payload)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -1474,7 +1619,6 @@ class ArbitrationCaseWorkspaceService:
                 if latest:
                     archive.writestr(f"drafts/{safe_id}/latest-version.json", json.dumps(_jsonable(latest), default=str, indent=2))
             # Guide §19 volumes: exhibit binaries placed by document type.
-            exhibit_files = await self._collect_exhibit_files(payload.get("exhibit_list") or [])
             for entry in exhibit_files:
                 if entry.get("content") is not None and entry.get("path"):
                     archive.writestr(entry["path"], entry["content"])
@@ -1659,7 +1803,22 @@ class ArbitrationCaseWorkspaceService:
             if current and current.get("status") == "completed" and current.get("content"):
                 return self._public_bundle_export(current)
             raise TimeoutError("Filing bundle export effect is owned by another live lease")
-        content = await self._build_filing_bundle_export_content(case_id, normalized)
+        authorization = await self.db.arbitration_export_authorizations.find_one(
+            {"_id": claimed.get("export_authorization_id"), "case_id": case_id, "format": normalized}
+        )
+        if not authorization or not authorization.get("immutable_manifest"):
+            raise RuntimeError("Filing bundle export authorization manifest is missing")
+        current_payload = await self.filing_bundle_payload(case_id)
+        current_manifest, exhibit_files = await self._immutable_bundle_manifest(current_payload, normalized)
+        current_hash = _canonical_hash(current_manifest)
+        if current_hash != str(authorization.get("bundle_hash") or ""):
+            raise RuntimeError("Filing bundle inputs drifted after export authorization")
+        content = await self._build_filing_bundle_export_content(
+            case_id,
+            normalized,
+            payload=current_payload,
+            exhibit_files=exhibit_files,
+        )
         if len(content) > MAX_INLINE_BUNDLE_EXPORT_BYTES:
             raise RuntimeError(
                 f"Filing bundle export is {len(content)} bytes; inline export limit is {MAX_INLINE_BUNDLE_EXPORT_BYTES} bytes"
@@ -1764,7 +1923,69 @@ class ArbitrationCaseWorkspaceService:
             status="failed" if terminal else "retrying",
         )
 
+    async def _immutable_bundle_manifest(
+        self,
+        payload: Dict[str, Any],
+        export_format: str,
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+        workflow_bindings: List[Dict[str, Any]] = []
+        for draft in payload.get("drafts") or []:
+            governed = await require_governed_workflow_chain(
+                self.db,
+                draft_id=str(draft.get("_id")),
+                draft_version_hash=str(draft.get("approved_version_hash") or ""),
+                required_gates=("readiness", "plan", "legal_review", "draft", "export"),
+                allowed_nodes={"complete"},
+                allowed_statuses={"completed"},
+            )
+            workflow_bindings.append(
+                {
+                    "draft_id": str(draft.get("_id")),
+                    "run_id": str(governed.get("_id")),
+                    "draft_version_hash": str(draft.get("approved_version_hash")),
+                    "approval_receipt_ids": governed.get("_resolved_approval_receipts") or {},
+                }
+            )
+        exhibit_files = await self._collect_exhibit_files(payload.get("exhibit_list") or [])
+        unresolved = [entry for entry in exhibit_files if entry.get("content") is None or entry.get("error")]
+        if unresolved:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Every filing exhibit must resolve before export authorization",
+            )
+        manifest = {
+            "manifest_version": "arbitration-filing-manifest.v2",
+            "format": export_format,
+            "case_hash": _canonical_hash(_stable_runtime_projection(payload.get("case") or {})),
+            "draft_versions": sorted(
+                (str(draft.get("_id")), str(draft.get("approved_version_hash")))
+                for draft in payload.get("drafts") or []
+            ),
+            "workflow_bindings": sorted(workflow_bindings, key=lambda item: item["draft_id"]),
+            "matrix_hashes": {
+                slug: _canonical_hash(rows)
+                for slug, rows in sorted((payload.get("matrices") or {}).items())
+            },
+            "readiness_hash": _canonical_hash(_stable_runtime_projection(payload.get("readiness") or {})),
+            "citation_audit_hash": _canonical_hash(_stable_runtime_projection(payload.get("citation_audit") or {})),
+            "exhibits": sorted(
+                [
+                    {
+                        "exhibit_id": entry.get("exhibit_id"),
+                        "source_id": entry.get("source_id"),
+                        "path": entry.get("path"),
+                        "size": entry.get("size"),
+                        "sha256": hashlib.sha256(bytes(entry.get("content") or b"")).hexdigest(),
+                    }
+                    for entry in exhibit_files
+                ],
+                key=lambda item: (str(item.get("exhibit_id") or ""), str(item.get("source_id") or "")),
+            ),
+        }
+        return manifest, exhibit_files
+
     async def _authorize_filing_bundle(self, payload: Dict[str, Any], export_format: str, current_user: Any) -> Dict[str, Any]:
+        resolve_gate_role("export", current_user)
         drafts = payload.get("drafts") or []
         enforce_author_approver_separation(
             current_user,
@@ -1775,19 +1996,9 @@ class ArbitrationCaseWorkspaceService:
             ],
             gate="filing bundle export authorization",
         )
-        bundle_manifest = {
-            "case_id": (payload.get("case") or {}).get("_id"),
-            "draft_versions": sorted(
-                {
-                    str(draft.get("_id")): str(draft.get("approved_version_hash"))
-                    for draft in drafts
-                }.items()
-            ),
-            "readiness": payload.get("readiness"),
-            "citation_audit": payload.get("citation_audit"),
-        }
+        bundle_manifest, _ = await self._immutable_bundle_manifest(payload, export_format)
         bundle_hash = _canonical_hash(bundle_manifest)
-        query = {"case_id": bundle_manifest["case_id"], "bundle_hash": bundle_hash, "format": export_format}
+        query = {"case_id": (payload.get("case") or {}).get("_id"), "bundle_hash": bundle_hash, "format": export_format}
         existing = await self.db.arbitration_export_authorizations.find_one(query)
         if existing:
             return existing
@@ -1795,6 +2006,7 @@ class ArbitrationCaseWorkspaceService:
             "_id": str(uuid.uuid4()), "gate": "filing_bundle_export", **query,
             "authorized_by": _actor_id(current_user), "authorized_at": datetime.utcnow(),
             "draft_version_hashes": dict(bundle_manifest["draft_versions"]),
+            "immutable_manifest": bundle_manifest,
         }
         await self.db.arbitration_export_authorizations.insert_one(_jsonable(authorization))
         return authorization
@@ -1821,13 +2033,22 @@ class ArbitrationCaseWorkspaceService:
             "filename": export.get("filename") or BUNDLE_EXPORT_FORMATS.get(str(export.get("format")), BUNDLE_EXPORT_FORMATS["zip"])[1],
         }
 
-    async def _build_filing_bundle_export_content(self, case_id: str, export_format: str) -> bytes:
+    async def _build_filing_bundle_export_content(
+        self,
+        case_id: str,
+        export_format: str,
+        *,
+        payload: Optional[Dict[str, Any]] = None,
+        exhibit_files: Optional[List[Dict[str, Any]]] = None,
+    ) -> bytes:
+        payload = payload or await self.filing_bundle_payload(case_id)
         if export_format == "zip":
-            return await self.export_filing_bundle_zip(case_id)
+            files = exhibit_files if exhibit_files is not None else await self._collect_exhibit_files(payload.get("exhibit_list") or [])
+            return self._render_filing_bundle_zip(payload, files)
         if export_format == "docx":
-            return await self.export_filing_bundle_docx(case_id)
+            return ArbitrationDraftExporter.build_docx({"full_markdown": self._filing_bundle_markdown(payload)})
         if export_format == "pdf":
-            return await self.export_filing_bundle_pdf(case_id)
+            return ArbitrationDraftExporter.build_pdf({"full_markdown": self._filing_bundle_markdown(payload)})
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unsupported bundle export format: {export_format}")
 
     @staticmethod

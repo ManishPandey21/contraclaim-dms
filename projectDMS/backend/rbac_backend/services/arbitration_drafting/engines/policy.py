@@ -134,6 +134,8 @@ class ArbitrationEngineSelector:
             ).strip().lower()
             if not receipt_id or not re.fullmatch(r"[0-9a-f]{64}", receipt_hash):
                 return primary_fallback("primary_acceptance_receipt_missing")
+            if not bool((rollout_health or {}).get("acceptance_receipt", {}).get("valid_for_scope")):
+                return primary_fallback("primary_acceptance_receipt_unresolved")
             require_health = bool(
                 getattr(self.config, "ARBITRATION_ENGINE_PRIMARY_REQUIRE_HEALTH_READY", True)
             )

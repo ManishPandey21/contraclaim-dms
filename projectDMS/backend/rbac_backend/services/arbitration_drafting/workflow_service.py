@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from ...core.config import settings
 from ...models.arbitration_drafting import (
+    ArbitrationProductionAcceptanceRequest,
     ArbitrationWorkflowApprovalRequest,
     ArbitrationWorkflowCreateRequest,
 )
@@ -23,6 +24,7 @@ from .workflow_validation import ArbitrationValidationOrchestrator
 from .workflow_hardening import build_rollout_health, build_shadow_comparison
 from .repository import _collect
 from ..observability import observability_registry
+from .acceptance import acceptance_hash, sign_acceptance, verify_acceptance_receipt
 
 
 GATE_ARTIFACT_FIELDS = {
@@ -202,7 +204,9 @@ class ArbitrationWorkflowService:
         if existing:
             return
         started = perf_counter()
-        candidate_analysis = await self.domain.analyze(run, parallel=False)
+        from .shadow_candidate import ArbitrationShadowCandidate
+
+        candidate_analysis = await ArbitrationShadowCandidate(self.db).analyze(run)
         from .langgraph_engine import LangGraphArbitrationEngine
 
         graph_projection = await LangGraphArbitrationEngine(self.db).shadow_route_projection(run)
@@ -666,7 +670,14 @@ class ArbitrationWorkflowService:
         run = await self.repository.get_run(run_id)
         if not run or str(run.get("case_id")) != case_id:
             raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        await self.repository.reconcile_pending_approvals(run)
         return self.public_state(run)
+
+    async def list(self, case_id: str, *, active_only: bool = False, limit: int = 25) -> list[Dict[str, Any]]:
+        return [
+            self.public_state(run)
+            for run in await self.repository.list_case_runs(case_id, active_only=active_only, limit=limit)
+        ]
 
     async def events(self, case_id: str, run_id: str) -> list[Dict[str, Any]]:
         await self.get(case_id, run_id)
@@ -683,6 +694,10 @@ class ArbitrationWorkflowService:
         run = await self.repository.get_run(run_id)
         if not run or str(run.get("case_id")) != case_id:
             raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+        await self.repository.reconcile_pending_approvals(run)
+        await observability_registry.record_arbitration_runtime_event(
+            signal="node_attempt", node=f"{gate}_approval_gate", reason="approval"
+        )
         self._assert_state_version(run, payload.state_version)
         artifact_field = GATE_ARTIFACT_FIELDS.get(gate)
         transition = GATE_TRANSITIONS.get(gate)
@@ -793,6 +808,7 @@ class ArbitrationWorkflowService:
                 rejection_update,
                 event=f"{gate}_{payload.decision}",
             )
+            await self.repository.commit_approval(str(receipt["_id"]), run_id)
             await self._record_shadow_safely(updated)
             return self.public_state(updated)
         status_value, node, next_action, progress = transition
@@ -802,7 +818,10 @@ class ArbitrationWorkflowService:
                 case_id,
                 current_user,
                 ArbitrationReadinessApprovalRequest(
-                    draft_id=run.get("draft_id"), draft_type=run.get("pleading_type"), reviewer_role="legal", comment=payload.comment
+                    draft_id=run.get("draft_id"),
+                    draft_type=run.get("pleading_type"),
+                    reviewer_role="senior_legal_approver",
+                    comment=payload.comment,
                 ),
             )
             plan = await self.domain.build_plan(run, current_user)
@@ -831,6 +850,12 @@ class ArbitrationWorkflowService:
                     }
                 },
             )
+            plan = {
+                **plan,
+                "status": "approved",
+                "approval_receipt_id": receipt["_id"],
+                "approved_at": datetime.now(timezone.utc),
+            }
             effect_key = f"{run_id}:generate:{run['plan_hash']}"
             effect = await self.repository.claim_effect(
                 run_id=run_id,
@@ -894,7 +919,7 @@ class ArbitrationWorkflowService:
                 }
             )
         elif gate == "draft":
-            await self.drafting.approve(str(run.get("draft_id")), current_user)
+            await self.drafting.approve(str(run.get("draft_id")), current_user, workflow_run=run)
             transition_update["authoritative_effects"] = [*(run.get("authoritative_effects") or []), "draft_approval"]
         elif gate == "export":
             transition_update["authoritative_effects"] = [*(run.get("authoritative_effects") or []), "export_authorization"]
@@ -920,6 +945,7 @@ class ArbitrationWorkflowService:
             },
             event=f"{gate}_approved",
         )
+        await self.repository.commit_approval(str(receipt["_id"]), run_id)
         flag = {
             "document_selection": "documents_selected", "matrix_review": "matrices_approved",
             "readiness": "readiness_approved", "plan": "plan_approved", "legal_review": "legal_review_approved",
@@ -929,6 +955,14 @@ class ArbitrationWorkflowService:
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event=f"{gate}_approved"
         )
+        paused_at = run.get("updated_at")
+        if isinstance(paused_at, datetime):
+            if paused_at.tzinfo is None:
+                paused_at = paused_at.replace(tzinfo=timezone.utc)
+            await observability_registry.record_arbitration_runtime_value(
+                signal="human_wait_seconds", scope=gate,
+                value=max(0.0, (datetime.now(timezone.utc) - paused_at).total_seconds()),
+            )
         await self._record_shadow_safely(updated)
         return self.public_state(updated)
 
@@ -943,6 +977,9 @@ class ArbitrationWorkflowService:
         expected_gate = RESUMABLE_GATES.get(current_node)
         if not expected_gate:
             raise HTTPException(status_code=409, detail="Workflow is not waiting at a resumable human gate")
+        await observability_registry.record_arbitration_runtime_event(
+            signal="resume", node=current_node, reason=str(payload.gate or "unknown")
+        )
         if payload.gate != expected_gate:
             raise HTTPException(status_code=409, detail="Resume gate does not match the paused workflow node")
         if payload.selected_document_ids and current_node != "document_selection_gate":
@@ -1119,7 +1156,7 @@ class ArbitrationWorkflowService:
                 "current_node": "cancelled",
                 "next_action": "cancelled",
             },
-            traverse=False,
+            traverse=True,
         )
         await observability_registry.record_arbitration_workflow(
             engine=str(updated.get("engine")), status=str(updated.get("status")), node=str(updated.get("current_node")), event="cancelled"
@@ -1183,6 +1220,33 @@ class ArbitrationWorkflowService:
             reverse=True,
         )[: int(settings.ARBITRATION_ENGINE_ACCEPTANCE_WINDOW_RUNS)]
         run_ids = [str(run.get("_id")) for run in runs if run.get("_id")]
+        acceptance_approvals = (
+            await _collect(
+                self.db.arbitration_workflow_approvals.find(
+                    {
+                        "run_id": {"$in": run_ids},
+                        "gate": {"$in": ["readiness", "plan", "legal_review", "draft", "export"]},
+                        "decision": "approved",
+                        "receipt_status": "committed",
+                    }
+                )
+            )
+            if run_ids
+            else []
+        )
+        for run in runs:
+            run_id = str(run.get("_id") or "")
+            run["_acceptance_receipts_valid"] = all(
+                any(
+                    str(receipt.get("run_id") or "") == run_id
+                    and str(receipt.get("gate") or "") == gate
+                    and not receipt.get("invalidated_at")
+                    and str(receipt.get("artifact_hash") or "")
+                    == str(run.get(GATE_ARTIFACT_FIELDS[gate]) or "")
+                    for receipt in acceptance_approvals
+                )
+                for gate in ("readiness", "plan", "legal_review", "draft", "export")
+            )
         events = (
             await _collect(self.db.arbitration_workflow_events.find({"run_id": {"$in": run_ids}}))
             if run_ids
@@ -1200,7 +1264,79 @@ class ArbitrationWorkflowService:
                 blockers.append("filing_export_queue_not_ready")
             cutover["blockers"] = blockers
             cutover["eligible"] = False
+        receipt_id = str(settings.ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_ID or "").strip()
+        receipt_hash = str(settings.ARBITRATION_ENGINE_ACCEPTANCE_RECEIPT_SHA256 or "").strip().lower()
+        receipt = (
+            await self.db.arbitration_production_acceptance_receipts.find_one({"_id": receipt_id})
+            if receipt_id
+            else None
+        )
+        receipt_valid = verify_acceptance_receipt(
+            receipt,
+            receipt_id=receipt_id,
+            receipt_hash=receipt_hash,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        health["acceptance_receipt"] = {
+            "configured": bool(receipt_id and receipt_hash),
+            "resolved": bool(receipt),
+            "valid_for_scope": receipt_valid,
+        }
+        if not receipt_valid:
+            cutover = health.setdefault("primary_cutover", {})
+            blockers = list(cutover.get("blockers") or [])
+            if "formal_acceptance_receipt_unresolved" not in blockers:
+                blockers.append("formal_acceptance_receipt_unresolved")
+            cutover["blockers"] = blockers
+            cutover["eligible"] = False
         return health
+
+    async def create_acceptance_receipt(
+        self,
+        case_id: str,
+        payload: ArbitrationProductionAcceptanceRequest,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        case = await self.cases.get_case(case_id)
+        organization_id = str(case.get("organization_id") or "")
+        project_id = str(case.get("project_id") or "")
+        if organization_id not in set(payload.organization_ids) or (
+            payload.project_ids and project_id not in set(payload.project_ids)
+        ):
+            raise HTTPException(status_code=409, detail="Acceptance receipt scope must include the authorized case scope")
+        expires_at = payload.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=409, detail="Acceptance receipt expiry must be in the future")
+        health = await self._scoped_rollout_health(organization_id=organization_id, project_id=project_id)
+        if health.get("status") != "ready" or not (health.get("filing_export_queue") or {}).get("ready"):
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Operational acceptance evidence is incomplete", "health": health},
+            )
+        coverage = (health.get("primary_cutover") or {}).get("pleading_type_counts") or {}
+        if any(int(coverage.get(kind) or 0) < 1 for kind in ("statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder")):
+            raise HTTPException(status_code=409, detail="All four pleading types require accepted production-like samples")
+        receipt = {
+            "_id": str(uuid.uuid4()),
+            "status": "accepted",
+            "criteria": dict(payload.criteria),
+            "evidence_hashes": {key: str(value).lower() for key, value in payload.evidence_hashes.items()},
+            "stakeholder_signoffs": sorted(set(payload.stakeholder_signoffs)),
+            "organization_ids": sorted(set(payload.organization_ids)),
+            "project_ids": sorted(set(payload.project_ids)),
+            "health_snapshot_hash": artifact_hash(health),
+            "notes": payload.notes,
+            "accepted_by": _actor_id(current_user),
+            "accepted_at": datetime.now(timezone.utc),
+            "expires_at": expires_at,
+        }
+        receipt["receipt_hash"] = acceptance_hash(receipt)
+        receipt["server_signature"] = sign_acceptance(receipt["receipt_hash"])
+        await self.db.arbitration_production_acceptance_receipts.insert_one(receipt)
+        return receipt
 
     async def operations_health(self, case_id: str) -> Dict[str, Any]:
         case = await self.cases.get_case(case_id)

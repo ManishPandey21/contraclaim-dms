@@ -109,6 +109,8 @@ class ArbitrationV2WorkflowEngine:
                 "draft_id": payload.draft_id,
                 "pleading_type": payload.pleading_type,
                 "input_snapshot_hash": input_snapshot["snapshot_hash"],
+                "document_manifest_id": manifest["_id"],
+                "document_manifest_hash": manifest["snapshot_hash"],
                 "evidence_snapshot_hash": readiness_artifact["evidence_snapshot_hash"],
                 "opponent_pleading_snapshot_id": (opponent_snapshot or {}).get("_id"),
                 "opponent_pleading_snapshot_hash": (opponent_snapshot or {}).get("snapshot_hash"),

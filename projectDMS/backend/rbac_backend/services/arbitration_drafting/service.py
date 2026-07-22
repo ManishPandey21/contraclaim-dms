@@ -40,7 +40,11 @@ from .llm_generator import LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
 from .validator import ArbitrationDraftValidator
-from .approval_policy import enforce_author_approver_separation
+from .approval_policy import enforce_author_approver_separation, resolve_gate_role
+from .workflow_governance import (
+    require_approved_plan_for_generation,
+    require_governed_workflow_chain,
+)
 from .paragraph_positions import replace_paragraph_position_projections, sync_paragraph_position_projection
 
 
@@ -379,6 +383,13 @@ class ArbitrationDraftingService:
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         await self.case_workspace.assert_case_ready_for_draft(draft, allow_standalone_working_draft=True)
+        if draft.get("case_id") and run_type == GenerationRunType.FULL_DRAFT:
+            if not pleading_plan:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Case-linked full drafting must be started from an approved pleading-plan workflow gate",
+                )
+            await require_approved_plan_for_generation(self.db, pleading_plan)
         self._validate_section_key(draft, payload.section_key)
         context = await self._context(
             draft_id,
@@ -560,8 +571,15 @@ class ArbitrationDraftingService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft version not found")
         return row
 
-    async def approve(self, draft_id: str, current_user: Any) -> Dict[str, Any]:
+    async def approve(
+        self,
+        draft_id: str,
+        current_user: Any,
+        *,
+        workflow_run: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         draft = await self._load(draft_id)
+        resolve_gate_role("draft", current_user)
         await self.case_workspace.assert_case_ready_for_draft(draft)
         if draft.get("current_version", 0) < 1:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Generate or save a version before approval")
@@ -587,6 +605,15 @@ class ArbitrationDraftingService:
                 },
             )
         version_hash = (latest or {}).get("version_hash") or immutable_version_hash(latest or {})
+        governed_run = await require_governed_workflow_chain(
+            self.db,
+            draft_id=draft_id,
+            draft_version_hash=version_hash,
+            required_gates=("readiness", "plan", "legal_review"),
+            run=workflow_run,
+            allowed_nodes={"draft_approval_gate"},
+            allowed_statuses={"awaiting_draft_approval"},
+        )
         updated = await self.repo.update_draft(
             draft_id,
             {
@@ -597,6 +624,9 @@ class ArbitrationDraftingService:
                 "approved_version_id": (latest or {}).get("_id"),
                 "approved_version": (latest or {}).get("version"),
                 "approved_version_hash": version_hash,
+                "workflow_run_id": governed_run.get("_id"),
+                "workflow_plan_approval_receipt_id": governed_run["_resolved_approval_receipts"]["plan"],
+                "workflow_legal_review_receipt_id": governed_run["_resolved_approval_receipts"]["legal_review"],
                 "readiness_approval_receipt_id": (await self.case_workspace.require_readiness_approval(
                     await self.case_workspace.get_case(str(draft.get("case_id"))), draft
                 )).get("_id"),
@@ -628,6 +658,7 @@ class ArbitrationDraftingService:
 
     async def export(self, draft_id: str, fmt: str, current_user: Any) -> bytes:
         draft = await self._load(draft_id)
+        resolve_gate_role("export", current_user)
         if not draft.get("case_id"):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -647,6 +678,14 @@ class ArbitrationDraftingService:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved draft version hash does not match")
         if approved_version.get("validation_status") != "passed" or approved_version.get("missing_evidence"):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved draft version has unresolved validation issues")
+        governed_run = await require_governed_workflow_chain(
+            self.db,
+            draft_id=draft_id,
+            draft_version_hash=version_hash,
+            required_gates=("readiness", "plan", "legal_review", "draft", "export"),
+            allowed_nodes={"complete"},
+            allowed_statuses={"completed"},
+        )
         case = await self.case_workspace.get_case(str(draft.get("case_id")))
         enforce_author_approver_separation(
             current_user,
@@ -674,6 +713,8 @@ class ArbitrationDraftingService:
             "authorized_by": _actor_id(current_user),
             "authorized_at": datetime.utcnow(),
             "format": fmt,
+            "workflow_run_id": governed_run.get("_id"),
+            "workflow_approval_receipt_ids": governed_run.get("_resolved_approval_receipts") or {},
         }
         existing_authorization = await self.db.arbitration_export_authorizations.find_one(
             {"draft_id": draft_id, "draft_version_hash": version_hash, "format": fmt}

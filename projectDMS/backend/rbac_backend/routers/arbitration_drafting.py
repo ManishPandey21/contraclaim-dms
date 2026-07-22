@@ -47,6 +47,7 @@ from ..models.arbitration_drafting import (
     ArbitrationWorkflowStateResponse,
     ArbitrationParagraphResponse,
     ArbitrationParagraphResponseUpdate,
+    ArbitrationProductionAcceptanceRequest,
 )
 from ..services.arbitration_drafting import ArbitrationCaseWorkspaceService, ArbitrationDraftingService
 from ..services.arbitration_drafting.case_workspace import MATRIX_COLLECTIONS
@@ -214,6 +215,19 @@ async def create_arbitration_workflow(
     )
 
 
+@router.get("/cases/{case_id}/workflows", response_model=List[ArbitrationWorkflowStateResponse])
+async def list_arbitration_workflows(
+    case_id: str,
+    active_only: bool = Query(False),
+    limit: int = Query(25, ge=1, le=100),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await _load_case_and_authorize(case_id, Permissions.ARBITRATION_VIEW, db, current_user, policy)
+    return await ArbitrationWorkflowService(db).list(case_id, active_only=active_only, limit=limit)
+
+
 @router.get("/cases/{case_id}/workflows/{run_id}/state", response_model=ArbitrationWorkflowStateResponse)
 async def get_arbitration_workflow_state(
     case_id: str,
@@ -305,6 +319,20 @@ async def get_arbitration_workflow_operational_health(
 ):
     await _load_case_and_authorize(case_id, Permissions.ARBITRATION_ADMIN, db, current_user, policy)
     return await ArbitrationWorkflowService(db).operations_health(case_id)
+
+
+@router.post("/cases/{case_id}/workflows/operations/acceptance-receipts", status_code=status.HTTP_201_CREATED)
+async def create_arbitration_production_acceptance_receipt(
+    case_id: str,
+    payload: ArbitrationProductionAcceptanceRequest,
+    request: Request,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    await _load_case_and_authorize(case_id, Permissions.ARBITRATION_ADMIN, db, current_user, policy)
+    await require_step_up(request, current_user, action="arbitration.workflow.production_acceptance")
+    return await ArbitrationWorkflowService(db).create_acceptance_receipt(case_id, payload, current_user)
 
 
 @router.get("/operations/workflows/{run_id}/checkpoints")

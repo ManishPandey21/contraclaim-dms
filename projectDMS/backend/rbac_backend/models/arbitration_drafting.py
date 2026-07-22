@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -417,7 +418,7 @@ class ArbitrationReadinessResponse(BaseModel):
 class ArbitrationReadinessApprovalRequest(BaseModel):
     draft_id: Optional[str] = None
     draft_type: Optional[ArbitrationDraftType] = None
-    reviewer_role: MatrixReviewerRole = MatrixReviewerRole.LEGAL
+    reviewer_role: str = Field(default="senior_legal_approver", min_length=1, max_length=100)
     comment: Optional[str] = Field(default=None, max_length=4000)
 
     model_config = ConfigDict(use_enum_values=True)
@@ -436,10 +437,12 @@ class ArbitrationApprovalReceipt(BaseModel):
     evidence_snapshot_hash: str
     artifact_hash: str
     decision: str = "approved"
+    receipt_status: str = "pending"
     approver_id: str
     approver_role: str
     comment: Optional[str] = None
     approved_at: datetime = Field(default_factory=datetime.utcnow)
+    committed_at: Optional[datetime] = None
     invalidated_at: Optional[datetime] = None
     invalidated_by: Optional[str] = None
     invalidation_reason: Optional[str] = None
@@ -898,6 +901,30 @@ class ArbitrationWorkflowCancelRequest(BaseModel):
 
 class ArbitrationWorkflowFallbackRequest(ArbitrationWorkflowCancelRequest):
     pass
+
+
+class ArbitrationProductionAcceptanceRequest(BaseModel):
+    criteria: Dict[str, str]
+    evidence_hashes: Dict[str, str]
+    stakeholder_signoffs: List[str] = Field(..., min_length=2, max_length=20)
+    organization_ids: List[str] = Field(..., min_length=1, max_length=100)
+    project_ids: List[str] = Field(default_factory=list, max_length=500)
+    expires_at: datetime
+    notes: Optional[str] = Field(default=None, max_length=8000)
+
+    @model_validator(mode="after")
+    def _validate_complete_acceptance(self):
+        required = {str(index) for index in range(1, 15)}
+        if set(self.criteria) != required or any(value != "passed" for value in self.criteria.values()):
+            raise ValueError("All 14 production acceptance criteria must be explicitly passed")
+        if set(self.evidence_hashes) != required or any(
+            not re.fullmatch(r"[0-9a-fA-F]{64}", str(value or ""))
+            for value in self.evidence_hashes.values()
+        ):
+            raise ValueError("Every production acceptance criterion requires a SHA-256 evidence hash")
+        if len(set(self.stakeholder_signoffs)) < 2:
+            raise ValueError("At least two distinct stakeholder signoffs are required")
+        return self
 
 
 class ArbitrationPlan(BaseModel):

@@ -32,6 +32,14 @@ class ArbitrationWorkflowRepository:
     async def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
         return await self.db.arbitration_workflow_runs.find_one({"_id": run_id})
 
+    async def list_case_runs(self, case_id: str, *, active_only: bool = False, limit: int = 25) -> List[Dict[str, Any]]:
+        query: Dict[str, Any] = {"case_id": case_id}
+        if active_only:
+            query["status"] = {"$nin": sorted(TERMINAL_WORKFLOW_STATUSES)}
+        return await _collect(
+            self.db.arbitration_workflow_runs.find(query).sort("updated_at", -1).limit(max(1, min(limit, 100)))
+        )
+
     async def get_by_idempotency_key(self, case_id: str, key: str) -> Optional[Dict[str, Any]]:
         return await self.db.arbitration_workflow_runs.find_one({"case_id": case_id, "idempotency_key": key})
 
@@ -317,6 +325,7 @@ class ArbitrationWorkflowRepository:
         return invalidated
 
     async def record_approval(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        receipt = {**receipt, "receipt_status": receipt.get("receipt_status") or "pending"}
         query = {
             "run_id": receipt.get("run_id"),
             "gate": receipt.get("gate"),
@@ -335,6 +344,40 @@ class ArbitrationWorkflowRepository:
         if not stored:
             raise HTTPException(status_code=409, detail="Unable to resolve the idempotent approval receipt")
         return stored
+
+    async def commit_approval(self, receipt_id: str, run_id: str) -> Dict[str, Any]:
+        committed = await self.db.arbitration_workflow_approvals.find_one_and_update(
+            {"_id": receipt_id, "run_id": run_id, "receipt_status": {"$in": ["pending", "committed"]}},
+            {
+                "$set": {
+                    "receipt_status": "committed",
+                    "committed_at": datetime.now(timezone.utc),
+                }
+            },
+            return_document=True,
+        )
+        if not committed:
+            raise HTTPException(status_code=409, detail="Approval receipt could not be committed")
+        return committed
+
+    async def reconcile_pending_approvals(self, run: Dict[str, Any]) -> Dict[str, Any]:
+        """Finalize only receipts already referenced by a successful run CAS.
+
+        This is the crash-recovery half of the pending/commit protocol: a
+        receipt created before a failed side effect remains non-authoritative,
+        while a process death after the run transition can be repaired safely.
+        """
+
+        pending = await _collect(
+            self.db.arbitration_workflow_approvals.find(
+                {"run_id": str(run.get("_id")), "receipt_status": "pending"}
+            )
+        )
+        for receipt in pending:
+            gate = str(receipt.get("gate") or "")
+            if gate and str(run.get(f"{gate}_approval_receipt_id") or "") == str(receipt.get("_id") or ""):
+                await self.commit_approval(str(receipt["_id"]), str(run["_id"]))
+        return run
 
     async def create_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
         query = {"run_id": plan.get("run_id"), "plan_hash": plan.get("plan_hash")}

@@ -330,6 +330,14 @@ export async function getArbitrationWorkflowState(caseId: string, runId: string)
   return data;
 }
 
+export async function listArbitrationWorkflows(caseId: string, activeOnly = false) {
+  const { data } = await api.get<ArbitrationWorkflowState[]>(
+    `/arbitration/cases/${caseId}/workflows`,
+    { params: { active_only: activeOnly, limit: 25 } },
+  );
+  return data;
+}
+
 export async function getArbitrationWorkflowEvents(caseId: string, runId: string) {
   const { data } = await api.get<Array<Record<string, unknown>>>(
     `/arbitration/cases/${caseId}/workflows/${runId}/events`,

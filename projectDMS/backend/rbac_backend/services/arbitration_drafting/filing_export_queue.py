@@ -23,6 +23,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError, TimeoutError as RedisTimeoutError
 
 from ...core.config import settings
+from ..observability import observability_registry
 
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,10 @@ class FilingExportQueue:
                     or 0
                 )
             self._last_recovery = time.monotonic()
+            if recovered:
+                await observability_registry.record_arbitration_runtime_event(
+                    signal="lease_expiry_recovery", node="filing_export_worker", reason="visibility_timeout", count=recovered
+                )
             return recovered
 
     async def _worker_loop(self, worker_name: str) -> None:
@@ -322,6 +327,22 @@ class FilingExportQueue:
         if attempts <= 0:
             await redis.lrem(settings.FILING_EXPORT_QUEUE_PROCESSING_NAME, 1, job_id)
             return
+        queued_at = await redis.hget(key, "queued_at")
+        if queued_at:
+            try:
+                queued_value = datetime.fromisoformat(str(queued_at).replace("Z", "+00:00"))
+                if queued_value.tzinfo is None:
+                    queued_value = queued_value.replace(tzinfo=timezone.utc)
+                await observability_registry.record_arbitration_runtime_value(
+                    signal="filing_export_queue_lag_seconds",
+                    scope="worker",
+                    value=max(0.0, (datetime.now(timezone.utc) - queued_value).total_seconds()),
+                )
+            except ValueError:
+                pass
+        await observability_registry.record_arbitration_runtime_event(
+            signal="node_attempt", node="filing_export_worker", reason="delivery"
+        )
         payload = json.loads(raw)
         heartbeat = asyncio.create_task(self._heartbeat(job_id, payload, token, worker_name))
         effect_completed = False
@@ -369,8 +390,14 @@ class FilingExportQueue:
                 self.metadata_ttl_seconds,
             )
             if terminal:
+                await observability_registry.record_arbitration_runtime_event(
+                    signal="export_blocked", node="filing_export_worker", reason="terminal_failure"
+                )
                 logger.error("Filing export failed permanently job_id=%s attempts=%s", job_id, attempts)
             else:
+                await observability_registry.record_arbitration_runtime_event(
+                    signal="retry", node="filing_export_worker", reason=type(exc).__name__
+                )
                 logger.warning("Filing export scheduled for retry job_id=%s attempts=%s", job_id, attempts)
         finally:
             heartbeat.cancel()

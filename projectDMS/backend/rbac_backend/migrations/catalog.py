@@ -55,6 +55,10 @@ from .v20260722_0003_arbitration_filing_export_effects import DESCRIPTION as ARB
 from .v20260722_0003_arbitration_filing_export_effects import NAME as ARB_EXPORT_EFFECT_NAME
 from .v20260722_0003_arbitration_filing_export_effects import VERSION as ARB_EXPORT_EFFECT_VERSION
 from .v20260722_0003_arbitration_filing_export_effects import upgrade as upgrade_arbitration_export_effects
+from .v20260722_0004_arbitration_acceptance_governance import DESCRIPTION as ARB_ACCEPTANCE_DESCRIPTION
+from .v20260722_0004_arbitration_acceptance_governance import NAME as ARB_ACCEPTANCE_NAME
+from .v20260722_0004_arbitration_acceptance_governance import VERSION as ARB_ACCEPTANCE_VERSION
+from .v20260722_0004_arbitration_acceptance_governance import upgrade as upgrade_arbitration_acceptance
 
 
 MIGRATIONS = [
@@ -129,5 +133,11 @@ MIGRATIONS = [
         name=ARB_EXPORT_EFFECT_NAME,
         description=ARB_EXPORT_EFFECT_DESCRIPTION,
         upgrade=upgrade_arbitration_export_effects,
+    ),
+    Migration(
+        version=ARB_ACCEPTANCE_VERSION,
+        name=ARB_ACCEPTANCE_NAME,
+        description=ARB_ACCEPTANCE_DESCRIPTION,
+        upgrade=upgrade_arbitration_acceptance,
     ),
 ]

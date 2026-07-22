@@ -47,6 +47,8 @@ class ObservabilityRegistry:
     _arbitration_shadow_latency_ms: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _arbitration_workflow_alerts: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _arbitration_fallbacks_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _arbitration_runtime_events_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
+    _arbitration_runtime_values: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _vector_store_failures_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _dependency_health: Dict[str, float] = field(default_factory=dict)
 
@@ -192,6 +194,23 @@ class ObservabilityRegistry:
         async with self._lock:
             self._arbitration_fallbacks_total[key] = self._arbitration_fallbacks_total.get(key, 0) + 1
 
+    async def record_arbitration_runtime_event(
+        self, *, signal: str, node: str = "none", reason: str = "none", count: int = 1
+    ) -> None:
+        """Count a bounded workflow/worker signal without run or tenant labels."""
+        key = (str(signal or "unknown"), str(node or "none"), str(reason or "none"))
+        async with self._lock:
+            self._arbitration_runtime_events_total[key] = (
+                self._arbitration_runtime_events_total.get(key, 0) + max(0, int(count))
+            )
+
+    async def record_arbitration_runtime_value(
+        self, *, signal: str, scope: str = "global", value: float
+    ) -> None:
+        """Record latest bounded operational value such as lag, age or ratio."""
+        async with self._lock:
+            self._arbitration_runtime_values[(str(signal or "unknown"), str(scope or "global"))] = float(value)
+
     async def record_vector_store_failure(self, *, operation: str, namespace: str | None = None) -> None:
         """Count a Qdrant operation that failed while the store was enabled.
 
@@ -224,6 +243,7 @@ class ObservabilityRegistry:
             "arbitration_workflow_event_total": sum(self._arbitration_workflow_events_total.values()),
             "arbitration_shadow_comparison_total": sum(self._arbitration_shadow_comparisons_total.values()),
             "arbitration_fallback_total": sum(self._arbitration_fallbacks_total.values()),
+            "arbitration_runtime_event_total": sum(self._arbitration_runtime_events_total.values()),
             "arbitration_workflow_active_alerts": sum(1 for value in self._arbitration_workflow_alerts.values() if value),
             "vector_store_failure_total": sum(self._vector_store_failures_total.values()),
             "dependency_health": dict(self._dependency_health),
@@ -407,6 +427,25 @@ class ObservabilityRegistry:
         for (from_engine, reason), value in sorted(self._arbitration_fallbacks_total.items()):
             labels = _labels((("from_engine", from_engine), ("reason", reason)))
             lines.append(f"contractdms_arbitration_workflow_fallbacks_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_runtime_events_total Bounded node attempts, resumes, retries, lease expiry and export blocks.",
+                "# TYPE contractdms_arbitration_runtime_events_total counter",
+            ]
+        )
+        for (signal, node, reason), value in sorted(self._arbitration_runtime_events_total.items()):
+            labels = _labels((("signal", signal), ("node", node), ("reason", reason)))
+            lines.append(f"contractdms_arbitration_runtime_events_total{labels} {value}")
+        lines.extend(
+            [
+                "# HELP contractdms_arbitration_runtime_value Latest queue lag, checkpoint age, evidence ratio or human wait value.",
+                "# TYPE contractdms_arbitration_runtime_value gauge",
+            ]
+        )
+        for (signal, scope), value in sorted(self._arbitration_runtime_values.items()):
+            labels = _labels((("signal", signal), ("scope", scope)))
+            lines.append(f"contractdms_arbitration_runtime_value{labels} {value:.3f}")
 
         lines.extend(
             [

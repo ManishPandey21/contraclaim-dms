@@ -1,0 +1,17 @@
+{
+  "title": "Arbitration LangGraph Governance",
+  "uid": "arbitration-langgraph",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {"id": 1, "type": "timeseries", "title": "Workflow node attempts", "targets": [{"expr": "sum by (node) (rate(contractdms_arbitration_runtime_events_total{signal=\"node_attempt\"}[5m]))"}]},
+    {"id": 2, "type": "timeseries", "title": "Resume and retry events", "targets": [{"expr": "sum by (signal,node,reason) (increase(contractdms_arbitration_runtime_events_total{signal=~\"resume|retry\"}[15m]))"}]},
+    {"id": 3, "type": "stat", "title": "Filing export queue lag", "targets": [{"expr": "max(contractdms_arbitration_runtime_value{signal=\"filing_export_queue_lag_seconds\"})"}]},
+    {"id": 4, "type": "stat", "title": "Checkpoint age", "targets": [{"expr": "max(contractdms_arbitration_runtime_value{signal=\"checkpoint_age_seconds\"})"}]},
+    {"id": 5, "type": "timeseries", "title": "Human gate wait", "targets": [{"expr": "max by (scope) (contractdms_arbitration_runtime_value{signal=\"human_wait_seconds\"})"}]},
+    {"id": 6, "type": "gauge", "title": "Evidence grounded ratio", "targets": [{"expr": "min by (scope) (contractdms_arbitration_runtime_value{signal=\"evidence_grounded_ratio\"})"}]},
+    {"id": 7, "type": "timeseries", "title": "Lease recovery and export blocks", "targets": [{"expr": "sum by (signal,reason) (increase(contractdms_arbitration_runtime_events_total{signal=~\"lease_expiry_recovery|export_blocked\"}[1h]))"}]},
+    {"id": 8, "type": "state-timeline", "title": "Rollout blockers", "targets": [{"expr": "contractdms_arbitration_workflow_alert"}]}
+  ]
+}
