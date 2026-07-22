@@ -32,6 +32,7 @@ try:
     from rbac_backend.services.audit_event_service import AuditEventService
     from rbac_backend.services.entitlement_service import EntitlementService
     from rbac_backend.services.permission_service import PermissionService
+    from rbac_backend.services.runtime_state import RuntimeStateService
     from rbac_backend.services.step_up_service import StepUpService
     from rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 
@@ -337,9 +338,20 @@ def client(monkeypatch):
     async def _no_audit(*_args, **_kwargs):
         return None
 
+    class _RevocationRedis:
+        async def get(self, _key):
+            return None
+
+    async def _revocation_redis(_self):
+        # A TestClient created without lifespan uses a new event loop per
+        # request. Keep only the revocation lookup deterministic here; the JWT
+        # decoder, user lookup, tenant policy, and step-up verifier stay real.
+        return _RevocationRedis()
+
     monkeypatch.setattr(PermissionService, "user_has_permission", _allow_permission)
     monkeypatch.setattr(EntitlementService, "check_permission_entitlement", _allow_entitlement)
     monkeypatch.setattr(AuditEventService, "emit", _no_audit)
+    monkeypatch.setattr(RuntimeStateService, "get_redis", _revocation_redis)
 
     db = _FakeDb()
 
