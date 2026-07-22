@@ -3558,6 +3558,44 @@ def test_official_arbitration_graph_resumes_through_every_human_gate_with_minima
     assert "snapshot-input" not in json.dumps(redacted)
 
 
+def test_analysis_fanout_resume_consumes_snapshot_before_merged_artifact_exists():
+    memory = pytest.importorskip("langgraph.checkpoint.memory")
+    commands = pytest.importorskip("langgraph.types")
+    graph = build_arbitration_graph(checkpointer=memory.InMemorySaver())
+    config = {"configurable": {"thread_id": "arbitration-analysis-input-order"}}
+    graph.invoke(
+        {
+            "run_id": "run-analysis-input-order",
+            "thread_id": "arbitration:run-analysis-input-order",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "graph_version": "phase6-node-owned-v1",
+            "state_schema_version": 2,
+            "state_version": 1,
+            "input_snapshot_id": "snapshot-input",
+            "input_snapshot_hash": "input-hash",
+            "documents_selected": False,
+            "user_direction_complete": False,
+        },
+        config,
+    )
+
+    graph.invoke(
+        commands.Command(
+            resume={"run_id": "run-analysis-input-order"},
+            update={"documents_selected": True, "state_version": 2},
+        ),
+        config,
+    )
+
+    state = graph.get_state(config)
+    assert state.next == ("material_question_gate",)
+    assert state.values["documents_analyzed"] is True
+    assert state.values["quantum_analysis_complete"] is True
+    assert not state.values.get("analysis_artifact_set_id")
+
+
 def test_langgraph_create_retry_reuses_checkpoint_and_state_version():
     memory = pytest.importorskip("langgraph.checkpoint.memory")
     db = _FakeDb()

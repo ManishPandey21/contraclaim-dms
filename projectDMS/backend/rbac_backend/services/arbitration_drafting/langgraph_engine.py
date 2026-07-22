@@ -251,6 +251,22 @@ def build_arbitration_graph(
 
         return run
 
+    def analysis_replay_marker(node: str, completion_flag: str):
+        def run(state: ArbitrationGraphState) -> Dict[str, Any]:
+            has_intake_snapshot = bool(state.get("input_snapshot_id") and state.get("input_snapshot_hash"))
+            has_merged_artifact = bool(
+                state.get("analysis_artifact_set_id") and state.get("analysis_artifact_set_hash")
+            )
+            if not has_intake_snapshot and not has_merged_artifact:
+                raise ValueError(
+                    f"{node} requires an immutable input snapshot or a previously merged analysis artifact"
+                )
+            update = {completion_flag: True}
+            validate_checkpoint_state({**state, **update})
+            return update
+
+        return run
+
     def validation_route(state: ArbitrationGraphState) -> str:
         if state.get("cancellation_requested") or state.get("execution_status") == "cancelled":
             return "cancelled"
@@ -288,11 +304,15 @@ def build_arbitration_graph(
     graph.add_node("validate_intake", command_or("validate_intake", marker("validate_intake", execution_status="running", next_action="poll")))
     graph.add_node("capture_input_snapshot", command_or("capture_input_snapshot", marker("capture_input_snapshot")))
     graph.add_node("document_selection_gate", _gate("document_selection_gate", "documents_selected", "awaiting_document_selection", "select_documents"))
-    graph.add_node("analyze_documents", command_or("analyze_documents", artifact_marker("analyze_documents", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, documents_analyzed=True)))
-    graph.add_node("analyze_chronology", command_or("analyze_chronology", artifact_marker("analyze_chronology", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, chronology_analyzed=True)))
-    graph.add_node("analyze_clause_jurisdiction_notice", command_or("analyze_clause_jurisdiction_notice", artifact_marker("analyze_clause_jurisdiction_notice", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, clause_analysis_complete=True)))
-    graph.add_node("analyze_pleading_position", command_or("analyze_pleading_position", artifact_marker("analyze_pleading_position", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, pleading_position_complete=True)))
-    graph.add_node("analyze_quantum_expert", command_or("analyze_quantum_expert", artifact_marker("analyze_quantum_expert", "analysis_artifact_set_id", "analysis_artifact_set_hash", track_node=False, quantum_analysis_complete=True)))
+    # A live read-only fan-out consumes the immutable intake snapshot.  During
+    # checkpoint-TTL reconstruction the node executor is intentionally absent,
+    # so a previously merged authoritative artifact may replay the completion
+    # markers without re-running analysis side effects.
+    graph.add_node("analyze_documents", command_or("analyze_documents", analysis_replay_marker("analyze_documents", "documents_analyzed")))
+    graph.add_node("analyze_chronology", command_or("analyze_chronology", analysis_replay_marker("analyze_chronology", "chronology_analyzed")))
+    graph.add_node("analyze_clause_jurisdiction_notice", command_or("analyze_clause_jurisdiction_notice", analysis_replay_marker("analyze_clause_jurisdiction_notice", "clause_analysis_complete")))
+    graph.add_node("analyze_pleading_position", command_or("analyze_pleading_position", analysis_replay_marker("analyze_pleading_position", "pleading_position_complete")))
+    graph.add_node("analyze_quantum_expert", command_or("analyze_quantum_expert", analysis_replay_marker("analyze_quantum_expert", "quantum_analysis_complete")))
     graph.add_node("merge_evidence_and_matrices", command_or("merge_evidence_and_matrices", marker("merge_evidence_and_matrices")))
     graph.add_node("material_question_gate", _gate("material_question_gate", "user_direction_complete", "awaiting_user_direction", "answer_questions"))
     graph.add_node("matrix_review_gate", _gate("matrix_review_gate", "matrices_approved", "awaiting_matrix_review", "review_matrices"))

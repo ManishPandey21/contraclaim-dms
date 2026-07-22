@@ -52,7 +52,7 @@ def test_expired_terminal_checkpoint_is_deleted_while_active_thread_resumes() ->
                 "case_id": f"{namespace}:case",
                 "draft_id": f"{namespace}:draft",
                 "pleading_type": "statement_of_claim",
-                "graph_version": "phase4-v1",
+                "graph_version": settings.ARBITRATION_ENGINE_GRAPH_VERSION,
                 "state_schema_version": 2,
                 "state_version": 1,
                 "input_snapshot_id": f"{namespace}:snapshot",
