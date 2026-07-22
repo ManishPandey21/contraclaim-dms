@@ -13,7 +13,9 @@ INDEXES = (
     (
         [("effect_key", 1)],
         {
-            "name": "arb_bundle_export_effect_unique",
+            # Match the runtime ensure_indexes name so startup-before-migrate
+            # remains idempotent on MongoDB.
+            "name": "effect_key_1",
             "unique": True,
             "partialFilterExpression": {"effect_key": {"$type": "string"}},
             "background": True,
@@ -21,7 +23,7 @@ INDEXES = (
     ),
     (
         [("status", 1), ("execution_lease_expires_at", 1)],
-        {"name": "arb_bundle_export_lease_recovery", "background": True},
+        {"name": "status_1_execution_lease_expires_at_1", "background": True},
     ),
 )
 
