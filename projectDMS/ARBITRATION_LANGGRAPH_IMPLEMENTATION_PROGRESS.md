@@ -18,6 +18,7 @@
 
 - **Phase 0 implementation pending:** none identified in the current local source. P0-01 through P0-08 have code and negative unit-test coverage.
 - **Phase 0 production-like acceptance:** migrations `20260721_0001`, `20260721_0002`, and corrective `20260722_0001` are applied and idempotent on production MongoDB; 99 production-image tests pass, including eight real-FastAPI two-tenant isolation tests. Live unauthenticated workflow/checkpoint/export probes return `401`. Authenticated browser testing with two real tenant accounts, real reviewer-role/step-up flows, and filing export artifacts remains pending, so Phase 0 is not fully production-accepted.
+- **Phase 1 implementation and scoped acceptance completed on 2026-07-22:** engine contracts, the authoritative v2 adapter, immutable input/document/opponent/evidence/matrix snapshots, workflow/effect/approval/event/plan repositories, optimistic state versioning, atomic draft-version allocation, idempotency, and server-owned rollout policy are implemented. Atomic upserts and deterministic keyed run IDs now prevent concurrent duplicate workflow artifacts; draft-generation effects have one owner and reuse completed immutable output references.
 - **Next functional step completed on 2026-07-22:** paragraph responses now own draft-bound SoD/Rejoinder positions. Legacy defence/rejoinder collections receive server-owned, reviewable, read-only projections; the rejoinder LLM updates the authoritative response before projecting it; direct draft-bound duplicate creation and projection content edits return `409`.
 - **Still pending in that cleanup:** a separately reviewed migration/backfill for historical defence/rejoinder rows that cannot be mapped unambiguously to an existing paragraph response.
 
@@ -33,9 +34,9 @@
 | P0-06 governed filing exports | implemented / unit-tested | draft/case services, router/API/UI | exact individual/bundle authorization indexes | Approved immutable version, readiness, validation, citation/exhibit audit and drift enforced; preview does not export status |
 | P0-07 rejoinder permission semantics | implemented / unit-tested | model, agent, readiness, validator, UI | conservative field migration | New matter with required/unobtained permission blocks; dedicated scoped permission receipt endpoint added |
 | P0-08 complete section regeneration | implemented / unit-tested | service, model, router, tests | lineage fields/index compatibility | Complete parent is merged, unaffected sections/ledger preserved, lineage and run type recorded |
-| Phase 1 engine interface and v2 adapter | implemented / unit-tested | `engines/base.py`, `engines/v2.py`, selector | `20260721_0002` | Server-only selection, input/document/opponent/evidence/matrix snapshots and idempotent create |
-| Snapshots, effects, approvals, events and plans | implemented / unit-tested; Mongo pending | workflow repository/domain/service | workflow/index migration | Exact hashes, optimistic CAS, effect keys, approval dedupe, immutable plans; real Mongo duplicate-race test pending |
-| Atomic version allocation and lineage | implemented / unit-tested; Mongo pending | arbitration repository/service | counter seed and unique draft/version index | Concurrent fake-repository allocation advances from existing maximum; real Mongo contention pending |
+| Phase 1 engine interface and v2 adapter | implemented / production-image and Mongo-tested | `engines/base.py`, `engines/v2.py`, selector | `20260721_0002` | Server-only selection; deterministic keyed run IDs; stable v2 state/hashes from identical immutable inputs; concurrent create returns one run and one snapshot set |
+| Snapshots, effects, approvals, events and plans | implemented / production-image and Mongo-tested | workflow repository/domain/service | workflow/index migration | Atomic upserts, exact input-hash conflicts, one-owner effects, completed-output reuse, optimistic CAS, approval/plan dedupe; 12-way Mongo race stored one row of each kind |
+| Atomic version allocation and lineage | implemented / production-image and Mongo-tested | arbitration repository/service | counter seed and unique draft/version index | Twelve concurrent real-Mongo allocations advanced uniquely from existing version 7 to versions 8-19 |
 | Official in-process LangGraph | implemented / production restart-tested | `langgraph_engine.py` | checkpoint/write indexes and TTL | Production has LangGraph `1.2.9` and MongoDB saver `0.4.0`; a synthetic allowlisted checkpoint interrupted, survived backend restart, resumed from Mongo, and completed |
 | Durable workflow APIs and gates | implemented / production-image tested | models, router, workflow service, API client | workflow indexes | create `202`, state/events/resume/cancel/approve/fallback/checkpoints; stale CAS and real-FastAPI HTTP authorization/isolation fixture pass; authenticated browser pending |
 | Pleading-specific routing | implemented / unit-tested | `workflow_domain.py`, v2/graph engines | matrix revision snapshots | SoC/SoD/Counterclaim/Rejoinder requirements; SoD/Rejoinder require immutable opponent versions |
@@ -71,6 +72,8 @@
 | `python -m pytest backend/rbac_backend/tests/test_migration_runner.py -q` | 9 passed | migration-runner unit |
 | `python -m pytest backend/rbac_backend/tests/test_observability.py -q` | 2 passed | monitoring unit |
 | Production backend image: arbitration drafting + HTTP isolation + migration runner | 99 passed, 224 warnings | production-image acceptance |
+| Phase 1 production-image regression after atomic idempotency hardening | 105 passed, 231 warnings | disposable production-image acceptance |
+| Phase 1 temporary Mongo replica-set concurrency probe | 12 concurrent callers produced one run/snapshot/effect/event/approval/plan; one effect owner; allocated versions 8-19 uniquely | real Mongo contention acceptance; temporary database removed |
 | Synthetic Mongo checkpoint interrupt, backend restart, resume | paused at document selection; resumed to completed with a new checkpoint ID | production restart acceptance |
 | Live unauthenticated arbitration route probes | case/workflow/checkpoint/export all `401` | production perimeter authorization |
 | Full production backup `20260722-015547` | MongoDB plus five volume archives all passed SHA-256 verification | production rollback evidence |
@@ -105,7 +108,7 @@ The repository `.venv` could not collect the HTTP tests because it lacks FastAPI
 
 ## Unresolved risks and deviations
 
-- Real MongoDB version-allocation contention, Redis job kill/retry, Qdrant/S3/model integration, load, TTL-expiry timing, restore drill, and authenticated browser tests remain required before canary acceptance.
+- Redis job kill/retry, Qdrant/S3/model integration, load, TTL-expiry timing, restore drill, and authenticated browser tests remain required before canary acceptance.
 - The production-image two-tenant fixture passes, but it is not a substitute for a live exercise with two authenticated tenant accounts and real organization/project memberships.
 - New draft-bound editable duplication is closed: paragraph responses materialize server-owned defence/rejoinder projections, and projection content cannot be changed through generic matrix APIs. Historical legacy rows remain unmigrated where a paragraph-response mapping is ambiguous; a data audit and conservative backfill are still required.
 - The frontend exposes immutable opponent draft/version IDs and document IDs, but a rich page-level document preview/selector and visual version diff remain partial; evidence snippets and version history remain available in their existing views.
