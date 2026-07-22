@@ -50,8 +50,6 @@ class ArbitrationV2WorkflowEngine:
                 raise HTTPException(status_code=404, detail="Case-linked arbitration draft not found")
             if str(draft.get("draft_type") or "") != str(payload.pleading_type):
                 raise HTTPException(status_code=422, detail="Workflow pleading type does not match the linked draft")
-            if str(draft.get("draft_type") or "") != str(payload.pleading_type):
-                raise HTTPException(status_code=422, detail="Workflow pleading type does not match the linked draft")
         documents = []
         for document_id in sorted(set(payload.selected_document_ids)):
             record = await self.db.documents.find_one(
@@ -71,7 +69,11 @@ class ArbitrationV2WorkflowEngine:
                     "updated_at": record.get("updated_at"),
                 }
             )
-        run_id = str(uuid.uuid4())
+        run_id = (
+            str(uuid.uuid5(uuid.NAMESPACE_URL, f"arbitration-workflow:{case_id}:{idempotency_key}"))
+            if idempotency_key
+            else str(uuid.uuid4())
+        )
         input_payload = {
             "case_id": case_id,
             "draft_id": payload.draft_id,

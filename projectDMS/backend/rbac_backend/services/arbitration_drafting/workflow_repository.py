@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from .repository import _collect, _jsonable
 
@@ -28,14 +30,41 @@ class ArbitrationWorkflowRepository:
         return await self.db.arbitration_workflow_runs.find_one({"case_id": case_id, "idempotency_key": key})
 
     async def create_run(self, run: Dict[str, Any]) -> Dict[str, Any]:
-        await self.db.arbitration_workflow_runs.insert_one(_jsonable(run))
-        await self.append_event(run["_id"], "workflow_created", actor_id=run.get("created_by"), data={"engine": run.get("engine")})
-        return run
+        payload = _jsonable(run)
+        idempotency_key = payload.get("idempotency_key")
+        if not idempotency_key:
+            await self.db.arbitration_workflow_runs.insert_one(payload)
+            await self.append_event(run["_id"], "workflow_created", actor_id=run.get("created_by"), data={"engine": run.get("engine")})
+            return run
+
+        query = {"case_id": payload.get("case_id"), "idempotency_key": idempotency_key}
+        inserted = False
+        try:
+            result = await self.db.arbitration_workflow_runs.update_one(
+                query,
+                {"$setOnInsert": payload},
+                upsert=True,
+            )
+            inserted = getattr(result, "upserted_id", None) is not None
+        except DuplicateKeyError:
+            # A concurrent request won the unique (case_id, idempotency_key)
+            # insert. Read and validate that winner below.
+            inserted = False
+        stored = await self.db.arbitration_workflow_runs.find_one(query)
+        if not stored:
+            raise HTTPException(status_code=409, detail="Unable to resolve the idempotent workflow creation")
+        if stored.get("request_hash") != payload.get("request_hash"):
+            raise HTTPException(status_code=409, detail="Idempotency-Key was reused with a different workflow request")
+        if inserted:
+            await self.append_event(
+                run["_id"],
+                "workflow_created",
+                actor_id=run.get("created_by"),
+                data={"engine": run.get("engine")},
+            )
+        return stored
 
     async def create_snapshot(self, *, run_id: str, kind: str, payload: Dict[str, Any], effect_key: str) -> Dict[str, Any]:
-        existing = await self.db.arbitration_workflow_snapshots.find_one({"effect_key": effect_key})
-        if existing:
-            return existing
         snapshot = {
             "_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -45,15 +74,26 @@ class ArbitrationWorkflowRepository:
             "snapshot_hash": artifact_hash(payload),
             "created_at": datetime.now(timezone.utc),
         }
-        await self.db.arbitration_workflow_snapshots.insert_one(snapshot)
-        return snapshot
+        try:
+            await self.db.arbitration_workflow_snapshots.update_one(
+                {"effect_key": effect_key},
+                {"$setOnInsert": snapshot},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            pass
+        stored = await self.db.arbitration_workflow_snapshots.find_one({"effect_key": effect_key})
+        if not stored:
+            raise HTTPException(status_code=409, detail="Unable to resolve the idempotent workflow snapshot")
+        if (
+            stored.get("run_id") != run_id
+            or stored.get("kind") != kind
+            or stored.get("snapshot_hash") != snapshot["snapshot_hash"]
+        ):
+            raise HTTPException(status_code=409, detail="Workflow snapshot effect key was reused with different input")
+        return stored
 
     async def claim_effect(self, *, run_id: str, effect_key: str, effect_type: str, input_hash: str) -> Dict[str, Any]:
-        existing = await self.db.arbitration_workflow_effects.find_one({"effect_key": effect_key})
-        if existing:
-            if existing.get("input_hash") != input_hash:
-                raise HTTPException(status_code=409, detail="Workflow effect key was reused with different input")
-            return existing
         effect = {
             "_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -63,13 +103,55 @@ class ArbitrationWorkflowRepository:
             "status": "claimed",
             "created_at": datetime.now(timezone.utc),
         }
-        await self.db.arbitration_workflow_effects.insert_one(effect)
-        return effect
+        claimed_now = False
+        try:
+            result = await self.db.arbitration_workflow_effects.update_one(
+                {"effect_key": effect_key},
+                {"$setOnInsert": effect},
+                upsert=True,
+            )
+            claimed_now = getattr(result, "upserted_id", None) is not None
+        except DuplicateKeyError:
+            claimed_now = False
+        stored = await self.db.arbitration_workflow_effects.find_one({"effect_key": effect_key})
+        if not stored:
+            raise HTTPException(status_code=409, detail="Unable to resolve the workflow effect claim")
+        if (
+            stored.get("run_id") != run_id
+            or stored.get("effect_type") != effect_type
+            or stored.get("input_hash") != input_hash
+        ):
+            raise HTTPException(status_code=409, detail="Workflow effect key was reused with different input")
+        return {**stored, "_claimed_now": claimed_now}
 
     async def complete_effect(self, effect_key: str, output: Dict[str, Any]) -> None:
+        output_refs = _jsonable(output)
+        updated = await self.db.arbitration_workflow_effects.find_one_and_update(
+            {"effect_key": effect_key, "status": "claimed"},
+            {"$set": {"status": "completed", "output_refs": output_refs, "completed_at": datetime.now(timezone.utc)}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if updated:
+            return
+        existing = await self.db.arbitration_workflow_effects.find_one({"effect_key": effect_key})
+        if (
+            existing
+            and existing.get("status") == "completed"
+            and artifact_hash(existing.get("output_refs")) == artifact_hash(output_refs)
+        ):
+            return
+        raise HTTPException(status_code=409, detail="Workflow effect cannot be completed from its current state")
+
+    async def fail_effect(self, effect_key: str, *, error_code: str) -> None:
         await self.db.arbitration_workflow_effects.update_one(
-            {"effect_key": effect_key},
-            {"$set": {"status": "completed", "output_refs": _jsonable(output), "completed_at": datetime.now(timezone.utc)}},
+            {"effect_key": effect_key, "status": "claimed"},
+            {
+                "$set": {
+                    "status": "failed",
+                    "error_code": str(error_code),
+                    "failed_at": datetime.now(timezone.utc),
+                }
+            },
         )
 
     async def transition(self, run_id: str, expected_version: int, update: Dict[str, Any], *, event: str) -> Dict[str, Any]:
@@ -114,17 +196,36 @@ class ArbitrationWorkflowRepository:
         return await _collect(self.db.arbitration_workflow_events.find({"run_id": run_id}).sort("created_at", 1).limit(limit))
 
     async def record_approval(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
-        existing = await self.db.arbitration_workflow_approvals.find_one(
-            {"run_id": receipt.get("run_id"), "gate": receipt.get("gate"), "artifact_hash": receipt.get("artifact_hash"), "decision": receipt.get("decision")}
-        )
-        if existing:
-            return existing
-        await self.db.arbitration_workflow_approvals.insert_one(_jsonable(receipt))
-        return receipt
+        query = {
+            "run_id": receipt.get("run_id"),
+            "gate": receipt.get("gate"),
+            "artifact_hash": receipt.get("artifact_hash"),
+            "decision": receipt.get("decision"),
+        }
+        try:
+            await self.db.arbitration_workflow_approvals.update_one(
+                query,
+                {"$setOnInsert": _jsonable(receipt)},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            pass
+        stored = await self.db.arbitration_workflow_approvals.find_one(query)
+        if not stored:
+            raise HTTPException(status_code=409, detail="Unable to resolve the idempotent approval receipt")
+        return stored
 
     async def create_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
-        existing = await self.db.arbitration_plans.find_one({"run_id": plan.get("run_id"), "plan_hash": plan.get("plan_hash")})
-        if existing:
-            return existing
-        await self.db.arbitration_plans.insert_one(_jsonable(plan))
-        return plan
+        query = {"run_id": plan.get("run_id"), "plan_hash": plan.get("plan_hash")}
+        try:
+            await self.db.arbitration_plans.update_one(
+                query,
+                {"$setOnInsert": _jsonable(plan)},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            pass
+        stored = await self.db.arbitration_plans.find_one(query)
+        if not stored:
+            raise HTTPException(status_code=409, detail="Unable to resolve the idempotent pleading plan")
+        return stored

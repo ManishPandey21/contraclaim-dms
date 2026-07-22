@@ -180,7 +180,7 @@ class ArbitrationWorkflowService:
             "comment": payload.comment,
             "approved_at": datetime.now(timezone.utc),
         }
-        await self.repository.record_approval(receipt)
+        receipt = await self.repository.record_approval(receipt)
         if payload.decision != "approved":
             updated = await self.repository.transition(
                 run_id,
@@ -210,20 +210,44 @@ class ArbitrationWorkflowService:
         elif gate == "plan":
             if not run.get("draft_id"):
                 raise HTTPException(status_code=409, detail="A case-linked draft is required before the approved plan can be generated")
-            await self.repository.claim_effect(
-                run_id=run_id, effect_key=f"{run_id}:generate:{run['plan_hash']}", effect_type="draft_generation", input_hash=run["plan_hash"]
+            effect_key = f"{run_id}:generate:{run['plan_hash']}"
+            effect = await self.repository.claim_effect(
+                run_id=run_id,
+                effect_key=effect_key,
+                effect_type="draft_generation",
+                input_hash=run["plan_hash"],
             )
-            detail = await self.drafting.generate(str(run["draft_id"]), ArbitrationGenerateRequest(), current_user)
-            version = await self.drafting.repo.latest_version(str(run["draft_id"]))
-            if not version:
-                raise HTTPException(status_code=409, detail="Draft generation did not create an immutable version")
-            version_hash = version.get("version_hash") or immutable_version_hash(version)
+            if effect.get("status") == "completed":
+                output_refs = effect.get("output_refs") or {}
+                version = await self.db.arbitration_draft_versions.find_one(
+                    {"_id": output_refs.get("draft_version_id"), "draft_id": str(run["draft_id"])}
+                )
+                if not version:
+                    raise HTTPException(status_code=409, detail="Completed draft effect references a missing immutable version")
+                version_hash = version.get("version_hash") or immutable_version_hash(version)
+                if version_hash != output_refs.get("draft_version_hash"):
+                    raise HTTPException(status_code=409, detail="Completed draft effect output hash does not match its immutable version")
+            else:
+                if not effect.get("_claimed_now"):
+                    raise HTTPException(status_code=409, detail="Draft generation effect is already in progress")
+                try:
+                    await self.drafting.generate(str(run["draft_id"]), ArbitrationGenerateRequest(), current_user)
+                    version = await self.drafting.repo.latest_version(str(run["draft_id"]))
+                    if not version:
+                        raise HTTPException(status_code=409, detail="Draft generation did not create an immutable version")
+                    version_hash = version.get("version_hash") or immutable_version_hash(version)
+                    await self.repository.complete_effect(
+                        effect_key,
+                        {"draft_version_id": version.get("_id"), "draft_version_hash": version_hash},
+                    )
+                except Exception as exc:
+                    await self.repository.fail_effect(effect_key, error_code=type(exc).__name__)
+                    raise
             validation = self.validation.bounded_remediation(await self.validation.evaluate(version))
             validation_snapshot = await self.repository.create_snapshot(
                 run_id=run_id, kind="validation_report", payload=validation,
                 effect_key=f"{run_id}:validation:{version_hash}",
             )
-            await self.repository.complete_effect(f"{run_id}:generate:{run['plan_hash']}", {"draft_version_id": version.get("_id"), "draft_version_hash": version_hash})
             status_value, node, next_action, progress = "awaiting_legal_review", "legal_review_gate", "legal_review", 85
             transition_update.update(
                 {

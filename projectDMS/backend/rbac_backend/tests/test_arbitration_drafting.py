@@ -19,6 +19,7 @@ from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationParagraphResponseUpdate,
     ArbitrationPartyRole,
     ArbitrationDraftType,
+    ArbitrationWorkflowApprovalRequest,
     GenerationRunType,
 )
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
@@ -46,6 +47,8 @@ from backend.rbac_backend.services.arbitration_drafting.engines.policy import (
 from backend.rbac_backend.services.arbitration_drafting.engines.v2 import ArbitrationV2WorkflowEngine
 from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import validate_checkpoint_state
 from backend.rbac_backend.services.arbitration_drafting.workflow_domain import ArbitrationWorkflowDomain
+from backend.rbac_backend.services.arbitration_drafting.workflow_repository import ArbitrationWorkflowRepository
+from backend.rbac_backend.services.arbitration_drafting.workflow_service import ArbitrationWorkflowService
 from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
     enforce_author_approver_separation,
     enforce_gate_role,
@@ -104,16 +107,26 @@ class _FakeCollection:
 
     async def update_one(self, query=None, update=None, *args, **kwargs):
         row = await self.find_one(query)
+        inserted = False
         if row is None and kwargs.get("upsert"):
             row = dict(query or {})
             row.update((update or {}).get("$setOnInsert") or {})
             self.rows.append(row)
+            inserted = True
         if row and update and "$set" in update:
             row.update(update["$set"])
         if row and update and "$max" in update:
             for key, value in update["$max"].items():
                 row[key] = max(int(row.get(key) or 0), int(value))
-        return type("UpdateResult", (), {"matched_count": 1 if row else 0, "modified_count": 1 if row else 0})()
+        return type(
+            "UpdateResult",
+            (),
+            {
+                "matched_count": 0 if inserted else (1 if row else 0),
+                "modified_count": 0 if inserted else (1 if row else 0),
+                "upserted_id": row.get("_id") if inserted else None,
+            },
+        )()
 
     async def update_many(self, query=None, update=None, *args, **kwargs):
         matched = 0
@@ -2555,6 +2568,222 @@ def test_v2_workflow_create_is_idempotent_and_uses_immutable_manifests():
     manifest = next(row for row in db.arbitration_workflow_snapshots.rows if row["kind"] == "document_manifest")
     assert manifest["payload"]["documents"][0]["document_id"] == "doc-1"
     assert "ocrText" not in json.dumps(manifest, default=str)
+
+
+def test_concurrent_v2_workflow_create_reuses_run_and_snapshot_rows():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+
+    async def create():
+        return await engine.create_workflow(
+            "case-1",
+            payload,
+            _FakeUser(),
+            idempotency_key="concurrent-idem-1",
+            request_hash=request_hash,
+        )
+
+    async def create_pair():
+        return await asyncio.gather(create(), create())
+
+    first, second = asyncio.run(create_pair())
+
+    assert first["_id"] == second["_id"]
+    assert len(db.arbitration_workflow_runs.rows) == 1
+    assert len(db.arbitration_workflow_snapshots.rows) == 5
+    assert len(db.arbitration_workflow_events.rows) == 1
+
+
+def test_v2_adapter_is_semantically_stable_for_same_immutable_inputs():
+    db = _FakeDb()
+    engine = ArbitrationV2WorkflowEngine(db)
+    payload = ArbitrationWorkflowCreateRequest(
+        draft_id="draft-1",
+        pleading_type="statement_of_claim",
+        selected_document_ids=["doc-1"],
+    )
+    request_hash = canonical_workflow_request_hash(
+        case_id="case-1", payload=payload, tenant_id="org-1", project_id="project-1"
+    )
+    first = asyncio.run(
+        engine.create_workflow("case-1", payload, _FakeUser(), idempotency_key=None, request_hash=request_hash)
+    )
+    second = asyncio.run(
+        engine.create_workflow("case-1", payload, _FakeUser(), idempotency_key=None, request_hash=request_hash)
+    )
+
+    stable_fields = (
+        "engine",
+        "engine_version",
+        "status",
+        "current_node",
+        "next_action",
+        "input_snapshot_hash",
+        "document_manifest_hash",
+        "evidence_snapshot_hash",
+        "matrix_revision_hash",
+        "readiness_artifact_hash",
+        "question_snapshot_hash",
+    )
+    assert {key: first.get(key) for key in stable_fields} == {key: second.get(key) for key in stable_fields}
+
+
+def test_workflow_effect_claim_and_completion_are_idempotent():
+    db = _FakeDb()
+    repository = ArbitrationWorkflowRepository(db)
+
+    first = asyncio.run(
+        repository.claim_effect(
+            run_id="run-1",
+            effect_key="run-1:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+    second = asyncio.run(
+        repository.claim_effect(
+            run_id="run-1",
+            effect_key="run-1:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+
+    assert first["_claimed_now"] is True
+    assert second["_claimed_now"] is False
+    assert len(db.arbitration_workflow_effects.rows) == 1
+
+    output = {"draft_version_id": "version-1", "draft_version_hash": "version-hash-1"}
+    asyncio.run(repository.complete_effect("run-1:generate:plan-1", output))
+    asyncio.run(repository.complete_effect("run-1:generate:plan-1", output))
+    with pytest.raises(HTTPException) as conflict:
+        asyncio.run(
+            repository.complete_effect(
+                "run-1:generate:plan-1",
+                {"draft_version_id": "version-2", "draft_version_hash": "version-hash-2"},
+            )
+        )
+    assert conflict.value.status_code == 409
+
+
+def test_workflow_snapshot_effect_key_rejects_different_payload():
+    db = _FakeDb()
+    repository = ArbitrationWorkflowRepository(db)
+    asyncio.run(
+        repository.create_snapshot(
+            run_id="run-1",
+            kind="input",
+            payload={"case_id": "case-1"},
+            effect_key="run-1:snapshot:input",
+        )
+    )
+    with pytest.raises(HTTPException) as conflict:
+        asyncio.run(
+            repository.create_snapshot(
+                run_id="run-1",
+                kind="input",
+                payload={"case_id": "case-2"},
+                effect_key="run-1:snapshot:input",
+            )
+        )
+    assert conflict.value.status_code == 409
+
+
+def test_workflow_approval_and_plan_rows_are_idempotent():
+    db = _FakeDb()
+    repository = ArbitrationWorkflowRepository(db)
+    first_receipt = {
+        "_id": "receipt-1",
+        "run_id": "run-1",
+        "gate": "matrix_review",
+        "artifact_hash": "matrix-hash-1",
+        "decision": "approved",
+    }
+    duplicate_receipt = {**first_receipt, "_id": "receipt-2"}
+    stored_first = asyncio.run(repository.record_approval(first_receipt))
+    stored_duplicate = asyncio.run(repository.record_approval(duplicate_receipt))
+
+    assert stored_first["_id"] == "receipt-1"
+    assert stored_duplicate["_id"] == "receipt-1"
+    assert len(db.arbitration_workflow_approvals.rows) == 1
+
+    first_plan = {"_id": "plan-1", "run_id": "run-1", "plan_hash": "plan-hash-1"}
+    duplicate_plan = {**first_plan, "_id": "plan-2"}
+    stored_plan = asyncio.run(repository.create_plan(first_plan))
+    stored_duplicate_plan = asyncio.run(repository.create_plan(duplicate_plan))
+
+    assert stored_plan["_id"] == "plan-1"
+    assert stored_duplicate_plan["_id"] == "plan-1"
+    assert len(db.arbitration_plans.rows) == 1
+
+
+def test_plan_gate_reuses_completed_generation_effect(monkeypatch):
+    db = _FakeDb()
+    version = db.arbitration_draft_versions.rows[0]
+    version["version_hash"] = immutable_version_hash(version)
+    plan_hash = "p" * 64
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-completed-effect",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_plan_approval",
+            "current_node": "plan_approval_gate",
+            "next_action": "approve_plan",
+            "state_version": 1,
+            "plan_hash": plan_hash,
+            "created_by": "author-user",
+            "last_material_editor_id": "editor-user",
+            "authoritative_effects": [],
+        }
+    )
+    db.arbitration_workflow_effects.rows.append(
+        {
+            "_id": "effect-1",
+            "run_id": "run-completed-effect",
+            "effect_key": f"run-completed-effect:generate:{plan_hash}",
+            "effect_type": "draft_generation",
+            "input_hash": plan_hash,
+            "status": "completed",
+            "output_refs": {
+                "draft_version_id": version["_id"],
+                "draft_version_hash": version["version_hash"],
+            },
+        }
+    )
+    service = ArbitrationWorkflowService(db)
+
+    async def unexpected_generation(*args, **kwargs):
+        raise AssertionError("completed effect must reuse its immutable output")
+
+    monkeypatch.setattr(service.drafting, "generate", unexpected_generation)
+    updated = asyncio.run(
+        service.approve_gate(
+            "case-1",
+            "run-completed-effect",
+            "plan",
+            ArbitrationWorkflowApprovalRequest(
+                state_version=1,
+                artifact_hash=plan_hash,
+                reviewer_role="senior_legal_approver",
+            ),
+            _FakeUser(),
+        )
+    )
+
+    assert updated["status"] == "awaiting_legal_review"
+    assert updated["draft_version_id"] == version["_id"]
+    assert len(db.arbitration_draft_versions.rows) == 1
 
 
 def test_workflow_transition_rejects_stale_state_version():
