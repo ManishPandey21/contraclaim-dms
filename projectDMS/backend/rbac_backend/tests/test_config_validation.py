@@ -42,6 +42,7 @@ def test_settings_reject_empty_critical_fields():
 
 def test_validate_runtime_configuration_accepts_non_placeholder_values():
     settings = Settings(
+        ENVIRONMENT="development",
         DATABASE_URL="mongodb://localhost:27017/test",
         SECRET_KEY="real-secret-key",
         AWS_ACCESS_KEY_ID="aws-key",
@@ -75,6 +76,8 @@ def test_production_validation_rejects_standalone_mongodb():
     settings = Settings(
         ENVIRONMENT="production",
         DATABASE_URL="mongodb://mongo.example.internal:27017/contraclaim",
+        MONGODB_REPLICA_SET=None,
+        MONGODB_ALLOW_STANDALONE_PRODUCTION=False,
         SECRET_KEY="x" * 32,
         AWS_ACCESS_KEY_ID="aws-key",
         AWS_SECRET_ACCESS_KEY="aws-secret",
