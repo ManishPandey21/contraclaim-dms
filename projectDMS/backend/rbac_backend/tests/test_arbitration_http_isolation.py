@@ -221,6 +221,8 @@ class _FakeDb:
                 {
                     "_id": "workflow-a1",
                     "case_id": "case-a1",
+                    "organization_id": "org-A",
+                    "project_id": "proj-a1",
                     "engine": "arbitration_v2",
                     "status": "awaiting_matrix_review",
                 }
