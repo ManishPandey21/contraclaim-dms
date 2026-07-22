@@ -1,5 +1,7 @@
 # Arbitration Pleadings LangGraph Operations Runbook
 
+> **Current production status (2026-07-23):** node-owned graph code is deployed, but production acceptance is withheld. Keep `arbitration_v2`, rollout `off`, primary `0`, and acceptance `false`. Real Redis recovery/load, Mongo TTL/failover/isolated restore, Qdrant outage/recovery, S3 round trip, and configured model round trips passed. Exhaustive node/gate kills, authenticated browser/legal acceptance, remaining provider-outage/load drills, credential rotation, and tested code rollback remain open. See `arbitration_langgraph_production_deployment_and_acceptance_2026-07-23.md`.
+
 **Status:** Implemented behind server-authoritative rollout controls; production acceptance is disabled by default.
 **Scope:** Statement of Claim, Statement of Defence, Counterclaim, and Rejoinder.
 **Architecture:** Official LangGraph runs in the main backend. The experimental `services/langgraph` sidecar is not used.
@@ -162,6 +164,14 @@ The operations checkpoint endpoint returns identifiers plus redacted hashes only
 6. Insert an expired terminal-run checkpoint and confirm TTL cleanup. Separately verify active paused checkpoints remain inside retention and can resume.
 7. Record recovery point, recovery time, restored counts, TTL evidence, and operator sign-off in the acceptance record.
 
+Production restore hardening verified on 2026-07-23:
+
+- Every Mongo replica container must have `nofile` soft and hard limits of at least `64000` before a large archive restore. A `1024` limit caused WiredTiger file-handle exhaustion during the first isolated drill.
+- Mongo health must require `rs.status().myState` PRIMARY (`1`) or SECONDARY (`2`); a ping-only probe can incorrectly admit a STARTUP/RECOVERING member.
+- Restart replica members one at a time and confirm quorum before proceeding to the next member.
+- Restore into a uniquely named isolated database first. Compare migration ledger, collection/document counts, checkpoint indexes, and representative hashes before considering any live restore.
+- Drop only the exact isolated drill database after evidence is captured. Delete only namespaced Redis keys, object-storage objects, and Qdrant collections created by the drill.
+
 ## Rollback
 
 Application rollback is configuration-first:
@@ -182,7 +192,7 @@ Application rollback is configuration-first:
 - Official LangGraph checkpoint lifecycle is implemented; production restart evidence covers document selection and active post-TTL resume, not every Phase-4 node/gate.
 - Ten production-image signed-JWT two-account/step-up tests pass; a real signed-in browser and separated legal-review workflow remain pending.
 - Redis duplicate/lease/visibility recovery, actual Redis stop/restart, bounded 40-job load, Qdrant outage/recovery, TTL expiry/resume, isolated restore, and cleanup passed in production.
-- Live Qdrant vector round trip passes. Live OpenAI PDF extraction and FalkorDB vector storage fail; S3/model outage and sustained end-to-end load remain pending.
+- Live Qdrant/embedding, OpenAI PDF file-input, and S3 object round trips pass. The separate FalkorDB vector adapter still expects unavailable RediSearch commands; actual S3/model outage and sustained end-to-end load remain pending.
 - Production runtime remains `arbitration_v2`, rollout `off`, primary `0`, and acceptance `false`.
 ## Monitoring assets
 

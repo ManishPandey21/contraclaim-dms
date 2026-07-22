@@ -1,5 +1,7 @@
 # Arbitration Pleadings LangGraph Implementation Verification Audit
 
+> **2026-07-23 production re-verification addendum:** the P1 architecture item below has been implemented: authoritative evidence, analysis, merge, planning, drafting, validation, remediation, approval-commit, and export-creation commands are now owned by typed LangGraph node executors in `graph_commands.py` with immutable input hashes, leases, idempotent effect keys, retry classification, and run compare-and-set. Production infrastructure drills substantially passed, including Redis restart/duplicate/load, real-Mongo TTL resume/failover/isolated restore, Qdrant outage/recovery, S3 put/get/delete, and configured model/PDF and embedding/vector round trips. The current verdict remains **Implemented but not production accepted** because exhaustive every-node/gate kill recovery, authenticated browser acceptance, four-type legal sign-off, remaining external-outage/load tests, credential rotation, and tested code rollback are incomplete. See `docs/architecture/arbitration_langgraph_production_deployment_and_acceptance_2026-07-23.md`, which supersedes stale environment and action statuses in this retained historical audit.
+
 **Audit date:** 2026-07-22
 **Audited plan:** `docs/architecture/arbitration_pleadings_langgraph_workflow_audit_and_implementation_plan_2026-07-21.md`
 **Repository working copy:** `C:\SaaS\projectDMS` at `ca712e2`
