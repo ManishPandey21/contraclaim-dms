@@ -60,7 +60,10 @@ from backend.rbac_backend.services.arbitration_drafting.approval_policy import (
     enforce_author_approver_separation,
     enforce_gate_role,
 )
-from backend.rbac_backend.services.arbitration_drafting.workflow_validation import ArbitrationValidationOrchestrator
+from backend.rbac_backend.services.arbitration_drafting.workflow_validation import (
+    VALIDATION_BRANCHES,
+    ArbitrationValidationOrchestrator,
+)
 from backend.rbac_backend.models.arbitration_drafting import ArbitrationWorkflowCreateRequest
 
 
@@ -674,12 +677,19 @@ def test_statement_of_claim_generator_preserves_source_citations():
         "claim_heads": [],
         "paragraph_responses": [],
         "missing_evidence": [],
+        "pleading_plan": {
+            "_id": "plan-1",
+            "plan_hash": "approved-plan-hash",
+            "section_structure": [{"order": 1, "key": "introduction"}, {"order": 2, "key": "claims"}],
+        },
     }
 
     generated = ArbitrationDraftGenerator().generate(context)
 
     assert "[S1: CPL/2025/0142]" in generated["full_markdown"]
     assert "Award extension of time." in generated["full_markdown"]
+    assert generated["structured_output"]["pleading_plan_hash"] == "approved-plan-hash"
+    assert generated["structured_output"]["planned_section_keys"] == ["introduction", "claims"]
 
 
 def test_statement_of_claim_generator_uses_case_matrix_context():
@@ -909,9 +919,14 @@ def test_generation_input_hash_is_stable_across_runtime_fields():
             "manual_facts": "Basement drawings were issued late and access was restricted.",
         },
     }
+    planned_inputs = {
+        **base_context,
+        "pleading_plan": {"_id": "plan-1", "plan_hash": "approved-plan-hash"},
+    }
 
     assert stable_generation_input_hash(base_context) == stable_generation_input_hash(same_inputs)
     assert stable_generation_input_hash(base_context) != stable_generation_input_hash(changed_inputs)
+    assert stable_generation_input_hash(base_context) != stable_generation_input_hash(planned_inputs)
 
 
 def test_case_workspace_sources_are_added_to_source_ledger():
@@ -2786,6 +2801,9 @@ def test_plan_gate_reuses_completed_generation_effect(monkeypatch):
     version = db.arbitration_draft_versions.rows[0]
     version["version_hash"] = immutable_version_hash(version)
     plan_hash = "p" * 64
+    db.arbitration_plans.rows.append(
+        {"_id": "plan-completed-effect", "run_id": "run-completed-effect", "plan_hash": plan_hash}
+    )
     db.arbitration_workflow_runs.rows.append(
         {
             "_id": "run-completed-effect",
@@ -2798,6 +2816,7 @@ def test_plan_gate_reuses_completed_generation_effect(monkeypatch):
             "next_action": "approve_plan",
             "state_version": 1,
             "plan_hash": plan_hash,
+            "plan_id": "plan-completed-effect",
             "created_by": "author-user",
             "last_material_editor_id": "editor-user",
             "authoritative_effects": [],
@@ -2904,20 +2923,33 @@ def test_official_arbitration_graph_resumes_through_every_human_gate_with_minima
     validate_checkpoint_state(dict(state.values))
 
     resume_steps = [
-        ("documents_selected", "material_question_gate"),
-        ("user_direction_complete", "matrix_review_gate"),
-        ("matrices_approved", "readiness_approval_gate"),
-        ("readiness_approved", "plan_approval_gate"),
-        ("plan_approved", "legal_review_gate"),
-        ("legal_review_approved", "draft_approval_gate"),
-        ("draft_approved", "export_authorization_gate"),
-        ("export_authorized", None),
+        ({"documents_selected": True}, "material_question_gate"),
+        ({"user_direction_complete": True}, "matrix_review_gate"),
+        ({"matrices_approved": True}, "readiness_approval_gate"),
+        ({"readiness_approved": True, "plan_id": "plan-1", "plan_hash": "plan-hash"}, "plan_approval_gate"),
+        (
+            {
+                "plan_approved": True,
+                "draft_version_id": "version-1",
+                "draft_version_hash": "version-hash",
+                "validation_artifact_set_id": "validation-set-1",
+                "validation_artifact_set_hash": "validation-set-hash",
+                "validation_report_id": "validation-report-1",
+                "validation_report_hash": "validation-report-hash",
+                "validation_status": "passed",
+                "validation_route": "legal_review",
+            },
+            "legal_review_gate",
+        ),
+        ({"legal_review_approved": True}, "draft_approval_gate"),
+        ({"draft_approved": True}, "export_authorization_gate"),
+        ({"export_authorized": True}, None),
     ]
-    for version, (flag, expected_gate) in enumerate(resume_steps, start=2):
+    for version, (state_update, expected_gate) in enumerate(resume_steps, start=2):
         graph.invoke(
             commands.Command(
                 resume={"run_id": "run-phase2"},
-                update={flag: True, "state_version": version},
+                update={**state_update, "state_version": version},
             ),
             config,
         )
@@ -2930,6 +2962,19 @@ def test_official_arbitration_graph_resumes_through_every_human_gate_with_minima
             assert state.values["execution_status"] == "completed"
 
     redacted = redact_checkpoint(dict(state.values))
+    assert all(
+        state.values[flag]
+        for flag in (
+            "citations_validated",
+            "assertions_validated",
+            "legal_structure_validated",
+            "new_matter_validated",
+            "quantum_validated",
+            "duplication_validated",
+            "exhibits_validated",
+            "source_drift_validated",
+        )
+    )
     assert redacted["run_id"] == "run-phase2"
     assert redacted["input_snapshot_id"]["redacted"] is True
     assert "snapshot-input" not in json.dumps(redacted)
@@ -3030,6 +3075,8 @@ def test_lagging_checkpoint_replays_cumulative_gate_receipts_to_current_gate():
             "user_direction_snapshot_id": "direction-snapshot",
             "matrix_review_approval_receipt_id": "matrix-receipt",
             "readiness_approval_receipt_id": "readiness-receipt",
+            "plan_id": "plan-catchup",
+            "plan_hash": "plan-catchup-hash",
         }
     )
 
@@ -3339,6 +3386,273 @@ def test_validation_remediation_is_bounded_and_does_not_change_draft_content():
     assert remediated["human_review_required"] is True
     assert remediated["remediation_cycle"] <= remediated["max_remediation_cycles"]
     assert version["full_markdown"] == "Unsupported assertion [SRC-99]"
+
+
+def test_phase4_validation_fans_out_deterministically_and_only_deduplicates_existing_citations():
+    version = {
+        "_id": "version-phase4",
+        "draft_id": "draft-1",
+        "version": 2,
+        "version_hash": "phase4-version-hash",
+        "full_markdown": "The amount is INR 100. [S1: Notice] [S1: Notice]",
+        "sections": [
+            {
+                "key": "facts",
+                "heading": "Facts",
+                "body": "The amount is INR 100. [S1: Notice] [S1: Notice]",
+            }
+        ],
+        "source_ledger": [{"source_key": "S1", "source_id": "doc-1", "source_revision_id": "rev-1"}],
+        "structured_output": {"approval_blockers": []},
+        "validation_status": "passed",
+    }
+    orchestrator = ArbitrationValidationOrchestrator()
+    first = asyncio.run(
+        orchestrator.evaluate(version, dependency_hashes={"plan_hash": "plan-1"})
+    )
+
+    assert [artifact["branch"] for artifact in first["artifacts"]] == list(VALIDATION_BRANCHES)
+    assert all(artifact["artifact_hash"] for artifact in first["artifacts"])
+    assert first["route"] == "remediate"
+    remediation = orchestrator.remediate(version, first)
+    assert remediation is not None
+    assert remediation["full_markdown"].count("[S1: Notice]") == 1
+    assert "INR 100" in remediation["full_markdown"]
+    assert remediation["source_keys_preserved"] is True
+    assert remediation["amounts_preserved"] is True
+    assert remediation["dates_preserved"] is True
+
+    second = asyncio.run(
+        orchestrator.evaluate(
+            {**version, "full_markdown": remediation["full_markdown"], "sections": remediation["sections"]},
+            dependency_hashes={"plan_hash": "plan-1"},
+            remediation_cycle=1,
+        )
+    )
+    assert second["status"] == "passed"
+    assert second["route"] == "legal_review"
+    assert second["remediation_cycle"] == 1
+
+
+def test_phase4_plan_gate_persists_validation_artifacts_and_blocks_unsupported_citation_approval():
+    db = _FakeDb()
+    version = db.arbitration_draft_versions.rows[0]
+    version.update(
+        {
+            "full_markdown": "Unsupported assertion [S99: Missing source].",
+            "validation_status": "passed",
+            "structured_output": {"approval_blockers": []},
+        }
+    )
+    version["version_hash"] = immutable_version_hash(version)
+    plan_hash = "q" * 64
+    db.arbitration_plans.rows.append(
+        {"_id": "plan-phase4-blocked", "run_id": "run-phase4-blocked", "plan_hash": plan_hash}
+    )
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-phase4-blocked",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_plan_approval",
+            "current_node": "plan_approval_gate",
+            "next_action": "approve_plan",
+            "state_version": 1,
+            "plan_hash": plan_hash,
+            "plan_id": "plan-phase4-blocked",
+            "created_by": "author-user",
+            "last_material_editor_id": "editor-user",
+            "authoritative_effects": [],
+        }
+    )
+    db.arbitration_workflow_effects.rows.append(
+        {
+            "_id": "effect-phase4-blocked",
+            "run_id": "run-phase4-blocked",
+            "effect_key": f"run-phase4-blocked:generate:{plan_hash}",
+            "effect_type": "draft_generation",
+            "input_hash": plan_hash,
+            "status": "completed",
+            "output_refs": {"draft_version_id": version["_id"], "draft_version_hash": version["version_hash"]},
+        }
+    )
+    service = ArbitrationWorkflowService(db)
+    state = asyncio.run(
+        service.approve_gate(
+            "case-1",
+            "run-phase4-blocked",
+            "plan",
+            ArbitrationWorkflowApprovalRequest(
+                state_version=1,
+                artifact_hash=plan_hash,
+                reviewer_role="senior_legal_approver",
+            ),
+            _FakeUser(),
+        )
+    )
+
+    assert state["status"] == "awaiting_legal_review"
+    assert state["next_action"] == "revise_draft"
+    assert state["validation_status"] == "blocked"
+    assert state["validation_artifact_set_hash"]
+    assert db.arbitration_plans.rows[0]["status"] == "approved"
+    assert db.arbitration_plans.rows[0]["approval_receipt_id"]
+    assert {row["kind"] for row in db.arbitration_workflow_snapshots.rows if row["kind"].startswith("validation_")} >= {
+        *(f"validation_{branch}" for branch in VALIDATION_BRANCHES),
+        "validation_report",
+        "validation_artifact_set",
+    }
+
+    approval_count = len(db.arbitration_workflow_approvals.rows)
+    with pytest.raises(HTTPException) as blocked:
+        asyncio.run(
+            service.approve_gate(
+                "case-1",
+                "run-phase4-blocked",
+                "legal_review",
+                ArbitrationWorkflowApprovalRequest(
+                    state_version=state["state_version"],
+                    artifact_hash=state["draft_version_hash"],
+                    reviewer_role="legal_reviewer",
+                ),
+                _FakeUser(),
+            )
+        )
+    assert blocked.value.status_code == 409
+    assert len(db.arbitration_workflow_approvals.rows) == approval_count
+
+
+def test_phase4_bounded_remediation_creates_one_parent_linked_candidate_without_new_values():
+    db = _FakeDb()
+    parent = db.arbitration_draft_versions.rows[0]
+    parent.update(
+        {
+            "full_markdown": "Claimed amount INR 100. [S1: Notice] [S1: Notice]",
+            "sections": [
+                {
+                    "key": "facts",
+                    "heading": "Facts",
+                    "body": "Claimed amount INR 100. [S1: Notice] [S1: Notice]",
+                }
+            ],
+            "validation_status": "passed",
+            "structured_output": {"approval_blockers": []},
+        }
+    )
+    parent["version_hash"] = immutable_version_hash(parent)
+    plan_hash = "r" * 64
+    db.arbitration_plans.rows.append(
+        {"_id": "plan-phase4-remediation", "run_id": "run-phase4-remediation", "plan_hash": plan_hash}
+    )
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-phase4-remediation",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_plan_approval",
+            "current_node": "plan_approval_gate",
+            "next_action": "approve_plan",
+            "state_version": 1,
+            "plan_hash": plan_hash,
+            "plan_id": "plan-phase4-remediation",
+            "created_by": "author-user",
+            "last_material_editor_id": "editor-user",
+            "authoritative_effects": [],
+        }
+    )
+    db.arbitration_workflow_effects.rows.append(
+        {
+            "_id": "effect-phase4-remediation",
+            "run_id": "run-phase4-remediation",
+            "effect_key": f"run-phase4-remediation:generate:{plan_hash}",
+            "effect_type": "draft_generation",
+            "input_hash": plan_hash,
+            "status": "completed",
+            "output_refs": {"draft_version_id": parent["_id"], "draft_version_hash": parent["version_hash"]},
+        }
+    )
+
+    state = asyncio.run(
+        ArbitrationWorkflowService(db).approve_gate(
+            "case-1",
+            "run-phase4-remediation",
+            "plan",
+            ArbitrationWorkflowApprovalRequest(
+                state_version=1,
+                artifact_hash=plan_hash,
+                reviewer_role="senior_legal_approver",
+            ),
+            _FakeUser(),
+        )
+    )
+    candidate = max(db.arbitration_draft_versions.rows, key=lambda item: int(item.get("version") or 0))
+
+    assert len(db.arbitration_draft_versions.rows) == 2
+    assert candidate["parent_version_id"] == parent["_id"]
+    assert candidate["parent_version"] == parent["version"]
+    assert candidate["full_markdown"].count("[S1: Notice]") == 1
+    assert "INR 100" in candidate["full_markdown"]
+    assert candidate["source_ledger"] == parent["source_ledger"]
+    assert state["draft_version_id"] == candidate["_id"]
+    assert state["validation_status"] == "passed"
+    assert state["remediation_cycle"] == 1
+    assert state["remediation_artifact_hash"]
+
+
+def test_phase4_human_revision_refresh_rebinds_validation_to_latest_immutable_candidate():
+    db = _FakeDb()
+    corrected = {
+        **db.arbitration_draft_versions.rows[0],
+        "_id": "version-corrected",
+        "version": 2,
+        "full_markdown": "Supported assertion [S1: Delay notice].",
+        "validation_status": "passed",
+        "structured_output": {"approval_blockers": []},
+        "created_by": "draft-editor",
+    }
+    corrected["version_hash"] = immutable_version_hash(corrected)
+    db.arbitration_draft_versions.rows.append(corrected)
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-phase4-refresh",
+            "case_id": "case-1",
+            "draft_id": "draft-1",
+            "pleading_type": "statement_of_claim",
+            "engine": "arbitration_v2",
+            "status": "awaiting_legal_review",
+            "current_node": "legal_review_gate",
+            "next_action": "revise_draft",
+            "state_version": 1,
+            "draft_version_id": "version-1",
+            "draft_version_hash": "blocked-version-hash",
+            "validation_status": "blocked",
+            "validation_blockers": [{"code": "unknown_source_key", "message": "Missing source"}],
+            "authoritative_effects": ["draft_version"],
+        }
+    )
+
+    state = asyncio.run(
+        ArbitrationWorkflowService(db).resume(
+            "case-1",
+            "run-phase4-refresh",
+            ArbitrationWorkflowResumeRequest(
+                state_version=1,
+                gate="legal_review",
+                decision="refresh_candidate",
+            ),
+            _FakeUser(),
+        )
+    )
+
+    assert state["draft_version_id"] == corrected["_id"]
+    assert state["draft_version_hash"] == corrected["version_hash"]
+    assert state["validation_status"] == "passed"
+    assert state["next_action"] == "legal_review"
+    assert state["validation_artifact_set_hash"]
 
 
 def test_deterministic_rejoinder_reply_remains_review_only():

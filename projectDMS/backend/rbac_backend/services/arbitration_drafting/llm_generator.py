@@ -135,6 +135,7 @@ class LLMDraftGenerator:
         additional_instruction: Optional[str],
     ) -> str:
         draft = context.get("draft") or {}
+        pleading_plan = context.get("pleading_plan") or {}
         allowed = sorted(self._citation_tokens(sections))
         lines = [
             "You are an arbitration counsel drafting a construction pleading.",
@@ -149,6 +150,19 @@ class LLMDraftGenerator:
             "- Keep numbered lists numbered. Do not merge separate claims.",
             "- Return ONLY a JSON object mapping section_key -> rewritten body. No prose, no fences.",
         ]
+        if pleading_plan:
+            planned_sections = [
+                str(item.get("key"))
+                for item in pleading_plan.get("section_structure") or []
+                if item.get("key")
+            ]
+            lines.extend(
+                [
+                    f"- Approved pleading plan hash: {pleading_plan.get('plan_hash')}.",
+                    "- Approved planned sections: " + (", ".join(planned_sections) if planned_sections else "(none)"),
+                    "- Follow the approved plan decisions; do not expand them or add a new theory.",
+                ]
+            )
         if additional_instruction:
             lines.append(f"- Additional user instruction (style only, no new facts): {additional_instruction}")
         lines.append("")

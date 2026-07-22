@@ -222,12 +222,18 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_CANARY_PERCENT: int = Field(default=0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_CANARY_PERCENT")
     ARBITRATION_ENGINE_CANARY_TENANT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_TENANT_IDS")
     ARBITRATION_ENGINE_CANARY_PROJECT_IDS: str = Field(default="", validation_alias="ARBITRATION_ENGINE_CANARY_PROJECT_IDS")
-    ARBITRATION_ENGINE_GRAPH_VERSION: str = Field(default="v1", validation_alias="ARBITRATION_ENGINE_GRAPH_VERSION")
-    ARBITRATION_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=1, ge=1, validation_alias="ARBITRATION_ENGINE_STATE_SCHEMA_VERSION")
+    ARBITRATION_ENGINE_GRAPH_VERSION: str = Field(default="phase4-v1", validation_alias="ARBITRATION_ENGINE_GRAPH_VERSION")
+    ARBITRATION_ENGINE_STATE_SCHEMA_VERSION: int = Field(default=2, ge=1, validation_alias="ARBITRATION_ENGINE_STATE_SCHEMA_VERSION")
     ARBITRATION_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False, validation_alias="ARBITRATION_ENGINE_PRODUCTION_ACCEPTED")
     ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES")
     ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS")
     ARBITRATION_ENGINE_RETRY_BUDGET: int = Field(default=3, ge=0, le=20, validation_alias="ARBITRATION_ENGINE_RETRY_BUDGET")
+    ARBITRATION_ENGINE_MAX_REMEDIATION_CYCLES: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        validation_alias="ARBITRATION_ENGINE_MAX_REMEDIATION_CYCLES",
+    )
     ARBITRATION_REVIEWER_ROLE_MATRIX: str = Field(default="", validation_alias="ARBITRATION_REVIEWER_ROLE_MATRIX")
     
     # FalkorDB / RedisGraph configuration

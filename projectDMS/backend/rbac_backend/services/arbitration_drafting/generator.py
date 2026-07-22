@@ -139,6 +139,7 @@ class ArbitrationDraftGenerator:
                 sections = [{"key": section_key, "heading": section_key.replace("_", " ").title(), "body": "[Evidence required]"}]
         markdown = self._markdown(draft, sections, context, additional_instruction=additional_instruction)
         source_ledger = context.get("source_ledger") or []
+        pleading_plan = context.get("pleading_plan") or {}
         return {
             "sections": sections,
             "full_markdown": markdown,
@@ -153,6 +154,13 @@ class ArbitrationDraftGenerator:
                 "missing_evidence_count": len(context.get("missing_evidence") or []),
                 "section_key": section_key,
                 "generation_instruction_included": bool(additional_instruction),
+                "pleading_plan_id": pleading_plan.get("_id"),
+                "pleading_plan_hash": pleading_plan.get("plan_hash"),
+                "planned_section_keys": [
+                    item.get("key")
+                    for item in pleading_plan.get("section_structure") or []
+                    if item.get("key")
+                ],
             },
             "missing_evidence": context.get("missing_evidence") or [],
             "annexures": self._annexures(context.get("source_ledger") or []),

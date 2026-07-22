@@ -72,6 +72,14 @@ class ArbitrationGraphState(TypedDict, total=False):
     plan_hash: str
     draft_version_id: str
     draft_version_hash: str
+    validation_artifact_set_id: str
+    validation_artifact_set_hash: str
+    validation_report_id: str
+    validation_report_hash: str
+    validation_status: str
+    validation_route: str
+    remediation_artifact_id: str
+    remediation_artifact_hash: str
     documents_selected: bool
     material_questions_required: bool
     user_direction_complete: bool
@@ -83,6 +91,16 @@ class ArbitrationGraphState(TypedDict, total=False):
     matrices_approved: bool
     readiness_approved: bool
     plan_approved: bool
+    draft_generated: bool
+    citations_validated: bool
+    assertions_validated: bool
+    legal_structure_validated: bool
+    new_matter_validated: bool
+    quantum_validated: bool
+    duplication_validated: bool
+    exhibits_validated: bool
+    source_drift_validated: bool
+    validation_complete: bool
     legal_review_approved: bool
     draft_approved: bool
     export_authorized: bool
@@ -105,6 +123,16 @@ BOOLEAN_CHECKPOINT_KEYS = {
     "matrices_approved",
     "readiness_approved",
     "plan_approved",
+    "draft_generated",
+    "citations_validated",
+    "assertions_validated",
+    "legal_structure_validated",
+    "new_matter_validated",
+    "quantum_validated",
+    "duplication_validated",
+    "exhibits_validated",
+    "source_drift_validated",
+    "validation_complete",
     "legal_review_approved",
     "draft_approved",
     "export_authorized",
@@ -177,6 +205,26 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
 
         return run
 
+    def artifact_marker(node: str, *required_fields: str, **values: Any):
+        def run(state: ArbitrationGraphState) -> Dict[str, Any]:
+            missing = [field for field in required_fields if not state.get(field)]
+            if missing:
+                raise ValueError(f"{node} requires durable artifact references: {sorted(missing)}")
+            update = {"current_node": node, **values}
+            validate_checkpoint_state({**state, **update})
+            return update
+
+        return run
+
+    def validation_route(state: ArbitrationGraphState) -> str:
+        return "remediate" if state.get("validation_route") == "remediate" else "review"
+
+    def completion_marker(flag: str):
+        def run(state: ArbitrationGraphState) -> Dict[str, bool]:
+            return {flag: True}
+
+        return run
+
     graph = StateGraph(ArbitrationGraphState)
     graph.add_node("validate_intake", marker("validate_intake", execution_status="running", next_action="poll"))
     graph.add_node("capture_input_snapshot", marker("capture_input_snapshot"))
@@ -190,10 +238,44 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
     graph.add_node("material_question_gate", _gate("material_question_gate", "user_direction_complete", "awaiting_user_direction", "answer_questions"))
     graph.add_node("matrix_review_gate", _gate("matrix_review_gate", "matrices_approved", "awaiting_matrix_review", "review_matrices"))
     graph.add_node("readiness_approval_gate", _gate("readiness_approval_gate", "readiness_approved", "awaiting_readiness_approval", "approve_readiness"))
-    graph.add_node("build_pleading_plan", marker("build_pleading_plan"))
+    graph.add_node("build_pleading_plan", artifact_marker("build_pleading_plan", "plan_id", "plan_hash"))
     graph.add_node("plan_approval_gate", _gate("plan_approval_gate", "plan_approved", "awaiting_plan_approval", "approve_plan"))
-    graph.add_node("generate_draft", marker("generate_draft"))
-    graph.add_node("validate_draft", marker("validate_draft"))
+    graph.add_node(
+        "generate_draft",
+        artifact_marker("generate_draft", "draft_version_id", "draft_version_hash", draft_generated=True),
+    )
+    validation_nodes = {
+        "validate_citations": "citations_validated",
+        "validate_assertions": "assertions_validated",
+        "validate_legal_structure": "legal_structure_validated",
+        "validate_new_matter": "new_matter_validated",
+        "validate_quantum": "quantum_validated",
+        "validate_duplication": "duplication_validated",
+        "validate_exhibits": "exhibits_validated",
+        "validate_source_drift": "source_drift_validated",
+    }
+    for node, flag in validation_nodes.items():
+        graph.add_node(node, completion_marker(flag))
+    graph.add_node(
+        "merge_validation_artifacts",
+        artifact_marker(
+            "merge_validation_artifacts",
+            "validation_artifact_set_id",
+            "validation_artifact_set_hash",
+            "validation_report_id",
+            "validation_report_hash",
+            validation_complete=True,
+        ),
+    )
+    graph.add_node(
+        "remediate_draft",
+        artifact_marker(
+            "remediate_draft",
+            "remediation_artifact_id",
+            "remediation_artifact_hash",
+            validation_route="legal_review",
+        ),
+    )
     graph.add_node("legal_review_gate", _gate("legal_review_gate", "legal_review_approved", "awaiting_legal_review", "legal_review"))
     graph.add_node("draft_approval_gate", _gate("draft_approval_gate", "draft_approved", "awaiting_draft_approval", "approve_draft"))
     graph.add_node("export_authorization_gate", _gate("export_authorization_gate", "export_authorized", "awaiting_export_authorization", "authorize_export"))
@@ -210,12 +292,24 @@ def build_arbitration_graph(*, checkpointer: Optional[BaseCheckpointSaver] = Non
     )
     ordered = [
         "material_question_gate", "matrix_review_gate", "readiness_approval_gate", "build_pleading_plan",
-        "plan_approval_gate", "generate_draft", "validate_draft", "legal_review_gate",
-        "draft_approval_gate", "export_authorization_gate", "complete",
+        "plan_approval_gate", "generate_draft",
     ]
     graph.add_edge("merge_evidence_and_matrices", ordered[0])
     for left, right in zip(ordered, ordered[1:]):
         graph.add_edge(left, right)
+    for node in validation_nodes:
+        graph.add_edge("generate_draft", node)
+    graph.add_edge(list(validation_nodes), "merge_validation_artifacts")
+    graph.add_conditional_edges(
+        "merge_validation_artifacts",
+        validation_route,
+        {"remediate": "remediate_draft", "review": "legal_review_gate"},
+    )
+    for node in validation_nodes:
+        graph.add_edge("remediate_draft", node)
+    graph.add_edge("legal_review_gate", "draft_approval_gate")
+    graph.add_edge("draft_approval_gate", "export_authorization_gate")
+    graph.add_edge("export_authorization_gate", "complete")
     graph.add_edge("complete", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -242,7 +336,7 @@ class MongoArbitrationCheckpointStore:
 
 class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
     name = "langgraph_v1"
-    version = "1"
+    version = "2"
 
     def __init__(self, db: Any, *, checkpointer: Optional[BaseCheckpointSaver] = None) -> None:
         super().__init__(db)
@@ -294,7 +388,7 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
         await self._checkpoint(run, resume_update=update, traverse=False)
 
     @staticmethod
-    def _cumulative_gate_state(run: Dict[str, Any]) -> Dict[str, bool]:
+    def _cumulative_gate_state(run: Dict[str, Any]) -> Dict[str, Any]:
         """Replays every completed gate so a lagging checkpoint can catch up."""
         return {
             "documents_selected": bool(run.get("documents_selected")),
@@ -305,9 +399,31 @@ class LangGraphArbitrationEngine(ArbitrationV2WorkflowEngine):
             "matrices_approved": bool(run.get("matrix_review_approval_receipt_id")),
             "readiness_approved": bool(run.get("readiness_approval_receipt_id")),
             "plan_approved": bool(run.get("plan_approval_receipt_id")),
+            "draft_generated": bool(run.get("draft_version_id") and run.get("draft_version_hash")),
+            "validation_complete": bool(
+                run.get("validation_artifact_set_id") and run.get("validation_artifact_set_hash")
+            ),
             "legal_review_approved": bool(run.get("legal_review_approval_receipt_id")),
             "draft_approved": bool(run.get("draft_approval_receipt_id")),
             "export_authorized": bool(run.get("export_approval_receipt_id")),
+        } | {
+            key: run[key]
+            for key in (
+                "plan_id",
+                "plan_hash",
+                "draft_version_id",
+                "draft_version_hash",
+                "validation_artifact_set_id",
+                "validation_artifact_set_hash",
+                "validation_report_id",
+                "validation_report_hash",
+                "validation_status",
+                "validation_route",
+                "remediation_artifact_id",
+                "remediation_artifact_hash",
+                "remediation_cycle",
+            )
+            if run.get(key) is not None
         }
 
     async def _checkpoint(
