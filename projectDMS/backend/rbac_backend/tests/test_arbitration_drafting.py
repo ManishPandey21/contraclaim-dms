@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from backend.rbac_backend.core.config import settings
 from backend.rbac_backend.models.arbitration_drafting import (
     ArbitrationAgentRunRequest,
     ArbitrationDraftCreate,
@@ -28,6 +29,7 @@ from backend.rbac_backend.models.arbitration_drafting import (
 )
 from backend.rbac_backend.services.arbitration_drafting.acceptance import (
     acceptance_hash,
+    resolve_server_backed_acceptance,
     sign_acceptance,
     verify_acceptance_receipt,
 )
@@ -80,6 +82,9 @@ from backend.rbac_backend.services.arbitration_drafting.workflow_hardening impor
     SHADOW_DIMENSIONS,
     build_rollout_health,
     build_shadow_comparison,
+)
+from backend.rbac_backend.services.arbitration_drafting.historical_paragraph_review import (
+    classify_historical_row,
 )
 from backend.rbac_backend.models.arbitration_drafting import ArbitrationWorkflowCreateRequest
 
@@ -323,6 +328,8 @@ class _FakeDb:
         self.arbitration_workflow_events = _FakeCollection([])
         self.arbitration_plans = _FakeCollection([])
         self.arbitration_production_acceptance_receipts = _FakeCollection([])
+        self.arbitration_acceptance_evidence = _FakeCollection([])
+        self.arbitration_acceptance_signoffs = _FakeCollection([])
         self.arbitration_analysis_leases = _FakeCollection([])
         self.arbitration_drafts = _FakeCollection(
             [
@@ -2713,6 +2720,39 @@ def test_paragraph_response_is_authoritative_and_matrix_projection_is_read_only(
     assert exc.value.status_code == 409
 
 
+def test_historical_paragraph_review_resolves_only_unique_authoritative_match():
+    responses = [
+        {"_id": "response-7", "source_paragraph_number": "7"},
+        {"_id": "response-8a", "source_paragraph_number": "8(a)"},
+        {"_id": "response-8b", "source_paragraph_number": "8-a"},
+    ]
+    unique = classify_historical_row(
+        {"source_soc_para": "07"},
+        responses,
+        matrix_slug="defence-matrix",
+    )
+    ambiguous = classify_historical_row(
+        {"source_sod_para": "8(a)"},
+        responses,
+        matrix_slug="rejoinder-matrix",
+    )
+    missing = classify_historical_row(
+        {"defence": "Legacy text without paragraph identity"},
+        responses,
+        matrix_slug="defence-matrix",
+    )
+
+    assert unique == {
+        "classification": "unambiguous_paragraph_number",
+        "candidate_response_ids": ["response-7"],
+        "resolvable": True,
+    }
+    assert ambiguous["classification"] == "ambiguous_multiple_responses"
+    assert ambiguous["resolvable"] is False
+    assert missing["classification"] == "missing_paragraph_identity"
+    assert missing["resolvable"] is False
+
+
 def test_draft_bound_paragraph_position_matrix_cannot_be_created_directly():
     db = _FakeDb()
     with pytest.raises(HTTPException) as exc:
@@ -3307,16 +3347,118 @@ def test_workflow_effect_claim_and_completion_are_idempotent():
     assert len(db.arbitration_workflow_effects.rows) == 1
 
     output = {"draft_version_id": "version-1", "draft_version_hash": "version-hash-1"}
-    asyncio.run(repository.complete_effect("run-1:generate:plan-1", output))
-    asyncio.run(repository.complete_effect("run-1:generate:plan-1", output))
+    lease_token = str(first["lease_token"])
+    asyncio.run(
+        repository.complete_effect(
+            "run-1:generate:plan-1",
+            output,
+            lease_token=lease_token,
+        )
+    )
+    asyncio.run(
+        repository.complete_effect(
+            "run-1:generate:plan-1",
+            output,
+            lease_token=lease_token,
+        )
+    )
     with pytest.raises(HTTPException) as conflict:
         asyncio.run(
             repository.complete_effect(
                 "run-1:generate:plan-1",
                 {"draft_version_id": "version-2", "draft_version_hash": "version-hash-2"},
+                lease_token=lease_token,
             )
         )
     assert conflict.value.status_code == 409
+
+
+def test_workflow_effect_lease_recovers_process_kill_and_fences_stale_lease():
+    db = _FakeDb()
+    repository = ArbitrationWorkflowRepository(db)
+    first = asyncio.run(
+        repository.claim_effect(
+            run_id="run-effect-recovery",
+            effect_key="run-effect-recovery:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+    assert first["_claimed_now"] is True
+    assert first["_recovered"] is False
+
+    stored = db.arbitration_workflow_effects.rows[0]
+    stored["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    recovered = asyncio.run(
+        repository.claim_effect(
+            run_id="run-effect-recovery",
+            effect_key="run-effect-recovery:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+    assert recovered["_claimed_now"] is True
+    assert recovered["_recovered"] is True
+    assert recovered["attempt_count"] == 2
+    assert recovered["lease_token"] != first["lease_token"]
+
+    output = {"draft_version_id": "version-1", "draft_version_hash": "hash-1"}
+    with pytest.raises(HTTPException):
+        asyncio.run(
+            repository.complete_effect(
+                "run-effect-recovery:generate:plan-1",
+                output,
+                lease_token=str(first["lease_token"]),
+            )
+        )
+    asyncio.run(
+        repository.complete_effect(
+            "run-effect-recovery:generate:plan-1",
+            output,
+            lease_token=str(recovered["lease_token"]),
+        )
+    )
+    replay = asyncio.run(
+        repository.claim_effect(
+            run_id="run-effect-recovery",
+            effect_key="run-effect-recovery:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+    assert replay["status"] == "completed"
+    assert replay["_claimed_now"] is False
+
+
+def test_workflow_effect_recovery_stops_at_configured_attempt_limit(monkeypatch):
+    monkeypatch.setattr(settings, "ARBITRATION_ENGINE_EFFECT_MAX_ATTEMPTS", 1)
+    db = _FakeDb()
+    repository = ArbitrationWorkflowRepository(db)
+    first = asyncio.run(
+        repository.claim_effect(
+            run_id="run-effect-budget",
+            effect_key="run-effect-budget:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+    db.arbitration_workflow_effects.rows[0]["lease_expires_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    )
+
+    blocked = asyncio.run(
+        repository.claim_effect(
+            run_id="run-effect-budget",
+            effect_key="run-effect-budget:generate:plan-1",
+            effect_type="draft_generation",
+            input_hash="plan-1",
+        )
+    )
+
+    assert blocked["_claimed_now"] is False
+    assert blocked["_attempt_limit_reached"] is True
+    assert blocked["lease_token"] == first["lease_token"]
+    assert blocked["attempt_count"] == 1
 
 
 def test_workflow_snapshot_effect_key_rejects_different_payload():
@@ -4708,7 +4850,12 @@ def test_formal_acceptance_receipt_rejects_forgery_expiry_and_wrong_scope():
         "status": "accepted",
         "criteria": {str(index): "passed" for index in range(1, 15)},
         "evidence_hashes": {str(index): f"{index:064x}" for index in range(1, 15)},
-        "stakeholder_signoffs": ["security", "legal"],
+        "stakeholder_signoffs": ["security-signoff", "legal-signoff"],
+        "acceptance_bundle_hash": "f" * 64,
+        "evidence_record_ids": [f"evidence-{index}" for index in range(1, 15)],
+        "signoff_receipt_ids": ["security-signoff", "legal-signoff"],
+        "signoff_actor_ids": ["security-user", "legal-user"],
+        "signoff_roles": ["security", "senior_legal_counsel"],
         "organization_ids": ["org-1"],
         "project_ids": ["project-1"],
         "accepted_at": now,
@@ -4733,6 +4880,78 @@ def test_formal_acceptance_receipt_rejects_forgery_expiry_and_wrong_scope():
         receipt, receipt_id="acceptance-1", receipt_hash=receipt["receipt_hash"],
         organization_id="org-1", project_id="project-1", now=now + timedelta(days=31),
     )
+
+
+def test_production_acceptance_rejects_client_assertions_without_server_backed_evidence():
+    db = _FakeDb()
+    now = datetime.now(timezone.utc)
+    criteria = {str(index): "passed" for index in range(1, 15)}
+    evidence_hashes = {str(index): f"{index:064x}" for index in range(1, 15)}
+    db.arbitration_acceptance_evidence.rows.extend(
+        {
+            "_id": f"evidence-{criterion}",
+            "criterion": criterion,
+            "evidence_hash": evidence_hashes[criterion],
+            "organization_id": "org-1",
+            "project_id": "project-1",
+            "status": "passed",
+            "execution_mode": "real_execution",
+            "executed_at": now,
+            "recorded_by": "acceptance-runner",
+        }
+        for criterion in criteria
+    )
+
+    unresolved = asyncio.run(
+        resolve_server_backed_acceptance(
+            db,
+            criteria=criteria,
+            evidence_hashes=evidence_hashes,
+            stakeholder_signoff_ids=["claimed-legal", "claimed-security"],
+            organization_id="org-1",
+            project_id="project-1",
+        )
+    )
+    assert unresolved["valid"] is False
+    assert unresolved["reason"] == "bound_distinct_legal_and_operational_signoffs_missing"
+
+    db.arbitration_acceptance_signoffs.rows.extend(
+        [
+            {
+                "_id": "legal-signoff",
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "acceptance_bundle_hash": unresolved["bundle_hash"],
+                "decision": "accepted",
+                "actor_id": "legal-user",
+                "actor_role": "senior_legal_counsel",
+                "signed_at": now,
+            },
+            {
+                "_id": "security-signoff",
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "acceptance_bundle_hash": unresolved["bundle_hash"],
+                "decision": "accepted",
+                "actor_id": "security-user",
+                "actor_role": "security",
+                "signed_at": now,
+            },
+        ]
+    )
+    resolved = asyncio.run(
+        resolve_server_backed_acceptance(
+            db,
+            criteria=criteria,
+            evidence_hashes=evidence_hashes,
+            stakeholder_signoff_ids=["legal-signoff", "security-signoff"],
+            organization_id="org-1",
+            project_id="project-1",
+        )
+    )
+    assert resolved["valid"] is True
+    assert len(resolved["evidence_record_ids"]) == 14
+    assert resolved["signoff_actor_ids"] == ["legal-user", "security-user"]
 
 
 def test_validator_blocks_fluent_unsupported_factual_assertion():

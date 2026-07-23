@@ -24,7 +24,12 @@ from .workflow_validation import ArbitrationValidationOrchestrator
 from .workflow_hardening import build_rollout_health, build_shadow_comparison
 from .repository import _collect
 from ..observability import observability_registry
-from .acceptance import acceptance_hash, sign_acceptance, verify_acceptance_receipt
+from .acceptance import (
+    acceptance_hash,
+    resolve_server_backed_acceptance,
+    sign_acceptance,
+    verify_acceptance_receipt,
+)
 
 
 GATE_ARTIFACT_FIELDS = {
@@ -435,7 +440,15 @@ class ArbitrationWorkflowService:
                 raise HTTPException(status_code=409, detail="Completed remediation effect output hash does not match its immutable version")
         else:
             if not effect.get("_claimed_now"):
+                if effect.get("_attempt_limit_reached"):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Draft remediation effect exhausted its recovery attempt budget",
+                    )
                 raise HTTPException(status_code=409, detail="Draft remediation effect is already in progress")
+            effect_lease_token = str(effect.get("lease_token") or "")
+            if not effect_lease_token:
+                raise HTTPException(status_code=409, detail="Draft remediation effect lease token is missing")
             try:
                 version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
                 structured = {
@@ -474,9 +487,14 @@ class ArbitrationWorkflowService:
                 await self.repository.complete_effect(
                     effect_key,
                     {"draft_version_id": remediated["_id"], "draft_version_hash": remediated_hash},
+                    lease_token=effect_lease_token,
                 )
             except Exception as exc:
-                await self.repository.fail_effect(effect_key, error_code=type(exc).__name__)
+                await self.repository.fail_effect(
+                    effect_key,
+                    error_code=type(exc).__name__,
+                    lease_token=effect_lease_token,
+                )
                 raise
         remediation_artifact = await self.repository.create_snapshot(
             run_id=str(run["_id"]),
@@ -927,7 +945,15 @@ class ArbitrationWorkflowService:
                     raise HTTPException(status_code=409, detail="Completed draft effect output hash does not match its immutable version")
             else:
                 if not effect.get("_claimed_now"):
+                    if effect.get("_attempt_limit_reached"):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Draft generation effect exhausted its recovery attempt budget",
+                        )
                     raise HTTPException(status_code=409, detail="Draft generation effect is already in progress")
+                effect_lease_token = str(effect.get("lease_token") or "")
+                if not effect_lease_token:
+                    raise HTTPException(status_code=409, detail="Draft generation effect lease token is missing")
                 try:
                     await self.drafting.generate(
                         str(run["draft_id"]),
@@ -942,9 +968,14 @@ class ArbitrationWorkflowService:
                     await self.repository.complete_effect(
                         effect_key,
                         {"draft_version_id": version.get("_id"), "draft_version_hash": version_hash},
+                        lease_token=effect_lease_token,
                     )
                 except Exception as exc:
-                    await self.repository.fail_effect(effect_key, error_code=type(exc).__name__)
+                    await self.repository.fail_effect(
+                        effect_key,
+                        error_code=type(exc).__name__,
+                        lease_token=effect_lease_token,
+                    )
                     raise
             version, validation, remediation_refs = await self._validate_with_bounded_remediation(
                 run, version, current_user
@@ -1462,12 +1493,34 @@ class ArbitrationWorkflowService:
         coverage = (health.get("primary_cutover") or {}).get("pleading_type_counts") or {}
         if any(int(coverage.get(kind) or 0) < 1 for kind in ("statement_of_claim", "statement_of_defence", "counterclaim", "rejoinder")):
             raise HTTPException(status_code=409, detail="All four pleading types require accepted production-like samples")
+        resolved_acceptance = await resolve_server_backed_acceptance(
+            self.db,
+            criteria=dict(payload.criteria),
+            evidence_hashes=dict(payload.evidence_hashes),
+            stakeholder_signoff_ids=list(payload.stakeholder_signoffs),
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        if not resolved_acceptance.get("valid"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Production acceptance requires server-backed real-execution evidence and bound stakeholder signoffs",
+                    "reason": resolved_acceptance.get("reason"),
+                    "missing_criteria": resolved_acceptance.get("missing_criteria") or [],
+                },
+            )
         receipt = {
             "_id": str(uuid.uuid4()),
             "status": "accepted",
             "criteria": dict(payload.criteria),
             "evidence_hashes": {key: str(value).lower() for key, value in payload.evidence_hashes.items()},
             "stakeholder_signoffs": sorted(set(payload.stakeholder_signoffs)),
+            "acceptance_bundle_hash": resolved_acceptance["bundle_hash"],
+            "evidence_record_ids": resolved_acceptance["evidence_record_ids"],
+            "signoff_receipt_ids": resolved_acceptance["signoff_receipt_ids"],
+            "signoff_actor_ids": resolved_acceptance["signoff_actor_ids"],
+            "signoff_roles": resolved_acceptance["signoff_roles"],
             "organization_ids": sorted(set(payload.organization_ids)),
             "project_ids": sorted(set(payload.project_ids)),
             "health_snapshot_hash": artifact_hash(health),

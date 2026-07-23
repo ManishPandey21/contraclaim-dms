@@ -10,8 +10,8 @@ from fastapi import HTTPException, status
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from .repository import _collect, _jsonable
 from ...core.config import settings
+from .repository import _collect, _jsonable
 
 
 DOWNSTREAM_APPROVAL_GATES = ("matrix_review", "readiness", "plan", "legal_review", "draft", "export")
@@ -127,9 +127,25 @@ class ArbitrationWorkflowRepository:
             raise HTTPException(status_code=409, detail="Workflow snapshot effect key was reused with different input")
         return stored
 
-    async def claim_effect(self, *, run_id: str, effect_key: str, effect_type: str, input_hash: str) -> Dict[str, Any]:
+    async def claim_effect(
+        self,
+        *,
+        run_id: str,
+        effect_key: str,
+        effect_type: str,
+        input_hash: str,
+        lease_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Claim a replay-safe effect with a recoverable process-death lease."""
+
         now = datetime.now(timezone.utc)
         lease_token = str(uuid.uuid4())
+        duration = int(
+            lease_seconds
+            if lease_seconds is not None
+            else settings.ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS
+        )
+        lease_expires_at = now + timedelta(seconds=max(15, duration))
         effect = {
             "_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -139,11 +155,13 @@ class ArbitrationWorkflowRepository:
             "status": "claimed",
             "attempt_count": 1,
             "retryable": False,
-            "lease_expires_at": now + timedelta(minutes=5),
+            "lease_expires_at": lease_expires_at,
             "lease_token": lease_token,
             "created_at": now,
+            "updated_at": now,
         }
         claimed_now = False
+        recovered = False
         try:
             result = await self.db.arbitration_workflow_effects.update_one(
                 {"effect_key": effect_key},
@@ -166,25 +184,38 @@ class ArbitrationWorkflowRepository:
             lease_expires_at = stored.get("lease_expires_at")
             if lease_expires_at and getattr(lease_expires_at, "tzinfo", None) is None:
                 lease_expires_at = lease_expires_at.replace(tzinfo=timezone.utc)
-            retry_budget = max(0, int(settings.ARBITRATION_ENGINE_RETRY_BUDGET))
+            attempts = int(stored.get("attempt_count") or 1)
+            max_attempts = max(1, int(settings.ARBITRATION_ENGINE_EFFECT_MAX_ATTEMPTS))
+            if attempts >= max_attempts:
+                return {
+                    **stored,
+                    "_claimed_now": False,
+                    "_recovered": False,
+                    "_attempt_limit_reached": True,
+                }
             retryable_failure = stored.get("status") == "failed" and bool(stored.get("retryable"))
             expired_claim = stored.get("status") == "claimed" and (
                 lease_expires_at is None or lease_expires_at <= now
             )
-            if (retryable_failure or expired_claim) and int(stored.get("attempt_count") or 1) <= retry_budget:
+            if retryable_failure or expired_claim:
                 reclaimed = await self.db.arbitration_workflow_effects.find_one_and_update(
                     {
                         "effect_key": effect_key,
+                        "run_id": run_id,
+                        "effect_type": effect_type,
+                        "input_hash": input_hash,
                         "status": stored.get("status"),
-                        "attempt_count": int(stored.get("attempt_count") or 1),
+                        "attempt_count": attempts,
+                        "lease_token": stored.get("lease_token"),
                     },
                     {
                         "$set": {
                             "status": "claimed",
                             "retryable": False,
-                            "lease_expires_at": now + timedelta(minutes=5),
+                            "lease_expires_at": now + timedelta(seconds=max(15, duration)),
                             "lease_token": lease_token,
                             "reclaimed_at": now,
+                            "updated_at": now,
                         },
                         "$inc": {"attempt_count": 1},
                     },
@@ -193,16 +224,34 @@ class ArbitrationWorkflowRepository:
                 if reclaimed:
                     stored = reclaimed
                     claimed_now = True
-        return {**stored, "_claimed_now": claimed_now}
+                    recovered = True
+        return {
+            **stored,
+            "_claimed_now": claimed_now,
+            "_recovered": recovered,
+            "_attempt_limit_reached": False,
+        }
 
-    async def renew_effect(self, effect_key: str, lease_token: str, *, lease_seconds: int = 300) -> bool:
+    async def renew_effect(
+        self,
+        effect_key: str,
+        lease_token: str,
+        *,
+        lease_seconds: Optional[int] = None,
+    ) -> bool:
+        duration = int(
+            lease_seconds
+            if lease_seconds is not None
+            else settings.ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS
+        )
+        now = datetime.now(timezone.utc)
         result = await self.db.arbitration_workflow_effects.update_one(
             {"effect_key": effect_key, "status": "claimed", "lease_token": lease_token},
             {
                 "$set": {
-                    "lease_expires_at": datetime.now(timezone.utc)
-                    + timedelta(seconds=max(30, int(lease_seconds))),
-                    "heartbeat_at": datetime.now(timezone.utc),
+                    "lease_expires_at": now + timedelta(seconds=max(15, duration)),
+                    "heartbeat_at": now,
+                    "updated_at": now,
                 }
             },
         )
@@ -213,15 +262,24 @@ class ArbitrationWorkflowRepository:
         effect_key: str,
         output: Dict[str, Any],
         *,
-        lease_token: Optional[str] = None,
+        lease_token: str,
     ) -> None:
         output_refs = _jsonable(output)
-        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
-        if lease_token:
-            query["lease_token"] = lease_token
         updated = await self.db.arbitration_workflow_effects.find_one_and_update(
-            query,
-            {"$set": {"status": "completed", "output_refs": output_refs, "completed_at": datetime.now(timezone.utc)}},
+            {
+                "effect_key": effect_key,
+                "status": "claimed",
+                "lease_token": lease_token,
+            },
+            {
+                "$set": {
+                    "status": "completed",
+                    "output_refs": output_refs,
+                    "completed_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$unset": {"lease_expires_at": ""},
+            },
             return_document=ReturnDocument.AFTER,
         )
         if updated:
@@ -242,14 +300,15 @@ class ArbitrationWorkflowRepository:
         error_code: str,
         retryable: bool = False,
         retry_after_seconds: int = 0,
-        lease_token: Optional[str] = None,
+        lease_token: str,
     ) -> None:
         now = datetime.now(timezone.utc)
-        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
-        if lease_token:
-            query["lease_token"] = lease_token
         await self.db.arbitration_workflow_effects.update_one(
-            query,
+            {
+                "effect_key": effect_key,
+                "status": "claimed",
+                "lease_token": lease_token,
+            },
             {
                 "$set": {
                     "status": "failed",
@@ -257,6 +316,7 @@ class ArbitrationWorkflowRepository:
                     "retryable": bool(retryable),
                     "lease_expires_at": now + timedelta(seconds=max(0, int(retry_after_seconds))),
                     "failed_at": now,
+                    "updated_at": datetime.now(timezone.utc),
                 }
             },
         )

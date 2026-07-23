@@ -444,9 +444,15 @@ class _ScopeColl:
         return _ScopeCursor()
 
 
+class _Projects:
+    async def find_one(self, _query):
+        return {"_id": "proj-A", "organization_id": "org-A"}
+
+
 class _ScopeDB:
     organization_memberships = _ScopeColl()
     project_memberships = _ScopeColl()
+    projects = _Projects()
 
 
 class _Audit:

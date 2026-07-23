@@ -190,8 +190,15 @@ class ArbitrationGraphCommandExecutor:
         if effect.get("status") == "completed":
             return dict(effect.get("output_refs") or {})
         if not effect.get("_claimed_now"):
+            if effect.get("_attempt_limit_reached"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Graph node effect exhausted its recovery attempt budget: {node}",
+                )
             raise HTTPException(status_code=409, detail=f"Graph node effect is already active: {node}")
         lease_token = str(effect.get("lease_token") or "")
+        if not lease_token:
+            raise HTTPException(status_code=409, detail=f"Graph node effect lease token is missing: {node}")
 
         async def heartbeat() -> None:
             while True:
@@ -199,7 +206,7 @@ class ArbitrationGraphCommandExecutor:
                 if not await self.repository.renew_effect(effect_key, lease_token):
                     raise RuntimeError(f"Graph node effect lease was lost: {node}")
 
-        heartbeat_task = asyncio.create_task(heartbeat()) if lease_token else None
+        heartbeat_task = asyncio.create_task(heartbeat())
         operation_task = asyncio.create_task(operation(run))
         try:
             if heartbeat_task:
@@ -218,7 +225,7 @@ class ArbitrationGraphCommandExecutor:
             await self.repository.complete_effect(
                 effect_key,
                 output,
-                lease_token=lease_token or None,
+                lease_token=lease_token,
             )
             return output
         except Exception as exc:
@@ -228,7 +235,7 @@ class ArbitrationGraphCommandExecutor:
                 error_code=type(exc).__name__,
                 retryable=retry_class == "transient",
                 retry_after_seconds=1 if retry_class == "transient" else 0,
-                lease_token=lease_token or None,
+                lease_token=lease_token,
             )
             raise
         finally:
