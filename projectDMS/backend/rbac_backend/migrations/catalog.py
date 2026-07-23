@@ -59,6 +59,10 @@ from .v20260722_0004_arbitration_acceptance_governance import DESCRIPTION as ARB
 from .v20260722_0004_arbitration_acceptance_governance import NAME as ARB_ACCEPTANCE_NAME
 from .v20260722_0004_arbitration_acceptance_governance import VERSION as ARB_ACCEPTANCE_VERSION
 from .v20260722_0004_arbitration_acceptance_governance import upgrade as upgrade_arbitration_acceptance
+from .v20260723_0001_arbitration_effect_recovery import DESCRIPTION as ARB_EFFECT_RECOVERY_DESCRIPTION
+from .v20260723_0001_arbitration_effect_recovery import NAME as ARB_EFFECT_RECOVERY_NAME
+from .v20260723_0001_arbitration_effect_recovery import VERSION as ARB_EFFECT_RECOVERY_VERSION
+from .v20260723_0001_arbitration_effect_recovery import upgrade as upgrade_arbitration_effect_recovery
 
 
 MIGRATIONS = [
@@ -139,5 +143,11 @@ MIGRATIONS = [
         name=ARB_ACCEPTANCE_NAME,
         description=ARB_ACCEPTANCE_DESCRIPTION,
         upgrade=upgrade_arbitration_acceptance,
+    ),
+    Migration(
+        version=ARB_EFFECT_RECOVERY_VERSION,
+        name=ARB_EFFECT_RECOVERY_NAME,
+        description=ARB_EFFECT_RECOVERY_DESCRIPTION,
+        upgrade=upgrade_arbitration_effect_recovery,
     ),
 ]

@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+from ...core.config import settings
 from .repository import _collect, _jsonable
 
 
@@ -126,7 +127,26 @@ class ArbitrationWorkflowRepository:
             raise HTTPException(status_code=409, detail="Workflow snapshot effect key was reused with different input")
         return stored
 
-    async def claim_effect(self, *, run_id: str, effect_key: str, effect_type: str, input_hash: str) -> Dict[str, Any]:
+    async def claim_effect(
+        self,
+        *,
+        run_id: str,
+        effect_key: str,
+        effect_type: str,
+        input_hash: str,
+        owner: Optional[str] = None,
+        lease_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Claim a replay-safe effect with a recoverable process-death lease."""
+
+        now = datetime.now(timezone.utc)
+        owner_id = str(owner or uuid.uuid4())
+        duration = int(
+            lease_seconds
+            if lease_seconds is not None
+            else settings.ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS
+        )
+        lease_expires_at = now + timedelta(seconds=max(15, duration))
         effect = {
             "_id": str(uuid.uuid4()),
             "run_id": run_id,
@@ -134,9 +154,14 @@ class ArbitrationWorkflowRepository:
             "effect_type": effect_type,
             "input_hash": input_hash,
             "status": "claimed",
-            "created_at": datetime.now(timezone.utc),
+            "lease_owner": owner_id,
+            "lease_expires_at": lease_expires_at,
+            "attempt": 1,
+            "created_at": now,
+            "updated_at": now,
         }
         claimed_now = False
+        recovered = False
         try:
             result = await self.db.arbitration_workflow_effects.update_one(
                 {"effect_key": effect_key},
@@ -155,13 +180,73 @@ class ArbitrationWorkflowRepository:
             or stored.get("input_hash") != input_hash
         ):
             raise HTTPException(status_code=409, detail="Workflow effect key was reused with different input")
-        return {**stored, "_claimed_now": claimed_now}
+        if not claimed_now and stored.get("status") == "claimed":
+            attempts = int(stored.get("attempt") or 1)
+            if attempts >= int(settings.ARBITRATION_ENGINE_EFFECT_MAX_ATTEMPTS):
+                return {
+                    **stored,
+                    "_claimed_now": False,
+                    "_recovered": False,
+                    "_lease_owner": stored.get("lease_owner"),
+                    "_attempt_limit_reached": True,
+                }
+            reclaimed = await self.db.arbitration_workflow_effects.find_one_and_update(
+                {
+                    "effect_key": effect_key,
+                    "run_id": run_id,
+                    "effect_type": effect_type,
+                    "input_hash": input_hash,
+                    "status": "claimed",
+                    "$or": [
+                        {"lease_expires_at": {"$lte": now}},
+                        {"lease_expires_at": {"$exists": False}},
+                    ],
+                },
+                {
+                    "$set": {
+                        "lease_owner": owner_id,
+                        "lease_expires_at": lease_expires_at,
+                        "recovered_at": now,
+                        "updated_at": now,
+                    },
+                    "$inc": {"attempt": 1},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if reclaimed:
+                stored = reclaimed
+                claimed_now = True
+                recovered = True
+        return {
+            **stored,
+            "_claimed_now": claimed_now,
+            "_recovered": recovered,
+            "_lease_owner": stored.get("lease_owner"),
+            "_attempt_limit_reached": False,
+        }
 
-    async def complete_effect(self, effect_key: str, output: Dict[str, Any]) -> None:
+    async def complete_effect(
+        self,
+        effect_key: str,
+        output: Dict[str, Any],
+        *,
+        owner: Optional[str] = None,
+    ) -> None:
         output_refs = _jsonable(output)
+        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
+        if owner:
+            query["lease_owner"] = str(owner)
         updated = await self.db.arbitration_workflow_effects.find_one_and_update(
-            {"effect_key": effect_key, "status": "claimed"},
-            {"$set": {"status": "completed", "output_refs": output_refs, "completed_at": datetime.now(timezone.utc)}},
+            query,
+            {
+                "$set": {
+                    "status": "completed",
+                    "output_refs": output_refs,
+                    "completed_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$unset": {"lease_owner": "", "lease_expires_at": ""},
+            },
             return_document=ReturnDocument.AFTER,
         )
         if updated:
@@ -175,14 +260,24 @@ class ArbitrationWorkflowRepository:
             return
         raise HTTPException(status_code=409, detail="Workflow effect cannot be completed from its current state")
 
-    async def fail_effect(self, effect_key: str, *, error_code: str) -> None:
+    async def fail_effect(
+        self,
+        effect_key: str,
+        *,
+        error_code: str,
+        owner: Optional[str] = None,
+    ) -> None:
+        query: Dict[str, Any] = {"effect_key": effect_key, "status": "claimed"}
+        if owner:
+            query["lease_owner"] = str(owner)
         await self.db.arbitration_workflow_effects.update_one(
-            {"effect_key": effect_key, "status": "claimed"},
+            query,
             {
                 "$set": {
                     "status": "failed",
                     "error_code": str(error_code),
                     "failed_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
                 }
             },
         )

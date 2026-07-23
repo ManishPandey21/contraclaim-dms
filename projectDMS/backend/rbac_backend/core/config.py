@@ -243,6 +243,18 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES: int = Field(default=262144, ge=4096, validation_alias="ARBITRATION_ENGINE_MAX_CHECKPOINT_BYTES")
     ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS: int = Field(default=30, ge=1, validation_alias="ARBITRATION_ENGINE_CHECKPOINT_RETENTION_DAYS")
     ARBITRATION_ENGINE_RETRY_BUDGET: int = Field(default=3, ge=0, le=20, validation_alias="ARBITRATION_ENGINE_RETRY_BUDGET")
+    ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS: int = Field(
+        default=120,
+        ge=15,
+        le=3600,
+        validation_alias="ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS",
+    )
+    ARBITRATION_ENGINE_EFFECT_MAX_ATTEMPTS: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        validation_alias="ARBITRATION_ENGINE_EFFECT_MAX_ATTEMPTS",
+    )
     ARBITRATION_ENGINE_MAX_FANOUT_PER_SCOPE: int = Field(
         default=4,
         ge=1,
