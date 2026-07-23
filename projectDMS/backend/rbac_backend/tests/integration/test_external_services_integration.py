@@ -7,14 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict
 
-import numpy as np
 import pytest
 from langchain_core.embeddings import Embeddings
 
-import rbac_backend.services.falkordb_vector_service as falkordb_module
 import rbac_backend.services.openai_service as openai_module
 from rbac_backend.config.document_processing_config import DocumentProcessingConfig
-from rbac_backend.services.falkordb_vector_service import FalkorDBVectorService
 from rbac_backend.services.langchain_vector_service import LangChainVectorService
 from rbac_backend.services.openai_service import OpenAIService
 
@@ -135,56 +132,6 @@ class _DeterministicEmbeddings(Embeddings):
         ]
 
 
-class _FakeSearchIndex:
-    def __init__(self, client: "_FakeRedisClient", index_name: str) -> None:
-        self._client = client
-        self._index_name = index_name
-
-    def info(self) -> dict[str, Any]:
-        if self._index_name not in self._client.indexes:
-            raise RuntimeError("Index does not exist")
-        return {"index_name": self._index_name}
-
-    def create_index(self, *, fields: Any, definition: Any) -> None:
-        self._client.indexes.add(self._index_name)
-
-    def dropindex(self, delete_documents: bool = False, dd: bool = False) -> None:
-        self._client.indexes.discard(self._index_name)
-        if delete_documents or dd:
-            prefix = f"{self._index_name}:"
-            for key in [name for name in self._client.hashes if name.startswith(prefix)]:
-                self._client.hashes.pop(key, None)
-
-
-class _FakeRedisClient:
-    def __init__(self) -> None:
-        self.hashes: Dict[str, Dict[bytes, bytes]] = {}
-        self.indexes: set[str] = set()
-
-    def ft(self, index_name: str) -> _FakeSearchIndex:
-        return _FakeSearchIndex(self, index_name)
-
-    def hset(self, key: str, *, mapping: Dict[str, Any]) -> int:
-        encoded: Dict[bytes, bytes] = {}
-        for field, value in mapping.items():
-            field_bytes = field.encode("utf-8") if isinstance(field, str) else bytes(field)
-            if isinstance(value, bytes):
-                value_bytes = value
-            elif isinstance(value, str):
-                value_bytes = value.encode("utf-8")
-            else:
-                value_bytes = str(value).encode("utf-8")
-            encoded[field_bytes] = value_bytes
-        self.hashes[key] = encoded
-        return len(encoded)
-
-    def hgetall(self, key: str) -> Dict[bytes, bytes]:
-        return dict(self.hashes.get(key, {}))
-
-    def delete(self, key: str) -> int:
-        return 1 if self.hashes.pop(key, None) is not None else 0
-
-
 @pytest.mark.external_service
 async def test_openai_service_document_round_trip_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(openai_module, "AsyncOpenAI", _FakeAsyncOpenAI)
@@ -268,48 +215,6 @@ async def test_qdrant_langchain_vector_round_trip_contract(monkeypatch: pytest.M
 
 
 @pytest.mark.external_service
-async def test_falkordb_vector_service_round_trip_contract(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_client = _FakeRedisClient()
-
-    class _FakeRedisFactory:
-        @staticmethod
-        def from_url(url: str) -> _FakeRedisClient:
-            assert url == "memory://falkor"
-            return fake_client
-
-    monkeypatch.setattr(falkordb_module, "Redis", _FakeRedisFactory)
-
-    index_name = f"itest_{uuid.uuid4().hex[:12]}"
-    document_id = f"doc-{uuid.uuid4().hex}"
-
-    config = DocumentProcessingConfig(falkordb_enabled=True)
-    config.falkordb_index_name = index_name
-    config.falkordb_vector_dim = 4
-    config.falkordb_url = "memory://falkor"
-    service = FalkorDBVectorService(config)
-    key = f"{service.index_name}:{document_id}:0"
-
-    payloads = [
-        {
-            "text": "Redis integration smoke payload",
-            "vector": np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
-            "metadata": {
-                "document_id": document_id,
-                "chunk_index": 0,
-            },
-        }
-    ]
-
-    saved = await service.save_data(payloads)
-    assert saved == 1
-
-    stored = service.client.hgetall(key)
-    assert stored
-    assert stored.get(b"text") == b"Redis integration smoke payload"
-    assert stored.get(b"document_id") == document_id.encode("utf-8")
-
-
-@pytest.mark.external_service
 @pytest.mark.live_external_service
 async def test_openai_service_document_round_trip_live(tmp_path: Path) -> None:
     _require_live_external_services("OPENAI_API_KEY")
@@ -389,53 +294,3 @@ async def test_qdrant_langchain_vector_round_trip_live() -> None:
         client = getattr(service, "_client", None)
         if client is not None:
             await asyncio.to_thread(client.delete_collection, collection_name)
-
-
-@pytest.mark.external_service
-@pytest.mark.live_external_service
-async def test_falkordb_vector_service_round_trip_live() -> None:
-    _require_live_external_services("FALKORDB_URL")
-
-    index_name = f"itest_{uuid.uuid4().hex[:12]}"
-    document_id = f"doc-{uuid.uuid4().hex}"
-
-    config = DocumentProcessingConfig(falkordb_enabled=True)
-    config.falkordb_index_name = index_name
-    config.falkordb_vector_dim = 4
-    config.falkordb_url = os.environ["FALKORDB_URL"]
-    service = FalkorDBVectorService(config)
-    key = f"{service.index_name}:{document_id}:0"
-
-    payloads = [
-        {
-            "text": "Redis integration smoke payload",
-            "vector": np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
-            "metadata": {
-                "document_id": document_id,
-                "chunk_index": 0,
-            },
-        }
-    ]
-
-    try:
-        saved = await service.save_data(payloads)
-        assert saved == 1
-
-        stored = service.client.hgetall(key)
-        assert stored
-        assert stored.get(b"text") == b"Redis integration smoke payload"
-        assert stored.get(b"document_id") == document_id.encode("utf-8")
-    finally:
-        try:
-            service.client.delete(key)
-        except Exception:
-            pass
-        try:
-            service.client.ft(index_name).dropindex(delete_documents=True)
-        except TypeError:
-            try:
-                service.client.ft(index_name).dropindex(dd=True)
-            except Exception:
-                pass
-        except Exception:
-            pass

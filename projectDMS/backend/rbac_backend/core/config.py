@@ -282,8 +282,6 @@ class Settings(BaseSettings):
     FALKORDB_GRAPH_NAME: str = Field(default="contraclaim", validation_alias="FALKORDB_GRAPH_NAME")
     FALKORDB_PASSWORD: Optional[str] = Field(default=None, validation_alias="FALKORDB_PASSWORD")
     FALKORDB_CLEANUP_REFERENCES: bool = Field(default=True, validation_alias="FALKORDB_CLEANUP_REFERENCES")
-    FALKORDB_INDEX_NAME: str = Field(default="document_vectors", validation_alias="FALKORDB_INDEX_NAME")
-    FALKORDB_VECTOR_DIM: int = Field(default=1536, validation_alias="FALKORDB_VECTOR_DIM")
 
     # Knowledge graph provider selection. Production uses direct FalkorDB access;
     # Graphiti remains an explicitly enabled experimental adapter path.

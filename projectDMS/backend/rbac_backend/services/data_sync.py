@@ -3,19 +3,16 @@ import asyncio
 try:
     from .mongodb_reader import MongoDBReader
     from .langchain_vector_service import LangChainVectorService
-    from .falkordb_vector_service import FalkorDBVectorService
     from ..config.document_processing_config import DocumentProcessingConfig
 except ImportError:  # pragma: no cover - script compatibility
     from services.mongodb_reader import MongoDBReader
     from services.langchain_vector_service import LangChainVectorService
-    from services.falkordb_vector_service import FalkorDBVectorService
     from config.document_processing_config import DocumentProcessingConfig
 
 async def sync_data():
     config = DocumentProcessingConfig()
     mongodb_reader = MongoDBReader(config)
     langchain_service = LangChainVectorService(config)
-    falkordb_service = FalkorDBVectorService(config)
 
     data = await mongodb_reader.read_contraclaim_data()
     payloads = []
@@ -31,7 +28,6 @@ async def sync_data():
 
     if langchain_service.enabled:
         await langchain_service.replace_document(payloads)
-    await falkordb_service.save_data(payloads)
 
     await mongodb_reader.close_connection()
 

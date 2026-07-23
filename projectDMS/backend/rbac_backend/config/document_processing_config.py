@@ -168,9 +168,7 @@ class DocumentProcessingConfig:
     falkordb_password: Optional[str] = None
     # NOTE: falkordb_url is now a @property only - removed field declaration to avoid conflicts
     falkordb_graph_name: str = "contraclaim"
-    falkordb_index_name: str = "document_vectors"
-    falkordb_vector_dim: int = 1536
-    
+
     _falkordb_url_override: Optional[str] = None
 
     def __post_init__(self):
@@ -312,18 +310,6 @@ class DocumentProcessingConfig:
         if graph_env:
             self.falkordb_graph_name = graph_env
 
-        index_env = os.getenv("FALKORDB_INDEX_NAME")
-        if index_env:
-            self.falkordb_index_name = index_env
-
-        vector_dim_env = os.getenv("FALKORDB_VECTOR_DIM")
-        if vector_dim_env:
-            self.falkordb_vector_dim = _coerce_int(
-                vector_dim_env,
-                "FALKORDB_VECTOR_DIM",
-                self.falkordb_vector_dim,
-            )
-
         self._clear_default_falkordb_override_if_components_explicit()
 
         dual_env = os.getenv("DUAL_VECTOR_WRITE")
@@ -447,16 +433,6 @@ class DocumentProcessingConfig:
             self.falkordb_graph_name = getattr(
                 settings, "FALKORDB_GRAPH_NAME", self.falkordb_graph_name
             )
-            self.falkordb_index_name = getattr(
-                settings, "FALKORDB_INDEX_NAME", self.falkordb_index_name
-            )
-            settings_falkordb_vector_dim = getattr(settings, "FALKORDB_VECTOR_DIM", None)
-            if settings_falkordb_vector_dim is not None:
-                self.falkordb_vector_dim = _coerce_int(
-                    settings_falkordb_vector_dim,
-                    "FALKORDB_VECTOR_DIM",
-                    self.falkordb_vector_dim,
-                )
 
             override = _normalize_falkordb_url(getattr(settings, "FALKORDB_URL", None))
             if override and not (

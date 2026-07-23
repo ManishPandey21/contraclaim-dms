@@ -29,8 +29,6 @@ def _settings_stub(**overrides):
         "FALKORDB_PORT": 6380,
         "FALKORDB_PASSWORD": None,
         "FALKORDB_GRAPH_NAME": "contraclaim",
-        "FALKORDB_INDEX_NAME": "document_vectors",
-        "FALKORDB_VECTOR_DIM": 1536,
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
