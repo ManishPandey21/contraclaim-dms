@@ -42,7 +42,10 @@ INDEXES = [
         ],
         "arb_acceptance_evidence_scope_criterion_hash",
         True,
-        {"invalidated_at": {"$exists": False}},
+        # Equality to null is supported by MongoDB partial indexes and matches
+        # both missing and explicitly-null fields. Invalidated records carry a
+        # timestamp, so they remain outside the active-record uniqueness set.
+        {"invalidated_at": None},
     ),
     (
         "arbitration_acceptance_signoffs",
@@ -54,7 +57,7 @@ INDEXES = [
         ],
         "arb_acceptance_signoff_scope_bundle_actor",
         True,
-        {"invalidated_at": {"$exists": False}},
+        {"invalidated_at": None},
     ),
 ]
 

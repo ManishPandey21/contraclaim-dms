@@ -28,6 +28,9 @@ from rbac_backend.migrations.v20260722_0002_arbitration_phase6_scope_index impor
 from rbac_backend.migrations.v20260722_0003_arbitration_filing_export_effects import (
     upgrade as upgrade_arbitration_export_effects,
 )
+from rbac_backend.migrations.v20260723_0001_arbitration_effect_recovery import (
+    upgrade as upgrade_arbitration_effect_recovery,
+)
 from rbac_backend.migrations.runner import LEDGER_COLLECTION
 
 
@@ -181,6 +184,43 @@ async def test_filing_export_effect_migration_adds_unique_effect_and_lease_index
         [("status", 1), ("execution_lease_expires_at", 1)],
         {"name": "status_1_execution_lease_expires_at_1", "background": True},
     ) in db.arbitration_bundle_exports.indexes
+
+
+@pytest.mark.asyncio
+async def test_effect_recovery_migration_uses_supported_active_record_partial_indexes():
+    db = _DB()
+
+    result = await upgrade_arbitration_effect_recovery(db, dry_run=False)
+
+    assert result.status == "applied"
+    assert (
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("criterion", 1),
+            ("evidence_hash", 1),
+        ],
+        {
+            "name": "arb_acceptance_evidence_scope_criterion_hash",
+            "unique": True,
+            "background": True,
+            "partialFilterExpression": {"invalidated_at": None},
+        },
+    ) in db.arbitration_acceptance_evidence.indexes
+    assert (
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("acceptance_bundle_hash", 1),
+            ("actor_id", 1),
+        ],
+        {
+            "name": "arb_acceptance_signoff_scope_bundle_actor",
+            "unique": True,
+            "background": True,
+            "partialFilterExpression": {"invalidated_at": None},
+        },
+    ) in db.arbitration_acceptance_signoffs.indexes
 
 
 def test_seed_catalog_digest_is_stable_and_validates_current_seeds():
