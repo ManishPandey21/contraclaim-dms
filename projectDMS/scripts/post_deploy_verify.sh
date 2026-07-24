@@ -147,7 +147,27 @@ if [[ -n "$PUBLIC_BASE_URL" ]]; then
 fi
 
 database_url=$(get_env DATABASE_URL)
-if command -v mongosh >/dev/null 2>&1 && [[ -n "$database_url" ]]; then
+backend_container=$(docker compose --env-file "$ENV_FILE" $COMPOSE_FILES ps -q backend 2>/dev/null || true)
+if [[ -n "$backend_container" ]]; then
+  if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false backend \
+    python -c 'import os; from pymongo import MongoClient; client = MongoClient(os.environ["DATABASE_URL"], serverSelectionTimeoutMS=8000); assert client.admin.command("ping").get("ok") == 1' \
+    >/tmp/mongo_ping.out 2>&1; then
+    pass "MongoDB ping succeeded through backend DATABASE_URL"
+  else
+    fail "MongoDB ping failed through backend DATABASE_URL"
+  fi
+
+  replica_set=$(get_env MONGODB_REPLICA_SET)
+  if [[ -n "$replica_set" ]]; then
+    if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false backend \
+      python -c 'import os; from pymongo import MongoClient; client = MongoClient(os.environ["DATABASE_URL"], serverSelectionTimeoutMS=8000); assert client.admin.command("replSetGetStatus").get("ok") == 1' \
+      >/tmp/mongo_rs.out 2>&1; then
+      pass "MongoDB replica-set status succeeded through backend"
+    else
+      fail "MongoDB replica-set status failed through backend"
+    fi
+  fi
+elif command -v mongosh >/dev/null 2>&1 && [[ -n "$database_url" ]]; then
   if mongosh "$database_url" --quiet --eval "db.adminCommand('ping').ok" >/tmp/mongo_ping.out 2>&1; then
     pass "MongoDB ping succeeded through DATABASE_URL"
   else
@@ -163,7 +183,7 @@ if command -v mongosh >/dev/null 2>&1 && [[ -n "$database_url" ]]; then
     fi
   fi
 else
-  warn "mongosh or DATABASE_URL unavailable; relying on backend /health/ready for MongoDB verification"
+  warn "Backend container and host mongosh probe unavailable; relying on backend /health/ready for MongoDB verification"
 fi
 
 if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false redis sh -lc 'if [ -n "${REDIS_PASSWORD:-}" ]; then redis-cli -a "$REDIS_PASSWORD" ping; else redis-cli ping; fi' >/tmp/redis_ping.out 2>&1; then
