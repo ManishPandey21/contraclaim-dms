@@ -853,6 +853,10 @@ These results do not authorize primary rollout. The following global acceptance 
 
 Until all six are closed, `ARBITRATION_ENGINE_PRODUCTION_ACCEPTED` must remain false, primary/canary allocation must remain zero, the default must remain `arbitration_v2`, and `arbitration_v2` must not be deprecated. Detailed evidence and blocker ownership are recorded in `arbitration_langgraph_pending_work_and_blockers_2026-07-23.md`.
 
+Post-deployment re-verification on 2026-07-26 deployed the equivalent GitHub commits `512362470911927ee95a6391a50d53f51fa39f75` (`contraclaim/main`) and `d47ea624862c54ffaa7c75ede657dd0d5508116d` (`projectDMS/main`). A fresh full backup (`20260726-165848`) completed before the rollout. The new backend/worker/client images, migration dry-run/apply, public and internal health checks, MongoDB replica set, Redis, metrics authentication, and isolated old-image rollback check all passed. The final S3 and live-model outage/recovery drills also passed against the new image. Internal signing and metrics credentials were rotated after diagnostics, followed by another green post-deploy verification.
+
+The browser test authenticated a temporary drafter account and reached the server-enforced active-terms gate. It deliberately stopped there: accepting the active Security/Privacy/Anti-Piracy Terms would create a legal-consent record, and no authority was provided to accept it on behalf of the disposable test identity. The temporary accounts and tagged case were removed. This preserves the requirement as an open acceptance gate rather than fabricating browser or legal evidence.
+
 ## 16. Final Recommendation
 
 The current arbitration subsystem should remain the domain foundation and short-term fallback, but it needs immediate gate hardening. It should not be replaced by the experimental sidecar, and official LangGraph should not be introduced merely as a wrapper around the current sequential orchestrator without first fixing approval/provenance/export semantics.

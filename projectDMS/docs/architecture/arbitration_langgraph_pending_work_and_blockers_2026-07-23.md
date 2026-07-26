@@ -101,9 +101,9 @@ The exposed AWS account-root access key was replaced with a least-privilege prod
 
 ### B5 — Final production/browser/rollback evidence
 
-The release is not accepted until the committed code is deployed fail-closed, its exact commit is verified, an isolated old-image application rollback starts successfully without changing databases, and two authenticated accounts exercise tenant/role isolation in a real browser.
+The committed code is deployed fail-closed, its exact commit is verified, and the isolated old-image rollback check passed. The browser exercise authenticated a temporary drafter account and reached the server-enforced Security/Privacy/Anti-Piracy Terms gate. It did not accept the terms or fabricate a legal-consent record, and therefore could not complete the reviewer account or tenant/role-isolation flow.
 
-**Required to clear:** complete the deployment checklist and append the evidence in section 6.
+**Required to clear:** an authorized representative must approve acceptance of the active terms for two explicitly named disposable QA accounts, or supply two already-authorized QA accounts. Then complete the drafter/reviewer tenant-and-role-isolation browser flow and remove the temporary data.
 
 ### B6 — Final online Python advisory database re-query
 
@@ -132,18 +132,19 @@ The active requirements were rebuilt successfully after removing/upgrading the v
 
 ## 6. Final deployment evidence
 
-This section is intentionally completed only after the exact release commit is deployed and reverified.
+- Deployed commit: `512362470911927ee95a6391a50d53f51fa39f75` (`contraclaim/main`)
+- Equivalent `projectDMS/main` commit: `d47ea624862c54ffaa7c75ede657dd0d5508116d`
+- Backup identifier: `20260726-165848`; MongoDB and all required volumes are fresh and checksummed.
+- Migration result: dry-run and apply both reported all registered migrations `skipped`, with no warnings.
+- Public health/readiness: public `/health`, backend live/ready, MongoDB replica set, Redis, Qdrant, FalkorDB, ClamAV, and client health all passed.
+- Rollout flag proof: `rollout=off`, `default=arbitration_v2`, `accepted=False`, `primary=0`, `canary=0`.
+- Metrics authentication proof: unauthenticated `/metrics` returned `401`; the internal-token request returned `200`.
+- Isolated old-image rollback proof: tagged pre-deployment backend image returned `/health/live` from a read-only, `--network none` container with no production volumes or database connectivity.
+- Authenticated two-account browser proof: drafter authentication and mandatory terms gate passed; the remainder is blocked pending authorized terms consent as described in B5.
+- Post-deploy S3/model-outage proof: network-isolated S3 and model calls failed closed with `EndpointConnectionError` and `APIConnectionError`; live recovery calls succeeded, and the S3 temporary object was deleted.
+- Final internal credential rotation: `SECRET_KEY` and `METRICS_TOKEN` rotated after diagnostics; root `.env` mode verified `0600`; backend/worker recreated; post-rotation verification passed.
 
-- Deployed commit: pending
-- Backup identifier: pending
-- Migration result: pending
-- Public health/readiness: pending
-- Rollout flag proof: pending
-- Metrics authentication proof: pending
-- Isolated old-image rollback proof: pending
-- Authenticated two-account browser proof: pending
-- Post-deploy S3/model-outage proof: pending
-- Final internal credential rotation: pending
+The first post-rotation verification found a stale `backend/.env` overriding the root Compose environment in release scripts. The scripts were corrected to load the legacy backend file only as fallback; the final post-deploy verification then passed with zero failures.
 
 ## 7. Acceptance disposition
 
