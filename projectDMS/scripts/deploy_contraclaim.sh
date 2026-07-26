@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e  # exit on any error
 
+PYTHON_VERSION="3.12"
+PYTHON_BIN="python${PYTHON_VERSION}"
+
 # -------------------------------
 # Color and logging functions
 # -------------------------------
@@ -27,11 +30,11 @@ fi
 [ -d "/opt/contraclaim/backend" ] || log_error "Backend directory missing: /opt/contraclaim/backend"
 [ -d "/opt/contraclaim/client" ] || log_error "Frontend directory missing: /opt/contraclaim/client"
 
-# Check Python & Node
-command -v python3 >/dev/null || log_error "python3 not found"
+# Check Python & Node. Keep Ubuntu's default python3 untouched; application
+# environments are explicitly built with the supported interpreter.
+command -v "$PYTHON_BIN" >/dev/null || log_error "${PYTHON_BIN} not found"
 command -v node >/dev/null || log_error "node not found"
 command -v npm >/dev/null || log_error "npm not found"
-command -v pip3 >/dev/null || log_error "pip3 not found"
 
 # Check ports (optional)
 if ss -tlnp | grep -q ":8000 "; then
@@ -47,13 +50,16 @@ fi
 log_info "Setting up backend..."
 cd /opt/contraclaim/backend
 
-# Create virtual environment if not exists
+# Recreate only the application venv when it was made by a different Python.
+if [ -x "venv/bin/python" ] && [ "$(venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" != "$PYTHON_VERSION" ]; then
+    mv venv "venv.python-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
 if [ ! -d "venv" ]; then
-    python3 -m venv venv
+    "$PYTHON_BIN" -m venv venv
 fi
 source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 deactivate
 
 # -------------------------------

@@ -77,7 +77,7 @@ def build_drafting_graph(
     def collect_evidence(state: DraftGraphState) -> Dict[str, Any]:
         # Scoped retrieval runs before this synchronous graph invocation. This
         # node records only its completion marker and snapshot IDs, so it can
-        # safely participate in Python 3.10 interrupt/checkpoint execution.
+        # safely participate in the supported Python 3.12 interrupt/checkpoint execution.
         return {"evidence_collected": bool(state.get("context_snapshot_id"))}
 
     def review_correspondence(state: DraftGraphState) -> Dict[str, Any]:

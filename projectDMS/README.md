@@ -30,6 +30,7 @@ Once the containers start:
 - Qdrant dashboard/API: http://localhost:6333
 
 ## Development Notes
+- Python services use Python 3.12. Create project virtual environments explicitly with `py -3.12 -m venv backend/.venv` on Windows or `python3.12 -m venv backend/.venv` on Ubuntu; do not change the operating system's default `python3` interpreter.
 - The backend build uses ackend/.env. Adjust for Docker context as required.
 - To rebuild after code changes, run docker compose build backend client.
 - WebSocket updates are available at ws://localhost/ws/<job_id> once a workflow is running.

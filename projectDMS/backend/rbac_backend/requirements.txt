@@ -2,7 +2,7 @@ aiosmtplib==5.1.1
 annotated-types==0.7.0
 razorpay==1.4.2
 anyio==4.8.0
-bcrypt==3.2.2
+bcrypt==4.2.1
 APScheduler==3.10.4
 beanie==1.29.0
 blinker==1.9.0

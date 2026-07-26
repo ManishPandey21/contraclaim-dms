@@ -28,7 +28,7 @@ Contract correspondence + document management with: project/org multi-tenant acc
 ### 2.2 Tech stack **[Confirmed]**
 | Layer | Technology | Evidence |
 |---|---|---|
-| Backend | Python 3.10/3.11, FastAPI, Uvicorn | `backend/rbac_backend/main.py`, `requirements.txt`, `.github/workflows/ci.yml` |
+| Backend | Python 3.12, FastAPI, Uvicorn | `backend/rbac_backend/main.py`, `requirements.txt`, `.github/workflows/ci.yml` |
 | Primary DB | MongoDB (replica set) via `motor` (async) | `backend/rbac_backend/core/database.py` |
 | Vectors | Qdrant (with MongoDB mirror fallback) | `retrieval/vector_client.py`, `core/config.py` |
 | Knowledge graph | FalkorDB (Redis-protocol) | `services/falkor_graph_service.py`, `graph/` |

@@ -10,7 +10,7 @@ permissions:
   security-events: write
 
 env:
-  PYTHON_VERSION: "3.11"
+  PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
   DATABASE_URL: mongodb://localhost:27017/contraclaim
   SECRET_KEY: ci-secret-key-at-least-32-characters
@@ -167,6 +167,18 @@ jobs:
       - name: Build frontend image
         run: docker build -t projectdms-client:${{ github.sha }} ./client
 
+      # These services are profile-gated in compose, but their Python runtime
+      # must still be built on every change so a 3.12 incompatibility cannot
+      # remain hidden until an operator enables the profile.
+      - name: Build LangGraph image
+        run: docker build -t projectdms-langgraph:${{ github.sha }} ./services/langgraph
+
+      - name: Build Graphiti image
+        run: docker build -t projectdms-graphiti:${{ github.sha }} ./services/graphiti
+
+      - name: Build Docling image
+        run: docker build -t projectdms-docling:${{ github.sha }} ./services/docling
+
       - name: Scan backend image
         uses: aquasecurity/trivy-action@0.24.0
         with:
@@ -180,6 +192,33 @@ jobs:
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: projectdms-client:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Scan LangGraph image
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: projectdms-langgraph:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Scan Graphiti image
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: projectdms-graphiti:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+
+      - name: Scan Docling image
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: projectdms-docling:${{ github.sha }}
           format: table
           exit-code: "1"
           ignore-unfixed: true

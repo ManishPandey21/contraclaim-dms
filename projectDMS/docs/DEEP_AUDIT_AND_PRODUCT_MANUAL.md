@@ -766,7 +766,7 @@ Known limitation: dashboard currently equates total letters with total documents
 Expected tooling:
 
 - Docker and Docker Compose
-- Python 3.11
+- Python 3.12 (project virtual environments and containers; do not replace the OS `python3` default)
 - Node.js 20
 - MongoDB 8.0 for local backend development
 - Redis for runtime/session/queue state
@@ -1321,4 +1321,3 @@ Weaknesses to address before market:
 - [ ] Replace request-time index creation with migrations/startup setup.
 - [ ] Add frontend E2E tests for top workflows.
 - [ ] Add API contract tests for auth, CSRF, upload, search, and drafting.
-

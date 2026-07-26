@@ -31,6 +31,8 @@ CLIENT_DIR="/opt/contraclaim/client"
 WEB_ROOT="/var/www/web"
 VENV_DIR="${BACKEND_DIR}/venv"
 REQUIREMENTS="${BACKEND_DIR}/rbac_backend/requirements.txt"
+PYTHON_VERSION="3.12"
+PYTHON_BIN="python${PYTHON_VERSION}"
 NGINX_SITE="/etc/nginx/sites-available/contraclaim"
 BACKEND_SERVICE="contraclaim-backend"
 WORKER_SERVICE="contraclaim-worker"
@@ -93,15 +95,15 @@ install_system_deps() {
 }
 
 install_python() {
-  if command -v python3.11 &>/dev/null; then
-    ok "Python 3.11 already installed: $(python3.11 --version)"
+  if command -v "$PYTHON_BIN" &>/dev/null; then
+    ok "Python ${PYTHON_VERSION} already installed: $($PYTHON_BIN --version)"
     return
   fi
-  log "Installing Python 3.11..."
+  log "Installing Python ${PYTHON_VERSION} alongside the system Python..."
   add-apt-repository -y ppa:deadsnakes/ppa
   apt-get update -qq
-  apt-get install -y -qq python3.11 python3.11-venv python3.11-dev
-  ok "Python 3.11 installed."
+  apt-get install -y -qq "${PYTHON_BIN}" "${PYTHON_BIN}-venv" "${PYTHON_BIN}-dev"
+  ok "Python ${PYTHON_VERSION} installed without changing the system default interpreter."
 }
 
 install_node() {
@@ -136,7 +138,7 @@ if $FULL_INSTALL; then
   install_nginx
 else
   # Verify required tools exist
-  command -v python3.11 &>/dev/null || die "python3.11 not found. Run with --full to install."
+  command -v "$PYTHON_BIN" &>/dev/null || die "${PYTHON_BIN} not found. Run with --full to install Python ${PYTHON_VERSION}."
   command -v node &>/dev/null       || die "node not found. Run with --full to install."
   command -v nginx &>/dev/null      || die "nginx not found. Run with --full to install."
 fi
@@ -172,10 +174,19 @@ log "Setting up backend Python environment..."
 
 cd "$BACKEND_DIR"
 
-# Create venv if it doesn't exist
+# Preserve a previous-runtime venv for rollback, then create a clean 3.12 venv.
+# This deliberately never alters the operating system's python3 alternative.
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+  VENV_VERSION=$(sudo -u "$APP_USER" "$VENV_DIR/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo "unknown")
+  if [[ "$VENV_VERSION" != "$PYTHON_VERSION" ]]; then
+    VENV_BACKUP="${VENV_DIR}.python-${VENV_VERSION//./_}-$(date -u +%Y%m%dT%H%M%SZ)"
+    log "Preserving Python ${VENV_VERSION} venv at $VENV_BACKUP before rebuilding with Python ${PYTHON_VERSION}."
+    mv "$VENV_DIR" "$VENV_BACKUP"
+  fi
+fi
 if [[ ! -d "$VENV_DIR" ]]; then
   log "Creating virtual environment..."
-  sudo -u "$APP_USER" python3.11 -m venv "$VENV_DIR"
+  sudo -u "$APP_USER" "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi
 
 # Install/update dependencies
