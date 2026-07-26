@@ -3,6 +3,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from pymongo.errors import DuplicateKeyError
+
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, Enum):
@@ -98,8 +100,17 @@ class ArbitrationDraftingRepository:
 
     async def create_generation_run(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         payload = _jsonable(doc)
-        await self.db.arbitration_generation_runs.insert_one(payload)
-        return payload
+        try:
+            await self.db.arbitration_generation_runs.insert_one(payload)
+            return payload
+        except DuplicateKeyError:
+            existing = await self.db.arbitration_generation_runs.find_one({"_id": payload.get("_id")})
+            if not existing or any(
+                existing.get(field) != payload.get(field)
+                for field in ("draft_id", "run_type", "input_hash", "prompt_version", "model")
+            ):
+                raise
+            return existing
 
     async def update_generation_run(self, run_id: str, update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return await self.db.arbitration_generation_runs.find_one_and_update(
@@ -130,8 +141,17 @@ class ArbitrationDraftingRepository:
 
     async def create_version(self, doc: Dict[str, Any]) -> Dict[str, Any]:
         payload = _jsonable(doc)
-        await self.db.arbitration_draft_versions.insert_one(payload)
-        return payload
+        try:
+            await self.db.arbitration_draft_versions.insert_one(payload)
+            return payload
+        except DuplicateKeyError:
+            existing = await self.db.arbitration_draft_versions.find_one({"_id": payload.get("_id")})
+            if not existing or any(
+                existing.get(field) != payload.get(field)
+                for field in ("draft_id", "version", "version_hash", "generation_run_id", "parent_version_id")
+            ):
+                raise
+            return existing
 
     async def list_versions(self, draft_id: str) -> List[Dict[str, Any]]:
         return await _collect(self.db.arbitration_draft_versions.find({"draft_id": draft_id}).sort("version", -1))

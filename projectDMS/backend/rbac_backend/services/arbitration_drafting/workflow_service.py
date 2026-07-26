@@ -450,31 +450,55 @@ class ArbitrationWorkflowService:
             if not effect_lease_token:
                 raise HTTPException(status_code=409, detail="Draft remediation effect lease token is missing")
             try:
-                version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
-                structured = {
-                    **(version.get("structured_output") or {}),
-                    "workflow_remediation": {
-                        "policy": report.get("remediation_policy"),
-                        "cycle": cycle,
-                        "applied_fixes": remediation["applied_fixes"],
-                        "parent_version_hash": report.get("version_hash"),
-                    },
-                }
-                remediated = {
-                    **version,
-                    "_id": str(uuid.uuid4()),
-                    "version": version_number,
-                    "sections": remediation["sections"],
-                    "full_markdown": remediation["full_markdown"],
-                    "structured_output": structured,
-                    "parent_version_id": version.get("_id"),
-                    "parent_version": version.get("version"),
-                    "generation_run_id": None,
-                    "created_by": _actor_id(current_user),
-                    "created_at": datetime.now(timezone.utc),
-                }
-                remediated["version_hash"] = immutable_version_hash(remediated)
-                await self.drafting.repo.create_version(remediated)
+                remediation_version_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        f"arbitration-remediation:{run['_id']}:{input_hash}",
+                    )
+                )
+                remediated = await self.db.arbitration_draft_versions.find_one(
+                    {"_id": remediation_version_id, "draft_id": str(run["draft_id"])}
+                )
+                if remediated:
+                    if str(remediated.get("parent_version_id") or "") != str(version.get("_id") or ""):
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Recovered remediation version has a different immutable parent",
+                        )
+                    calculated_hash = immutable_version_hash(remediated)
+                    remediated_hash = remediated.get("version_hash") or calculated_hash
+                    if remediated.get("version_hash") and remediated["version_hash"] != calculated_hash:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Recovered remediation version failed its immutable hash check",
+                        )
+                    version_number = int(remediated.get("version") or 0)
+                else:
+                    version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
+                    structured = {
+                        **(version.get("structured_output") or {}),
+                        "workflow_remediation": {
+                            "policy": report.get("remediation_policy"),
+                            "cycle": cycle,
+                            "applied_fixes": remediation["applied_fixes"],
+                            "parent_version_hash": report.get("version_hash"),
+                        },
+                    }
+                    remediated = {
+                        **version,
+                        "_id": remediation_version_id,
+                        "version": version_number,
+                        "sections": remediation["sections"],
+                        "full_markdown": remediation["full_markdown"],
+                        "structured_output": structured,
+                        "parent_version_id": version.get("_id"),
+                        "parent_version": version.get("version"),
+                        "generation_run_id": None,
+                        "created_by": _actor_id(current_user),
+                        "created_at": datetime.now(timezone.utc),
+                    }
+                    remediated["version_hash"] = immutable_version_hash(remediated)
+                    remediated = await self.drafting.repo.create_version(remediated)
                 await self.drafting.repo.update_draft(
                     str(run["draft_id"]),
                     {
@@ -955,16 +979,30 @@ class ArbitrationWorkflowService:
                 if not effect_lease_token:
                     raise HTTPException(status_code=409, detail="Draft generation effect lease token is missing")
                 try:
-                    await self.drafting.generate(
+                    generated = await self.drafting.generate(
                         str(run["draft_id"]),
                         ArbitrationGenerateRequest(),
                         current_user,
                         pleading_plan=plan,
+                        workflow_effect_key=f"workflow:{run_id}:generate:{run['plan_hash']}",
                     )
-                    version = await self.drafting.repo.latest_version(str(run["draft_id"]))
+                    version = await self.db.arbitration_draft_versions.find_one(
+                        {
+                            "_id": generated.get("_workflow_version_id"),
+                            "draft_id": str(run["draft_id"]),
+                        }
+                    )
                     if not version:
-                        raise HTTPException(status_code=409, detail="Draft generation did not create an immutable version")
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Draft generation did not return its workflow-owned immutable version",
+                        )
                     version_hash = version.get("version_hash") or immutable_version_hash(version)
+                    if generated.get("_workflow_version_hash") != version_hash:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Workflow draft generation returned a mismatched immutable hash",
+                        )
                     await self.repository.complete_effect(
                         effect_key,
                         {"draft_version_id": version.get("_id"), "draft_version_hash": version_hash},
@@ -1267,10 +1305,11 @@ class ArbitrationWorkflowService:
         self._assert_state_version(run, payload.state_version)
         if str(run.get("status")) in TERMINAL_WORKFLOW_STATUSES:
             raise HTTPException(status_code=409, detail="Terminal arbitration workflows cannot be cancelled")
-        updated = await self.repository.transition(
-            run_id, payload.state_version,
-            {"status": "cancelled", "current_node": "cancelled", "next_action": "cancelled", "fallback_available": False, "cancellation_reason": payload.reason},
-            event="workflow_cancelled",
+        updated = await self.repository.cancel_if_idle(
+            run_id,
+            payload.state_version,
+            reason=payload.reason,
+            actor_id=_actor_id(current_user),
         )
         await self._sync_langgraph_checkpoint(
             updated,

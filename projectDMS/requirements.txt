@@ -51,7 +51,6 @@ docling-core==2.48.4
 docling-ibm-models==3.9.1
 docling-parse==4.5.0
 docstring_parser==0.17.0
-ecdsa==0.19.0
 email_validator==2.2.0
 et_xmlfile==2.0.0
 eval_type_backport==0.2.2
@@ -205,7 +204,6 @@ pytest==9.0.2
 python-dateutil==2.9.0.post0
 python-docx==1.2.0
 python-dotenv==1.0.1
-python-jose==3.4.0
 python-multipart==0.0.20
 python-pptx==1.0.2
 pytz==2025.2

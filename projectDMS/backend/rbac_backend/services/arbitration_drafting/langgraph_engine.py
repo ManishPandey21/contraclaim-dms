@@ -533,24 +533,27 @@ class LangGraphArbitrationEngine:
         """Re-run the graph-owned analysis fan-out after matrix/source drift."""
 
         bound = await self.command_executor.refresh_evidence_binding(run, actor_id=actor_id)
-        state: Dict[str, Any] = {
-            "run_id": str(bound["_id"]),
-            "thread_id": str(bound["thread_id"]),
-            "state_version": int(bound["state_version"]),
-        }
-        branch_outputs = await asyncio.gather(
-            *(self.command_executor.execute(node, state) for node in ANALYSIS_NODE_BRANCHES)
-        )
-        for output in branch_outputs:
-            state.update(output)
-        state.update(await self.command_executor.execute("merge_evidence_and_matrices", state))
-        updated = await self.get_state(str(bound["_id"]))
-        await self._checkpoint(
-            updated,
-            resume_update={**self._cumulative_gate_state(updated), **state},
-            traverse=False,
-        )
-        return updated
+        try:
+            state: Dict[str, Any] = {
+                "run_id": str(bound["_id"]),
+                "thread_id": str(bound["thread_id"]),
+                "state_version": int(bound["state_version"]),
+            }
+            branch_outputs = await asyncio.gather(
+                *(self.command_executor.execute(node, state) for node in ANALYSIS_NODE_BRANCHES)
+            )
+            for output in branch_outputs:
+                state.update(output)
+            state.update(await self.command_executor.execute("merge_evidence_and_matrices", state))
+            updated = await self.get_state(str(bound["_id"]))
+            await self._checkpoint(
+                updated,
+                resume_update={**self._cumulative_gate_state(updated), **state},
+                traverse=False,
+            )
+            return updated
+        finally:
+            await self.command_executor.release_execution_lease(str(bound["_id"]))
 
     async def refresh_validation(self, run: Dict[str, Any], *, actor_id: str) -> Dict[str, Any]:
         """Validate a new immutable candidate through node-scoped branch effects."""
@@ -561,32 +564,35 @@ class LangGraphArbitrationEngine:
         current = await self.command_executor.prepare_validation_refresh(
             run, candidate, actor_id=actor_id
         )
-        state: Dict[str, Any] = {
-            "run_id": str(current["_id"]),
-            "thread_id": str(current["thread_id"]),
-            "state_version": int(current["state_version"]),
-            "draft_version_id": str(current["draft_version_id"]),
-            "draft_version_hash": str(current["draft_version_hash"]),
-        }
-        while True:
-            branch_outputs = await asyncio.gather(
-                *(self.command_executor.execute(node, state) for node in VALIDATION_NODE_BRANCH)
+        try:
+            state: Dict[str, Any] = {
+                "run_id": str(current["_id"]),
+                "thread_id": str(current["thread_id"]),
+                "state_version": int(current["state_version"]),
+                "draft_version_id": str(current["draft_version_id"]),
+                "draft_version_hash": str(current["draft_version_hash"]),
+            }
+            while True:
+                branch_outputs = await asyncio.gather(
+                    *(self.command_executor.execute(node, state) for node in VALIDATION_NODE_BRANCH)
+                )
+                for output in branch_outputs:
+                    state.update(output)
+                merged = await self.command_executor.execute("merge_validation_artifacts", state)
+                state.update(merged)
+                if str(merged.get("validation_route") or "") != "remediate":
+                    break
+                remediation = await self.command_executor.execute("remediate_draft", state)
+                state.update(remediation)
+            updated = await self.get_state(str(current["_id"]))
+            await self._checkpoint(
+                updated,
+                resume_update={**self._cumulative_gate_state(updated), **state},
+                traverse=False,
             )
-            for output in branch_outputs:
-                state.update(output)
-            merged = await self.command_executor.execute("merge_validation_artifacts", state)
-            state.update(merged)
-            if str(merged.get("validation_route") or "") != "remediate":
-                break
-            remediation = await self.command_executor.execute("remediate_draft", state)
-            state.update(remediation)
-        updated = await self.get_state(str(current["_id"]))
-        await self._checkpoint(
-            updated,
-            resume_update={**self._cumulative_gate_state(updated), **state},
-            traverse=False,
-        )
-        return updated
+            return updated
+        finally:
+            await self.command_executor.release_execution_lease(str(current["_id"]))
 
     async def checkpoint_transition(self, run: Dict[str, Any], update: Dict[str, Any]) -> None:
         if not LANGGRAPH_RUNTIME_AVAILABLE or (self.checkpointer is None and MongoDBSaver is None):
@@ -691,6 +697,7 @@ class LangGraphArbitrationEngine:
         traverse: bool = True,
     ) -> None:
         store = None
+        executor = None
         checkpointer = self.checkpointer
         if checkpointer is None:
             store = MongoArbitrationCheckpointStore()
@@ -781,6 +788,8 @@ class LangGraphArbitrationEngine:
                 {"$set": {"last_checkpoint_id": checkpoint_id, "last_checkpoint_at": datetime.now(timezone.utc)}},
             )
         finally:
+            if executor:
+                await executor.release_execution_lease(str(run["_id"]))
             if store:
                 await asyncio.to_thread(store.close)
 

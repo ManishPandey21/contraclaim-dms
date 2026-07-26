@@ -85,6 +85,7 @@ class ArbitrationGraphCommandExecutor:
     def __init__(self, db: Any, *, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         self.db = db
         self.loop = loop
+        self.execution_lease_token = str(uuid.uuid4())
         self.repository = ArbitrationWorkflowRepository(db)
         self.cases = ArbitrationCaseWorkspaceService(db)
         self.domain = ArbitrationWorkflowDomain(db)
@@ -101,6 +102,16 @@ class ArbitrationGraphCommandExecutor:
             raise RuntimeError("Arbitration graph command executor is not bound to an event loop")
         future = asyncio.run_coroutine_threadsafe(self.execute(node, dict(state)), self.loop)
         return future.result()
+
+    def _execution_effect_key(self, run_id: str) -> str:
+        return f"{run_id}:graph-execution:{self.execution_lease_token}"
+
+    async def release_execution_lease(self, run_id: str) -> None:
+        await self.repository.release_run_execution_lease(
+            run_id,
+            effect_key=self._execution_effect_key(run_id),
+            lease_token=self.execution_lease_token,
+        )
 
     @staticmethod
     def _actor(run: Dict[str, Any]) -> Any:
@@ -199,12 +210,35 @@ class ArbitrationGraphCommandExecutor:
         lease_token = str(effect.get("lease_token") or "")
         if not lease_token:
             raise HTTPException(status_code=409, detail=f"Graph node effect lease token is missing: {node}")
+        run_lease_claimed = await self.repository.claim_run_execution_lease(
+            str(run["_id"]),
+            effect_key=self._execution_effect_key(str(run["_id"])),
+            node=node,
+            lease_token=self.execution_lease_token,
+        )
+        if not run_lease_claimed:
+            await self.repository.fail_effect(
+                effect_key,
+                error_code="RunExecutionLeaseUnavailable",
+                retryable=False,
+                lease_token=lease_token,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=f"Graph node cannot start after cancellation or while another node is active: {node}",
+            )
 
         async def heartbeat() -> None:
             while True:
                 await asyncio.sleep(30)
                 if not await self.repository.renew_effect(effect_key, lease_token):
                     raise RuntimeError(f"Graph node effect lease was lost: {node}")
+                if not await self.repository.renew_run_execution_lease(
+                    str(run["_id"]),
+                    effect_key=self._execution_effect_key(str(run["_id"])),
+                    lease_token=self.execution_lease_token,
+                ):
+                    raise RuntimeError(f"Graph node run execution lease was lost: {node}")
 
         heartbeat_task = asyncio.create_task(heartbeat())
         operation_task = asyncio.create_task(operation(run))
@@ -701,16 +735,27 @@ class ArbitrationGraphCommandExecutor:
             "approval_receipt_id": approval["_id"],
             "approved_at": approval.get("approved_at") or datetime.now(timezone.utc),
         }
-        await self.drafting.generate(
+        generated = await self.drafting.generate(
             str(run["draft_id"]),
             ArbitrationGenerateRequest(),
             self._actor(run),
             pleading_plan=plan,
+            workflow_effect_key=f"graph:{run['_id']}:generate:{run['plan_hash']}",
         )
-        version = await self.drafting.repo.latest_version(str(run["draft_id"]))
+        version = await self.db.arbitration_draft_versions.find_one(
+            {
+                "_id": generated.get("_workflow_version_id"),
+                "draft_id": str(run["draft_id"]),
+            }
+        )
         if not version:
-            raise HTTPException(status_code=409, detail="Draft generation did not create an immutable candidate")
+            raise HTTPException(
+                status_code=409,
+                detail="Draft generation did not return its workflow-owned immutable candidate",
+            )
         version_hash = version.get("version_hash") or immutable_version_hash(version)
+        if generated.get("_workflow_version_hash") != version_hash:
+            raise HTTPException(status_code=409, detail="Workflow draft generation returned a mismatched immutable hash")
         updated = await self.repository.transition(
             str(run["_id"]),
             int(run.get("state_version") or 0),
@@ -902,30 +947,48 @@ class ArbitrationGraphCommandExecutor:
         if not remediation:
             return {"validation_route": "human_revision"}
         cycle = int(report.get("remediation_cycle") or 0) + 1
-        version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
-        remediated = {
-            **version,
-            "_id": str(uuid.uuid4()),
-            "version": version_number,
-            "sections": remediation["sections"],
-            "full_markdown": remediation["full_markdown"],
-            "structured_output": {
-                **(version.get("structured_output") or {}),
-                "workflow_remediation": {
-                    "policy": report.get("remediation_policy"),
-                    "cycle": cycle,
-                    "applied_fixes": remediation["applied_fixes"],
-                    "parent_version_hash": report.get("version_hash"),
+        remediation_version_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"arbitration-remediation:{run['_id']}:{report.get('report_hash')}:{cycle}",
+            )
+        )
+        remediated = await self.db.arbitration_draft_versions.find_one(
+            {"_id": remediation_version_id, "draft_id": str(run["draft_id"])}
+        )
+        if remediated:
+            if str(remediated.get("parent_version_id") or "") != str(version.get("_id") or ""):
+                raise HTTPException(status_code=409, detail="Recovered remediation version has a different immutable parent")
+            calculated_hash = immutable_version_hash(remediated)
+            if remediated.get("version_hash") and remediated["version_hash"] != calculated_hash:
+                raise HTTPException(status_code=409, detail="Recovered remediation version failed its immutable hash check")
+            remediated["version_hash"] = remediated.get("version_hash") or calculated_hash
+            version_number = int(remediated.get("version") or 0)
+        else:
+            version_number = await self.drafting.repo.next_version(str(run["draft_id"]))
+            remediated = {
+                **version,
+                "_id": remediation_version_id,
+                "version": version_number,
+                "sections": remediation["sections"],
+                "full_markdown": remediation["full_markdown"],
+                "structured_output": {
+                    **(version.get("structured_output") or {}),
+                    "workflow_remediation": {
+                        "policy": report.get("remediation_policy"),
+                        "cycle": cycle,
+                        "applied_fixes": remediation["applied_fixes"],
+                        "parent_version_hash": report.get("version_hash"),
+                    },
                 },
-            },
-            "parent_version_id": version.get("_id"),
-            "parent_version": version.get("version"),
-            "generation_run_id": None,
-            "created_by": run.get("created_by"),
-            "created_at": datetime.now(timezone.utc),
-        }
-        remediated["version_hash"] = immutable_version_hash(remediated)
-        await self.drafting.repo.create_version(remediated)
+                "parent_version_id": version.get("_id"),
+                "parent_version": version.get("version"),
+                "generation_run_id": None,
+                "created_by": run.get("created_by"),
+                "created_at": datetime.now(timezone.utc),
+            }
+            remediated["version_hash"] = immutable_version_hash(remediated)
+            remediated = await self.drafting.repo.create_version(remediated)
         await self.drafting.repo.update_draft(
             str(run["draft_id"]),
             {

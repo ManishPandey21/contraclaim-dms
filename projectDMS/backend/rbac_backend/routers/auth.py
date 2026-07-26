@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Response
 from typing import Optional
 import logging
 from datetime import timedelta, datetime
-from jose import jwt
+import jwt
 from pydantic import BaseModel, Field
 
 from ..core.security import get_current_user, CurrentUser, create_access_token

@@ -70,6 +70,9 @@ class _FakeDb:
 
 
 def _make_client(monkeypatch):
+    # This unit intentionally uses the in-process session double. Production
+    # Redis fail-closed behavior is covered in test_session_fail_closed.py.
+    monkeypatch.setattr(settings, "AUTH_SESSION_FAIL_CLOSED", False)
     db = _FakeDb()
 
     async def fake_get_db():
@@ -86,7 +89,10 @@ def _make_client(monkeypatch):
     app.include_router(auth.router, prefix="/api")
     app.dependency_overrides[auth.get_db] = fake_get_db
     app.dependency_overrides[security.get_db] = fake_get_db
-    return TestClient(app)
+    # Production correctly marks authentication cookies Secure.  Use an HTTPS
+    # origin so the client exercises the deployed cookie policy instead of
+    # silently discarding the session cookie on an artificial HTTP origin.
+    return TestClient(app, base_url="https://web.contraclaim.com")
 
 
 def test_superadmin_login_sets_cookie_and_me_resolves_session(monkeypatch):

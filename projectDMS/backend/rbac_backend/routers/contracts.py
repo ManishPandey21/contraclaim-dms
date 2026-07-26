@@ -234,6 +234,11 @@ async def get_contract_service() -> ContractService:
     return ContractService()
 
 
+def get_policy_service() -> PolicyService:
+    """Construct policy enforcement without exposing constructor internals to FastAPI."""
+    return PolicyService()
+
+
 async def get_file_service() -> SecureFileService:
     config = DocumentProcessingConfig()
     if settings.SECURE_UPLOADS_DIR:
@@ -273,7 +278,7 @@ async def create_contract_upload_session(
     payload: ContractUploadSessionRequest,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     await _authorize_contract_scope(
         policy,
@@ -302,7 +307,7 @@ async def upload_contracts_multipart(
     contract_service: ContractService = Depends(get_contract_service),
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     if not files:
         raise ContractError("At least one contract file is required", status.HTTP_422_UNPROCESSABLE_ENTITY)
@@ -487,7 +492,7 @@ async def upload_contract_chunk(
     contract_service: ContractService = Depends(get_contract_service),
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     max_file_size_bytes, max_chunk_size_bytes = _contract_limits()
     session_doc = await contract_service.validate_upload_session(
@@ -726,7 +731,7 @@ async def get_contract_status(
     upload_id: str = Query(...),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     status_response = await contract_service.get_job_status(upload_id, current_user)
     await _authorize_contract_scope(
@@ -748,7 +753,7 @@ async def retry_contract_ocr_pages(
     request: OCRRetryRequest,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     document = await contract_service.get_contract_document(document_id, current_user)
     organization_id = str(document.get("organization_id") or "")
@@ -819,7 +824,7 @@ async def reindex_contract(
     document_id: str,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Re-run ingestion for an existing contract to rebuild its vector index
     without re-uploading. Intended for documents whose vectors were never
@@ -899,7 +904,7 @@ async def list_contract_uploads(
     skip: int = Query(0, ge=0),
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     await _authorize_contract_scope(
         policy,
@@ -919,7 +924,7 @@ async def search_contracts(
     request: ContractSearchRequest,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
-    policy: PolicyService = Depends(PolicyService),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     await _authorize_contract_scope(
         policy,

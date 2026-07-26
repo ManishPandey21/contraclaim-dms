@@ -56,6 +56,54 @@ def build_authorization_url(
     return f"{authorization_endpoint}{sep}{urlencode(params)}"
 
 
+def decode_oidc_id_token(
+    id_token: str,
+    jwks: Dict[str, Any],
+    *,
+    audience: str,
+    issuer: str,
+) -> Dict[str, Any]:
+    """Verify an OIDC ID token against exactly one matching JWK.
+
+    Selecting the signing key by ``kid`` before decoding avoids accepting a
+    provider-controlled key set as a generic key object.  Only the algorithms
+    explicitly supported by this service are allowed.
+    """
+    import jwt
+
+    allowed_algorithms = {"RS256", "ES256"}
+    try:
+        header = jwt.get_unverified_header(id_token)
+    except jwt.PyJWTError as exc:
+        raise OidcError(f"id_token header is invalid: {exc}") from exc
+
+    algorithm = str(header.get("alg") or "")
+    key_id = str(header.get("kid") or "")
+    if algorithm not in allowed_algorithms or not key_id:
+        raise OidcError("id_token uses an unsupported algorithm or has no key id")
+
+    candidates = [
+        key
+        for key in (jwks.get("keys") or [])
+        if str(key.get("kid") or "") == key_id
+        and str(key.get("alg") or algorithm) == algorithm
+    ]
+    if len(candidates) != 1:
+        raise OidcError("OIDC signing key was not found or was ambiguous")
+
+    try:
+        signing_key = jwt.PyJWK.from_dict(candidates[0], algorithm=algorithm).key
+        return jwt.decode(
+            id_token,
+            signing_key,
+            algorithms=[algorithm],
+            audience=audience,
+            issuer=issuer,
+        )
+    except jwt.PyJWTError as exc:
+        raise OidcError(f"id_token verification failed: {exc}") from exc
+
+
 async def resolve_or_provision_user(
     db: Any,
     claims: Dict[str, Any],
@@ -144,8 +192,6 @@ class OidcService:
     async def exchange_code_for_claims(self, code: str, nonce: Optional[str]) -> Dict[str, Any]:
         disc = await self.discovery()
         import httpx
-        from jose import jwt
-
         async with httpx.AsyncClient(timeout=10) as client:
             token_resp = await client.post(
                 disc["token_endpoint"],
@@ -166,17 +212,12 @@ class OidcService:
             jwks_resp.raise_for_status()
             jwks = jwks_resp.json()
 
-        try:
-            claims = jwt.decode(
-                id_token,
-                jwks,
-                algorithms=["RS256", "ES256"],
-                audience=self.s.OIDC_CLIENT_ID,
-                issuer=self.s.OIDC_ISSUER,
-                options={"verify_at_hash": False},
-            )
-        except Exception as exc:  # noqa: BLE001 - normalize JWT errors
-            raise OidcError(f"id_token verification failed: {exc}") from exc
+        claims = decode_oidc_id_token(
+            id_token,
+            jwks,
+            audience=self.s.OIDC_CLIENT_ID,
+            issuer=self.s.OIDC_ISSUER,
+        )
 
         if nonce and claims.get("nonce") != nonce:
             raise OidcError("OIDC nonce mismatch")

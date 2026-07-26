@@ -1,0 +1,69 @@
+rule_files:
+  - arbitration-langgraph-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'contractdms_arbitration_workflow_alert{severity="critical",code="checkpoint_store"}'
+        values: '1+0x20'
+      - series: 'contractdms_arbitration_runtime_events_total{signal="export_blocked"}'
+        values: '0 1+0x19'
+      - series: 'contractdms_arbitration_runtime_events_total{signal="lease_expiry_recovery"}'
+        values: '0 4+0x19'
+      - series: 'contractdms_arbitration_runtime_value{signal="checkpoint_age_seconds"}'
+        values: '901+0x20'
+      - series: 'contractdms_arbitration_runtime_value{signal="filing_export_queue_lag_seconds"}'
+        values: '301+0x20'
+      - series: 'contractdms_arbitration_runtime_value{signal="evidence_grounded_ratio"}'
+        values: '0.9+0x20'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ArbitrationWorkflowCriticalAlert
+        exp_alerts:
+          - exp_labels:
+              code: checkpoint_store
+              severity: critical
+            exp_annotations:
+              summary: Arbitration workflow rollout is blocked
+      - eval_time: 2m
+        alertname: ArbitrationExportDeadLetter
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              signal: export_blocked
+            exp_annotations:
+              summary: A governed filing export reached terminal failure
+      - eval_time: 2m
+        alertname: ArbitrationExportLeaseRecoverySpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              signal: lease_expiry_recovery
+            exp_annotations:
+              summary: Filing export visibility leases are expiring repeatedly
+      - eval_time: 11m
+        alertname: ArbitrationCheckpointStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              signal: checkpoint_age_seconds
+            exp_annotations:
+              summary: Arbitration checkpoint has not advanced for 15 minutes
+      - eval_time: 6m
+        alertname: ArbitrationQueueLagHigh
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              signal: filing_export_queue_lag_seconds
+            exp_annotations:
+              summary: Filing export queue lag exceeds five minutes
+      - eval_time: 6m
+        alertname: ArbitrationEvidenceGroundingLow
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              signal: evidence_grounded_ratio
+            exp_annotations:
+              summary: An arbitration workflow contains unresolved evidence

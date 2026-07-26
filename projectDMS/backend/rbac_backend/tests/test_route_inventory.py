@@ -10,15 +10,23 @@ UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
 def _api_routes():
+    routes = []
+    for mounted in app.routes:
+        if isinstance(mounted, APIRoute):
+            routes.append(mounted)
+            continue
+        candidates = getattr(mounted, "effective_candidates", None)
+        if callable(candidates):
+            routes.extend(candidates())
     return [
         route
-        for route in app.routes
-        if isinstance(route, APIRoute) and str(getattr(route, "path", "")).startswith("/api")
+        for route in routes
+        if str(getattr(route, "path", "")).startswith("/api")
     ]
 
 
 def test_frontend_referenced_route_families_are_mounted():
-    paths = {getattr(route, "path", "") for route in app.routes}
+    paths = {getattr(route, "path", "") for route in _api_routes()}
 
     expected_paths = {
         "/api/search/documents",

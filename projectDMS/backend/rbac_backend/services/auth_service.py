@@ -1,7 +1,8 @@
 from typing import Optional
 
 from pymongo.database import Database
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError
 from bcrypt import checkpw
 from datetime import timedelta, datetime
 from ..models.user import User

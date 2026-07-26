@@ -2,7 +2,8 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
 from fastapi import Depends, HTTPException, status, Request
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError
 from passlib.context import CryptContext
 from .config import settings
 from .database import get_db  # Corrected import

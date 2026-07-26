@@ -23,7 +23,7 @@ import rbac_backend.services.runtime_state as runtime_mod
 from rbac_backend.core.security import CurrentUser, create_access_token, get_current_user
 from rbac_backend.services.authentication_service import AuthenticationService
 from rbac_backend.services.step_up_service import StepUpService
-from jose import jwt
+import jwt
 from rbac_backend.core.config import settings
 
 

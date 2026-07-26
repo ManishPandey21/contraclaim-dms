@@ -380,6 +380,7 @@ class ArbitrationDraftingService:
         *,
         run_type: GenerationRunType = GenerationRunType.FULL_DRAFT,
         pleading_plan: Optional[Dict[str, Any]] = None,
+        workflow_effect_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         draft = await self._load_unlocked(draft_id)
         await self.case_workspace.assert_case_ready_for_draft(draft, allow_standalone_working_draft=True)
@@ -419,12 +420,28 @@ class ArbitrationDraftingService:
             draft_mode=payload.draft_mode,
         )
         latest_structured = (latest or {}).get("structured_output") or {}
-        if latest and latest_structured.get("input_hash") == input_hash and latest_structured.get("prompt_version") == PROMPT_VERSION:
+        if (
+            not workflow_effect_key
+            and latest
+            and latest_structured.get("input_hash") == input_hash
+            and latest_structured.get("prompt_version") == PROMPT_VERSION
+        ):
             await self._emit("generation_reused", draft, current_user, after={"version": latest.get("version"), "input_hash": input_hash})
             return await self.detail(draft_id)
         retrieval_queries = self._retrieval_queries(context)
         generator, run_model, run_prompt_version = self._resolve_generator(payload.draft_mode, context)
+        deterministic_run_id = (
+            str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"arbitration-generation:{draft_id}:{workflow_effect_key}:{input_hash}",
+                )
+            )
+            if workflow_effect_key
+            else None
+        )
         run = ArbitrationGenerationRun(
+            **({"id": deterministic_run_id} if deterministic_run_id else {}),
             draft_id=draft_id,
             run_type=run_type,
             section_key=payload.section_key,
@@ -437,7 +454,67 @@ class ArbitrationDraftingService:
             created_by=_actor_id(current_user),
             started_at=datetime.utcnow(),
         ).model_dump(by_alias=True)
-        await self.repo.create_generation_run(run)
+        if deterministic_run_id:
+            existing_run = await self.repo.get_generation_run(deterministic_run_id)
+            if existing_run:
+                run = existing_run
+                existing_version = await self.db.arbitration_draft_versions.find_one(
+                    {"draft_id": draft_id, "generation_run_id": deterministic_run_id}
+                )
+                if existing_version:
+                    calculated_hash = immutable_version_hash(existing_version)
+                    version_hash = existing_version.get("version_hash") or calculated_hash
+                    if existing_version.get("version_hash") and existing_version["version_hash"] != calculated_hash:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="Recovered workflow draft version failed its immutable hash check",
+                        )
+                    await self.repo.update_generation_run(
+                        deterministic_run_id,
+                        {
+                            "status": GenerationRunStatus.COMPLETED.value,
+                            "completed_at": datetime.utcnow(),
+                            "parsed_output": existing_version.get("structured_output") or {},
+                            "raw_output": existing_version.get("full_markdown") or "",
+                            "warnings": existing_version.get("warnings") or [],
+                        },
+                    )
+                    await self.db.arbitration_drafts.update_one(
+                        {
+                            "_id": draft_id,
+                            "$or": [
+                                {"current_version": {"$lte": int(existing_version.get("version") or 0)}},
+                                {"current_version": {"$exists": False}},
+                            ],
+                        },
+                        {
+                            "$set": {
+                                "status": ArbitrationDraftStatus.DRAFT.value,
+                                "current_version": int(existing_version.get("version") or 0),
+                                "latest_generation_run_id": deterministic_run_id,
+                                "updated_at": datetime.utcnow(),
+                                "updated_by": _actor_id(current_user),
+                            }
+                        },
+                    )
+                    detail = await self.detail(draft_id)
+                    detail["_workflow_generation_run_id"] = deterministic_run_id
+                    detail["_workflow_version_id"] = existing_version["_id"]
+                    detail["_workflow_version_hash"] = version_hash
+                    return detail
+                await self.repo.update_generation_run(
+                    deterministic_run_id,
+                    {
+                        "status": GenerationRunStatus.RUNNING.value,
+                        "started_at": datetime.utcnow(),
+                        "completed_at": None,
+                        "error_message": None,
+                    },
+                )
+            else:
+                await self.repo.create_generation_run(run)
+        else:
+            await self.repo.create_generation_run(run)
         try:
             generated = generator.generate(
                 context,
@@ -472,6 +549,18 @@ class ArbitrationDraftingService:
             }
             version_no = await self.repo.next_version(draft_id)
             version = ArbitrationDraftVersion(
+                **(
+                    {
+                        "id": str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"arbitration-draft-version:{deterministic_run_id}",
+                            )
+                        )
+                    }
+                    if deterministic_run_id
+                    else {}
+                ),
                 draft_id=draft_id,
                 version=version_no,
                 status=ArbitrationDraftStatus.DRAFT,
@@ -493,7 +582,7 @@ class ArbitrationDraftingService:
                 created_by=_actor_id(current_user),
             ).model_dump(by_alias=True)
             version["version_hash"] = immutable_version_hash(version)
-            await self.repo.create_version(version)
+            version = await self.repo.create_version(version)
             await self.repo.update_generation_run(
                 run["_id"],
                 {
@@ -515,7 +604,12 @@ class ArbitrationDraftingService:
                 },
             )
             await self._emit("generated", draft, current_user, after={"version": version_no, "warnings": warnings})
-            return await self.detail(draft_id)
+            detail = await self.detail(draft_id)
+            if deterministic_run_id:
+                detail["_workflow_generation_run_id"] = deterministic_run_id
+                detail["_workflow_version_id"] = version["_id"]
+                detail["_workflow_version_hash"] = version["version_hash"]
+            return detail
         except Exception as exc:
             await self.repo.update_generation_run(
                 run["_id"],

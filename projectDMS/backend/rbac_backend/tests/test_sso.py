@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import jwt
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 from rbac_backend.services.oidc_service import (
     OidcError,
     build_authorization_url,
+    decode_oidc_id_token,
     email_domain_allowed,
     resolve_or_provision_user,
 )
@@ -71,6 +74,49 @@ def test_build_authorization_url_has_required_params():
     assert "state=st8" in url
     assert "nonce=nc9" in url
     assert "redirect_uri=https%3A%2F%2Fapp%2Fcb" in url
+
+
+def test_decode_oidc_id_token_selects_kid_and_verifies_claims():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_jwk = jwt.algorithms.RSAAlgorithm.to_jwk(private_key.public_key(), as_dict=True)
+    public_jwk.update({"kid": "signing-key-1", "alg": "RS256", "use": "sig"})
+    token = jwt.encode(
+        {
+            "sub": "idp-user-1",
+            "email": "legal@example.com",
+            "aud": "client-id",
+            "iss": "https://idp.example.com",
+        },
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "signing-key-1"},
+    )
+
+    claims = decode_oidc_id_token(
+        token,
+        {"keys": [public_jwk]},
+        audience="client-id",
+        issuer="https://idp.example.com",
+    )
+
+    assert claims["sub"] == "idp-user-1"
+
+
+def test_decode_oidc_id_token_rejects_unknown_key_id():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    token = jwt.encode(
+        {"sub": "idp-user-1", "aud": "client-id", "iss": "https://idp.example.com"},
+        private_key,
+        algorithm="RS256",
+        headers={"kid": "unknown"},
+    )
+    with pytest.raises(OidcError, match="not found"):
+        decode_oidc_id_token(
+            token,
+            {"keys": []},
+            audience="client-id",
+            issuer="https://idp.example.com",
+        )
 
 
 # --- find-or-provision ----------------------------------------------------

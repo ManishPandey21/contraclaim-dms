@@ -812,7 +812,48 @@ The LangGraph workflow may become primary only when all of the following are tru
 13. Real MongoDB/Redis/Qdrant/S3/live-model integration, load, backup/restore, and authenticated browser tests pass in a production-like environment.
 14. Operations runbooks cover paused runs, failed checkpoints, source drift, stuck leases, fallback, and export recovery.
 
-## 15. Final Recommendation
+## 15. Independent Implementation Re-audit — 2026-07-24
+
+The active implementation was re-audited without treating implementation notes, Graphify output, test names, or earlier completion claims as proof. The audit traced active imports, effective API routes, production Compose wiring, worker entry points, database repositories and migrations, frontend dependencies, rollout controls, and security boundaries. It then exercised the current code in a freshly built production backend image and against real production-like backing services.
+
+Corrections made during this re-audit include:
+
+- authoritative LangGraph node ownership of generation, remediation, validation, and completion domain commands;
+- deterministic workflow effect/run/version identities plus duplicate-key recovery;
+- execution-lease fencing and atomic cancellation at side-effect boundaries;
+- process-kill recovery coverage at every command node and all eight human gates;
+- OIDC/JWT hardening and removal of the active `python-jose`/`ecdsa` dependency;
+- FastAPI lazy-router authorization inventory compatibility;
+- production Compose propagation of the FalkorDB cleanup control;
+- client dependency upgrades and safe overrides; and
+- executable Prometheus tests for all six arbitration alert expressions.
+
+Fresh executed results before deployment:
+
+- production-image backend suite: **1085 passed, 12 skipped**;
+- focused arbitration/authentication/OIDC/login suite: **161 passed**;
+- effective route-security inventory: **18 passed**;
+- process-kill recovery at every command node and all human gates: **passed** against real MongoDB;
+- 60-second, eight-worker sustained load plus cancellation-under-load: **passed**;
+- real S3 outage/recovery and live-model outage/recovery: **passed fail-closed and recovered**;
+- production historical ambiguous-row review: **0 candidate rows, 0 unresolved rows**;
+- client suite: **102 passed, 3 skipped**;
+- client production build: **passed**;
+- client dependency audit: **0 vulnerabilities**; and
+- alert rule syntax plus all six alert-expression tests: **passed**.
+
+These results do not authorize primary rollout. The following global acceptance criteria remain open:
+
+1. authorized human legal acceptance for SoC, SoD, Counterclaim, and Rejoinder;
+2. distinct authorized legal and operations sign-offs over the immutable acceptance evidence;
+3. an actual production monitoring receiver and a delivered alert-notification exercise;
+4. provider-administrator rotation of any exposed OpenAI/SMTP credentials;
+5. final fail-closed production deployment, isolated old-image rollback, and authenticated two-account browser evidence; and
+6. a final current-advisory `pip-audit` re-query, which the audit environment could not perform after reaching its external-tool usage limit.
+
+Until all six are closed, `ARBITRATION_ENGINE_PRODUCTION_ACCEPTED` must remain false, primary/canary allocation must remain zero, the default must remain `arbitration_v2`, and `arbitration_v2` must not be deprecated. Detailed evidence and blocker ownership are recorded in `arbitration_langgraph_pending_work_and_blockers_2026-07-23.md`.
+
+## 16. Final Recommendation
 
 The current arbitration subsystem should remain the domain foundation and short-term fallback, but it needs immediate gate hardening. It should not be replaced by the experimental sidecar, and official LangGraph should not be introduced merely as a wrapper around the current sequential orchestrator without first fixing approval/provenance/export semantics.
 

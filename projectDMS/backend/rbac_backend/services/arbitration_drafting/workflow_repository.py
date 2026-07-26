@@ -257,6 +257,172 @@ class ArbitrationWorkflowRepository:
         )
         return bool(getattr(result, "modified_count", 0) or getattr(result, "matched_count", 0))
 
+    async def claim_run_execution_lease(
+        self,
+        run_id: str,
+        *,
+        effect_key: str,
+        node: str,
+        lease_token: str,
+        lease_seconds: Optional[int] = None,
+    ) -> bool:
+        """Fence cancellation while one authoritative graph effect is active."""
+
+        now = datetime.now(timezone.utc)
+        duration = int(
+            lease_seconds
+            if lease_seconds is not None
+            else settings.ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS
+        )
+        updated = await self.db.arbitration_workflow_runs.find_one_and_update(
+            {
+                "_id": run_id,
+                "status": {"$nin": sorted(TERMINAL_WORKFLOW_STATUSES)},
+                "cancellation_requested": {"$ne": True},
+                "$or": [
+                    {"active_effect_key": {"$exists": False}},
+                    {"active_effect_key": None},
+                    {"active_effect_lease_expires_at": {"$lte": now}},
+                    {
+                        "active_effect_key": effect_key,
+                        "active_effect_lease_token": lease_token,
+                    },
+                ],
+            },
+            {
+                "$set": {
+                    "active_effect_key": effect_key,
+                    "active_effect_node": node,
+                    "active_effect_lease_token": lease_token,
+                    "active_effect_lease_expires_at": now + timedelta(seconds=max(15, duration)),
+                    "active_effect_heartbeat_at": now,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        return bool(updated)
+
+    async def renew_run_execution_lease(
+        self,
+        run_id: str,
+        *,
+        effect_key: str,
+        lease_token: str,
+        lease_seconds: Optional[int] = None,
+    ) -> bool:
+        duration = int(
+            lease_seconds
+            if lease_seconds is not None
+            else settings.ARBITRATION_ENGINE_EFFECT_LEASE_SECONDS
+        )
+        now = datetime.now(timezone.utc)
+        result = await self.db.arbitration_workflow_runs.update_one(
+            {
+                "_id": run_id,
+                "status": {"$nin": sorted(TERMINAL_WORKFLOW_STATUSES)},
+                "active_effect_key": effect_key,
+                "active_effect_lease_token": lease_token,
+            },
+            {
+                "$set": {
+                    "active_effect_lease_expires_at": now + timedelta(seconds=max(15, duration)),
+                    "active_effect_heartbeat_at": now,
+                    "updated_at": now,
+                }
+            },
+        )
+        return bool(getattr(result, "modified_count", 0) or getattr(result, "matched_count", 0))
+
+    async def release_run_execution_lease(
+        self,
+        run_id: str,
+        *,
+        effect_key: str,
+        lease_token: str,
+    ) -> None:
+        await self.db.arbitration_workflow_runs.update_one(
+            {
+                "_id": run_id,
+                "active_effect_key": effect_key,
+                "active_effect_lease_token": lease_token,
+            },
+            {
+                "$set": {
+                    "active_effect_key": None,
+                    "active_effect_node": None,
+                    "active_effect_lease_token": None,
+                    "active_effect_lease_expires_at": None,
+                    "active_effect_heartbeat_at": None,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+        )
+
+    async def cancel_if_idle(
+        self,
+        run_id: str,
+        expected_version: int,
+        *,
+        reason: Optional[str],
+        actor_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Atomically cancel only when no live authoritative effect owns the run."""
+
+        now = datetime.now(timezone.utc)
+        next_version = expected_version + 1
+        updated = await self.db.arbitration_workflow_runs.find_one_and_update(
+            {
+                "_id": run_id,
+                "state_version": expected_version,
+                "status": {"$nin": sorted(TERMINAL_WORKFLOW_STATUSES)},
+                "$or": [
+                    {"active_effect_key": {"$exists": False}},
+                    {"active_effect_key": None},
+                    {"active_effect_lease_expires_at": {"$lte": now}},
+                ],
+            },
+            {
+                "$set": {
+                    "status": "cancelled",
+                    "current_node": "cancelled",
+                    "next_action": "cancelled",
+                    "fallback_available": False,
+                    "cancellation_requested": True,
+                    "cancellation_reason": reason,
+                    "state_version": next_version,
+                    "updated_at": now,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if not updated:
+            current = await self.get_run(run_id)
+            if not current:
+                raise HTTPException(status_code=404, detail="Arbitration workflow run not found")
+            active_until = current.get("active_effect_lease_expires_at")
+            if active_until and getattr(active_until, "tzinfo", None) is None:
+                active_until = active_until.replace(tzinfo=timezone.utc)
+            if current.get("active_effect_key") and active_until and active_until > now:
+                raise HTTPException(
+                    status_code=409,
+                    detail="An authoritative graph node is active; retry cancellation after the node boundary",
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Stale arbitration workflow state version",
+                    "current_state_version": current.get("state_version"),
+                },
+            )
+        await self.append_event(
+            run_id,
+            "workflow_cancelled",
+            actor_id=actor_id,
+            data={"state_version": next_version, "status": "cancelled"},
+        )
+        return updated
+
     async def complete_effect(
         self,
         effect_key: str,

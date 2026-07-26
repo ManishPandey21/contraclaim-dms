@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import uuid
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ from backend.rbac_backend.services.arbitration_drafting.acceptance import (
 )
 from backend.rbac_backend.services.arbitration_drafting import case_workspace as case_workspace_module
 from backend.rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
-from backend.rbac_backend.services.arbitration_drafting.generator import ArbitrationDraftGenerator
+from backend.rbac_backend.services.arbitration_drafting.generator import ArbitrationDraftGenerator, PROMPT_VERSION
 from backend.rbac_backend.services.arbitration_drafting.case_workspace import ArbitrationCaseWorkspaceService
 from backend.rbac_backend.services.arbitration_drafting.agents import (
     LLM_FALLBACK_WARNING,
@@ -62,7 +63,10 @@ from backend.rbac_backend.services.arbitration_drafting.langgraph_engine import 
     redact_checkpoint,
     validate_checkpoint_state,
 )
-from backend.rbac_backend.services.arbitration_drafting.graph_commands import classify_retry
+from backend.rbac_backend.services.arbitration_drafting.graph_commands import (
+    ArbitrationGraphCommandExecutor,
+    classify_retry,
+)
 from backend.rbac_backend.services.arbitration_drafting.workflow_domain import (
     ANALYSIS_BRANCHES,
     ANALYSIS_NODE_BRANCHES,
@@ -3459,6 +3463,231 @@ def test_workflow_effect_recovery_stops_at_configured_attempt_limit(monkeypatch)
     assert blocked["_attempt_limit_reached"] is True
     assert blocked["lease_token"] == first["lease_token"]
     assert blocked["attempt_count"] == 1
+
+
+def test_cancellation_is_fenced_while_authoritative_graph_effect_is_active():
+    db = _FakeDb()
+    now = datetime.now(timezone.utc)
+    db.arbitration_workflow_runs.rows.append(
+        {
+            "_id": "run-cancel-fence",
+            "state_version": 7,
+            "status": "running",
+            "current_node": "generate_draft",
+            "next_action": "poll",
+            "updated_at": now,
+        }
+    )
+    repository = ArbitrationWorkflowRepository(db)
+    claimed = asyncio.run(
+        repository.claim_run_execution_lease(
+            "run-cancel-fence",
+            effect_key="run-cancel-fence:graph-node:generate_draft:hash",
+            node="generate_draft",
+            lease_token="lease-1",
+            lease_seconds=60,
+        )
+    )
+    assert claimed is True
+
+    with pytest.raises(HTTPException) as active:
+        asyncio.run(
+            repository.cancel_if_idle(
+                "run-cancel-fence",
+                7,
+                reason="cancel under load",
+                actor_id="user-1",
+            )
+        )
+    assert active.value.status_code == 409
+    assert "authoritative graph node is active" in str(active.value.detail)
+    assert db.arbitration_workflow_runs.rows[0]["status"] == "running"
+
+    asyncio.run(
+        repository.release_run_execution_lease(
+            "run-cancel-fence",
+            effect_key="run-cancel-fence:graph-node:generate_draft:hash",
+            lease_token="lease-1",
+        )
+    )
+    cancelled = asyncio.run(
+        repository.cancel_if_idle(
+            "run-cancel-fence",
+            7,
+            reason="cancel after boundary",
+            actor_id="user-1",
+        )
+    )
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["cancellation_requested"] is True
+    assert cancelled["state_version"] == 8
+    assert db.arbitration_workflow_events.rows[-1]["event_type"] == "workflow_cancelled"
+
+
+def test_workflow_generation_recovers_inserted_version_without_creating_a_duplicate(monkeypatch):
+    db = _FakeDb()
+    db.arbitration_drafts.rows[0]["case_id"] = None
+    service = ArbitrationDraftingService(db)
+    actor = _FakeUser()
+    plan = {"plan_hash": "plan-hash-1", "status": "approved"}
+    context = {
+        "draft": dict(db.arbitration_drafts.rows[0]),
+        "source_ledger": [],
+        "matrix_context": {},
+        "claim_heads": [],
+        "paragraph_responses": [],
+        "missing_evidence": [],
+        "context_warnings": [],
+        "pleading_plan": plan,
+    }
+
+    async def ready(*args, **kwargs):
+        return None
+
+    async def fixed_context(*args, **kwargs):
+        return dict(context)
+
+    monkeypatch.setattr(service.case_workspace, "assert_case_ready_for_draft", ready)
+    monkeypatch.setattr(service, "_context", fixed_context)
+    effect_key = "graph:run-1:generate:plan-hash-1"
+    input_hash = stable_generation_input_hash(context)
+    generation_run_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"arbitration-generation:draft-1:{effect_key}:{input_hash}",
+        )
+    )
+    version = {
+        "_id": str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"arbitration-draft-version:{generation_run_id}",
+            )
+        ),
+        "draft_id": "draft-1",
+        "version": 2,
+        "status": "draft",
+        "sections": [],
+        "full_markdown": "# Recovered workflow candidate",
+        "structured_output": {"input_hash": input_hash, "prompt_version": PROMPT_VERSION},
+        "source_ledger": [],
+        "missing_evidence": [],
+        "paragraph_responses": [],
+        "claim_heads": [],
+        "annexures": [],
+        "warnings": [],
+        "validation_status": "passed",
+        "generation_run_id": generation_run_id,
+        "created_by": actor.id,
+    }
+    version["version_hash"] = immutable_version_hash(version)
+    db.arbitration_generation_runs.rows.append(
+        {
+            "_id": generation_run_id,
+            "draft_id": "draft-1",
+            "run_type": "full_draft",
+            "input_hash": input_hash,
+            "prompt_version": PROMPT_VERSION,
+            "model": "deterministic-source-grounded",
+            "status": "running",
+        }
+    )
+    db.arbitration_draft_versions.rows.append(version)
+    before = len(db.arbitration_draft_versions.rows)
+
+    result = asyncio.run(
+        service.generate(
+            "draft-1",
+            ArbitrationGenerateRequest(),
+            actor,
+            pleading_plan=plan,
+            workflow_effect_key=effect_key,
+        )
+    )
+
+    assert len(db.arbitration_draft_versions.rows) == before
+    assert result["current_version"] == 2
+    assert db.arbitration_generation_runs.rows[-1]["status"] == "completed"
+
+
+def test_graph_remediation_recovers_inserted_version_without_allocating_another(monkeypatch):
+    db = _FakeDb()
+    parent = db.arbitration_draft_versions.rows[0]
+    parent["version_hash"] = immutable_version_hash(parent)
+    run = {
+        "_id": "run-remediation-recovery",
+        "case_id": "case-1",
+        "draft_id": "draft-1",
+        "created_by": "user-1",
+        "state_version": 7,
+        "status": "running",
+        "current_node": "remediate_draft",
+        "draft_version_id": parent["_id"],
+        "draft_version_hash": parent["version_hash"],
+        "validation_report_id": "report-snapshot-1",
+        "validation_report_hash": "report-hash-1",
+        "remediation_cycle": 0,
+    }
+    db.arbitration_workflow_runs.rows.append(run)
+    report = {
+        "report_hash": "report-hash-1",
+        "version_hash": parent["version_hash"],
+        "remediation_policy": "bounded_deterministic",
+        "remediation_cycle": 0,
+    }
+    db.arbitration_workflow_snapshots.rows.append(
+        {
+            "_id": "report-snapshot-1",
+            "run_id": run["_id"],
+            "kind": "validation_report",
+            "payload": report,
+        }
+    )
+    remediation = {
+        "sections": [{"key": "facts", "content": "Recovered content"}],
+        "full_markdown": "# Recovered remediation",
+        "applied_fixes": ["normalize_heading"],
+        "before_content_hash": "before-hash",
+        "after_content_hash": "after-hash",
+    }
+    executor = ArbitrationGraphCommandExecutor(db)
+    monkeypatch.setattr(executor.validation, "remediate", lambda *_args, **_kwargs: remediation)
+    remediation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"arbitration-remediation:{run['_id']}:{report['report_hash']}:1",
+        )
+    )
+    recovered = {
+        **parent,
+        "_id": remediation_id,
+        "version": 2,
+        "sections": remediation["sections"],
+        "full_markdown": remediation["full_markdown"],
+        "structured_output": {
+            **(parent.get("structured_output") or {}),
+            "workflow_remediation": {
+                "policy": report["remediation_policy"],
+                "cycle": 1,
+                "applied_fixes": remediation["applied_fixes"],
+                "parent_version_hash": report["version_hash"],
+            },
+        },
+        "parent_version_id": parent["_id"],
+        "parent_version": parent["version"],
+        "generation_run_id": None,
+        "created_by": run["created_by"],
+    }
+    recovered["version_hash"] = immutable_version_hash(recovered)
+    db.arbitration_draft_versions.rows.append(recovered)
+    before = len(db.arbitration_draft_versions.rows)
+
+    output = asyncio.run(executor._remediate(run))
+
+    assert len(db.arbitration_draft_versions.rows) == before
+    assert db.arbitration_draft_version_counters.rows == []
+    assert output["draft_version_id"] == remediation_id
+    assert output["remediation_cycle"] == 1
 
 
 def test_workflow_snapshot_effect_key_rejects_different_payload():

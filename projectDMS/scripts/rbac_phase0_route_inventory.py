@@ -15,7 +15,7 @@ import sys
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Iterator
 
 from fastapi.routing import APIRoute
 
@@ -53,7 +53,27 @@ class RouteInventoryItem:
     public_reason: str = ""
 
 
-def _route_source(route: APIRoute) -> str:
+def _effective_api_routes() -> Iterator[Any]:
+    """Yield mounted API routes across FastAPI's eager and lazy representations.
+
+    FastAPI 0.139 stores ``include_router`` entries as private lazy wrappers.
+    Their ``effective_candidates`` are the fully prefixed route contexts with
+    the effective dependency graph, tags, and metadata used by dispatch.
+    Older FastAPI versions expose flattened ``APIRoute`` objects directly.
+    """
+    for mounted in app.routes:
+        if isinstance(mounted, APIRoute):
+            yield mounted
+            continue
+        candidates = getattr(mounted, "effective_candidates", None)
+        if not callable(candidates):
+            continue
+        for route in candidates():
+            if getattr(route, "endpoint", None) is not None:
+                yield route
+
+
+def _route_source(route: Any) -> str:
     try:
         source = inspect.getsource(route.endpoint)
     except (OSError, TypeError):
@@ -86,7 +106,7 @@ def _contains_any(source: str, needles: Iterable[str]) -> list[str]:
     return [needle for needle in needles if needle in source]
 
 
-def _classify_source(source: str, route: APIRoute) -> tuple[str, list[str], str]:
+def _classify_source(source: str, route: Any) -> tuple[str, list[str], str]:
     key = (str(route.path), str(route.name))
     if key in PUBLIC_OR_EXTERNAL_ROUTES:
         return "public_or_external", [], PUBLIC_OR_EXTERNAL_ROUTES[key]
@@ -187,9 +207,7 @@ def _classify_source(source: str, route: APIRoute) -> tuple[str, list[str], str]
 
 def build_inventory() -> list[RouteInventoryItem]:
     items: list[RouteInventoryItem] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in _effective_api_routes():
         path = str(getattr(route, "path", ""))
         if not path.startswith("/api"):
             continue

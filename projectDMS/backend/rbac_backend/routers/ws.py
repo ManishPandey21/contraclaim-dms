@@ -2,7 +2,8 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from jose import JWTError, jwt
+import jwt
+from jwt import PyJWTError as JWTError
 
 from ..core.config import settings
 from ..dependencies import get_notification_service
