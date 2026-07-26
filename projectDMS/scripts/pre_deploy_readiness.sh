@@ -55,8 +55,11 @@ cd "$ROOT_DIR"
 [[ -f "$ENV_FILE" ]] && pass "Root .env exists" || fail "Root .env is missing"
 [[ -f "$BACKEND_ENV_FILE" ]] && pass "backend/.env exists" || warn "backend/.env is missing; using root .env only"
 
-load_env_file "$ENV_FILE"
+# Compose injects the root .env into the running services. Load the legacy
+# backend file first only as a fallback; otherwise a stale backend/.env can
+# make readiness checks authenticate with a token that is not deployed.
 load_env_file "$BACKEND_ENV_FILE"
+load_env_file "$ENV_FILE"
 
 command -v docker >/dev/null 2>&1 && pass "docker is installed" || fail "docker is not installed"
 docker compose version >/dev/null 2>&1 && pass "docker compose is installed" || fail "docker compose plugin is not installed"

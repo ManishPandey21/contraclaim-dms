@@ -92,8 +92,11 @@ http_check() {
 }
 
 cd "$ROOT_DIR"
-load_env_file "$ENV_FILE"
+# Compose injects the root .env into the running services. Load the legacy
+# backend file first only as a fallback; otherwise a stale backend/.env can
+# make verification authenticate with a token that is not deployed.
 load_env_file "$BACKEND_ENV_FILE"
+load_env_file "$ENV_FILE"
 
 python_bin=$(resolve_python_bin || true)
 BACKEND_BASE_URL=$(resolve_backend_base_url)
