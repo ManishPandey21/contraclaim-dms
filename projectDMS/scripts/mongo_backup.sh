@@ -26,6 +26,11 @@ mongodump \
   --archive="${ARCHIVE}" \
   --gzip
 
-find "${BACKUP_DIR}" -type f -name "${MONGO_DB}-*.archive.gz" -mtime "+${RETENTION_DAYS}" -delete
+if ! find "${BACKUP_DIR}" -type f -name "${MONGO_DB}-*.archive.gz" -mtime "+${RETENTION_DAYS}" -delete 2>/dev/null; then
+  # A legacy archive may have a different owner. The new backup is valid and
+  # must not be reported as failed merely because retention needs operator
+  # cleanup; this condition is visible on stderr for follow-up.
+  echo "WARN: unable to remove one or more expired MongoDB backup archives; retention cleanup is required" >&2
+fi
 
 echo "MongoDB backup written to ${ARCHIVE}"

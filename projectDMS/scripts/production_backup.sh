@@ -102,6 +102,11 @@ cat >"$manifest_json" <<EOF
 EOF
 cp "$manifest_json" "$BACKUP_ROOT/manifests/latest.json"
 
-find "$BACKUP_ROOT" -type f -mtime "+$RETENTION_DAYS" -delete
+if ! find "$BACKUP_ROOT" -type f -mtime "+$RETENTION_DAYS" -delete 2>/dev/null; then
+  # Do not invalidate a freshly completed backup when a legacy artifact is
+  # owned by another account. Keep the warning actionable and leave the
+  # inaccessible artifact untouched for an authorized retention cleanup.
+  echo "WARN: unable to remove one or more expired backup artifacts; retention cleanup is required" >&2
+fi
 
 echo "Production backup complete: $BACKUP_ROOT ($STAMP)"
