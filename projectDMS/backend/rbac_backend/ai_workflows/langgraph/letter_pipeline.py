@@ -1119,12 +1119,14 @@ class LetterDraftGraph:
                     sources="\n".join(source_context_lines[:6]) or "None",
                 )
                 try:
+                    # strict=True: outage raises so the deterministic plan_text
+                    # is kept, instead of the fallback banner becoming the plan.
                     llm_plan = await plan_generator.generate(
-                        llm_plan_prompt, max_tokens=1800, model=plan_model
+                        llm_plan_prompt, max_tokens=1800, model=plan_model, strict=True
                     )
                     if llm_plan:
                         plan_text = llm_plan
-                except Exception as exc:  # pragma: no cover - defensive
+                except Exception as exc:
                     warnings.append(f"plan_llm: {exc}")
 
             document_items: List[Dict[str, Any]] = []
@@ -1403,12 +1405,15 @@ class LetterDraftGraph:
 
             llm_body = ""
             try:
+                # strict=True: outage raises so the draft callback fallback below
+                # runs, instead of the fallback banner becoming the letter body.
                 llm_body = await llm_generator.generate(
                     prompt_text,
                     max_tokens=1200,
                     model=drafter_model,
+                    strict=True,
                 )
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:
                 warnings.append(f"drafter_llm: {exc}")
 
             if not llm_body:
@@ -1506,8 +1511,10 @@ class LetterDraftGraph:
                 f"Draft:\n{draft.body}\n\nSources:\n{sources_text}"
             )
             try:
+                # strict=True: a reviewer outage is a recorded warning, not a
+                # silent "no findings" pass over the draft.
                 reviewer_response = await llm_generator.generate(
-                    reviewer_prompt, max_tokens=512, model=reviewer_model
+                    reviewer_prompt, max_tokens=512, model=reviewer_model, strict=True
                 )
                 for raw_line in reviewer_response.splitlines():
                     parts = [p.strip() for p in raw_line.split("|") if p.strip()]

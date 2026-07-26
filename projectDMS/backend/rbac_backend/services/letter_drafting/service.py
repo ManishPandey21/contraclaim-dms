@@ -56,7 +56,11 @@ from ...models.letter_drafting import (
     ValidationFinding,
     ValidationReport,
 )
+from ...models.ai_guardrails import GuardrailReport
+from ...models.evidence_ledger import EvidenceLedgerEntry
 from ...models.notification import NotificationPriority, NotificationSeverity, NotificationType
+from ...core.config import settings
+from ...services.ai_guardrails import AIOutputGuardrailService
 from ...services.authorization_service import AuthorizationService
 from ...services.policy_service import PolicyService
 from ...services.contract_service import ContractService
@@ -107,6 +111,7 @@ class DraftRunService:
         self.clause_checker = ClauseCheckingAgent(db)
         self.legal_risk_reviewer = LegalRiskReviewer()
         self.planning_builder = PlanningSheetBuilder()
+        self.guardrails = AIOutputGuardrailService.from_settings(settings)
 
     async def create_run(
         self,
@@ -200,6 +205,22 @@ class DraftRunService:
             warnings.extend(context_warnings)
             trace.append({"stage": "context", "status": "success", "source_count": len(sources)})
 
+            # Deterministic input/evidence guardrail scan (H1): user-supplied
+            # request text and retrieved source material are untrusted; an
+            # injection attempt must be visible to the reviewer, not just
+            # neutralised by the prompt guard.
+            guardrail_report = self._guardrail_scan(request, sources)
+            for finding in guardrail_report.findings:
+                warnings.append(f"guardrail {finding.code}: {finding.message}")
+            trace.append(
+                {
+                    "stage": "guardrail_scan",
+                    "status": "flagged" if guardrail_report.findings else "success",
+                    "verdict": guardrail_report.verdict,
+                    "finding_count": len(guardrail_report.findings),
+                }
+            )
+
             # The context pack is only persisted on the terminal path actually
             # taken, and its `sources` differ before vs. after generation, so it
             # is built lazily at each terminal below rather than eagerly (and
@@ -285,6 +306,8 @@ class DraftRunService:
                     draft_artifact=self._blocked_artifact(threshold_report),
                     source_integrity_summary=source_summary,
                     validation_report=threshold_report,
+                    guardrail_report=guardrail_report,
+                    evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                     warnings=warnings,
                     trace=trace,
                     completed_at=datetime.now(timezone.utc),
@@ -318,6 +341,8 @@ class DraftRunService:
                     draft_artifact=self._blocked_artifact(validation),
                     source_integrity_summary=source_summary,
                     validation_report=validation,
+                    guardrail_report=guardrail_report,
+                    evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                     warnings=warnings,
                     trace=trace + [{"stage": "strategy", "status": "blocked"}],
                     completed_at=datetime.now(timezone.utc),
@@ -385,10 +410,16 @@ class DraftRunService:
                 warnings.extend(cyclic_warnings)
                 if validation.blocking:
                     status = "needs_attention"
+                # Fail-visible: the deterministic template fallback (LLM outage
+                # or offline mode) is a degraded output that must reach a human
+                # as such — never a "completed" run with a buried warning.
+                llm_degraded = any(w.startswith("draft_llm:") for w in warnings)
+                if llm_degraded:
+                    status = "needs_attention"
                 trace.append(
                     {
                         "stage": "draft",
-                        "status": "success",
+                        "status": "degraded" if llm_degraded else "success",
                         "prompt_version": artifact.prompt_version,
                     }
                 )
@@ -445,6 +476,8 @@ class DraftRunService:
                 source_integrity_summary=source_summary,
                 validation_report=validation,
                 legal_risk_report=legal_risk_report,
+                guardrail_report=guardrail_report,
+                evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                 cyclic_trace=cyclic_trace,
                 assertion_support=assertion_support,
                 confidence_scores=confidence_scores,
@@ -2321,6 +2354,63 @@ class DraftRunService:
         except Exception:
             return
 
+    def _guardrail_scan(
+        self,
+        request: DraftRunCreateRequest,
+        sources: List[SourceEvidence],
+    ) -> GuardrailReport:
+        """Deterministic injection scan over user inputs and source texts.
+
+        Advisory by design: the letter workflow's three-stage human approval
+        chain is the enforcement layer, so findings flag rather than block —
+        but a critical finding always demands human review.
+        """
+        findings = []
+        for origin in ("subject", "points", "context", "requirements", "background_facts"):
+            findings.extend(self.guardrails.scan_input(getattr(request, origin, None), origin=origin))
+        findings.extend(
+            self.guardrails.scan_evidence([source.text or source.snippet for source in sources])
+        )
+        verdict = (
+            "requires_human_review"
+            if any(finding.severity == "critical" for finding in findings)
+            else "pass"
+        )
+        return GuardrailReport(verdict=verdict, findings=findings)
+
+    @staticmethod
+    def _evidence_ledger_entries(
+        run_id: str, sources: List[SourceEvidence]
+    ) -> List[EvidenceLedgerEntry]:
+        """Unified provenance records; labels match the prompt's [S#] tokens."""
+        return [
+            EvidenceLedgerEntry.from_source_evidence(
+                source, run_id=run_id, citation_label=f"S{idx}"
+            )
+            for idx, source in enumerate(sources, start=1)
+        ]
+
+    async def _record_run_observability(self, run: DraftRun) -> None:
+        """Count run outcomes and degraded/guardrail signals; never fails the run."""
+        try:
+            from ...services.observability import observability_registry
+
+            await observability_registry.record_domain_event(
+                resource_type="letter_drafting", event_type=f"run_{run.status}"
+            )
+            if any(str(w).startswith("draft_llm:") for w in run.warnings):
+                await observability_registry.record_domain_event(
+                    resource_type="letter_drafting", event_type="llm_fallback_draft"
+                )
+            if run.guardrail_report and run.guardrail_report.findings:
+                await observability_registry.record_domain_event(
+                    resource_type="letter_drafting", event_type="prompt_injection_suspected"
+                )
+        except Exception:
+            # Observability must never break drafting; the run record itself
+            # still carries the warnings and reports.
+            pass
+
     async def _create_and_record(
         self,
         run: DraftRun,
@@ -2328,6 +2418,7 @@ class DraftRunService:
         *,
         context_pack: Optional[DraftContextPack] = None,
     ) -> DraftRun:
+        await self._record_run_observability(run)
         stored = await self.repository.create(run)
         if stored.run_id != run.run_id:
             # A duplicate idempotent request won the creation race.  It owns

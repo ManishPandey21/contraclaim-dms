@@ -36,7 +36,7 @@ from ..audit_event_service import AuditEventService
 from .context import ArbitrationContextBuilder, condense
 from .exporter import ArbitrationDraftExporter
 from .generator import ArbitrationDraftGenerator, PROMPT_VERSION, SECTION_KEYS_BY_DRAFT_TYPE, SOURCE_POLICY
-from .llm_generator import LLMDraftGenerator
+from .llm_generator import LLM_DRAFT_PROMPT_VERSION, LLMDraftGenerator
 from .case_workspace import ArbitrationCaseWorkspaceService
 from .repository import ArbitrationDraftingRepository, _jsonable
 from .validator import ArbitrationDraftValidator
@@ -958,7 +958,7 @@ class ArbitrationDraftingService:
         if mode == "llm":
             llm = LLMDraftGenerator()
             if llm.available:
-                return llm, llm.model_name, "arbitration_pleadings_llm.v1"
+                return llm, llm.model_name, LLM_DRAFT_PROMPT_VERSION
             context.setdefault("context_warnings", []).append(
                 "LLM draft mode was requested but no model client is configured; "
                 "the deterministic source-grounded draft was used instead."

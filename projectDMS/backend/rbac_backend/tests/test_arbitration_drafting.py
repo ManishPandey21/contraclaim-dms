@@ -1447,7 +1447,7 @@ def test_agent_mode_option_overrides_environment(monkeypatch):
     monkeypatch.delenv("ARBITRATION_AGENT_MODE", raising=False)
     assert resolve_agent_mode({}) == "deterministic"
     assert resolve_agent_mode({"agent_mode": "bogus"}) == "deterministic"
-    assert agent_run_metadata({"agent_mode": "llm"})["prompt_version"] == "arbitration-agents-llm-1"
+    assert agent_run_metadata({"agent_mode": "llm"})["prompt_version"] == "arbitration-agents-llm-2"
     assert agent_run_metadata({})["model"] == "deterministic-matrix-agent"
 
 
@@ -1481,7 +1481,7 @@ def test_llm_agent_creates_needs_review_rows_from_mocked_output(monkeypatch):
         )
     )
 
-    assert result["prompt_version"] == "arbitration-agents-llm-1"
+    assert result["prompt_version"] == "arbitration-agents-llm-2"
     assert result["model"] != "deterministic-matrix-agent"
     assert result["errors"] == []
     row = next(r for r in db.arbitration_claim_matrix.rows if r.get("source_claim_id") == "claim-1")
@@ -2559,7 +2559,7 @@ def test_llm_draft_generator_rewrites_sections_preserving_citations():
 
     result = asyncio.run(gen.generate(context))
 
-    assert result["ai_prompt_version"] == "arbitration_pleadings_llm.v1"
+    assert result["ai_prompt_version"] == "arbitration_pleadings_llm.v2"
     assert result["structured_output"]["generation_mode"] == "llm"
     assert result["structured_output"]["llm_rewritten_sections"] >= 1
     assert "the Claimant advances its case on the record. [S1: CPL/2025/0142]" in result["full_markdown"]

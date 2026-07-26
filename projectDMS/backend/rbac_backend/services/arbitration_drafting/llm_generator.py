@@ -26,12 +26,15 @@ import re
 from typing import Any, Dict, List, Optional
 
 from ...config.document_processing_config import DocumentProcessingConfig
+from ...core.config import settings
 from ...retrieval.generator import LLMGenerator
+from ...services.ai_guardrails import AIOutputGuardrailService
+from .agents.llm import UNTRUSTED_SOURCE_GUARD
 from .generator import ArbitrationDraftGenerator
 
 logger = logging.getLogger(__name__)
 
-LLM_DRAFT_PROMPT_VERSION = "arbitration_pleadings_llm.v1"
+LLM_DRAFT_PROMPT_VERSION = "arbitration_pleadings_llm.v2"
 DEFAULT_DRAFT_MODEL = "gpt-4o"
 
 # Sections whose body is structural/verbatim and must not be reworded by the LLM.
@@ -77,6 +80,21 @@ class LLMDraftGenerator:
         rewritable = [s for s in sections if s["key"] not in _VERBATIM_SECTIONS and (s.get("body") or "").strip()]
         if not rewritable:
             return base
+
+        # Section bodies embed source-derived text (register rows, opponent
+        # pleading excerpts); scan them so an injection attempt is a visible
+        # context warning for the legal reviewer, not a silent prompt payload.
+        try:
+            injection_findings = AIOutputGuardrailService.from_settings(settings).scan_evidence(
+                [section.get("body") for section in rewritable]
+            )
+        except Exception:  # pragma: no cover - defensive
+            injection_findings = []
+        for finding in injection_findings:
+            context.setdefault("context_warnings", []).append(
+                f"guardrail {finding.code}: {finding.message} "
+                "Review the flagged source text before legal review."
+            )
 
         prompt = self._build_prompt(context, rewritable, additional_instruction)
         try:
@@ -139,6 +157,7 @@ class LLMDraftGenerator:
         allowed = sorted(self._citation_tokens(sections))
         lines = [
             "You are an arbitration counsel drafting a construction pleading.",
+            UNTRUSTED_SOURCE_GUARD,
             f"Pleading type: {draft.get('draft_type')}. Title: {draft.get('title')}.",
             "",
             "Rewrite each section below into formal, persuasive but neutral pleading prose.",

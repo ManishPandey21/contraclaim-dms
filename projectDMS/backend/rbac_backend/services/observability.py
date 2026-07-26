@@ -50,6 +50,7 @@ class ObservabilityRegistry:
     _arbitration_runtime_events_total: Dict[Tuple[str, str, str], int] = field(default_factory=dict)
     _arbitration_runtime_values: Dict[Tuple[str, str], float] = field(default_factory=dict)
     _vector_store_failures_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
+    _llm_calls_total: Dict[Tuple[str, str], int] = field(default_factory=dict)
     _dependency_health: Dict[str, float] = field(default_factory=dict)
 
     async def record_request(
@@ -222,6 +223,18 @@ class ObservabilityRegistry:
         async with self._lock:
             self._vector_store_failures_total[key] = self._vector_store_failures_total.get(key, 0) + 1
 
+    async def record_llm_call(self, *, model: str, outcome: str) -> None:
+        """Count an LLM generation attempt by model and outcome.
+
+        Outcomes: ``success`` (live completion returned), ``failed`` (API call
+        raised), ``offline`` (no client configured). ``failed``/``offline`` are
+        the alerting signals for degraded drafting output — the generator no
+        longer masks these as ordinary answers.
+        """
+        key = (str(model or "unknown"), str(outcome or "unknown"))
+        async with self._lock:
+            self._llm_calls_total[key] = self._llm_calls_total.get(key, 0) + 1
+
     async def record_dependency_health(self, *, name: str, healthy: bool) -> None:
         async with self._lock:
             self._dependency_health[str(name)] = 1.0 if healthy else 0.0
@@ -246,6 +259,10 @@ class ObservabilityRegistry:
             "arbitration_runtime_event_total": sum(self._arbitration_runtime_events_total.values()),
             "arbitration_workflow_active_alerts": sum(1 for value in self._arbitration_workflow_alerts.values() if value),
             "vector_store_failure_total": sum(self._vector_store_failures_total.values()),
+            "llm_call_total": sum(self._llm_calls_total.values()),
+            "llm_call_degraded_total": sum(
+                value for (model, outcome), value in self._llm_calls_total.items() if outcome != "success"
+            ),
             "dependency_health": dict(self._dependency_health),
         }
 
@@ -456,6 +473,16 @@ class ObservabilityRegistry:
         for (operation, namespace), value in sorted(self._vector_store_failures_total.items()):
             labels = _labels((("operation", operation), ("namespace", namespace)))
             lines.append(f"contractdms_vector_store_failures_total{labels} {value}")
+
+        lines.extend(
+            [
+                "# HELP contractdms_llm_calls_total LLM generation attempts by model and outcome.",
+                "# TYPE contractdms_llm_calls_total counter",
+            ]
+        )
+        for (model, outcome), value in sorted(self._llm_calls_total.items()):
+            labels = _labels((("model", model), ("outcome", outcome)))
+            lines.append(f"contractdms_llm_calls_total{labels} {value}")
 
         lines.extend(
             [

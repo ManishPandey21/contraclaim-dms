@@ -603,6 +603,8 @@ class LangGraphDraftingEngine:
             "source_integrity_summary": generated.source_integrity_summary,
             "validation_report": generated.validation_report,
             "legal_risk_report": generated.legal_risk_report,
+            "guardrail_report": generated.guardrail_report,
+            "evidence_ledger": generated.evidence_ledger,
             "cyclic_trace": generated.cyclic_trace,
             "assertion_support": generated.assertion_support,
             "confidence_scores": generated.confidence_scores,

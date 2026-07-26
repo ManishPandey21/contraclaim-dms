@@ -227,6 +227,9 @@ class DraftingQueue:
             await redis.lrem(settings.DRAFTING_QUEUE_PROCESSING_NAME, 1, job_id)
             if terminal:
                 await self._push_unique(redis, settings.DRAFTING_QUEUE_DEADLETTER_NAME, job_id)
+                # Fail-visible: a dead-lettered job must not leave its Mongo run
+                # in "running" forever; the client polls that record, not Redis.
+                await self._mark_run_failed(raw, exc)
             else:
                 await asyncio.sleep(min(2**attempts, 10))
                 await self._push_unique(redis, settings.DRAFTING_QUEUE_NAME, job_id)
@@ -235,6 +238,37 @@ class DraftingQueue:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat
+
+    async def _mark_run_failed(self, raw_payload: str, exc: Exception) -> None:
+        """Best-effort terminal-failure sync from the queue to the run record."""
+        try:
+            payload = json.loads(raw_payload)
+            letter_id = str(payload.get("letter_id") or "")
+            run_id = str(payload.get("run_id") or "")
+            if not letter_id or not run_id:
+                return
+            from ...core.database import get_database
+            from .repository import DraftRunRepository
+
+            repository = DraftRunRepository(await get_database())
+            await repository.update_fields(
+                letter_id,
+                run_id,
+                {
+                    "status": "failed",
+                    "execution_status": "failed",
+                    "next_action": "none",
+                    "lease_owner": None,
+                },
+            )
+            await repository.append_event(
+                letter_id,
+                run_id,
+                "failed",
+                detail=f"Drafting job dead-lettered after retries: {str(exc)[:500]}",
+            )
+        except Exception:
+            logger.exception("Failed to mark dead-lettered draft run as failed")
 
     async def _heartbeat(self, job_id: str, worker_name: str) -> None:
         while True:

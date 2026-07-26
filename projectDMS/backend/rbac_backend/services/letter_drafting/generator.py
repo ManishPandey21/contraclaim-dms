@@ -53,7 +53,10 @@ class StrategyPlanner:
         )
         try:
             prompt = render_prompt(prompt_record, payload)
-            plan = await self.generator.generate(prompt, max_tokens=1800, model=self.model_name)
+            # strict=True: an LLM outage raises instead of returning the canned
+            # "Answer unavailable" text, so the deterministic plan below is used
+            # and the degradation is recorded as a warning (fail-visible).
+            plan = await self.generator.generate(prompt, max_tokens=1800, model=self.model_name, strict=True)
         except Exception as exc:
             warnings.append(f"strategy_llm: {exc}")
             plan = fallback_strategy_plan(role, context, sources)
@@ -85,7 +88,10 @@ class DraftGenerator:
         payload["finalized"] = "true" if finalized else "false"
         try:
             prompt = render_prompt(prompt_record, payload)
-            raw = await self.generator.generate(prompt, max_tokens=1400, model=self.model_name)
+            # strict=True: an LLM outage must never let the fallback banner text
+            # become the draft letter; the structured template below is the
+            # explicit degraded output and the run is marked accordingly.
+            raw = await self.generator.generate(prompt, max_tokens=1400, model=self.model_name, strict=True)
         except Exception as exc:
             warnings.append(f"draft_llm: {exc}")
             raw = fallback_draft(role, letter, context, sources, finalized)

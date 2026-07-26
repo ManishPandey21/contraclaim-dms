@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..utils.datetime import now_utc
+from .ai_guardrails import GuardrailReport
+from .evidence_ledger import EvidenceLedgerEntry
 
 
 DraftMode = Literal["background", "strategy", "draft", "review"]
@@ -762,6 +764,13 @@ class DraftRun(BaseModel):
     source_integrity_summary: Optional[SourceIntegritySummary] = None
     validation_report: ValidationReport = Field(default_factory=ValidationReport)
     legal_risk_report: Optional[LegalRiskReport] = None
+    # Deterministic input/evidence guardrail result for this run (injection
+    # scan over user inputs and source texts). Advisory: flags, never blocks —
+    # the three-stage human approval chain is the enforcement layer.
+    guardrail_report: Optional[GuardrailReport] = None
+    # Unified provenance records for the sources this draft was grounded in,
+    # labelled to match the [S#] tokens used in the drafting prompt.
+    evidence_ledger: List[EvidenceLedgerEntry] = Field(default_factory=list)
     locked_paragraphs: List[str] = Field(default_factory=list)
     cyclic_trace: List[CyclicIterationTrace] = Field(default_factory=list)
     assertion_support: List[DraftAssertionSupport] = Field(default_factory=list)
