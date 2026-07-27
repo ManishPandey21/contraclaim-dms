@@ -505,6 +505,8 @@ export const useLetterWorkflow = () => {
       payload?: {
         reviewer_summary?: string;
         reviewer_findings?: Record<string, unknown>[];
+        draft_run_id?: string;
+        expected_draft_hash?: string;
       }
     ) => {
       await api.post(`/letters/${id}/submit`, payload ?? {}, headerFor(id));

@@ -18,8 +18,10 @@ import type {
   DraftRunStateResponse,
   ExactClauseSearchRequest,
   ExactReferenceSearchRequest,
+  FreezeSectionsRequest,
   LockParagraphsRequest,
   ReviseDraftRequest,
+  ReviseSectionsRequest,
   ReturnForCorrectionRequest,
   SourceLedgerResponse,
   UserDirectionRequest,
@@ -51,6 +53,19 @@ const isAcceptedRun = (value: DraftRunResponse | DraftRunAccepted): value is Dra
   "poll_url" in value && value.engine === "langgraph_v3";
 
 const pause = (milliseconds: number) => new Promise<void>((resolve) => window.setTimeout(resolve, milliseconds));
+
+async function waitForWorkflowRun(letterId: string, runId: string) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const state = await requestJson<DraftRunStateResponse>(
+      `/letters/${letterId}/drafting/runs/${runId}/state`
+    );
+    if (state.next_action !== "poll") {
+      return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
+    }
+    await pause(1000);
+  }
+  return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
+}
 
 export const useLetterDrafting = () => {
   const [data, setData] = useState<DraftRunResponse | null>(null);
@@ -100,22 +115,6 @@ export const useLetterDrafting = () => {
     []
   );
 
-  const waitForWorkflowRun = useCallback(
-    async (letterId: string, runId: string) => {
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        const state = await requestJson<DraftRunStateResponse>(
-          `/letters/${letterId}/drafting/runs/${runId}/state`
-        );
-        if (state.next_action !== "poll") {
-          return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
-        }
-        await pause(1000);
-      }
-      return requestJson<DraftRunResponse>(`/letters/${letterId}/drafting/runs/${runId}`);
-    },
-    []
-  );
-
   const resumeWorkflowRun = useCallback(
     async (letterId: string, runId: string, payload: DraftRunResumeRequest) => {
       setLoading(true);
@@ -131,7 +130,7 @@ export const useLetterDrafting = () => {
         setLoading(false);
       }
     },
-    [waitForWorkflowRun]
+    []
   );
 
   const cancelWorkflowRun = useCallback(
@@ -334,6 +333,28 @@ export const useLetterDrafting = () => {
     [store]
   );
 
+  const freezeSections = useCallback(
+    (letterId: string, runId: string, payload: FreezeSectionsRequest) =>
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/freeze-sections`,
+          { method: "POST", body: JSON.stringify(payload) }
+        )
+      ),
+    [store]
+  );
+
+  const reviseSections = useCallback(
+    (letterId: string, runId: string, payload: ReviseSectionsRequest) =>
+      store(
+        requestJson<DraftRunResponse>(
+          `/letters/${letterId}/drafting/runs/${runId}/revise-sections`,
+          { method: "POST", body: JSON.stringify(payload) }
+        )
+      ),
+    [store]
+  );
+
   const exportRun = useCallback(
     (letterId: string, runId: string) => postAction(letterId, runId, "export"),
     [postAction]
@@ -423,6 +444,8 @@ export const useLetterDrafting = () => {
     approveStage,
     provideUserDirection,
     lockParagraphs,
+    freezeSections,
+    reviseSections,
     exportRun,
     issueRun,
     assignReviewer,

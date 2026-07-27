@@ -55,6 +55,7 @@ from ..core.database import get_db
 
 
 from ..services.letter_service import LetterService
+from ..services.letter_drafting.service import DraftRunService
 
 
 
@@ -136,7 +137,12 @@ class StrategyRoleUpdateRequest(BaseModel):
     recipient: Optional[str] = None
 
 
-class SubmitLetterRequest(BaseModel):
+class GovernedTransitionRequest(BaseModel):
+    draft_run_id: Optional[str] = None
+    expected_draft_hash: Optional[str] = None
+
+
+class SubmitLetterRequest(GovernedTransitionRequest):
     reviewer_summary: Optional[str] = None
     reviewer_findings: Optional[List[Dict[str, Any]]] = None
 
@@ -2613,6 +2619,16 @@ async def submit_letter(
             if lines:
                 comment = "Reviewer findings:\n" + "\n".join(lines)
 
+    await DraftRunService(controller.letter_service.db).approve_legacy_workflow_stage(
+        letter_id,
+        "drafter",
+        letter.content,
+        current_user,
+        run_id=payload.draft_run_id if payload else None,
+        expected_draft_hash=payload.expected_draft_hash if payload else None,
+        comment=comment,
+    )
+
     return await controller.letter_service.change_status(
 
 
@@ -2646,6 +2662,8 @@ async def approve_letter(
 
     letter_id: str,
 
+    payload: Optional[GovernedTransitionRequest] = Body(default=None),
+
 
 
     controller: LetterController = Depends(get_letter_controller),
@@ -2667,6 +2685,15 @@ async def approve_letter(
     await controller.auth_service.check_letter_access(current_user, letter, "admin")
     _enforce_letter_separation_of_duties(letter, current_user)
     _enforce_letter_transition(letter, "Approval")
+
+    await DraftRunService(controller.letter_service.db).approve_legacy_workflow_stage(
+        letter_id,
+        "reviewer",
+        letter.content,
+        current_user,
+        run_id=payload.draft_run_id if payload else None,
+        expected_draft_hash=payload.expected_draft_hash if payload else None,
+    )
 
 
 
@@ -2700,6 +2727,8 @@ async def complete_letter(
 
     letter_id: str,
 
+    payload: Optional[GovernedTransitionRequest] = Body(default=None),
+
 
 
     controller: LetterController = Depends(get_letter_controller),
@@ -2722,6 +2751,15 @@ async def complete_letter(
     _enforce_letter_separation_of_duties(letter, current_user)
     _enforce_letter_transition(letter, "Completed")
 
+    await DraftRunService(controller.letter_service.db).approve_legacy_workflow_stage(
+        letter_id,
+        "final",
+        letter.content,
+        current_user,
+        run_id=payload.draft_run_id if payload else None,
+        expected_draft_hash=payload.expected_draft_hash if payload else None,
+    )
+
 
 
     return await controller.letter_service.change_status(
@@ -2733,6 +2771,4 @@ async def complete_letter(
 
 
     )
-
-
 

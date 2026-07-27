@@ -193,6 +193,7 @@ class Letter(BaseModel):
     current_draft_version: Optional[int] = None
     approved_draft_version: Optional[int] = None
     approved_run_id: Optional[str] = None
+    governed_draft_hash: Optional[str] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     approved_version_locked: bool = False
@@ -308,6 +309,7 @@ class LetterUpdate(BaseModel):
     current_draft_version: Optional[int] = None
     approved_draft_version: Optional[int] = None
     approved_run_id: Optional[str] = None
+    governed_draft_hash: Optional[str] = None
     approved_by: Optional[str] = None
     approved_at: Optional[datetime] = None
     approved_version_locked: Optional[bool] = None

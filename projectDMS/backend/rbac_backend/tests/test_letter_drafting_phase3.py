@@ -50,7 +50,8 @@ def test_clean_draft_produces_no_flags():
     )
     assert report.flags == []
     assert report.human_review_required is False
-    assert report.reviewed_at is not None
+    assert report.scanned_at is not None
+    assert report.human_reviewed_at is None
 
 
 # --------------------------------------------------------------------------- #

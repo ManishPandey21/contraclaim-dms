@@ -33,6 +33,14 @@ export type RevisionAction =
   | "regenerate"
   | "custom_instruction";
 
+export type SectionEditAction =
+  | "rewrite"
+  | "grammar_spelling"
+  | "clarity_structure"
+  | "tone_formality"
+  | "expand"
+  | "polish";
+
 export interface DraftRunCreateRequest {
   mode?: DraftMode;
   draft_type?: DraftType;
@@ -61,6 +69,8 @@ export interface DraftRunCreateRequest {
   plan_override?: string;
   max_iterations?: number;
   finalized?: boolean;
+  user_direction_answers?: UserDirectionAnswer[];
+  user_direction?: string;
 }
 
 export interface SourceEvidence {
@@ -136,6 +146,10 @@ export interface LegalRiskFlag {
 export interface LegalRiskReport {
   flags: LegalRiskFlag[];
   human_review_required?: boolean;
+  scanned_at?: string;
+  human_reviewed_at?: string;
+  human_reviewed_by?: string;
+  human_review_comment?: string;
   reviewed_at?: string;
 }
 
@@ -155,6 +169,35 @@ export interface ApproveStageRequest {
 
 export interface LockParagraphsRequest {
   locked_paragraphs: string[];
+}
+
+export interface FrozenDraftSection {
+  section_index: number;
+  content: string;
+  content_hash: string;
+  frozen_by?: string;
+  frozen_at?: string;
+}
+
+export interface FreezeSectionsRequest {
+  section_indices: number[];
+  expected_draft_hash?: string;
+}
+
+export interface ReviseSectionsRequest {
+  section_indices: number[];
+  action: SectionEditAction;
+  expected_draft_hash?: string;
+}
+
+export interface SectionRevisionRecord {
+  source_run_id: string;
+  action: SectionEditAction;
+  editable_section_indices: number[];
+  preserved_sections: FrozenDraftSection[];
+  source_draft_hash: string;
+  result_draft_hash: string;
+  prompt_version: number;
 }
 
 export interface DraftRunResponse {
@@ -232,6 +275,8 @@ export interface DraftRunResponse {
   user_directions?: UserDirectionAnswer[];
   legal_risk_report?: LegalRiskReport;
   locked_paragraphs?: string[];
+  frozen_sections?: FrozenDraftSection[];
+  section_revision?: SectionRevisionRecord;
   approvals?: ApprovalStep[];
   approval_status?: string;
   assigned_reviewer_id?: string;
@@ -303,6 +348,8 @@ export interface DraftLifecycleEvent {
     | "user_direction_provided"
     | "legal_risk_reviewed"
     | "paragraphs_locked"
+    | "sections_frozen"
+    | "sections_revised"
     | "drafter_approved"
     | "reviewer_approved"
     | "final_approved"
