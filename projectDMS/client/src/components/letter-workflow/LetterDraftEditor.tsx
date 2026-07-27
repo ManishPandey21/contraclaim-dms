@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -99,6 +99,13 @@ const LetterDraftEditor: React.FC<LetterDraftEditorProps> = ({
   const [reference, setReference] = useState<LetterReference | undefined>(letter.reference);
   const [isReferenceDialogOpen, setIsReferenceDialogOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+
+  // Draft generation and scoped section revision replace the parent letter
+  // content asynchronously. Keep the editor aligned with that authoritative
+  // run artifact instead of retaining the first render's stale local value.
+  useEffect(() => {
+    setContent(letter.content);
+  }, [letter.content]);
   
   // Filter letters based on search query
   const filteredLetters = referenceLetters.filter((l) => {

@@ -20,6 +20,9 @@ from rbac_backend.models.letter_drafting import (
     DraftRun,
     LegalRiskFlag,
     LegalRiskReport,
+    ProbingQuestion,
+    UserDirectionAnswer,
+    UserDirectionRequest,
     ValidationReport,
 )
 from rbac_backend.services.letter_drafting.service import DraftRunService
@@ -38,6 +41,9 @@ class FakeRepo:
     async def get(self, letter_id, run_id):
         return self.run
 
+    async def latest(self, letter_id, mode=None):
+        return self.run
+
     async def update_fields(self, letter_id, run_id, fields):
         self.run = self.run.model_copy(update=fields)
         return self.run
@@ -52,6 +58,22 @@ class FakeRepo:
     async def lock_approved_draft_version(self, letter_id, run_id, user_id):
         self.locked.append(user_id)
         return 1
+
+    async def finalize_draft_approval(
+        self, letter_id, run, approvals, user_id, approved_at
+    ):
+        self.accepted.append(user_id)
+        self.locked.append(user_id)
+        self.run = self.run.model_copy(
+            update={
+                "approvals": approvals,
+                "approval_status": "approved",
+                "status": "approved",
+                "approved_by": user_id,
+                "approved_at": approved_at,
+            }
+        )
+        return self.run, 1
 
 
 class FakePolicy:
@@ -155,25 +177,25 @@ async def test_out_of_order_stage_rejected():
 
 
 @pytest.mark.asyncio
-async def test_duplicate_stage_rejected():
+async def test_duplicate_stage_is_idempotent():
     service = _service(_run())
-    await _approve(service, "drafter", "drafter-1")
-    with pytest.raises(HTTPException) as exc:
-        await _approve(service, "drafter", "drafter-1")
-    assert exc.value.status_code == 409
+    first = await _approve(service, "drafter", "drafter-1")
+    replay = await _approve(service, "drafter", "drafter-1")
+    assert replay == first
+    assert [step.stage for step in replay.approvals] == ["drafter"]
 
 
 @pytest.mark.asyncio
-async def test_chain_complete_rejects_more_approvals():
+async def test_chain_complete_final_replay_is_idempotent():
     approvals = [
         ApprovalStep(stage="drafter", approved_by="d"),
         ApprovalStep(stage="reviewer", approved_by="r"),
         ApprovalStep(stage="final", approved_by="f"),
     ]
     service = _service(_run(approvals=approvals, status="approved"))
-    with pytest.raises(HTTPException) as exc:
-        await _approve(service, "final", "manager-1")
-    assert exc.value.status_code == 400  # already approved/finalized
+    replay = await _approve(service, "final", "manager-1")
+    assert replay.status == "approved"
+    assert [step.stage for step in replay.approvals] == ["drafter", "reviewer", "final"]
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +261,7 @@ async def test_blocked_run_cannot_enter_chain():
 async def test_high_legal_risk_requires_recorded_human_review_before_approval():
     risk = LegalRiskReport(
         human_review_required=True,
+        reviewed_at=datetime.now(timezone.utc),
         flags=[
             LegalRiskFlag(
                 flag_id="risk-1", category="admission", severity="high",
@@ -261,3 +284,101 @@ async def test_legacy_approve_walks_the_chain():
     assert [s.stage for s in run.approvals] == ["drafter", "reviewer"]
     run = await service.approve_run("letter-1", "run-1", _user("manager-1"))
     assert run.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_legacy_submit_binds_exact_governed_artifact():
+    service = _service(_run())
+    run = await service.approve_legacy_workflow_stage(
+        "letter-1",
+        "drafter",
+        "Dear Sir, ...",
+        _user("drafter-1"),
+        run_id="run-1",
+    )
+    assert run.approval_status == "drafter_approved"
+    assert service.repository.accepted == ["drafter-1"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_submit_rejects_mutated_content():
+    service = _service(_run())
+    with pytest.raises(HTTPException) as exc:
+        await service.approve_legacy_workflow_stage(
+            "letter-1",
+            "drafter",
+            "Dear Sir, changed outside the governed run.",
+            _user("drafter-1"),
+            run_id="run-1",
+        )
+    assert exc.value.status_code == 409
+    assert service.repository.accepted == []
+
+
+@pytest.mark.asyncio
+async def test_v2_direction_resume_requires_every_required_answer():
+    service = _service(
+        _run(
+            status="awaiting_user_direction",
+            execution_status="awaiting_user_direction",
+            probing_questions=[
+                ProbingQuestion(
+                    question_id="deadline",
+                    question="What deadline should apply?",
+                    required=True,
+                )
+            ],
+        )
+    )
+    with pytest.raises(HTTPException) as exc:
+        await service.provide_user_direction(
+            "letter-1",
+            "run-1",
+            UserDirectionRequest(directions="Proceed firmly."),
+            _user("drafter-1"),
+        )
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_v2_direction_resume_creates_linked_child_after_answers():
+    original = _run(
+        status="awaiting_user_direction",
+        execution_status="awaiting_user_direction",
+        probing_questions=[
+            ProbingQuestion(
+                question_id="deadline",
+                question="What deadline should apply?",
+                question_version=2,
+                required=True,
+            )
+        ],
+    )
+    child = _run(run_id="run-2", parent_run_id="run-1")
+    service = _service(original)
+    captured = {}
+
+    async def create_run(letter_id, request, current_user, **kwargs):
+        captured["request"] = request
+        captured["metadata"] = kwargs["engine_metadata"]
+        return child
+
+    service.create_run = create_run
+    resumed = await service.provide_user_direction(
+        "letter-1",
+        "run-1",
+        UserDirectionRequest(
+            answers=[
+                UserDirectionAnswer(
+                    question_id="deadline",
+                    question_version=2,
+                    answer="Seven calendar days.",
+                )
+            ]
+        ),
+        _user("drafter-1"),
+    )
+    assert resumed.run_id == "run-2"
+    assert captured["metadata"]["parent_run_id"] == "run-1"
+    assert captured["request"].user_direction_answers[0].answer == "Seven calendar days."
+    assert service.repository.run.status == "completed"

@@ -32,7 +32,13 @@ import { formatDateTime } from "@/utils/dateFormat";
 import { mapLetterToUi, UILetter } from "@/utils/letterWorkflowMapping";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertTriangle } from "lucide-react";
-import type { DraftRunResponse, DraftType, LetterCategory, SourceEvidence } from "@/types/letterDrafting";
+import type {
+  DraftRunResponse,
+  DraftType,
+  LetterCategory,
+  SectionEditAction,
+  SourceEvidence,
+} from "@/types/letterDrafting";
 
 type DocumentSummarySource =
   | LanggraphContextDocument
@@ -99,7 +105,8 @@ const LetterDraftPage = () => {
     approveStage,
     provideUserDirection,
     resumeWorkflowRun,
-    lockParagraphs,
+    freezeSections,
+    reviseSections,
     exportRun,
     issueRun,
     loading: draftingV2Loading,
@@ -473,15 +480,23 @@ const LetterDraftPage = () => {
         exclude_letter_codes: excludeLetterCodes,
       });
       setV2Run(response);
-      setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
+      if (response.draft_artifact?.draft_letter) {
+        setV2DraftBody(response.draft_artifact.draft_letter);
+      }
       setBackgroundItems(
         (graphRun?.background_summary as LanggraphBackgroundItem[]) ?? []
       );
       await fetchLetters();
       await fetchRun(id);
       toast({
-        title: "Draft updated",
-        description: "Structured drafting workflow generated a new draft.",
+        title:
+          response.status === "awaiting_user_direction"
+            ? "Direction required"
+            : "Draft updated",
+        description:
+          response.status === "awaiting_user_direction"
+            ? "Answer the material questions before drafting can continue."
+            : "Structured drafting workflow generated a new draft.",
       });
       return response.draft_artifact?.draft_letter ?? null;
     } catch (error: any) {
@@ -684,27 +699,58 @@ const LetterDraftPage = () => {
     }
   }, [id, resumeWorkflowRun, toast, v2Run]);
 
-  const handleLockParagraphs = useCallback(
-    async (lockedParagraphs: string[]) => {
+  const handleFreezeSections = useCallback(
+    async (sectionIndices: number[], expectedDraftHash?: string) => {
       if (!id || !v2Run?.run_id) return;
       try {
-        const response = await lockParagraphs(id, v2Run.run_id, {
-          locked_paragraphs: lockedParagraphs,
+        const response = await freezeSections(id, v2Run.run_id, {
+          section_indices: sectionIndices,
+          expected_draft_hash: expectedDraftHash,
         });
         setV2Run(response);
         toast({
-          title: "Locks saved",
-          description: `${lockedParagraphs.length} paragraph(s) locked against AI redrafts.`,
+          title: "Frozen sections saved",
+          description: `${sectionIndices.length} section(s) will be preserved exactly.`,
         });
       } catch (error: any) {
         toast({
-          title: "Unable to save locks",
-          description: error?.message ?? "Lock paragraphs failed.",
+          title: "Unable to freeze sections",
+          description: error?.message ?? "Freeze sections failed.",
           variant: "destructive",
         });
       }
     },
-    [id, lockParagraphs, toast, v2Run]
+    [freezeSections, id, toast, v2Run]
+  );
+
+  const handleReviseSections = useCallback(
+    async (
+      sectionIndices: number[],
+      action: SectionEditAction,
+      expectedDraftHash?: string,
+    ) => {
+      if (!id || !v2Run?.run_id) return;
+      try {
+        const response = await reviseSections(id, v2Run.run_id, {
+          section_indices: sectionIndices,
+          action,
+          expected_draft_hash: expectedDraftHash,
+        });
+        setV2Run(response);
+        setV2DraftBody(response.draft_artifact?.draft_letter ?? null);
+        toast({
+          title: "Selected sections revised",
+          description: "Frozen and unselected content was preserved exactly.",
+        });
+      } catch (error: any) {
+        toast({
+          title: "Unable to revise selected sections",
+          description: error?.message ?? "Scoped section revision failed.",
+          variant: "destructive",
+        });
+      }
+    },
+    [id, reviseSections, toast, v2Run]
   );
 
   const handleEditorUpdate = useCallback(
@@ -763,6 +809,7 @@ const LetterDraftPage = () => {
           await submitForReview(id, {
             reviewer_summary: reviewerSummary,
             reviewer_findings: reviewerFindings,
+            draft_run_id: v2Run?.run_id,
           });
           await fetchLetters();
           toast({
@@ -790,6 +837,7 @@ const LetterDraftPage = () => {
       toast,
       reviewerFindings,
       reviewerBlocking,
+      v2Run,
     ]
   );
 
@@ -1214,7 +1262,8 @@ const LetterDraftPage = () => {
               <LockedParagraphsPanel
                 run={v2Run}
                 loading={draftingV2Loading}
-                onSave={handleLockParagraphs}
+                onFreeze={handleFreezeSections}
+                onRevise={handleReviseSections}
               />
               <ApprovalChainCard
                 approvals={v2Run.approvals ?? []}

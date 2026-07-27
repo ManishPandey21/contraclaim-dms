@@ -117,3 +117,40 @@ def test_question_and_strategy_gates_interrupt_before_prepare_execution():
 
     second = graph.invoke(Command(resume={"run_id": "run-1"}), config)
     assert second["next_action"] == "confirm_strategy"
+
+
+def test_domain_nodes_enforce_and_checkpoint_persisted_stage_markers():
+    graph = build_drafting_graph(checkpointer=InMemorySaver())
+    config = {"configurable": {"thread_id": "thread-domain-stages"}}
+    first = graph.invoke(
+        {
+            "run_id": "run-1",
+            "letter_id": "letter-1",
+            "state_schema_version": 1,
+            "questions_required": False,
+            "execution_status": "awaiting_strategy_confirmation",
+            "next_action": "confirm_strategy",
+        },
+        config,
+    )
+    assert first["next_action"] == "confirm_strategy"
+
+    completed = graph.invoke(
+        Command(
+            resume={"run_id": "run-1"},
+            update={
+                "domain_run_id": "domain-run-1",
+                "draft_generated": True,
+                "validation_completed": True,
+                "legal_risk_scanned": True,
+                "approval_ready": True,
+                "domain_run_status": "completed",
+            },
+        ),
+        config,
+    )
+    assert completed["draft_generated"] is True
+    assert completed["validation_completed"] is True
+    assert completed["legal_risk_scanned"] is True
+    assert completed["approval_ready"] is True
+    assert completed["next_action"] == "approve"

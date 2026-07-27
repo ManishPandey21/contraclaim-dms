@@ -31,10 +31,12 @@ from ..models.letter_drafting import (
     ForceV2FallbackRequest,
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
+    FreezeSectionsRequest,
     LockParagraphsRequest,
     LegalRiskReviewRequest,
     ReturnForCorrectionRequest,
     ReviseDraftRequest,
+    ReviseSectionsRequest,
     SourceLedgerResponse,
     UserDirectionRequest,
 )
@@ -333,6 +335,19 @@ async def lock_paragraphs(
     return await service.lock_paragraphs(letter_id, run_id, payload, current_user)
 
 
+@router.post("/runs/{run_id}/freeze-sections", response_model=DraftRunResponse)
+@handle_exceptions
+async def freeze_draft_sections(
+    letter_id: str,
+    run_id: str,
+    payload: FreezeSectionsRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Freeze server-captured sections for exact preservation on scoped edits."""
+    return await service.freeze_sections(letter_id, run_id, payload, current_user)
+
+
 @router.post("/prepare-plan", response_model=DraftRunResponse)
 @handle_exceptions
 async def prepare_drafting_plan(
@@ -381,6 +396,19 @@ async def revise_draft_run(
 ):
     """Create a new draft run as a revision of an existing run."""
     return await service.revise_run(letter_id, run_id, payload, current_user)
+
+
+@router.post("/runs/{run_id}/revise-sections", response_model=DraftRunResponse)
+@handle_exceptions
+async def revise_selected_draft_sections(
+    letter_id: str,
+    run_id: str,
+    payload: ReviseSectionsRequest,
+    service: DraftRunService = Depends(get_draft_run_service),
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Apply an allowed AI edit only to selected, non-frozen draft sections."""
+    return await service.revise_selected_sections(letter_id, run_id, payload, current_user)
 
 
 @router.post("/runs/{run_id}/validate", response_model=DraftRunResponse)

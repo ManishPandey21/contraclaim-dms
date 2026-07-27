@@ -44,19 +44,28 @@ from ...models.letter_drafting import (
     DraftReviewComment,
     ExactClauseSearchRequest,
     ExactReferenceSearchRequest,
+    FreezeSectionsRequest,
+    FrozenDraftSection,
     IncomingLetterAnalysis,
     LegalRiskReport,
     LockParagraphsRequest,
     ProbingQuestion,
     ReviseDraftRequest,
+    ReviseSectionsRequest,
     ReturnForCorrectionRequest,
+    SectionRevisionRecord,
     SourceEvidence,
     SourceLedgerResponse,
     UserDirectionRequest,
+    UserDirectionAnswer,
     ValidationFinding,
     ValidationReport,
 )
+from ...models.ai_guardrails import GuardrailReport
+from ...models.evidence_ledger import EvidenceLedgerEntry
 from ...models.notification import NotificationPriority, NotificationSeverity, NotificationType
+from ...core.config import settings
+from ...services.ai_guardrails import AIOutputGuardrailService
 from ...services.authorization_service import AuthorizationService
 from ...services.policy_service import PolicyService
 from ...services.contract_service import ContractService
@@ -75,9 +84,19 @@ from .incoming_analyzer import IncomingLetterAnalyzer
 from .input_validator import DraftInputValidator
 from .legal_risk_reviewer import LegalRiskReviewer
 from .locked_text import locked_instruction, verify_locked_paragraphs
+from .frozen_sections import (
+    apply_section_edits,
+    content_hash,
+    freeze_sections as capture_frozen_sections,
+    preserved_sections,
+    protected_anchor_changes,
+    section_map,
+    verify_frozen_sections,
+)
 from .planning import PlanningSheetBuilder
 from .prompts import PromptRegistry
 from .repository import DraftRunRepository
+from .section_editor import SECTION_EDIT_PROMPT_VERSION, ScopedSectionEditor
 from .user_direction import UserDirectionAgent
 from .validator import DraftValidator
 
@@ -107,6 +126,7 @@ class DraftRunService:
         self.clause_checker = ClauseCheckingAgent(db)
         self.legal_risk_reviewer = LegalRiskReviewer()
         self.planning_builder = PlanningSheetBuilder()
+        self.guardrails = AIOutputGuardrailService.from_settings(settings)
 
     async def create_run(
         self,
@@ -117,6 +137,7 @@ class DraftRunService:
         idempotency_key: Optional[str] = None,
         request_hash: Optional[str] = None,
         engine_metadata: Optional[Dict[str, Any]] = None,
+        stop_after_generation: bool = False,
     ) -> DraftRun:
         started = datetime.now(timezone.utc)
         run_id = str(uuid.uuid4())
@@ -142,7 +163,19 @@ class DraftRunService:
 
         # Carry the user's line of action (answers from a previous analysis run)
         # into this run's inputs so strategy/draft stages honour it.
-        directions_block = await self._latest_user_directions(letter_id)
+        supplied_directions = list(request.user_direction_answers or [])
+        if request.user_direction and request.user_direction.strip():
+            supplied_directions.append(
+                UserDirectionAnswer(
+                    question_id="free_text",
+                    answer=request.user_direction.strip(),
+                )
+            )
+        directions_block = (
+            UserDirectionAgent.format_directions(supplied_directions)
+            if supplied_directions
+            else await self._latest_user_directions(letter_id)
+        )
         if directions_block and directions_block not in (request.points or ""):
             request = request.model_copy(
                 update={
@@ -199,6 +232,22 @@ class DraftRunService:
             sources = self._with_source_hashes(sources)
             warnings.extend(context_warnings)
             trace.append({"stage": "context", "status": "success", "source_count": len(sources)})
+
+            # Deterministic input/evidence guardrail scan (H1): user-supplied
+            # request text and retrieved source material are untrusted; an
+            # injection attempt must be visible to the reviewer, not just
+            # neutralised by the prompt guard.
+            guardrail_report = self._guardrail_scan(request, sources)
+            for finding in guardrail_report.findings:
+                warnings.append(f"guardrail {finding.code}: {finding.message}")
+            trace.append(
+                {
+                    "stage": "guardrail_scan",
+                    "status": "flagged" if guardrail_report.findings else "success",
+                    "verdict": guardrail_report.verdict,
+                    "finding_count": len(guardrail_report.findings),
+                }
+            )
 
             # The context pack is only persisted on the terminal path actually
             # taken, and its `sources` differ before vs. after generation, so it
@@ -269,6 +318,23 @@ class DraftRunService:
                 self.validator.threshold_findings(context),
                 self.input_validator.validate_request(letter, request, context, sources),
             )
+            if guardrail_report.verdict != "pass":
+                threshold_report = self._merge_reports(
+                    threshold_report,
+                    ValidationReport(
+                        blocking=True,
+                        findings=[
+                            ValidationFinding(
+                                level="error",
+                                code="critical_prompt_injection",
+                                message=(
+                                    "Drafting stopped because critical prompt-injection "
+                                    "or instruction-manipulation content was detected."
+                                ),
+                            )
+                        ],
+                    ),
+                )
             if threshold_report.blocking:
                 context_pack = _context_pack(sources)
                 run = DraftRun(
@@ -285,9 +351,53 @@ class DraftRunService:
                     draft_artifact=self._blocked_artifact(threshold_report),
                     source_integrity_summary=source_summary,
                     validation_report=threshold_report,
+                    guardrail_report=guardrail_report,
+                    evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                     warnings=warnings,
                     trace=trace,
                     completed_at=datetime.now(timezone.utc),
+                )
+                return await self._create_and_record(run, current_user, context_pack=context_pack)
+
+            required_question_ids = {
+                question.question_id for question in probing_questions if question.required
+            }
+            answered_question_ids = {
+                answer.question_id
+                for answer in supplied_directions
+                if answer.question_id and answer.question_id != "free_text"
+            }
+            if required_question_ids - answered_question_ids:
+                context_pack = _context_pack(sources)
+                run = DraftRun(
+                    **base_run,
+                    status="awaiting_user_direction",
+                    execution_status="awaiting_user_direction",
+                    next_action="answer_questions",
+                    incoming_analysis=incoming_analysis,
+                    probing_questions=probing_questions,
+                    user_directions=supplied_directions,
+                    planning_sheet=planning_sheet,
+                    reply_matrix=reply_matrix,
+                    context_bundle=context,
+                    sources=sources,
+                    context_pack_id=context_pack.context_pack_id,
+                    plan=deterministic_plan,
+                    source_integrity_summary=source_summary,
+                    validation_report=threshold_report,
+                    guardrail_report=guardrail_report,
+                    evidence_ledger=self._evidence_ledger_entries(run_id, sources),
+                    warnings=warnings,
+                    trace=trace
+                    + [
+                        {
+                            "stage": "user_direction_gate",
+                            "status": "interrupted",
+                            "missing_question_ids": sorted(
+                                required_question_ids - answered_question_ids
+                            ),
+                        }
+                    ],
                 )
                 return await self._create_and_record(run, current_user, context_pack=context_pack)
 
@@ -318,6 +428,8 @@ class DraftRunService:
                     draft_artifact=self._blocked_artifact(validation),
                     source_integrity_summary=source_summary,
                     validation_report=validation,
+                    guardrail_report=guardrail_report,
+                    evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                     warnings=warnings,
                     trace=trace + [{"stage": "strategy", "status": "blocked"}],
                     completed_at=datetime.now(timezone.utc),
@@ -361,50 +473,58 @@ class DraftRunService:
                     finalized=request.finalized,
                 )
                 warnings.extend(draft_warnings)
-                (
-                    artifact,
-                    sources,
-                    validation,
-                    cyclic_trace,
-                    assertion_support,
-                    confidence_scores,
-                    cyclic_warnings,
-                ) = await self._run_cyclic_draft(
-                    letter=letter,
-                    request=request,
-                    current_user=current_user,
-                    role=role,
-                    recipient_focus=recipient_focus,
-                    context=context,
-                    sources=sources,
-                    inputs=inputs,
-                    plan=plan,
-                    generator=generator,
-                    initial_artifact=artifact,
-                )
-                warnings.extend(cyclic_warnings)
-                if validation.blocking:
+                if not stop_after_generation:
+                    (
+                        artifact,
+                        sources,
+                        validation,
+                        cyclic_trace,
+                        assertion_support,
+                        confidence_scores,
+                        cyclic_warnings,
+                    ) = await self._run_cyclic_draft(
+                        letter=letter,
+                        request=request,
+                        current_user=current_user,
+                        role=role,
+                        recipient_focus=recipient_focus,
+                        context=context,
+                        sources=sources,
+                        inputs=inputs,
+                        plan=plan,
+                        generator=generator,
+                        initial_artifact=artifact,
+                    )
+                    warnings.extend(cyclic_warnings)
+                    if validation.blocking:
+                        status = "needs_attention"
+                # Fail-visible: the deterministic template fallback (LLM outage
+                # or offline mode) is a degraded output that must reach a human
+                # as such — never a "completed" run with a buried warning.
+                llm_degraded = any(w.startswith("draft_llm:") for w in warnings)
+                if llm_degraded:
                     status = "needs_attention"
                 trace.append(
                     {
                         "stage": "draft",
-                        "status": "success",
+                        "status": "degraded" if llm_degraded else "success",
                         "prompt_version": artifact.prompt_version,
                     }
                 )
-                trace.append(
-                    {
-                        "stage": "cyclic_validation",
-                        "status": "success",
-                        "blocking": validation.blocking,
-                        "finding_count": len(validation.findings),
-                        "iteration_count": len(cyclic_trace),
-                    }
-                )
+                if not stop_after_generation:
+                    trace.append(
+                        {
+                            "stage": "cyclic_validation",
+                            "status": "success",
+                            "blocking": validation.blocking,
+                            "finding_count": len(validation.findings),
+                            "iteration_count": len(cyclic_trace),
+                        }
+                    )
                 # Legal / Contractual Risk Review Agent: flags admissions,
                 # waivers, entitlement creation and stance reversals vs the
                 # previous position. Flags only — never blocks the run.
-                if artifact and artifact.draft_letter:
+                if not stop_after_generation and artifact and artifact.draft_letter:
                     previous_positions = [
                         source.text
                         for source in sources
@@ -435,6 +555,7 @@ class DraftRunService:
                 status=status,
                 incoming_analysis=incoming_analysis,
                 probing_questions=probing_questions,
+                user_directions=supplied_directions,
                 planning_sheet=planning_sheet,
                 reply_matrix=reply_matrix,
                 context_bundle=context,
@@ -445,6 +566,8 @@ class DraftRunService:
                 source_integrity_summary=source_summary,
                 validation_report=validation,
                 legal_risk_report=legal_risk_report,
+                guardrail_report=guardrail_report,
+                evidence_ledger=self._evidence_ledger_entries(run_id, sources),
                 cyclic_trace=cyclic_trace,
                 assertion_support=assertion_support,
                 confidence_scores=confidence_scores,
@@ -1253,18 +1376,53 @@ class DraftRunService:
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Draft run not found")
+        if existing.status != "awaiting_user_direction":
+            raise HTTPException(
+                status_code=409,
+                detail="This draft run is not waiting for user direction",
+            )
+        supplied_by_id = {
+            answer.question_id: answer
+            for answer in request.answers
+            if answer.question_id and answer.question_id != "free_text"
+        }
+        for question in existing.probing_questions:
+            answer = supplied_by_id.get(question.question_id)
+            if answer and answer.question_version not in (None, question.question_version):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Question '{question.question_id}' changed; refresh before answering",
+                )
         answers = list(existing.user_directions or [])
         answers.extend(request.answers)
         if request.directions and request.directions.strip():
-            from ...models.letter_drafting import UserDirectionAnswer
-
             answers.append(
                 UserDirectionAnswer(question_id="free_text", answer=request.directions.strip())
             )
         if not answers:
             raise HTTPException(status_code=422, detail="No direction provided")
+        answered_ids = {
+            answer.question_id
+            for answer in answers
+            if answer.question_id and answer.question_id != "free_text"
+        }
+        missing = [
+            question.question_id
+            for question in existing.probing_questions
+            if question.required and question.question_id not in answered_ids
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "All required probing questions must be answered",
+                    "missing_question_ids": missing,
+                },
+            )
         run = await self.repository.update_fields(
-            letter_id, run_id, {"user_directions": answers}
+            letter_id,
+            run_id,
+            {"user_directions": answers},
         )
         if not run:
             raise HTTPException(status_code=404, detail="Draft run not found")
@@ -1276,7 +1434,41 @@ class DraftRunService:
             status=run.status,
             payload={"answer_count": len(answers)},
         )
-        return run
+        payload = {
+            key: value
+            for key, value in dict(existing.inputs or {}).items()
+            if key in DraftRunCreateRequest.model_fields
+        }
+        payload.update(
+            {
+                "mode": existing.mode,
+                "draft_type": existing.draft_type,
+                "letter_category": existing.letter_category,
+                "user_direction_answers": answers,
+                "user_direction": request.directions,
+            }
+        )
+        resumed = await self.create_run(
+            letter_id,
+            DraftRunCreateRequest(**payload),
+            current_user,
+            engine_metadata={
+                "engine": existing.engine,
+                "engine_version": f"{existing.engine_version}-direction-resume",
+                "parent_run_id": existing.run_id,
+            },
+        )
+        await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {
+                "status": "completed",
+                "execution_status": "completed",
+                "next_action": "none",
+                "resumed_at": datetime.now(timezone.utc),
+            },
+        )
+        return resumed
 
     async def lock_paragraphs(
         self,
@@ -1312,6 +1504,60 @@ class DraftRunService:
             actor_user_id=self._user_id(current_user),
             status=run.status,
             payload={"locked_count": len(locked), "unmatched_in_draft": len(unmatched)},
+        )
+        return run
+
+    async def freeze_sections(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: FreezeSectionsRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        """Capture selected sections from the stored draft as immutable text."""
+
+        await self._load_and_authorize(
+            letter_id,
+            current_user,
+            "write",
+            drafting_permission="drafting.draft.edit",
+        )
+        existing = await self.repository.get(letter_id, run_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        if existing.status in _FINALIZED_STATUSES:
+            raise HTTPException(status_code=409, detail="Finalized drafts cannot change frozen sections")
+        draft_text = existing.draft_artifact.draft_letter if existing.draft_artifact else ""
+        if not draft_text:
+            raise HTTPException(status_code=400, detail="Run does not contain a draft artifact")
+        current_hash = content_hash(draft_text)
+        if request.expected_draft_hash and request.expected_draft_hash != current_hash:
+            raise HTTPException(status_code=409, detail="Draft changed; refresh section selection and retry")
+        try:
+            frozen = capture_frozen_sections(
+                draft_text,
+                request.section_indices,
+                frozen_by=self._user_id(current_user),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        run = await self.repository.update_fields(
+            letter_id,
+            run_id,
+            {"frozen_sections": frozen},
+        )
+        if not run:
+            raise HTTPException(status_code=404, detail="Draft run not found")
+        await self.repository.append_event(
+            letter_id,
+            run_id,
+            "sections_frozen",
+            actor_user_id=self._user_id(current_user),
+            status=run.status,
+            payload={
+                "section_indices": [item.section_index for item in frozen],
+                "draft_hash": current_hash,
+            },
         )
         return run
 
@@ -1511,6 +1757,225 @@ class DraftRunService:
         )
         return result
 
+    async def revise_selected_sections(
+        self,
+        letter_id: str,
+        run_id: str,
+        request: ReviseSectionsRequest,
+        current_user: Any,
+    ) -> DraftRun:
+        """Rewrite only selected non-frozen sections of a stored draft.
+
+        Frozen and unselected text never enters the model-editable response
+        path. The server reconstructs the result from the source draft and then
+        blocks approval if any preserved section fails exact verification.
+        """
+
+        source = await self.get_run(letter_id, run_id, current_user)
+        if source.status in _FINALIZED_STATUSES:
+            raise HTTPException(status_code=409, detail="Finalized drafts cannot be revised")
+        if not source.draft_artifact or not source.draft_artifact.draft_letter:
+            raise HTTPException(status_code=400, detail="Run does not contain a draft artifact")
+
+        source_text = source.draft_artifact.draft_letter
+        source_hash = content_hash(source_text)
+        if request.expected_draft_hash and request.expected_draft_hash != source_hash:
+            raise HTTPException(status_code=409, detail="Draft changed; refresh section selection and retry")
+
+        available = section_map(source_text)
+        editable_indices = sorted(set(int(index) for index in request.section_indices))
+        unknown = [index for index in editable_indices if index not in available]
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown draft section indices: {unknown}",
+            )
+
+        frozen_violations = verify_frozen_sections(source_text, source.frozen_sections)
+        if frozen_violations:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Stored frozen section integrity check failed",
+                    "section_indices": frozen_violations,
+                },
+            )
+        frozen_indices = {item.section_index for item in source.frozen_sections}
+        conflicts = sorted(frozen_indices.intersection(editable_indices))
+        if conflicts:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Frozen sections cannot be selected for editing",
+                    "section_indices": conflicts,
+                },
+            )
+
+        editor = ScopedSectionEditor()
+        replacements, edit_warnings = await editor.edit(
+            {index: available[index].content for index in editable_indices},
+            request.action,
+        )
+        anchor_violations: Dict[int, Dict[str, List[str]]] = {}
+        for index, replacement in replacements.items():
+            changes = protected_anchor_changes(available[index].content, replacement)
+            if changes["removed"] or changes["introduced"]:
+                anchor_violations[index] = changes
+        if anchor_violations:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "Scoped edit changed protected factual anchors",
+                    "sections": anchor_violations,
+                },
+            )
+        try:
+            revised_text = apply_section_edits(source_text, replacements)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        preserved = preserved_sections(source_text, editable_indices)
+        preservation_violations = verify_frozen_sections(revised_text, preserved)
+        if preservation_violations:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Scoped revision integrity check failed",
+                    "section_indices": preservation_violations,
+                },
+            )
+
+        artifact = source.draft_artifact.model_copy(
+            update={
+                "draft_letter": revised_text,
+                "raw_model_output": revised_text,
+            }
+        )
+        validation = self._merge_reports(
+            self.validator.critique(
+                artifact,
+                source.role,
+                source.sources,
+                finalized=bool((source.inputs or {}).get("finalized")),
+            ),
+            self.validator.strategy_alignment(artifact, source.plan or ""),
+        )
+        previous_positions = [
+            evidence.text or evidence.snippet or ""
+            for evidence in source.sources
+            if evidence.source_type in {"prior_correspondence", "graph_thread"}
+        ]
+        legal_risk_report = self.legal_risk_reviewer.review(
+            artifact.draft_letter,
+            previous_positions=previous_positions,
+        )
+        now = datetime.now(timezone.utc)
+        warnings = list(source.warnings or []) + list(edit_warnings)
+        status = "needs_attention" if validation.blocking or edit_warnings else "completed"
+        section_revision = SectionRevisionRecord(
+            source_run_id=source.run_id,
+            action=request.action,
+            editable_section_indices=editable_indices,
+            preserved_sections=preserved,
+            source_draft_hash=source_hash,
+            result_draft_hash=content_hash(revised_text),
+            prompt_version=SECTION_EDIT_PROMPT_VERSION,
+        )
+        revised_inputs = dict(source.inputs or {})
+        revised_inputs["section_edit"] = {
+            "source_run_id": source.run_id,
+            "action": request.action,
+            "editable_section_indices": editable_indices,
+            "source_draft_hash": source_hash,
+            "result_draft_hash": section_revision.result_draft_hash,
+            "prompt_version": SECTION_EDIT_PROMPT_VERSION,
+        }
+        revised = source.model_copy(
+            update={
+                "id": None,
+                "run_id": str(uuid.uuid4()),
+                "status": status,
+                "inputs": revised_inputs,
+                "draft_artifact": artifact,
+                "validation_report": validation,
+                "legal_risk_report": legal_risk_report,
+                "warnings": warnings,
+                "revision_of_run_id": source.run_id,
+                "revision_action": None,
+                "section_revision": section_revision,
+                "approvals": [],
+                "approval_status": None,
+                "approved_by": None,
+                "approved_at": None,
+                "returned_reason": None,
+                "required_changes": [],
+                "issued_document_id": None,
+                "exported_file_id": None,
+                "exported_pdf_file_id": None,
+                "exported_docx_file_id": None,
+                "exported_by": None,
+                "exported_at": None,
+                "issued_by": None,
+                "issued_at": None,
+                "engine": "v2",
+                "engine_version": "v2-section-edit",
+                "graph_version": None,
+                "thread_id": None,
+                "idempotency_key": None,
+                "request_hash": None,
+                "attempt_number": 1,
+                "parent_run_id": source.run_id,
+                "fallback_of_run_id": None,
+                "fallback_reason": None,
+                "shadow_of_run_id": None,
+                "context_snapshot_id": None,
+                "input_snapshot_id": None,
+                "input_snapshot_hash": None,
+                "context_snapshot_hash": None,
+                "execution_status": "completed",
+                "next_action": "approve",
+                "state_version": 0,
+                "last_checkpoint_id": None,
+                "queue_job_id": None,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "cancellation_requested_at": None,
+                "cancellation_reason": None,
+                "resumed_at": None,
+                "trace": list(source.trace or [])
+                + [
+                    {
+                        "stage": "section_revision",
+                        "status": "success" if not edit_warnings else "degraded",
+                        "action": request.action,
+                        "editable_section_indices": editable_indices,
+                        "preserved_section_count": len(preserved),
+                    }
+                ],
+                "started_at": now,
+                "completed_at": now,
+                "updated_at": now,
+                "created_by": self._user_id(current_user),
+            }
+        )
+        stored = await self._create_and_record(revised, current_user)
+        await self.repository.append_event(
+            letter_id,
+            stored.run_id,
+            "sections_revised",
+            actor_user_id=self._user_id(current_user),
+            status=stored.status,
+            payload={
+                "source_run_id": source.run_id,
+                "action": request.action,
+                "editable_section_indices": editable_indices,
+                "preserved_section_count": len(preserved),
+                "source_draft_hash": source_hash,
+                "result_draft_hash": section_revision.result_draft_hash,
+            },
+        )
+        return stored
+
     async def validate_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
         await self._load_and_authorize(
             letter_id,
@@ -1533,6 +1998,22 @@ class DraftRunService:
             ),
             self.validator.strategy_alignment(run.draft_artifact, run.plan or ""),
         )
+        integrity_violations = self._section_integrity_violations(run)
+        if integrity_violations:
+            validation = self._merge_reports(
+                validation,
+                ValidationReport(
+                    blocking=True,
+                    findings=[
+                        ValidationFinding(
+                            level="error",
+                            code="frozen_section_modified",
+                            message="Frozen or unselected draft content no longer matches its approved exact text.",
+                            evidence=", ".join(str(index) for index in integrity_violations),
+                        )
+                    ],
+                ),
+            )
         status = "needs_attention" if validation.blocking else run.status
         if run.status in {"blocked", "failed"} and not validation.blocking:
             status = "completed"
@@ -1662,6 +2143,12 @@ class DraftRunService:
         existing = await self.repository.get(letter_id, run_id)
         if not existing:
             raise HTTPException(status_code=404, detail="Draft run not found")
+        already_approved = next(
+            (step for step in existing.approvals if step.stage == stage),
+            None,
+        )
+        if already_approved:
+            return existing
         if existing.status in _FINALIZED_STATUSES:
             raise HTTPException(status_code=400, detail="Draft is already approved or finalized")
         if existing.status in {"blocked", "failed", "needs_attention"}:
@@ -1669,7 +2156,7 @@ class DraftRunService:
         if (
             existing.legal_risk_report
             and existing.legal_risk_report.human_review_required
-            and not existing.legal_risk_report.reviewed_at
+            and not existing.legal_risk_report.human_reviewed_at
         ):
             raise HTTPException(
                 status_code=409,
@@ -1683,6 +2170,20 @@ class DraftRunService:
             )
         if existing.validation_report.blocking:
             raise HTTPException(status_code=400, detail="Draft has blocking validation findings")
+        if existing.guardrail_report and existing.guardrail_report.verdict != "pass":
+            raise HTTPException(
+                status_code=409,
+                detail="Critical guardrail findings must be removed before approval",
+            )
+        integrity_violations = self._section_integrity_violations(existing)
+        if integrity_violations:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Frozen or preserved section integrity check failed",
+                    "section_indices": integrity_violations,
+                },
+            )
 
         expected = self.next_approval_stage(existing.approvals)
         if expected is None:
@@ -1741,18 +2242,17 @@ class DraftRunService:
         }
         approved_version = None
         if stage == "final":
-            await self.repository.accept_draft(letter_id, existing, actor)
-            approved_version = await self.repository.lock_approved_draft_version(
-                letter_id, run_id, actor
+            run, approved_version = await self.repository.finalize_draft_approval(
+                letter_id,
+                existing,
+                approvals,
+                actor,
+                now,
             )
-            fields.update(
-                status="approved",
-                approved_by=actor,
-                approved_at=now,
-            )
-        run = await self.repository.update_fields(letter_id, run_id, fields)
-        if not run:
-            raise HTTPException(status_code=404, detail="Draft run not found")
+        else:
+            run = await self.repository.update_fields(letter_id, run_id, fields)
+            if not run:
+                raise HTTPException(status_code=404, detail="Draft run not found")
 
         await self.repository.append_event(
             letter_id,
@@ -1800,7 +2300,13 @@ class DraftRunService:
             raise HTTPException(status_code=404, detail="Draft run not found")
         if not run.legal_risk_report or not run.legal_risk_report.human_review_required:
             raise HTTPException(status_code=409, detail="This run has no mandatory legal-risk review")
-        report = run.legal_risk_report.model_copy(update={"reviewed_at": datetime.now(timezone.utc)})
+        report = run.legal_risk_report.model_copy(
+            update={
+                "human_reviewed_at": datetime.now(timezone.utc),
+                "human_reviewed_by": self._user_id(current_user),
+                "human_review_comment": comment,
+            }
+        )
         updated = await self.repository.update_fields(letter_id, run_id, {"legal_risk_report": report})
         if not updated:
             raise HTTPException(status_code=404, detail="Draft run not found")
@@ -1826,6 +2332,75 @@ class DraftRunService:
         return await self.approve_stage(
             letter_id, run_id, ApproveStageRequest(stage=stage), current_user
         )
+
+    async def approve_legacy_workflow_stage(
+        self,
+        letter_id: str,
+        stage: ApprovalStage,
+        letter_content: str,
+        current_user: Any,
+        *,
+        run_id: Optional[str] = None,
+        expected_draft_hash: Optional[str] = None,
+        comment: Optional[str] = None,
+    ) -> DraftRun:
+        """Bind a legacy status transition to the exact governed run artifact."""
+
+        letter = await self._load_and_authorize(letter_id, current_user, "write")
+        selected_run_id = run_id
+        if not selected_run_id and stage != "drafter":
+            selected_run_id = getattr(letter, "graph_run_id", None)
+        run = (
+            await self.repository.get(letter_id, selected_run_id)
+            if selected_run_id
+            else await self.repository.latest(letter_id, mode="draft")
+        )
+        if not run or not run.draft_artifact:
+            raise HTTPException(
+                status_code=409,
+                detail="A governed draft run is required for this workflow transition",
+            )
+        if stage != "drafter" and str(getattr(letter, "graph_run_id", "") or "") != run.run_id:
+            raise HTTPException(
+                status_code=409,
+                detail="The letter is not bound to this governed draft run",
+            )
+        artifact_body = run.draft_artifact.draft_letter
+        artifact_hash = hashlib.sha256(artifact_body.encode("utf-8")).hexdigest()
+        mutable_hash = hashlib.sha256((letter_content or "").encode("utf-8")).hexdigest()
+        if expected_draft_hash and expected_draft_hash != artifact_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="The supplied draft hash does not match the governed artifact",
+            )
+        if mutable_hash != artifact_hash:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Letter content changed outside the governed draft run. "
+                    "Create a governed revision before continuing."
+                ),
+            )
+        if stage != "drafter":
+            bound_hash = str(getattr(letter, "governed_draft_hash", "") or "")
+            if bound_hash and bound_hash != artifact_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The governed artifact changed after submission",
+                )
+        approved = await self.approve_stage(
+            letter_id,
+            run.run_id,
+            ApproveStageRequest(stage=stage, comment=comment),
+            current_user,
+        )
+        if stage == "drafter":
+            await self.repository.accept_draft(
+                letter_id,
+                approved,
+                self._user_id(current_user),
+            )
+        return approved
 
     async def export_run(self, letter_id: str, run_id: str, current_user: Any) -> DraftRun:
         await self._load_and_authorize(
@@ -2025,6 +2600,26 @@ class DraftRunService:
                 raise HTTPException(status_code=403, detail="Drafters cannot approve their own draft")
         if run.validation_report.blocking:
             raise HTTPException(status_code=400, detail="Draft has blocking validation findings")
+        if run.guardrail_report and run.guardrail_report.verdict != "pass":
+            raise HTTPException(status_code=409, detail="Draft has critical guardrail findings")
+        if (
+            run.legal_risk_report
+            and run.legal_risk_report.human_review_required
+            and not run.legal_risk_report.human_reviewed_at
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="High legal-risk flags require recorded human review before acceptance",
+            )
+        integrity_violations = self._section_integrity_violations(run)
+        if integrity_violations:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Frozen or preserved section integrity check failed",
+                    "section_indices": integrity_violations,
+                },
+            )
         version = await self.repository.accept_draft(letter_id, run, self._user_id(current_user))
         await self.repository.append_event(
             letter_id,
@@ -2321,6 +2916,62 @@ class DraftRunService:
         except Exception:
             return
 
+    def _guardrail_scan(
+        self,
+        request: DraftRunCreateRequest,
+        sources: List[SourceEvidence],
+    ) -> GuardrailReport:
+        """Deterministic injection scan over user inputs and source texts.
+
+        Critical findings block drafting and approval. Lower-severity findings
+        remain visible to the three-stage human approval chain.
+        """
+        findings = []
+        for origin in ("subject", "points", "context", "requirements", "background_facts"):
+            findings.extend(self.guardrails.scan_input(getattr(request, origin, None), origin=origin))
+        findings.extend(
+            self.guardrails.scan_evidence([source.text or source.snippet for source in sources])
+        )
+        verdict = (
+            "requires_human_review"
+            if any(finding.severity == "critical" for finding in findings)
+            else "pass"
+        )
+        return GuardrailReport(verdict=verdict, findings=findings)
+
+    @staticmethod
+    def _evidence_ledger_entries(
+        run_id: str, sources: List[SourceEvidence]
+    ) -> List[EvidenceLedgerEntry]:
+        """Unified provenance records; labels match the prompt's [S#] tokens."""
+        return [
+            EvidenceLedgerEntry.from_source_evidence(
+                source, run_id=run_id, citation_label=f"S{idx}"
+            )
+            for idx, source in enumerate(sources, start=1)
+        ]
+
+    async def _record_run_observability(self, run: DraftRun) -> None:
+        """Count run outcomes and degraded/guardrail signals; never fails the run."""
+        try:
+            from ...services.observability import observability_registry
+
+            await observability_registry.record_domain_event(
+                resource_type="letter_drafting", event_type=f"run_{run.status}"
+            )
+            if any(str(w).startswith("draft_llm:") for w in run.warnings):
+                await observability_registry.record_domain_event(
+                    resource_type="letter_drafting", event_type="llm_fallback_draft"
+                )
+            if run.guardrail_report and run.guardrail_report.findings:
+                await observability_registry.record_domain_event(
+                    resource_type="letter_drafting", event_type="prompt_injection_suspected"
+                )
+        except Exception:
+            # Observability must never break drafting; the run record itself
+            # still carries the warnings and reports.
+            pass
+
     async def _create_and_record(
         self,
         run: DraftRun,
@@ -2328,6 +2979,7 @@ class DraftRunService:
         *,
         context_pack: Optional[DraftContextPack] = None,
     ) -> DraftRun:
+        await self._record_run_observability(run)
         stored = await self.repository.create(run)
         if stored.run_id != run.run_id:
             # A duplicate idempotent request won the creation race.  It owns
@@ -2856,6 +3508,10 @@ class DraftRunService:
             "plan_override": request.plan_override,
             "max_iterations": request.max_iterations,
             "finalized": request.finalized,
+            "user_direction_answers": [
+                answer.model_dump(mode="json") for answer in request.user_direction_answers
+            ],
+            "user_direction": request.user_direction,
         }
 
     @staticmethod
@@ -2933,6 +3589,15 @@ class DraftRunService:
         if request.additional_requirements:
             instruction = f"{instruction}\nAdditional requirements: {request.additional_requirements}"
         return instruction
+
+    @staticmethod
+    def _section_integrity_violations(run: DraftRun) -> List[int]:
+        if not run.draft_artifact:
+            return []
+        checks: List[FrozenDraftSection] = list(run.frozen_sections or [])
+        if run.section_revision:
+            checks.extend(run.section_revision.preserved_sections)
+        return sorted(set(verify_frozen_sections(run.draft_artifact.draft_letter, checks)))
 
     @staticmethod
     def _user_id(current_user: Any) -> Optional[str]:

@@ -145,7 +145,7 @@ class LegalRiskReviewer:
         return LegalRiskReport(
             flags=flags,
             human_review_required=bool(flags),
-            reviewed_at=datetime.now(timezone.utc),
+            scanned_at=datetime.now(timezone.utc),
         )
 
     @staticmethod

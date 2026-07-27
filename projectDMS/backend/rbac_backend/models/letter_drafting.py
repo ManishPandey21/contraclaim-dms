@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..utils.datetime import now_utc
+from .ai_guardrails import GuardrailReport
+from .evidence_ledger import EvidenceLedgerEntry
 
 
 DraftMode = Literal["background", "strategy", "draft", "review"]
@@ -67,6 +69,8 @@ DraftLifecycleEventType = Literal[
     "user_direction_provided",
     "legal_risk_reviewed",
     "paragraphs_locked",
+    "sections_frozen",
+    "sections_revised",
     "drafter_approved",
     "reviewer_approved",
     "final_approved",
@@ -119,6 +123,14 @@ RevisionAction = Literal[
     "regenerate",
     "custom_instruction",
 ]
+SectionEditAction = Literal[
+    "rewrite",
+    "grammar_spelling",
+    "clarity_structure",
+    "tone_formality",
+    "expand",
+    "polish",
+]
 SourceType = Literal[
     "current_input",
     "contract_clause",
@@ -154,6 +166,12 @@ class LegalRiskFlag(BaseModel):
 class LegalRiskReport(BaseModel):
     flags: List[LegalRiskFlag] = Field(default_factory=list)
     human_review_required: bool = False
+    scanned_at: datetime = Field(default_factory=now_utc)
+    human_reviewed_at: Optional[datetime] = None
+    human_reviewed_by: Optional[str] = None
+    human_review_comment: Optional[str] = None
+    # Read-only compatibility for historical records. New approval gates use
+    # human_reviewed_at so an automated scan can never satisfy human review.
     reviewed_at: Optional[datetime] = None
 
 
@@ -165,6 +183,41 @@ class LockParagraphsRequest(BaseModel):
     """Human-approved paragraphs the AI must not change on redraft."""
 
     locked_paragraphs: List[str] = Field(default_factory=list)
+
+
+class FrozenDraftSection(BaseModel):
+    """Server-captured immutable text for one top-level draft section."""
+
+    section_index: int = Field(..., ge=0)
+    content: str = Field(..., min_length=1)
+    content_hash: str = Field(..., min_length=64, max_length=64)
+    frozen_by: Optional[str] = None
+    frozen_at: datetime = Field(default_factory=now_utc)
+
+
+class FreezeSectionsRequest(BaseModel):
+    """Select sections by server-derived index; clients never submit the text."""
+
+    section_indices: List[int] = Field(default_factory=list, max_length=200)
+    expected_draft_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+
+class ReviseSectionsRequest(BaseModel):
+    """Edit only selected non-frozen sections using an allowed operation."""
+
+    section_indices: List[int] = Field(..., min_length=1, max_length=200)
+    action: SectionEditAction
+    expected_draft_hash: Optional[str] = Field(default=None, min_length=64, max_length=64)
+
+
+class SectionRevisionRecord(BaseModel):
+    source_run_id: str
+    action: SectionEditAction
+    editable_section_indices: List[int] = Field(default_factory=list)
+    preserved_sections: List[FrozenDraftSection] = Field(default_factory=list)
+    source_draft_hash: str
+    result_draft_hash: str
+    prompt_version: int = 1
 
 
 ApprovalStage = Literal["drafter", "reviewer", "final"]
@@ -248,6 +301,8 @@ class DraftRunCreateRequest(BaseModel):
         default=False,
         description="Allows Learning Update extraction when a user explicitly finalizes/approves the draft.",
     )
+    user_direction_answers: List[UserDirectionAnswer] = Field(default_factory=list)
+    user_direction: Optional[str] = Field(default=None, max_length=8000)
 
 
 class DraftRunResumeRequest(BaseModel):
@@ -720,6 +775,7 @@ class DraftExecutionEffect(BaseModel):
     effect_type: str
     status: Literal["pending", "completed", "failed"] = "pending"
     payload_hash: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=now_utc)
     completed_at: Optional[datetime] = None
 
@@ -762,7 +818,16 @@ class DraftRun(BaseModel):
     source_integrity_summary: Optional[SourceIntegritySummary] = None
     validation_report: ValidationReport = Field(default_factory=ValidationReport)
     legal_risk_report: Optional[LegalRiskReport] = None
+    # Deterministic input/evidence guardrail result for this run (injection
+    # scan over user inputs and source texts). Critical findings block drafting
+    # and approval; lower-severity findings remain review-visible.
+    guardrail_report: Optional[GuardrailReport] = None
+    # Unified provenance records for the sources this draft was grounded in,
+    # labelled to match the [S#] tokens used in the drafting prompt.
+    evidence_ledger: List[EvidenceLedgerEntry] = Field(default_factory=list)
     locked_paragraphs: List[str] = Field(default_factory=list)
+    frozen_sections: List[FrozenDraftSection] = Field(default_factory=list)
+    section_revision: Optional[SectionRevisionRecord] = None
     cyclic_trace: List[CyclicIterationTrace] = Field(default_factory=list)
     assertion_support: List[DraftAssertionSupport] = Field(default_factory=list)
     confidence_scores: Optional[DraftConfidenceScores] = None

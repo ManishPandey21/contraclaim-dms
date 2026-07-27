@@ -485,12 +485,15 @@ async def test_repository_accepts_draft_as_immutable_version() -> None:
     )
 
     version = await repo.accept_draft(str(letter_id), run, "user-1")
+    replay_version = await repo.accept_draft(str(letter_id), run, "user-1")
 
     stored = db.letters.docs[0]
     assert version == 1
+    assert replay_version == 1
     assert stored["draft_output"] == "The Contractor submits this draft."
     assert stored["current_draft_version"] == 1
     assert stored["draft_versions"][0]["run_id"] == "run-1"
+    assert len(stored["draft_versions"]) == 1
 
 
 async def test_repository_saves_strategy_versions_and_locks_approved_draft() -> None:
@@ -513,11 +516,11 @@ async def test_repository_saves_strategy_versions_and_locks_approved_draft() -> 
     )
 
     strategy_version = await repo.save_strategy_plan(str(letter_id), run, "drafter-1")
-    await repo.accept_draft(str(letter_id), run.model_copy(update={"mode": "draft"}), "approver-1")
-    locked_version = await repo.lock_approved_draft_version(
+    locked_version = await repo.accept_draft(
         str(letter_id),
-        "run-1",
+        run.model_copy(update={"mode": "draft"}),
         "approver-1",
+        lock=True,
     )
 
     stored = db.letters.docs[0]

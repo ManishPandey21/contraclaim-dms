@@ -113,6 +113,7 @@ DRAFTING_PERMISSIONS: List[str] = [
     "drafting.review.approve",
     "drafting.review.return_for_revision",
     "drafting.final.view",
+    "drafting.final.approve",
     "drafting.audit.view",
     "drafting.workflow.state",
     "drafting.workflow.resume",
@@ -265,6 +266,7 @@ class Permissions:
     DRAFTING_REVIEW_APPROVE = "drafting.review.approve"
     DRAFTING_REVIEW_RETURN_FOR_REVISION = "drafting.review.return_for_revision"
     DRAFTING_FINAL_VIEW = "drafting.final.view"
+    DRAFTING_FINAL_APPROVE = "drafting.final.approve"
     DRAFTING_AUDIT_VIEW = "drafting.audit.view"
     DRAFTING_WORKFLOW_STATE = "drafting.workflow.state"
     DRAFTING_WORKFLOW_RESUME = "drafting.workflow.resume"

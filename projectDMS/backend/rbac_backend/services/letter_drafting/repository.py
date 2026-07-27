@@ -217,10 +217,21 @@ class DraftRunRepository:
         existing = await self.effects.find_one({"effect_key": str(effect_key)})
         return DraftExecutionEffect(**existing) if existing else None
 
-    async def complete_effect(self, effect_key: str) -> None:
+    async def complete_effect(
+        self,
+        effect_key: str,
+        *,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        fields: Dict[str, Any] = {
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc),
+        }
+        if metadata is not None:
+            fields["metadata"] = metadata
         await self.effects.update_one(
             {"effect_key": str(effect_key)},
-            {"$set": {"status": "completed", "completed_at": datetime.now(timezone.utc)}},
+            {"$set": fields},
         )
 
     async def enqueue_outbox(self, event: DraftOutboxEvent) -> DraftOutboxEvent:
@@ -441,54 +452,168 @@ class DraftRunRepository:
         await self.db.letters.update_one({"_id": ObjectId(letter_id)}, {"$set": update})
         return version
 
-    async def accept_draft(self, letter_id: str, run: DraftRun, accepted_by: Optional[str]) -> int:
+    async def _accept_draft_document(
+        self,
+        letter_id: str,
+        run: DraftRun,
+        accepted_by: Optional[str],
+        *,
+        lock: bool = False,
+        session: Any = None,
+    ) -> int:
+        find_kwargs = {"session": session} if session is not None else {}
         existing = await self.db.letters.find_one(
             {"_id": ObjectId(letter_id)},
             {"draft_versions": 1},
+            **find_kwargs,
         )
+        if not existing:
+            raise RuntimeError("Letter disappeared while accepting draft")
+        original_versions = list(existing.get("draft_versions", []) or [])
+        versions = [dict(version) for version in original_versions]
         last_version = 0
-        for version in (existing or {}).get("draft_versions", []) or []:
+        matched = None
+        for version in versions:
             try:
                 last_version = max(last_version, int(version.get("version", 0)))
             except Exception:
                 continue
-        next_version = last_version + 1
+            if str(version.get("run_id") or "") == str(run.run_id):
+                matched = version
         artifact = run.draft_artifact
         body = artifact.draft_letter if artifact else ""
-        version_entry = {
-            "version": next_version,
-            "status": run.status,
-            "body": body,
-            "plan": run.plan,
-            "sources": [source.model_dump() for source in run.sources],
+        now = datetime.now(timezone.utc)
+        body_hash = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        if matched is None:
+            matched = {
+                "version": last_version + 1,
+                "status": "approved" if lock else run.status,
+                "body": body,
+                "body_hash": body_hash,
+                "plan": run.plan,
+                "sources": [source.model_dump() for source in run.sources],
+                "reviewer_findings": [
+                    finding.model_dump() for finding in run.validation_report.findings
+                ],
+                "run_id": run.run_id,
+                "locked": lock,
+                "created_at": now,
+                "created_by": accepted_by,
+            }
+            versions.append(matched)
+        elif hashlib.sha256(str(matched.get("body") or "").encode("utf-8")).hexdigest() != body_hash:
+            raise RuntimeError("Accepted draft run is already bound to different immutable content")
+        if lock:
+            matched.update(
+                {
+                    "locked": True,
+                    "approved_by": accepted_by,
+                    "approved_at": now,
+                    "status": "approved",
+                }
+            )
+        version_number = int(matched.get("version", last_version + 1))
+        update = {
+            "draft_versions": versions,
+            "draft_output": body,
+            "draft_plan": run.plan,
+            "graph_run_id": run.run_id,
+            "governed_draft_hash": body_hash,
+            "graph_status": "approved" if lock else run.status,
+            "reviewer_blocking": run.validation_report.blocking,
             "reviewer_findings": [
                 finding.model_dump() for finding in run.validation_report.findings
             ],
-            "run_id": run.run_id,
-            "locked": False,
-            "created_at": datetime.now(timezone.utc),
-            "created_by": accepted_by,
+            "draft_sources": [source.model_dump() for source in run.sources],
+            "current_draft_version": version_number,
+            "updated_at": now,
         }
+        if lock:
+            update.update(
+                {
+                    "approved_draft_version": version_number,
+                    "approved_run_id": run.run_id,
+                    "approved_by": accepted_by,
+                    "approved_at": now,
+                    "approved_version_locked": True,
+                }
+            )
+        update_kwargs = {"session": session} if session is not None else {}
         await self.db.letters.update_one(
             {"_id": ObjectId(letter_id)},
-            {
-                "$set": {
-                    "draft_output": body,
-                    "draft_plan": run.plan,
-                    "graph_run_id": run.run_id,
-                    "graph_status": run.status,
-                    "reviewer_blocking": run.validation_report.blocking,
-                    "reviewer_findings": [
-                        finding.model_dump() for finding in run.validation_report.findings
-                    ],
-                    "draft_sources": [source.model_dump() for source in run.sources],
-                    "current_draft_version": next_version,
-                    "updated_at": datetime.now(timezone.utc),
-                },
-                "$push": {"draft_versions": version_entry},
-            },
+            {"$set": update},
+            **update_kwargs,
         )
-        return next_version
+        return version_number
+
+    async def accept_draft(
+        self,
+        letter_id: str,
+        run: DraftRun,
+        accepted_by: Optional[str],
+        *,
+        lock: bool = False,
+    ) -> int:
+        """Idempotently bind one run to one letter version in a single write."""
+        return await self._accept_draft_document(
+            letter_id,
+            run,
+            accepted_by,
+            lock=lock,
+        )
+
+    async def finalize_draft_approval(
+        self,
+        letter_id: str,
+        run: DraftRun,
+        approvals: List[Any],
+        approved_by: Optional[str],
+        approved_at: datetime,
+    ) -> tuple[DraftRun, int]:
+        """Atomically lock the letter artifact and approve its governed run."""
+
+        fields = {
+            "approvals": [
+                item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
+                for item in approvals
+            ],
+            "approval_status": "approved",
+            "status": "approved",
+            "approved_by": approved_by,
+            "approved_at": approved_at,
+            "updated_at": approved_at,
+            "completed_at": approved_at,
+        }
+        client = getattr(self.db, "client", None)
+        if client is None or not hasattr(client, "start_session"):
+            version = await self._accept_draft_document(
+                letter_id, run, approved_by, lock=True
+            )
+            await self.collection.update_one(
+                {"letter_id": str(letter_id), "run_id": str(run.run_id)},
+                {"$set": fields},
+            )
+        else:
+            async with await client.start_session() as session:
+                async with session.start_transaction():
+                    version = await self._accept_draft_document(
+                        letter_id,
+                        run,
+                        approved_by,
+                        lock=True,
+                        session=session,
+                    )
+                    result = await self.collection.update_one(
+                        {"letter_id": str(letter_id), "run_id": str(run.run_id)},
+                        {"$set": fields},
+                        session=session,
+                    )
+                    if not getattr(result, "matched_count", 0):
+                        raise RuntimeError("Draft run disappeared during final approval")
+        updated = await self.get(letter_id, run.run_id)
+        if not updated:
+            raise RuntimeError("Approved draft run could not be reloaded")
+        return updated, version
 
     async def lock_approved_draft_version(
         self,

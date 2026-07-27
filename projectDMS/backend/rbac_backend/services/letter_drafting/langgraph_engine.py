@@ -38,6 +38,7 @@ from ...models.letter_drafting import (
 )
 from .drafting_queue import get_drafting_queue
 from .context import DraftContextBuilder
+from .generator import DraftGenerator
 from .repository import DraftRunRepository
 from ...services.conversation_service import ConversationService
 from ...services.document_service import DocumentService
@@ -60,12 +61,19 @@ class DraftGraphState(TypedDict, total=False):
     evidence_collected: bool
     questions_required: bool
     domain_execution_status: str
+    domain_run_status: str
     domain_next_action: str
+    domain_run_id: str
+    draft_generated: bool
+    validation_completed: bool
+    legal_risk_scanned: bool
+    approval_ready: bool
 
 
 def build_drafting_graph(
     *,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    engine: Optional["LangGraphDraftingEngine"] = None,
 ):
     """Build the v3 orchestration skeleton with an official StateGraph.
 
@@ -107,16 +115,28 @@ def build_drafting_graph(
         }
 
     def draft_generation(state: DraftGraphState) -> Dict[str, Any]:
-        return {}
+        if not state.get("draft_generated") or not state.get("domain_run_id"):
+            raise RuntimeError("Draft generation stage did not persist an artifact")
+        return {"draft_generated": True}
 
     def validation_review(state: DraftGraphState) -> Dict[str, Any]:
-        return {}
+        if not state.get("validation_completed"):
+            raise RuntimeError("Validation stage did not persist its report")
+        return {"validation_completed": True}
 
     def legal_risk_review(state: DraftGraphState) -> Dict[str, Any]:
-        return {}
+        if not state.get("legal_risk_scanned"):
+            raise RuntimeError("Legal-risk stage did not persist its scan")
+        return {"legal_risk_scanned": True}
 
     def approval_gate(state: DraftGraphState) -> Dict[str, Any]:
-        return {}
+        ready = bool(state.get("approval_ready"))
+        return {
+            "approval_ready": ready,
+            "domain_run_status": state.get("domain_run_status", "needs_attention"),
+            "domain_execution_status": "completed",
+            "domain_next_action": "approve" if ready else "none",
+        }
 
     graph = StateGraph(DraftGraphState)
     graph.add_node("collect_evidence", collect_evidence)
@@ -540,8 +560,8 @@ class LangGraphDraftingEngine:
             "next_action": "answer_questions" if questions else "confirm_strategy",
         }
 
-    async def execute_confirmed_domain_pipeline(self, run: DraftRun) -> DraftRun:
-        """Run the proven domain pipeline once after the v3 human gates.
+    async def execute_confirmed_domain_pipeline(self, run: DraftRun) -> tuple[DraftRun, str]:
+        """Run generation after the v3 human gates and stage its governed output.
 
         The v2 implementation is retained as an explicit, auditable domain
         adapter during migration. LangGraph owns sequencing/checkpoints; the
@@ -552,7 +572,14 @@ class LangGraphDraftingEngine:
         existing_effect = await self.repository.get_effect(effect_key)
         if existing_effect and existing_effect.status == "completed":
             latest = await self.repository.get(run.letter_id, run.run_id)
-            return latest or run
+            domain_run_id = str((existing_effect.metadata or {}).get("domain_run_id") or "")
+            if not domain_run_id:
+                child = await self.repository.collection.find_one(
+                    {"letter_id": run.letter_id, "parent_run_id": run.run_id},
+                    sort=[("started_at", -1)],
+                )
+                domain_run_id = str((child or {}).get("run_id") or "")
+            return latest or run, domain_run_id
         effect = await self.repository.record_effect(
             DraftExecutionEffect(
                 effect_id=str(uuid.uuid4()),
@@ -564,7 +591,8 @@ class LangGraphDraftingEngine:
         )
         if effect.status == "completed":
             latest = await self.repository.get(run.letter_id, run.run_id)
-            return latest or run
+            domain_run_id = str((effect.metadata or {}).get("domain_run_id") or "")
+            return latest or run, domain_run_id
 
         legacy = DraftRunService(self.db)
         letter = await legacy.letter_service.get_letter(run.letter_id)
@@ -572,6 +600,9 @@ class LangGraphDraftingEngine:
             raise RuntimeError("Draft letter disappeared before domain generation")
         request_payload = dict(run.inputs or {})
         request_payload["mode"] = run.mode
+        request_payload["user_direction_answers"] = [
+            answer.model_dump(mode="json") for answer in run.user_directions
+        ]
         if request_payload.get("user_direction"):
             points = str(request_payload.get("points") or "").strip()
             request_payload["points"] = "\n\n".join(part for part in (points, request_payload["user_direction"]) if part)
@@ -591,6 +622,7 @@ class LangGraphDraftingEngine:
             request,
             worker_principal,
             engine_metadata={"engine": "v2", "engine_version": "v2-domain-adapter", "parent_run_id": run.run_id},
+            stop_after_generation=True,
         )
         fields = {
             "incoming_analysis": generated.incoming_analysis,
@@ -601,20 +633,172 @@ class LangGraphDraftingEngine:
             "plan": generated.plan,
             "draft_artifact": generated.draft_artifact,
             "source_integrity_summary": generated.source_integrity_summary,
-            "validation_report": generated.validation_report,
-            "legal_risk_report": generated.legal_risk_report,
-            "cyclic_trace": generated.cyclic_trace,
-            "assertion_support": generated.assertion_support,
-            "confidence_scores": generated.confidence_scores,
-            "iteration_count": generated.iteration_count,
+            "guardrail_report": generated.guardrail_report,
+            "evidence_ledger": generated.evidence_ledger,
             "warnings": list(run.warnings) + list(generated.warnings),
-            "status": generated.status,
-            "execution_status": "failed" if generated.status == "failed" else "completed",
-            "next_action": "none" if generated.status == "failed" else "approve",
+            "status": "running",
+            "execution_status": "running",
+            "next_action": "poll",
         }
         copied = await self.repository.update_fields(run.letter_id, run.run_id, fields) or run
+        await self.repository.complete_effect(
+            effect_key,
+            metadata={"domain_run_id": generated.run_id},
+        )
+        return copied, generated.run_id
+
+    async def commit_validation_stage(self, run_id: str, domain_run_id: str) -> DraftRun:
+        target = await self.repository.get_by_run_id(run_id)
+        domain = await self.repository.get_by_run_id(domain_run_id)
+        if not target or not domain:
+            raise RuntimeError("Draft validation stage cannot resolve its persisted artifacts")
+        effect_key = f"{run_id}:domain_validation"
+        existing_effect = await self.repository.get_effect(effect_key)
+        if existing_effect and existing_effect.status == "completed":
+            return target
+        await self.repository.record_effect(
+            DraftExecutionEffect(
+                effect_id=str(uuid.uuid4()),
+                effect_key=effect_key,
+                run_id=run_id,
+                effect_type="domain_validation",
+                payload_hash=hashlib.sha256(
+                    (domain.draft_artifact.draft_letter if domain.draft_artifact else "").encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            )
+        )
+        legacy = DraftRunService(self.db)
+        letter = await legacy.letter_service.get_letter(target.letter_id)
+        if not letter or not domain.draft_artifact:
+            raise RuntimeError("Draft validation stage is missing its letter or draft artifact")
+        request_payload = {
+            key: value
+            for key, value in dict(target.inputs or {}).items()
+            if key in DraftRunCreateRequest.model_fields
+        }
+        request_payload.update(
+            {
+                "mode": target.mode,
+                "draft_type": target.draft_type,
+                "letter_category": target.letter_category,
+                "user_direction_answers": [
+                    answer.model_dump(mode="json") for answer in target.user_directions
+                ],
+            }
+        )
+        request = DraftRunCreateRequest(**request_payload)
+        generator = DraftGenerator(legacy.prompt_registry)
+        worker_principal = SimpleNamespace(
+            id=target.created_by,
+            organization_id=getattr(letter, "organization_id", None),
+            project_id=getattr(letter, "project_id", None),
+        )
+        (
+            artifact,
+            sources,
+            validation,
+            cyclic_trace,
+            assertion_support,
+            confidence_scores,
+            cyclic_warnings,
+        ) = await legacy._run_cyclic_draft(
+            letter=letter,
+            request=request,
+            current_user=worker_principal,
+            role=target.role,
+            recipient_focus=target.recipient_focus,
+            context=domain.context_bundle,
+            sources=domain.sources,
+            inputs=domain.inputs,
+            plan=domain.plan,
+            generator=generator,
+            initial_artifact=domain.draft_artifact,
+        )
+        updated = await self.repository.update_fields(
+            target.letter_id,
+            target.run_id,
+            {
+                "draft_artifact": artifact,
+                "sources": sources,
+                "validation_report": validation,
+                "cyclic_trace": cyclic_trace,
+                "assertion_support": assertion_support,
+                "confidence_scores": confidence_scores,
+                "iteration_count": len(cyclic_trace),
+                "warnings": list(target.warnings) + list(cyclic_warnings),
+                "status": "needs_attention" if validation.blocking else "running",
+            },
+        )
         await self.repository.complete_effect(effect_key)
-        return copied
+        return updated or target
+
+    async def commit_legal_risk_stage(self, run_id: str, domain_run_id: str) -> DraftRun:
+        target = await self.repository.get_by_run_id(run_id)
+        if not target:
+            raise RuntimeError("Legal-risk stage cannot resolve its persisted artifacts")
+        effect_key = f"{run_id}:domain_legal_risk"
+        existing_effect = await self.repository.get_effect(effect_key)
+        if existing_effect and existing_effect.status == "completed":
+            return target
+        await self.repository.record_effect(
+            DraftExecutionEffect(
+                effect_id=str(uuid.uuid4()),
+                effect_key=effect_key,
+                run_id=run_id,
+                effect_type="domain_legal_risk",
+                payload_hash=hashlib.sha256(
+                    (target.draft_artifact.draft_letter if target.draft_artifact else "").encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            )
+        )
+        previous_positions = [
+            source.text
+            for source in target.sources
+            if source.text and (source.metadata or {}).get("previous_position")
+        ]
+        from .legal_risk_reviewer import LegalRiskReviewer
+
+        report = (
+            LegalRiskReviewer().review(
+                target.draft_artifact.draft_letter,
+                previous_positions,
+            )
+            if target.draft_artifact and target.draft_artifact.draft_letter
+            else None
+        )
+        updated = await self.repository.update_fields(
+            target.letter_id,
+            target.run_id,
+            {"legal_risk_report": report},
+        )
+        await self.repository.complete_effect(effect_key)
+        return updated or target
+
+    async def evaluate_approval_gate(self, run_id: str) -> tuple[bool, str, str]:
+        run = await self.repository.get_by_run_id(run_id)
+        if not run:
+            raise RuntimeError("Approval gate cannot resolve its draft run")
+        ready = bool(
+            run.draft_artifact
+            and not run.validation_report.blocking
+            and (not run.guardrail_report or run.guardrail_report.verdict == "pass")
+        )
+        status = "completed" if ready else "needs_attention"
+        next_action = "approve" if ready else "none"
+        await self.repository.update_fields(
+            run.letter_id,
+            run.run_id,
+            {
+                "status": status,
+                "execution_status": "completed",
+                "next_action": next_action,
+            },
+        )
+        return ready, status, next_action
 
 
 async def process_drafting_job(payload: Dict[str, Any], *, worker_name: str) -> None:
@@ -642,17 +826,28 @@ async def process_drafting_job(payload: Dict[str, Any], *, worker_name: str) -> 
     store = MongoDraftCheckpointStore()
     try:
         evidence_state = await engine.collect_evidence({"run_id": running.run_id})
-        graph = build_drafting_graph(checkpointer=store.saver)
+        graph = build_drafting_graph(checkpointer=store.saver, engine=engine)
         config = {"configurable": {"thread_id": running.thread_id}}
-        domain_status: Optional[str] = None
         if payload.get("resume"):
             update: Dict[str, Any] = {}
             if payload.get("resume_gate") == "confirm_strategy":
-                domain_run = await engine.execute_confirmed_domain_pipeline(running)
-                domain_status = domain_run.status
+                generated, domain_run_id = await engine.execute_confirmed_domain_pipeline(running)
+                validated = await engine.commit_validation_stage(
+                    running.run_id, domain_run_id
+                )
+                await engine.commit_legal_risk_stage(running.run_id, domain_run_id)
+                ready, run_status, next_action = await engine.evaluate_approval_gate(
+                    running.run_id
+                )
                 update = {
-                    "domain_execution_status": domain_run.execution_status,
-                    "domain_next_action": domain_run.next_action,
+                    "domain_run_id": domain_run_id,
+                    "draft_generated": bool(generated.draft_artifact),
+                    "validation_completed": bool(validated.validation_report),
+                    "legal_risk_scanned": True,
+                    "approval_ready": ready,
+                    "domain_run_status": run_status,
+                    "domain_execution_status": "completed",
+                    "domain_next_action": next_action,
                 }
             result = await asyncio.to_thread(
                 graph.invoke,
@@ -677,7 +872,10 @@ async def process_drafting_job(payload: Dict[str, Any], *, worker_name: str) -> 
             running.letter_id,
             running.run_id,
             {
-                "status": domain_status or result.get("execution_status", "awaiting_user_direction"),
+                "status": result.get(
+                    "domain_run_status",
+                    result.get("execution_status", "awaiting_user_direction"),
+                ),
                 "execution_status": result.get("execution_status", "awaiting_user_direction"),
                 "next_action": result.get("next_action", "answer_questions"),
                 "last_checkpoint_id": checkpoint_id,
