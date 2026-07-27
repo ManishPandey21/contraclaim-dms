@@ -193,32 +193,46 @@ class LangChainVectorService:
             return False
 
         models = self._qdrant_models
-        conditions = [
-            models.FieldCondition(
-                key="document_id",
-                match=models.MatchValue(value=document_id),
-            )
+
+        def _schema_variant(prefix: str, org_field: Optional[str]):
+            conditions = [
+                models.FieldCondition(
+                    key=f"{prefix}document_id",
+                    match=models.MatchValue(value=document_id),
+                )
+            ]
+            if organization_id and org_field:
+                conditions.append(
+                    models.FieldCondition(
+                        key=f"{prefix}{org_field}",
+                        match=models.MatchValue(value=str(organization_id)),
+                    )
+                )
+            if project_id:
+                conditions.append(
+                    models.FieldCondition(
+                        key=f"{prefix}project_id",
+                        match=models.MatchValue(value=str(project_id)),
+                    )
+                )
+            return models.Filter(must=conditions)
+
+        # Native VectorClient payloads are flat; LangChain wraps the same
+        # metadata under ``metadata``. Include both organization aliases so
+        # a replacement removes old points before its UUID-backed write.
+        org_fields = ("org_id", "organization_id") if organization_id else (None,)
+        variants = [
+            _schema_variant(prefix, org_field)
+            for prefix in ("", "metadata.")
+            for org_field in org_fields
         ]
-        if organization_id:
-            conditions.append(
-                models.FieldCondition(
-                    key="organization_id",
-                    match=models.MatchValue(value=str(organization_id)),
-                )
-            )
-        if project_id:
-            conditions.append(
-                models.FieldCondition(
-                    key="project_id",
-                    match=models.MatchValue(value=str(project_id)),
-                )
-            )
-        qdrant_filter = models.Filter(must=conditions)
+        qdrant_filter = models.Filter(should=variants)
 
         await asyncio.to_thread(
             self._client.delete,
             collection_name=self.config.qdrant_collection,
             points_selector=models.FilterSelector(filter=qdrant_filter),
+            wait=True,
         )
         logger.info("Deleted Qdrant vectors for document_id=%s", document_id)
         return True

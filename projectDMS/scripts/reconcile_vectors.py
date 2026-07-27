@@ -93,12 +93,14 @@ async def _repair_document(
         metadata = {
             "document_id": document_id,
             "organization_id": chunk.get("organization_id"),
+            "org_id": chunk.get("organization_id"),
             "project_id": chunk.get("project_id"),
             "uploadType": chunk.get("uploadType"),
             "letterNo": chunk.get("letterNo"),
             "filepath_local": chunk.get("filepath_local"),
             "filepath_s3": chunk.get("filepath_s3"),
             "chunk_index": chunk.get("chunk_index", index),
+            "chunk_id": chunk.get("chunk_id"),
             "source": chunk.get("source", "reconcile"),
         }
         payloads.append(

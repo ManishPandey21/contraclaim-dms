@@ -21,6 +21,7 @@ from ..core.database import get_database
 from ..core.security import CurrentUser, get_current_user
 from ..services.step_up_service import require_step_up
 from ..services.falkor_graph_service import FalkorGraphService, FalkorGraphError
+from ..services.langchain_vector_service import LangChainVectorService
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
 
@@ -200,18 +201,76 @@ async def _fetch_qdrant_total(
     )
 
 
-def _candidate_id_filters(raw_id: str) -> List[Dict[str, Any]]:
+async def _fetch_qdrant_document_count(
+    config: DocumentProcessingConfig,
+    document_id: str,
+) -> Optional[int]:
+    """Return the exact Qdrant vector count for one document, or None if unavailable."""
+    if not config.qdrant_enabled or config.qdrant_auth_configuration_error or QdrantClient is None:
+        return None
+
+    def _count() -> Optional[int]:
+        try:
+            from qdrant_client.http import models as qmodels
+
+            client = QdrantClient(**config.qdrant_client_kwargs())
+            response = client.count(
+                collection_name=config.qdrant_collection,
+                count_filter=_qdrant_document_filter(qmodels, document_id),
+                exact=True,
+            )
+            return int(getattr(response, "count", 0))
+        except Exception as exc:  # pragma: no cover - external dependency
+            logger.warning("Qdrant document count failed for %s: %s", document_id, exc)
+            return None
+
+    return await asyncio.to_thread(_count)
+
+
+def _qdrant_document_filter(qmodels: Any, document_id: str):
+    """Match native and LangChain Qdrant payload layouts without double-counting."""
+    match = qmodels.MatchValue(value=document_id)
+    return qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(key="document_id", match=match),
+            qmodels.FieldCondition(key="metadata.document_id", match=match),
+        ]
+    )
+
+
+def _candidate_field_filters(field: str, raw_id: str) -> List[Dict[str, Any]]:
     """
-    Build a set of Mongo filters that try both ObjectId and string representations.
+    Build Mongo filters that try both ObjectId and string representations.
+
+    Production data has historically stored document IDs as ObjectId in
+    documents._id and as strings in sync/chunk/vector metadata. Repair and
+    reconciliation paths must therefore accept either representation.
     """
     filters: List[Dict[str, Any]] = []
     if raw_id:
         try:
-            filters.append({"_id": ObjectId(raw_id)})
+            filters.append({field: ObjectId(raw_id)})
         except (InvalidId, TypeError):
             pass
-        filters.append({"_id": raw_id})
-    return filters or [{"_id": raw_id}]
+        filters.append({field: raw_id})
+    return filters or [{field: raw_id}]
+
+
+def _candidate_field_query(field: str, raw_id: str) -> Dict[str, Any]:
+    filters = _candidate_field_filters(field, raw_id)
+    return filters[0] if len(filters) == 1 else {"$or": filters}
+
+
+def _candidate_id_filters(raw_id: str) -> List[Dict[str, Any]]:
+    return _candidate_field_filters("_id", raw_id)
+
+
+def _candidate_id_query(raw_id: str) -> Dict[str, Any]:
+    return _candidate_field_query("_id", raw_id)
+
+
+async def _find_document_by_id(db, document_id: str, projection: Optional[Dict[str, Any]] = None):
+    return await db.documents.find_one(_candidate_id_query(document_id), projection)
 
 
 async def _load_target_backlinks(db, target_id: str, cache: Dict[str, Optional[List[Dict[str, Any]]]]) -> Optional[List[Dict[str, Any]]]:
@@ -221,14 +280,7 @@ async def _load_target_backlinks(db, target_id: str, cache: Dict[str, Optional[L
     if target_id in cache:
         return cache[target_id]
 
-    filters = _candidate_id_filters(target_id)
-    query: Dict[str, Any]
-    if len(filters) == 1:
-        query = filters[0]
-    else:
-        query = {"$or": filters}
-
-    target_doc = await db.documents.find_one(query, {"referencedBy": 1})
+    target_doc = await _find_document_by_id(db, target_id, {"referencedBy": 1})
     if not target_doc:
         cache[target_id] = None
         return None
@@ -431,46 +483,96 @@ async def _resync_document_vectors(
     Re-embed and upsert vectors for a single document into Qdrant, then update sync status.
     Shared by single-doc and bulk repair endpoints.
     """
-    doc = await db.documents.find_one({"_id": document_id})
+    doc = await _find_document_by_id(db, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    chunks = [c async for c in db.chunks.find({"document_id": document_id})]
-    if not chunks:
-        raise HTTPException(status_code=404, detail="No chunks found for document")
-
-    embedding_client = embedding_client or EmbeddingClient(config)
+    document_ref_query = _candidate_field_query("document_id", document_id)
+    chunks = [c async for c in db.chunks.find(document_ref_query)]
     vector_client = vector_client or VectorClient(config)
 
-    texts = [c.get("text_enriched") or c.get("text_original") or c.get("text") or "" for c in chunks]
-    vectors = await embedding_client.embed(texts)
-    await vector_client.upsert(
-        vectors,
-        [
+    if chunks:
+        embedding_client = embedding_client or EmbeddingClient(config)
+        texts = [c.get("text_enriched") or c.get("text_original") or c.get("text") or "" for c in chunks]
+        vectors = await embedding_client.embed(texts)
+        await vector_client.upsert(
+            vectors,
+            [
+                {
+                    "chunk_id": c.get("chunk_id"),
+                    "document_id": c.get("document_id"),
+                    "org_id": c.get("org_id") or c.get("organization_id") or doc.get("organization_id"),
+                    "project_id": c.get("project_id") or doc.get("project_id"),
+                    "page_start": c.get("page_start"),
+                    "text": c.get("text_original") or c.get("text"),
+                    "text_enriched": c.get("text_enriched"),
+                    "tags": c.get("tags", []),
+                    "embedding_provider": c.get("embedding_provider"),
+                    "embedding_model": c.get("embedding_model"),
+                    "embedding_dim": c.get("embedding_dim"),
+                    "embedding_version": c.get("embedding_version"),
+                    "chunking_version": c.get("chunking_version"),
+                }
+                for c in chunks
+            ],
+            namespace=None,
+        )
+        qdrant_ids = await vector_client.list_chunk_ids(
             {
-                "chunk_id": c.get("chunk_id"),
-                "document_id": c.get("document_id"),
-                "org_id": c.get("org_id"),
-                "project_id": c.get("project_id"),
-                "page_start": c.get("page_start"),
-                "text": c.get("text_original") or c.get("text"),
-                "text_enriched": c.get("text_enriched"),
-                "tags": c.get("tags", []),
-                "embedding_provider": c.get("embedding_provider"),
-                "embedding_model": c.get("embedding_model"),
-                "embedding_dim": c.get("embedding_dim"),
-                "embedding_version": c.get("embedding_version"),
-                "chunking_version": c.get("chunking_version"),
-            }
-            for c in chunks
-        ],
-        namespace=None,
-    )
-    qdrant_ids = await vector_client.list_chunk_ids(
-        {"org_id": doc.get("organization_id"), "project_id": doc.get("project_id"), "document_id": document_id},
-        namespace=None,
-    )
-    status = "synced" if len(qdrant_ids) == len(chunks) else "mismatch"
+                "org_id": doc.get("organization_id"),
+                "project_id": doc.get("project_id"),
+                "document_id": document_id,
+            },
+            namespace=None,
+        )
+        mongo_chunks = len(chunks)
+        qdrant_chunks = len(qdrant_ids)
+        status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
+    else:
+        legacy_vectors = [v async for v in db.document_vectors.find(document_ref_query)]
+        payloads: List[Dict[str, Any]] = []
+        for index, chunk in enumerate(legacy_vectors):
+            text = chunk.get("text") or chunk.get("text_enriched") or chunk.get("text_original") or ""
+            if not isinstance(text, str) or not text.strip():
+                continue
+            organization_id = chunk.get("organization_id") or doc.get("organization_id")
+            project_id = chunk.get("project_id") or doc.get("project_id")
+            payloads.append(
+                {
+                    "text": text,
+                    "metadata": {
+                        "document_id": document_id,
+                        "organization_id": organization_id,
+                        "org_id": organization_id,
+                        "project_id": project_id,
+                        "uploadType": chunk.get("uploadType"),
+                        "letterNo": chunk.get("letterNo"),
+                        "filepath_local": chunk.get("filepath_local"),
+                        "filepath_s3": chunk.get("filepath_s3"),
+                        "chunk_index": chunk.get("chunk_index", index),
+                        "chunk_id": chunk.get("chunk_id") or str(chunk.get("_id") or index),
+                        "source": chunk.get("source", "legacy_vector_repair"),
+                        "embedding_model": chunk.get("embedding_model"),
+                        "embedding_provider": chunk.get("embedding_provider"),
+                        "embedding_version": chunk.get("embedding_version"),
+                        "chunking_version": chunk.get("chunking_version"),
+                    },
+                    "checksum": chunk.get("checksum_sha256"),
+                }
+            )
+
+        if not payloads:
+            raise HTTPException(status_code=404, detail="No chunks or legacy vector rows found for document")
+
+        legacy_service = LangChainVectorService(config)
+        if not legacy_service.enabled:
+            raise HTTPException(status_code=503, detail="Qdrant vector service is not available")
+        await legacy_service.replace_document(payloads)
+        mongo_chunks = len(payloads)
+        qdrant_count = await _fetch_qdrant_document_count(config, document_id)
+        qdrant_chunks = int(qdrant_count or 0)
+        status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
+
     await db.vector_sync_status.update_one(
         {"document_id": document_id},
         {
@@ -478,8 +580,8 @@ async def _resync_document_vectors(
                 "document_id": document_id,
                 "sync_status": status,
                 "updatedAt": datetime.utcnow(),
-                "mongo_chunks": len(chunks),
-                "qdrant_chunks": len(qdrant_ids),
+                "mongo_chunks": mongo_chunks,
+                "qdrant_chunks": qdrant_chunks,
             },
             "$setOnInsert": {"createdAt": datetime.utcnow()},
         },
@@ -487,8 +589,8 @@ async def _resync_document_vectors(
     )
     return {
         "document_id": document_id,
-        "mongo_chunks": len(chunks),
-        "qdrant_chunks": len(qdrant_ids),
+        "mongo_chunks": mongo_chunks,
+        "qdrant_chunks": qdrant_chunks,
         "status": status,
     }
 
@@ -851,32 +953,53 @@ async def reconcile_vectors(
             continue
         scanned += 1
 
-        # Load chunk metadata from Mongo
-        chunks = [c async for c in db.chunks.find({"document_id": doc_id})]
-        if not chunks:
-            details.append({"document_id": doc_id, "status": "no_chunks"})
-            continue
-
-        mongo_ids = {str(c.get("chunk_id")) for c in chunks if c.get("chunk_id")}
-
-        # Fetch Qdrant chunk IDs for this document
-        try:
-            qdrant_ids = set(
-                await vector_client.list_chunk_ids(
-                    {
-                        "org_id": doc.get("organization_id"),
-                        "project_id": doc.get("project_id"),
-                        "document_id": doc_id,
-                    },
-                    limit=max(1000, len(mongo_ids) + 100),
+        # Load chunk metadata from Mongo. Legacy documents may have
+        # document_vectors only; reconcile them by exact document count.
+        document_ref_query = _candidate_field_query("document_id", doc_id)
+        chunks = [c async for c in db.chunks.find(document_ref_query)]
+        legacy_vectors: List[Dict[str, Any]] = []
+        compare_by_count_only = False
+        if chunks:
+            mongo_ids = {str(c.get("chunk_id")) for c in chunks if c.get("chunk_id")}
+            try:
+                qdrant_ids = set(
+                    await vector_client.list_chunk_ids(
+                        {
+                            "org_id": doc.get("organization_id"),
+                            "project_id": doc.get("project_id"),
+                            "document_id": doc_id,
+                        },
+                        limit=max(1000, len(mongo_ids) + 100),
+                    )
                 )
+            except Exception as exc:  # pragma: no cover - external dependency
+                failures.append({"document_id": doc_id, "error": f"qdrant_list_failed: {exc}"})
+                continue
+            missing_in_qdrant = mongo_ids - qdrant_ids
+            extra_in_qdrant = qdrant_ids - mongo_ids
+            mongo_count = len(mongo_ids)
+            qdrant_count = len(qdrant_ids)
+        else:
+            legacy_vectors = [v async for v in db.document_vectors.find(document_ref_query)]
+            mongo_count = len(
+                [
+                    v
+                    for v in legacy_vectors
+                    if isinstance(v.get("text") or v.get("text_enriched") or v.get("text_original"), str)
+                    and (v.get("text") or v.get("text_enriched") or v.get("text_original") or "").strip()
+                ]
             )
-        except Exception as exc:  # pragma: no cover - external dependency
-            failures.append({"document_id": doc_id, "error": f"qdrant_list_failed: {exc}"})
-            continue
-
-        missing_in_qdrant = mongo_ids - qdrant_ids
-        extra_in_qdrant = qdrant_ids - mongo_ids
+            if mongo_count == 0:
+                details.append({"document_id": doc_id, "status": "no_chunks"})
+                continue
+            qdrant_count_result = await _fetch_qdrant_document_count(config, doc_id)
+            if qdrant_count_result is None:
+                failures.append({"document_id": doc_id, "error": "qdrant_count_failed"})
+                continue
+            qdrant_count = int(qdrant_count_result)
+            missing_in_qdrant = set(range(max(mongo_count - qdrant_count, 0)))
+            extra_in_qdrant = set(range(max(qdrant_count - mongo_count, 0)))
+            compare_by_count_only = True
 
         if not missing_in_qdrant and not extra_in_qdrant:
             in_sync += 1
@@ -888,10 +1011,11 @@ async def reconcile_vectors(
                 {
                     "document_id": doc_id,
                     "status": "would_repair",
-                    "mongo_chunks": len(mongo_ids),
-                    "qdrant_chunks": len(qdrant_ids),
+                    "mongo_chunks": mongo_count,
+                    "qdrant_chunks": qdrant_count,
                     "missing_qdrant": len(missing_in_qdrant),
                     "extra_qdrant": len(extra_in_qdrant),
+                    "compare_mode": "count" if compare_by_count_only else "chunk_id",
                 }
             )
             continue
@@ -910,6 +1034,7 @@ async def reconcile_vectors(
                     "qdrant_chunks": result.get("qdrant_chunks"),
                     "missing_qdrant": len(missing_in_qdrant),
                     "extra_qdrant": len(extra_in_qdrant),
+                    "compare_mode": "count" if compare_by_count_only else "chunk_id",
                 }
             )
         except Exception as exc:  # pragma: no cover - diagnostics
@@ -1057,7 +1182,7 @@ async def reconcile_files(
         if not doc_id:
             orphan_chunks += 1
             continue
-        if not await db.documents.find_one({"_id": doc_id}, {"_id": 1}):
+        if not await _find_document_by_id(db, doc_id, {"_id": 1}):
             orphan_chunks += 1
     counters["orphan_chunks"] = orphan_chunks
 
