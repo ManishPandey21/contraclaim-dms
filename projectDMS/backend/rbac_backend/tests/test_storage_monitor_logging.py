@@ -8,6 +8,7 @@ from rbac_backend.config.document_processing_config import DocumentProcessingCon
 from rbac_backend.routers.storage_sync import (
     WARN_REPEAT_SECONDS,
     _candidate_id_query,
+    _qdrant_document_filter,
     _qdrant_hint,
     _should_emit_warning,
 )
@@ -50,6 +51,28 @@ def test_candidate_id_query_matches_objectid_or_string():
     assert any(value.__class__.__name__ == "ObjectId" for value in ids)
 
 
+def test_qdrant_document_filter_matches_native_and_langchain_layouts():
+    class _Models:
+        class MatchValue:
+            def __init__(self, value):
+                self.value = value
+
+        class FieldCondition:
+            def __init__(self, key, match):
+                self.key = key
+                self.match = match
+
+        class Filter:
+            def __init__(self, should=None):
+                self.should = should
+
+    result = _qdrant_document_filter(_Models, "document-1")
+
+    assert [condition.key for condition in result.should] == [
+        "document_id",
+        "metadata.document_id",
+    ]
+    assert all(condition.match.value == "document-1" for condition in result.should)
 def test_warning_only_on_change_then_heartbeat():
     sig = ("qdrant client_init_failed",)
 

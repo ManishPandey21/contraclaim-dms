@@ -125,6 +125,50 @@ async def test_list_chunk_ids_returns_payload_chunk_id_from_qdrant_scroll():
 
 
 @pytest.mark.asyncio
+async def test_list_chunk_ids_reads_nested_langchain_metadata():
+    client = _offline_client()
+    client.enabled = True
+
+    class _Point:
+        id = "uuid-point-id"
+        payload = {"metadata": {"chunk_id": "langchain-chunk-id"}}
+
+    class _ScrollClient:
+        def __init__(self):
+            self.filters = []
+
+        def scroll(self, **kwargs):
+            self.filters.append(kwargs["scroll_filter"])
+            return ([_Point()], None)
+
+    class _Models:
+        class Filter:
+            def __init__(self, must=None):
+                self.must = must
+
+        class FieldCondition:
+            def __init__(self, **kwargs):
+                self.key = kwargs["key"]
+
+        class MatchValue:
+            def __init__(self, **kwargs):
+                pass
+
+        class MatchAny:
+            def __init__(self, **kwargs):
+                pass
+
+    scroll_client = _ScrollClient()
+    client._client = scroll_client
+    client._qmodels = _Models()
+
+    assert await client.list_chunk_ids(dict(FILTERS)) == ["langchain-chunk-id"]
+    assert len(scroll_client.filters) == 2
+    nested_keys = [condition.key for condition in scroll_client.filters[1].must]
+    assert nested_keys == ["metadata.org_id", "metadata.project_id"]
+
+
+@pytest.mark.asyncio
 async def test_disabled_client_still_serves_in_memory_index():
     client = _offline_client()
     await client.upsert(

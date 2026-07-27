@@ -216,14 +216,7 @@ async def _fetch_qdrant_document_count(
             client = QdrantClient(**config.qdrant_client_kwargs())
             response = client.count(
                 collection_name=config.qdrant_collection,
-                count_filter=qmodels.Filter(
-                    must=[
-                        qmodels.FieldCondition(
-                            key="document_id",
-                            match=qmodels.MatchValue(value=document_id),
-                        )
-                    ]
-                ),
+                count_filter=_qdrant_document_filter(qmodels, document_id),
                 exact=True,
             )
             return int(getattr(response, "count", 0))
@@ -234,6 +227,15 @@ async def _fetch_qdrant_document_count(
     return await asyncio.to_thread(_count)
 
 
+def _qdrant_document_filter(qmodels: Any, document_id: str):
+    """Match native and LangChain Qdrant payload layouts without double-counting."""
+    match = qmodels.MatchValue(value=document_id)
+    return qmodels.Filter(
+        should=[
+            qmodels.FieldCondition(key="document_id", match=match),
+            qmodels.FieldCondition(key="metadata.document_id", match=match),
+        ]
+    )
 def _candidate_field_filters(field: str, raw_id: str) -> List[Dict[str, Any]]:
     """
     Build Mongo filters that try both ObjectId and string representations.

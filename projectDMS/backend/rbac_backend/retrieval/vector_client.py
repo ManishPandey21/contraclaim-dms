@@ -315,21 +315,33 @@ class VectorClient:
         self._require_tenant_scope(filters, allow_global)
         collection = namespace or self.collection_name or self.config.qdrant_collection
         if self.enabled and self._client and self._qmodels:
-            qfilter = self._build_filter(filters)
             try:
-                res, _ = await asyncio.to_thread(
-                    self._client.scroll,
-                    collection_name=collection,
-                    scroll_filter=qfilter,
-                    limit=limit,
-                    with_payload=True,
-                    with_vectors=False,
-                )
                 ids: List[str] = []
-                for point in res:
-                    payload = getattr(point, "payload", None) or {}
-                    chunk_id = payload.get("chunk_id") if isinstance(payload, dict) else None
-                    ids.append(str(chunk_id or point.id))
+                seen: set[str] = set()
+                # Native VectorClient writes flat payload fields, while
+                # LangChain QdrantVectorStore writes the same metadata under
+                # ``metadata``. Reconciliation must see both representations
+                # during the migration; otherwise valid UUID-backed points look
+                # missing and trigger needless repair.
+                for qfilter in (
+                    self._build_filter(filters),
+                    self._build_filter(filters, field_prefix="metadata."),
+                ):
+                    res, _ = await asyncio.to_thread(
+                        self._client.scroll,
+                        collection_name=collection,
+                        scroll_filter=qfilter,
+                        limit=limit,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    for point in res:
+                        payload = getattr(point, "payload", None) or {}
+                        chunk_id = self._payload_value(payload, "chunk_id")
+                        point_id = str(chunk_id or point.id)
+                        if point_id not in seen:
+                            seen.add(point_id)
+                            ids.append(point_id)
                 return ids
             except Exception as exc:
                 # Enabled-but-failing is an outage: a silent empty list here
@@ -430,24 +442,35 @@ class VectorClient:
                 return False
         return True
 
-    def _build_filter(self, filters: Dict[str, Any]):
+    @staticmethod
+    def _payload_value(payload: Any, key: str) -> Any:
+        if not isinstance(payload, dict):
+            return None
+        value = payload.get(key)
+        if value is not None:
+            return value
+        metadata = payload.get("metadata")
+        return metadata.get(key) if isinstance(metadata, dict) else None
+
+    def _build_filter(self, filters: Dict[str, Any], field_prefix: str = ""):
         if not self._qmodels:
             return None
         must = []
         for key, value in filters.items():
             if value is None:
                 continue
+            field = f"{field_prefix}{key}"
             if key == "tags":
                 if isinstance(value, list) and value:
-                    must.append(self._qmodels.FieldCondition(key=key, match=self._qmodels.MatchAny(any=value)))
+                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchAny(any=value)))
                 elif value:
-                    must.append(self._qmodels.FieldCondition(key=key, match=self._qmodels.MatchValue(value=value)))
+                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchValue(value=value)))
                 continue
             if isinstance(value, list):
                 if value:
-                    must.append(self._qmodels.FieldCondition(key=key, match=self._qmodels.MatchAny(any=value)))
+                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchAny(any=value)))
                 continue
-            must.append(self._qmodels.FieldCondition(key=key, match=self._qmodels.MatchValue(value=value)))
+            must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchValue(value=value)))
         if not must:
             return None
         return self._qmodels.Filter(must=must)
