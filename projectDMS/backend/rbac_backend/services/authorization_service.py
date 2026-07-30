@@ -810,12 +810,20 @@ class AuthorizationService:
         allowed_orgs = self._collect_user_org_ids(current_user)
         allowed_projects = self._collect_user_project_ids(current_user)
 
+        # A non-superadmin with no reachable organisation must see nothing.
+        # Previously an empty allow-list skipped both branches below, leaving the
+        # query unconstrained -- so a role with no organisation assignment (e.g.
+        # reporter, doccontroller, which carry no organisation invariant on the
+        # User model) listed every tenant's email groups.
+        if not allowed_orgs:
+            return {"_id": {"$in": []}}
+
         # constrain organization if not specified
         org_id = query.get("organization_id")
         if org_id:
-            if allowed_orgs and str(org_id) not in allowed_orgs:
+            if str(org_id) not in allowed_orgs:
                 raise AuthorizationError("Access denied to this organization")
-        elif allowed_orgs:
+        else:
             query["organization_id"] = {"$in": sorted(allowed_orgs)}
 
         # constrain project if not specified
@@ -923,6 +931,7 @@ class AuthorizationService:
             )
 
         # Scope enforcement
+        scope_clause_count = len(and_clauses)
         if "superadmin" in role_names:
             # no additional constraints
             pass
@@ -964,6 +973,12 @@ class AuthorizationService:
                 elif allowed_projects:
                     and_clauses.append({"projects": {"$in": sorted(allowed_projects)}})
 
+        # A non-superadmin that produced no scope clause must see nothing. The
+        # constrained roles raise above, but a role carrying no organisation
+        # invariant (reporter, doccontroller) with no assignments reached here
+        # with an empty clause list and returned {} -- every tenant's parties.
+        if "superadmin" not in role_names and len(and_clauses) == scope_clause_count:
+            return {"_id": {"$in": []}}
         if not and_clauses:
             return {}
         if len(and_clauses) == 1:

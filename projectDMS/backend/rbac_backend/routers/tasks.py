@@ -18,7 +18,11 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-def build_scope_query(current_user: CurrentUser) -> Dict[str, Any]:
+def build_scope_query(
+    current_user: CurrentUser,
+    organization_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Organization/project scope filter for task list endpoints.
 
     Delegates to the canonical implementation in ``core.security``. This module
@@ -26,8 +30,14 @@ def build_scope_query(current_user: CurrentUser) -> Dict[str, Any]:
     /projectadmin/projectuser and then fell through to default-deny for
     everything else -- silently returning no tasks to Super Users and to the
     expert drafting roles that the canonical version does cover.
+
+    A client-supplied organisation/project is passed through here so it is
+    intersected with the caller's scope (and denied when outside it) rather
+    than being written over the scope predicate afterwards.
     """
-    return core_build_scope_query(current_user)
+    return core_build_scope_query(
+        current_user, organization_id=organization_id, project_id=project_id
+    )
 
 
 async def _load_authorized(task_id: str, permission: str, db, current_user, policy) -> Dict[str, Any]:
@@ -79,22 +89,24 @@ def _apply_task_filters(
     *,
     status_filter: Optional[str] = None,
     assigned_to: Optional[str] = None,
-    organization_id: Optional[str] = None,
-    project_id: Optional[str] = None,
     linked_claim_id: Optional[str] = None,
     task_type: Optional[str] = None,
     resource_type: Optional[str] = None,
     resource_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Layer optional filters onto a tenant scope query (shared by list/board)."""
+    """Layer optional filters onto a tenant scope query (shared by list/board).
+
+    ``organization_id``/``project_id`` are deliberately *not* written here. They
+    arrive from the client, and assigning them would overwrite the tenant
+    predicate that ``build_scope_query`` just computed -- turning a narrowing
+    filter into a scope escape. Callers pass them into ``build_scope_query``
+    instead, which intersects them with the caller's real scope and denies when
+    they reach outside it.
+    """
     if status_filter:
         query["status"] = status_filter
     if assigned_to:
         query["assigned_to"] = assigned_to
-    if organization_id:
-        query["organization_id"] = organization_id
-    if project_id:
-        query["project_id"] = project_id
     if linked_claim_id:
         query["linked_claim_id"] = linked_claim_id
     if task_type:
@@ -134,11 +146,9 @@ async def list_tasks(
         audit=False,
     )
     query = _apply_task_filters(
-        build_scope_query(current_user),
+        build_scope_query(current_user, organization_id=organization_id, project_id=project_id),
         status_filter=status_filter,
         assigned_to=assigned_to,
-        organization_id=organization_id,
-        project_id=project_id,
         linked_claim_id=linked_claim_id,
         task_type=task_type,
         resource_type=resource_type,
@@ -174,10 +184,8 @@ async def task_board(
         audit=False,
     )
     query = _apply_task_filters(
-        build_scope_query(current_user),
+        build_scope_query(current_user, organization_id=organization_id, project_id=project_id),
         assigned_to=assigned_to,
-        organization_id=organization_id,
-        project_id=project_id,
         resource_type=resource_type,
     )
     rows = await db.tasks.find(query).limit(limit).to_list(length=limit)
