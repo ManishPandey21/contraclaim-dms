@@ -936,6 +936,11 @@ class ReportService:
             if org:
                 org_ids.add(str(org))
         project_ids = {str(pid) for pid in (getattr(current_user, "projects", []) or []) if pid}
+        # Project assignment narrows *within* the organisation, so the two
+        # constraints combine with AND. They were previously combined with OR,
+        # which meant a project-scoped user matched every row in their
+        # organisation via the organisation clause alone -- reports ignored
+        # project restriction entirely.
         scope_clauses: List[Dict[str, Any]] = []
         if org_ids:
             org_list = sorted(org_ids)
@@ -945,7 +950,11 @@ class ReportService:
                 else {organization_field: {"$in": org_list}}
             )
             scope_clauses.append(clause)
-        if project_ids:
+        # Only project-scoped roles are limited to their assignment. An
+        # organisation role may hold incidental project links but still sees the
+        # whole organisation.
+        project_scoped = bool({"projectadmin", "projectuser"} & set(roles))
+        if project_ids and project_scoped:
             project_list = sorted(project_ids)
             clause = (
                 {project_field: project_list[0]}
@@ -954,10 +963,13 @@ class ReportService:
             )
             scope_clauses.append(clause)
         if not scope_clauses:
-            return None
+            # A non-superadmin with no reachable scope must see no rows. This
+            # previously returned None, which applied no filter at all and
+            # exposed every tenant's report data.
+            return {"_id": {"$in": []}}
         if len(scope_clauses) == 1:
             return scope_clauses[0]
-        return {"$or": scope_clauses}
+        return {"$and": scope_clauses}
 
     @staticmethod
     def _letter_field_map() -> Dict[str, Tuple[str, ...]]:
