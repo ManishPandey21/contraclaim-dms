@@ -117,11 +117,18 @@ describe("LoginPage login process", () => {
     expect(screen.getByTestId("login-background")).not.toHaveAttribute("style");
     expect(screen.getByTestId("login-responsive-layout")).toHaveClass(
       "grid",
+      "content-center",
+      "gap-5",
       "lg:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)]"
     );
     expect(screen.getByTestId("login-card")).toHaveClass(
       "w-full",
-      "max-w-md"
+      "max-w-md",
+      "bg-[#f7f8fa]"
+    );
+    expect(screen.getByTestId("login-card-heading")).toHaveClass(
+      "w-full",
+      "space-y-1.5"
     );
     expect(
       screen.getByRole("heading", {
@@ -139,7 +146,14 @@ describe("LoginPage login process", () => {
     );
     expect(
       screen.getByRole("button", { name: /^sign in$/i })
-    ).toBeInTheDocument();
+    ).toHaveClass("bg-ink", "hover:bg-ink/90");
+    expect(screen.getByLabelText(/^work email$/i)).toHaveClass("login-input");
+    expect(screen.getByLabelText(/^password$/i)).toHaveClass("login-input");
+    expect(
+      screen.getByText(
+        /claims, correspondence and evidence—connected in one defensible workspace/i
+      )
+    ).toHaveClass("hidden", "sm:block");
 
     await waitFor(() => {
       expect(getCurrentUserProfile).toHaveBeenCalledTimes(1);
