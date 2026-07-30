@@ -187,45 +187,53 @@ const LoginPage = () => {
         </header>
 
         <div
-          className="grid flex-1 items-center gap-7 py-7 sm:gap-9 sm:py-10 lg:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)] lg:gap-14"
+          className="grid flex-1 content-center items-center gap-5 py-5 sm:gap-8 sm:py-8 lg:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)] lg:gap-14"
           data-testid="login-responsive-layout"
         >
-          <section className="mx-auto max-w-2xl text-center lg:mx-0 lg:text-left">
+          <section
+            className="mx-auto max-w-2xl text-center lg:mx-0 lg:text-left"
+            data-testid="login-hero"
+          >
             <span className="inline-flex items-center rounded-full border border-brand/15 bg-white/65 px-3 py-1 text-xs font-bold uppercase tracking-[0.14em] text-brand backdrop-blur-sm">
               Governed workspace
             </span>
-            <h1 className="mt-4 font-serif text-3xl font-semibold leading-tight tracking-[-0.02em] text-ink sm:mt-5 sm:text-4xl lg:text-5xl">
+            <h1 className="mt-3 font-serif text-3xl font-semibold leading-tight tracking-[-0.02em] text-ink sm:mt-5 sm:text-4xl lg:text-5xl">
               Welcome back to your contract record.
             </h1>
-            <p className="mx-auto mt-3 max-w-xl text-sm leading-6 text-ink/65 sm:mt-4 sm:text-base sm:leading-7 lg:mx-0">
+            <p className="mx-auto mt-3 hidden max-w-xl text-sm leading-6 text-ink/65 sm:mt-4 sm:block sm:text-base sm:leading-7 lg:mx-0">
               Claims, correspondence and evidence—connected in one defensible
               workspace.
             </p>
-            <div className="mt-4 inline-flex items-center gap-2 text-xs font-semibold text-ink/70 sm:mt-6 sm:text-sm">
+            <div className="mt-3 inline-flex items-center gap-2 text-xs font-semibold text-ink/75 sm:mt-6 sm:text-sm">
               <ShieldCheck className="h-4 w-4 text-brand" aria-hidden="true" />
               <span>Role-based access · Complete audit trail</span>
             </div>
           </section>
 
           <Card
-            className="mx-auto w-full max-w-md border-ink/10 bg-white/95 shadow-[0_28px_70px_-36px_rgba(13,27,46,0.45)] backdrop-blur-md lg:mx-0 lg:justify-self-end"
+            className="mx-auto w-full max-w-md border-ink/10 bg-[#f7f8fa] shadow-[0_20px_55px_-38px_rgba(13,27,46,0.35)] backdrop-blur-md lg:mx-0 lg:justify-self-end"
             data-testid="login-card"
           >
-            <CardHeader className="space-y-1.5 px-5 pb-4 pt-5 sm:px-7 sm:pt-7">
-              <p className="text-xs font-bold uppercase tracking-[0.14em] text-brand">
-                Sign in
-              </p>
-              <CardTitle className="font-serif text-2xl font-semibold tracking-tight text-ink sm:text-3xl">
-                Access your workspace
-              </CardTitle>
-              <CardDescription className="text-sm text-ink/55">
-                Use your organisation credentials to continue.
-              </CardDescription>
+            <CardHeader className="px-5 pb-3 pt-4 sm:px-7 sm:pb-4 sm:pt-7">
+              <div
+                className="w-full space-y-1.5"
+                data-testid="login-card-heading"
+              >
+                <p className="text-xs font-bold uppercase tracking-[0.14em] text-brand">
+                  Sign in
+                </p>
+                <CardTitle className="font-serif text-2xl font-semibold tracking-tight text-ink sm:text-3xl">
+                  Access your workspace
+                </CardTitle>
+                <CardDescription className="text-sm text-ink/65">
+                  Use your organisation credentials to continue.
+                </CardDescription>
+              </div>
             </CardHeader>
 
             <Form {...form}>
               <form onSubmit={form.handleSubmit(onSubmit)}>
-                <CardContent className="space-y-4 px-5 pb-5 sm:px-7 sm:pb-7">
+                <CardContent className="space-y-3.5 px-5 pb-4 sm:space-y-4 sm:px-7 sm:pb-7">
                   {loginError && (
                     <Alert
                       variant="destructive"
@@ -255,7 +263,7 @@ const LoginPage = () => {
                             autoComplete="email"
                             aria-required="true"
                             aria-describedby="email-description"
-                            className="h-11 border-ink/15 bg-white"
+                            className="login-input h-11 border-ink/15 bg-white"
                             {...field}
                           />
                         </FormControl>
@@ -298,7 +306,7 @@ const LoginPage = () => {
                               autoComplete="current-password"
                               aria-required="true"
                               aria-describedby="password-description"
-                              className="h-11 border-ink/15 bg-white pr-11"
+                              className="login-input h-11 border-ink/15 bg-white pr-11"
                               {...field}
                             />
                           </FormControl>
@@ -339,7 +347,7 @@ const LoginPage = () => {
                     />
                     <Label
                       htmlFor="remember-me"
-                      className="text-sm font-medium text-ink/70"
+                      className="text-sm font-medium text-ink/75"
                     >
                       Keep me signed in on this device
                     </Label>
@@ -347,7 +355,7 @@ const LoginPage = () => {
 
                   <Button
                     type="submit"
-                    className="h-11 w-full bg-brand font-semibold text-white shadow-[0_10px_24px_-12px_rgba(20,102,196,0.9)] hover:bg-[#1157a8]"
+                    className="h-11 w-full bg-ink font-semibold text-white shadow-[0_10px_24px_-14px_rgba(13,27,46,0.7)] hover:bg-ink/90"
                     disabled={form.formState.isSubmitting}
                   >
                     {form.formState.isSubmitting ? (
@@ -382,7 +390,7 @@ const LoginPage = () => {
                     )}
                   </Button>
 
-                  <p className="text-center text-xs leading-5 text-ink/50">
+                  <p className="text-center text-xs leading-5 text-ink/60">
                     Need access? Contact your system administrator.
                   </p>
                 </CardContent>
@@ -391,7 +399,7 @@ const LoginPage = () => {
           </Card>
         </div>
 
-        <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-xs text-ink/45 lg:justify-start">
+        <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-center text-xs text-ink/60 lg:justify-start">
           <span>Authorised users only</span>
           <span aria-hidden="true">·</span>
           <span>Activity is audited</span>

@@ -7,6 +7,17 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .login-input:-webkit-autofill,
+  .login-input:-webkit-autofill:hover,
+  .login-input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #0d1b2e;
+    -webkit-box-shadow: 0 0 0 1000px #fff inset;
+    box-shadow: 0 0 0 1000px #fff inset;
+    caret-color: #0d1b2e;
+  }
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;
