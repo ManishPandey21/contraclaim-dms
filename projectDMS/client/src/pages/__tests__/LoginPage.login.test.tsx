@@ -69,9 +69,12 @@ describe("LoginPage login process", () => {
       </MemoryRouter>
     );
 
-    await user.type(screen.getByLabelText(/^email$/i), "superadmin@example.com");
+    await user.type(
+      screen.getByLabelText(/^work email$/i),
+      "superadmin@example.com"
+    );
     await user.type(screen.getByLabelText(/^password$/i), "password");
-    await user.click(screen.getByRole("button", { name: /login/i }));
+    await user.click(screen.getByRole("button", { name: /^sign in$/i }));
 
     await waitFor(() => {
       expect(loginWithPassword).toHaveBeenCalledWith({
@@ -88,5 +91,82 @@ describe("LoginPage login process", () => {
     expect(window.localStorage.removeItem).toHaveBeenCalledWith("user_roles");
     expect(window.localStorage.removeItem).toHaveBeenCalledWith("org_id");
     expect(window.localStorage.removeItem).toHaveBeenCalledWith("proj_id");
+  });
+
+  it("renders the Quiet authority shell with mobile-first and desktop layout guards", async () => {
+    vi.mocked(getCurrentUserProfile).mockRejectedValue(
+      new Error("No active session")
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <LoginPage />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByTestId("login-page")).toHaveClass(
+      "min-h-[100svh]",
+      "overflow-x-hidden"
+    );
+    expect(screen.getByTestId("login-background")).toHaveClass(
+      "bg-gradient-to-br",
+      "from-brand-soft",
+      "via-paper",
+      "to-paper"
+    );
+    expect(screen.getByTestId("login-background")).not.toHaveAttribute("style");
+    expect(screen.getByTestId("login-responsive-layout")).toHaveClass(
+      "grid",
+      "lg:grid-cols-[minmax(0,1.08fr)_minmax(360px,0.92fr)]"
+    );
+    expect(screen.getByTestId("login-card")).toHaveClass(
+      "w-full",
+      "max-w-md"
+    );
+    expect(
+      screen.getByRole("heading", {
+        name: /welcome back to your contract record/i,
+      })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "ContraClaim" })).toHaveAttribute(
+      "src",
+      "/contraclaim2.png"
+    );
+    expect(screen.getByRole("img", { name: "ContraClaim" })).toHaveClass(
+      "h-8",
+      "sm:h-9",
+      "w-auto"
+    );
+    expect(
+      screen.getByRole("button", { name: /^sign in$/i })
+    ).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(getCurrentUserProfile).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps password visibility accessible without changing the submitted value", async () => {
+    vi.mocked(getCurrentUserProfile).mockRejectedValue(
+      new Error("No active session")
+    );
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <LoginPage />
+      </MemoryRouter>
+    );
+
+    const passwordInput = screen.getByLabelText(/^password$/i);
+    await user.type(passwordInput, "password");
+    expect(passwordInput).toHaveAttribute("type", "password");
+
+    await user.click(screen.getByRole("button", { name: "Show password" }));
+    expect(passwordInput).toHaveAttribute("type", "text");
+    expect(passwordInput).toHaveValue("password");
+    expect(
+      screen.getByRole("button", { name: "Hide password" })
+    ).toBeInTheDocument();
   });
 });
