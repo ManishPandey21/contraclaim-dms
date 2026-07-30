@@ -256,9 +256,30 @@ class _ScopeColl:
         return _ScopeCursor()
 
 
+class _ScopeProjects:
+    """Minimal projects collection so tenant-isolation checks resolve.
+
+    ScopeService.project_belongs_to_organization fails closed when the
+    projects collection is absent, which otherwise masks the control under
+    test with an unrelated 403 scope_denied.
+    """
+
+    _DOCS = {"proj-A": "org-A", "proj-B": "org-B"}
+
+    async def find_one(self, query):
+        raw = (query or {}).get("_id")
+        candidates = raw.get("$in", []) if isinstance(raw, dict) else [raw]
+        for candidate in candidates:
+            org = self._DOCS.get(str(candidate))
+            if org:
+                return {"_id": str(candidate), "organization_id": org}
+        return None
+
+
 class _ScopeDB:
     organization_memberships = _ScopeColl()
     project_memberships = _ScopeColl()
+    projects = _ScopeProjects()
 
 
 class _Audit:

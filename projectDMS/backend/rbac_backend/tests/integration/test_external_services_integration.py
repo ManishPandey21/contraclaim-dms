@@ -67,6 +67,11 @@ class _FakeOpenAIFilesAPI:
         assert filename.endswith(".pdf")
         assert payload
         assert mime_type == "application/pdf"
+        # Files consumed as a Chat Completions {"type": "file"} content part are
+        # direct model inputs and must be uploaded with purpose="user_data".
+        # "assistants" files belong to the Assistants/vector-store API; the model
+        # cannot read their contents, which silently produced empty PDF
+        # extraction against the live API (blocker B1).
         assert purpose == "user_data"
 
         file_id = f"file-{len(self._uploads) + 1}"

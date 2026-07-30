@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import logging
 import os
 import re
@@ -34,6 +35,9 @@ class Settings(BaseSettings):
     # FIX: Use ClassVar for LOGGING_CONFIG since it's not a model field
     LOGGING_CONFIG: ClassVar[Dict[str, Any]] = {
         'version': 1,
+        # dictConfig defaults this to True, which silently disables every logger
+        # created before configure_logging() runs (i.e. most of the app).
+        'disable_existing_loggers': False,
         'handlers': {
             'file': {
                 'class': 'logging.handlers.RotatingFileHandler',
@@ -66,6 +70,15 @@ class Settings(BaseSettings):
                 'handlers': ['file', 'console'],
                 'propagate': False
             }
+        },
+        # Without a configured root logger every ``rbac_backend.*`` logger falls
+        # through to Python's lastResort handler, which drops anything below
+        # WARNING. That silently hid all INFO-level workflow, queue, lease,
+        # retry and fallback telemetry required by the operations runbook.
+        # Level is overridden from LOG_LEVEL in configure_logging().
+        'root': {
+            'level': 'INFO',
+            'handlers': ['console'],
         }
     }
     
@@ -775,9 +788,17 @@ def configure_logging():
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
     
+    # LOG_LEVEL is set in every deployed environment; honour it instead of
+    # leaving it as a setting that looks configured but is never read.
+    requested_level = str(os.getenv("LOG_LEVEL", "INFO")).upper()
+    if requested_level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}:
+        requested_level = "INFO"
+    config = copy.deepcopy(Settings.LOGGING_CONFIG)
+    config["root"]["level"] = requested_level
+
     try:
-        logging.config.dictConfig(Settings.LOGGING_CONFIG)
-        logger.info("Logging configured successfully for bulk upload service")
+        logging.config.dictConfig(config)
+        logger.info("Logging configured successfully at level %s", requested_level)
     except Exception as e:
         logger.error(f"Failed to configure logging: {e}")
 

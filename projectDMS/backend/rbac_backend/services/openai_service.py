@@ -64,6 +64,12 @@ class OpenAIService:
                 # the entire file into memory (M9): the SDK reads it incrementally.
                 file_handle = await loop.run_in_executor(None, lambda: open(file_path, "rb"))
                 try:
+                    # B1: this file is consumed by process_document() as a
+                    # Chat Completions ``{"type": "file"}`` content part, i.e. a
+                    # direct model input. Those require purpose="user_data";
+                    # "assistants" files belong to the Assistants/vector-store
+                    # API and the model cannot read their contents, which made
+                    # live PDF extraction silently return no document text.
                     response = await self._client.files.create(
                         file=(safe_filename, file_handle, mime_type),
                         purpose="user_data"
