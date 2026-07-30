@@ -124,7 +124,7 @@ describe("LoginPage login process", () => {
     expect(screen.getByTestId("login-card")).toHaveClass(
       "w-full",
       "max-w-md",
-      "bg-[#f7f8fa]"
+      "!bg-[#f7f8fa]"
     );
     expect(screen.getByTestId("login-card-heading")).toHaveClass(
       "w-full",

@@ -211,7 +211,7 @@ const LoginPage = () => {
           </section>
 
           <Card
-            className="mx-auto w-full max-w-md border-ink/10 bg-[#f7f8fa] shadow-[0_20px_55px_-38px_rgba(13,27,46,0.35)] backdrop-blur-md lg:mx-0 lg:justify-self-end"
+            className="mx-auto w-full max-w-md border-ink/10 !bg-[#f7f8fa] shadow-[0_20px_55px_-38px_rgba(13,27,46,0.35)] backdrop-blur-md lg:mx-0 lg:justify-self-end"
             data-testid="login-card"
           >
             <CardHeader className="px-5 pb-3 pt-4 sm:px-7 sm:pb-4 sm:pt-7">
