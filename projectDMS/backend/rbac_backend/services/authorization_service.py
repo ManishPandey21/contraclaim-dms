@@ -421,17 +421,21 @@ class AuthorizationService:
 
         allowed_orgs = self._collect_user_org_ids(current_user)
 
+        # Checked before the branch below. The explicit-filter path was guarded
+        # by "if allowed_orgs and ...", so a caller with no reachable
+        # organisation skipped both the validation and the implicit-scoping
+        # raise: passing ?organization_id=<any org> returned that organisation's
+        # users. Only the filtered path was exposed; the no-filter path already
+        # raised.
+        if not allowed_orgs:
+            raise AuthorizationError("No organization scope available for user queries")
+
         if org_id:
             # When an explicit org filter is provided, validate it
-            if allowed_orgs and str(org_id) not in allowed_orgs:
+            if str(org_id) not in allowed_orgs:
                 raise AuthorizationError("Access denied to this organization")
         else:
-            # Apply implicit org scoping where applicable
-            if allowed_orgs:
-                query["organization_id"] = {"$in": sorted(allowed_orgs)}
-            else:
-                # org/project scoped roles must have organization context
-                raise AuthorizationError("No organization scope available for user queries")
+            query["organization_id"] = {"$in": sorted(allowed_orgs)}
 
         # Project-scoped roles: restrict to own organization for safety
         if {"projectadmin", "projectuser"} & role_names:

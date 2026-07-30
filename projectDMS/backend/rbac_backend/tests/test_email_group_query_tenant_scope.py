@@ -104,3 +104,37 @@ async def test_party_query_scopes_org_user():
 async def test_party_query_superadmin_unrestricted():
     query = await _service().build_party_query(superadmin(), {})
     assert query == {}
+
+
+# --- build_user_query: the explicit-filter path was the exposed one -------
+
+
+@pytest.mark.asyncio
+async def test_user_query_denies_orgless_caller_naming_an_organisation():
+    """An orgless caller could previously enumerate any organisation's users."""
+    with pytest.raises(AuthorizationError):
+        await _service().build_user_query(orgless_role(), {"organization_id": "org-B"})
+
+
+@pytest.mark.asyncio
+async def test_user_query_denies_orgless_caller_without_filters():
+    with pytest.raises(AuthorizationError):
+        await _service().build_user_query(orgless_role(), {})
+
+
+@pytest.mark.asyncio
+async def test_user_query_denies_org_user_naming_another_organisation():
+    with pytest.raises(AuthorizationError):
+        await _service().build_user_query(org_user(), {"organization_id": "org-B"})
+
+
+@pytest.mark.asyncio
+async def test_user_query_scopes_org_user_by_default():
+    query = await _service().build_user_query(org_user(), {})
+    assert query["organization_id"] == {"$in": ["org-A"]}
+
+
+@pytest.mark.asyncio
+async def test_user_query_superadmin_unrestricted():
+    query = await _service().build_user_query(superadmin(), {})
+    assert "organization_id" not in query
