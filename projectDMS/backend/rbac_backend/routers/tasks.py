@@ -6,6 +6,7 @@ import logging
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser
+from ..core.security import build_scope_query as core_build_scope_query
 from ..models.task import Task, TaskCreate, TaskUpdate, TaskComment, TaskCommentCreate
 from ..services.policy_service import PolicyService
 
@@ -18,29 +19,15 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
 
 
 def build_scope_query(current_user: CurrentUser) -> Dict[str, Any]:
-    """Organization/project scope filter for list endpoints (non-superadmin)."""
-    roles = set(current_user.roles or [])
-    if "superadmin" in current_user.roles:
-        return {}
+    """Organization/project scope filter for task list endpoints.
 
-    org_id = getattr(current_user, "organization_id", None)
-    projects = [str(p) for p in getattr(current_user, "projects", []) or [] if p]
-
-    if {"orgadmin", "orguser"} & roles:
-        if not org_id:
-            return {"_id": {"$in": []}}
-        return {"organization_id": org_id}
-
-    if {"projectadmin", "projectuser"} & roles:
-        if not projects:
-            return {"_id": {"$in": []}}
-        q: Dict[str, Any] = {"project_id": {"$in": projects}}
-        if org_id:
-            q["organization_id"] = org_id
-        return q
-
-    # Default deny for unknown roles
-    return {"_id": {"$in": []}}
+    Delegates to the canonical implementation in ``core.security``. This module
+    previously carried its own copy, which handled superadmin/orgadmin/orguser
+    /projectadmin/projectuser and then fell through to default-deny for
+    everything else -- silently returning no tasks to Super Users and to the
+    expert drafting roles that the canonical version does cover.
+    """
+    return core_build_scope_query(current_user)
 
 
 async def _load_authorized(task_id: str, permission: str, db, current_user, policy) -> Dict[str, Any]:

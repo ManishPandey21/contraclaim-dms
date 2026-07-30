@@ -110,12 +110,35 @@ class AuthorizationService:
     async def build_letter_query(
         self, current_user: Any, filters: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
+        """Build a tenant-scoped letter query.
+
+        The organisation and project in ``filters`` arrive from the client, so
+        they are treated as a *narrowing request*, never as authorization.
+        ``build_scope_query`` decides what the user may actually see: it
+        intersects the request with the caller's real scope and returns a
+        deny-all filter when the request reaches outside it.
+
+        Previously these two ids were copied into the query verbatim, which
+        meant an omitted pair produced a query with no tenant predicate at all
+        (every organisation's letters) and a supplied pair could name any
+        organisation the caller liked.
+        """
+        from ..core.security import build_scope_query
+
         filters = dict(filters or {})
-        query: Dict[str, Any] = {}
-        for key in ("status", "organization_id", "project_id"):
-            value = filters.get(key)
-            if value:
-                query[key] = value
+        requested_org = filters.get("organization_id") or None
+        requested_project = filters.get("project_id") or None
+
+        query: Dict[str, Any] = build_scope_query(
+            current_user,
+            organization_id=str(requested_org) if requested_org else None,
+            project_id=str(requested_project) if requested_project else None,
+        )
+
+        status_value = filters.get("status")
+        if status_value:
+            query["status"] = status_value
+
         role_names = self._extract_role_names(current_user)
         if self._is_contract_letter_drafter(role_names):
             user_id = getattr(current_user, "id", None) or getattr(current_user, "_id", None)
