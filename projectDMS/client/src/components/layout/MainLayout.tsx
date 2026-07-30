@@ -5,11 +5,48 @@ import Sidebar from './Sidebar';
 import Navbar from './Navbar';
 import { ErrorBoundary } from '@/components/error-boundary/ErrorBoundary';
 import { TenantProvider, useTenant } from '@/contexts/TenantContext';
+import TenantContextGate from './TenantContextGate';
+
+/**
+ * Routes that are platform- or account-level rather than project-level. These
+ * must stay reachable without a project, otherwise a user with no project
+ * selected could not reach the very pages used to manage organisations,
+ * projects and their own account.
+ *
+ * Everything not listed here is treated as project-scoped and gated, so a new
+ * page is protected by default rather than by remembering to opt in.
+ */
+const CONTEXT_FREE_ROUTES = [
+  '/',
+  '/security-terms',
+  '/overview',
+  '/organizations',
+  '/projects',
+  '/profile',
+  '/users',
+  '/permissions',
+  '/settings',
+  '/plan-settings',
+  '/subscription-management',
+  '/notifications',
+  '/legal-words',
+  '/billing',
+  '/admin',
+  '/observability',
+];
+
+export function isContextFreeRoute(pathname: string): boolean {
+  const path = pathname.replace(/\/+$/, '') || '/';
+  return CONTEXT_FREE_ROUTES.some(
+    (route) => path === route || path.startsWith(`${route}/`),
+  );
+}
 
 const MainLayoutContent = () => {
   const location = useLocation();
   const { selectedOrganizationId, selectedProjectId } = useTenant();
   const tenantKey = `${selectedOrganizationId}:${selectedProjectId}`;
+  const contextFree = isContextFreeRoute(location.pathname);
   return (
     <div className="min-h-screen bg-docsumo-light flex">
       <Sidebar />
@@ -24,8 +61,18 @@ const MainLayoutContent = () => {
             the user navigates elsewhere.
           */}
           <ErrorBoundary key={`${location.pathname}:${tenantKey}`}>
+            {/*
+              Keyed by tenantKey so a context change remounts the page rather
+              than letting it re-render with the previous project's state.
+            */}
             <div key={tenantKey}>
-              <Outlet />
+              {contextFree ? (
+                <Outlet />
+              ) : (
+                <TenantContextGate>
+                  <Outlet />
+                </TenantContextGate>
+              )}
             </div>
           </ErrorBoundary>
         </main>

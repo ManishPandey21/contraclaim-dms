@@ -63,6 +63,10 @@ from .v20260723_0001_arbitration_effect_recovery import DESCRIPTION as ARB_EFFEC
 from .v20260723_0001_arbitration_effect_recovery import NAME as ARB_EFFECT_RECOVERY_NAME
 from .v20260723_0001_arbitration_effect_recovery import VERSION as ARB_EFFECT_RECOVERY_VERSION
 from .v20260723_0001_arbitration_effect_recovery import upgrade as upgrade_arbitration_effect_recovery
+from .v20260730_0001_tenant_context_active_flags import DESCRIPTION as TENANT_CONTEXT_DESCRIPTION
+from .v20260730_0001_tenant_context_active_flags import NAME as TENANT_CONTEXT_NAME
+from .v20260730_0001_tenant_context_active_flags import VERSION as TENANT_CONTEXT_VERSION
+from .v20260730_0001_tenant_context_active_flags import upgrade as upgrade_tenant_context_flags
 
 
 MIGRATIONS = [
@@ -149,5 +153,11 @@ MIGRATIONS = [
         name=ARB_EFFECT_RECOVERY_NAME,
         description=ARB_EFFECT_RECOVERY_DESCRIPTION,
         upgrade=upgrade_arbitration_effect_recovery,
+    ),
+    Migration(
+        version=TENANT_CONTEXT_VERSION,
+        name=TENANT_CONTEXT_NAME,
+        description=TENANT_CONTEXT_DESCRIPTION,
+        upgrade=upgrade_tenant_context_flags,
     ),
 ]

@@ -155,7 +155,9 @@ async def read_projects(
             raise HTTPException(status_code=500, detail="Database connection failed")
 
         service = ProjectService()
-        filters: Dict[str, Any] = {}
+        # Deactivated projects must never reach the header selector. Absent flag
+        # means active so pre-migration rows keep working.
+        filters: Dict[str, Any] = {"is_active": {"$ne": False}}
         if organization_id:
             filters["organization_id"] = organization_id
         # Apply scope

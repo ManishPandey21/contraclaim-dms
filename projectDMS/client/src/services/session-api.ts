@@ -23,6 +23,8 @@ export interface SessionProfile {
   roles?: string[] | string;
   permissions?: string[] | string;
   organization_id?: string | null;
+  /** Assigned organisations. Populated for Super Users, empty for Super Admin. */
+  organizations?: string[];
   projects?: string[];
 }
 
