@@ -69,6 +69,38 @@ def _normalize_role_name(value: Any) -> str:
         return ""
     return ROLE_ALIASES.get(raw, raw)
 
+
+async def _find_role_doc(db: Any, rid: Any) -> Optional[Dict[str, Any]]:
+    """Look up a role document, tolerating alias role ids.
+
+    ``users.roles`` may hold either a canonical id (``orgadmin``) or an alias
+    (``organization-admin``); ``roles`` is keyed by the canonical id only.
+    Looking up the raw value alone silently missed, and the caller's
+    ``if not role: continue`` then dropped the role entirely -- so a user
+    carrying an alias resolved to *zero* permissions and was denied everything
+    while appearing correctly configured.
+
+    Tries, in order: ObjectId, the raw string, then the normalised alias.
+    """
+    candidates: list = []
+    try:
+        candidates.append(ObjectId(rid))
+    except Exception:
+        pass
+
+    raw = str(rid).strip()
+    if raw:
+        candidates.append(raw)
+        normalized = _normalize_role_name(raw)
+        if normalized and normalized != raw:
+            candidates.append(normalized)
+
+    for candidate in candidates:
+        role = await db.roles.find_one({"_id": candidate})
+        if role:
+            return role
+    return None
+
 class PermissionServiceError(Exception):
     """Custom exception for permission service errors."""
     def __init__(self, message: str, status_code: int = 400):
@@ -470,11 +502,7 @@ class PermissionService:
             perm_ids: List[ObjectId] = []
 
             for rid in role_ids:
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                role = await _find_role_doc(db, rid)
                 if not role:
                     continue
                 rperms = role.get("permissions", []) or []
@@ -546,12 +574,7 @@ class PermissionService:
                     if "superadmin" in role_names:
                         return ["*"]
 
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-
-                role = await db.roles.find_one({"_id": role_qid})
+                role = await _find_role_doc(db, rid)
                 if not role:
                     continue
 
@@ -768,11 +791,7 @@ class PermissionService:
                         normalized_rid = _normalize_role_name(rid_str)
                         if normalized_rid:
                             role_names.add(normalized_rid)
-                    try:
-                        role_qid = ObjectId(rid)
-                    except Exception:
-                        role_qid = rid
-                    role = await db.roles.find_one({"_id": role_qid})
+                    role = await _find_role_doc(db, rid)
                     if not role:
                         continue
                     role_name = str(role.get("name", "")).lower()
@@ -899,11 +918,7 @@ class PermissionService:
                     is_super_admin = True
                     break
                 # Also check by querying the role
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                role = await _find_role_doc(db, rid)
                 if role:
                     role_name = str(role.get("name", "")).lower()
                     if role_name == "super admin" or role_name == "superadmin":
