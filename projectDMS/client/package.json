@@ -15,7 +15,8 @@
     "test:watch": "vitest watch",
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest --ui",
-    "gen:api-types": "npx -y openapi-typescript openapi.json -o src/types/api.generated.ts"
+    "gen:api-types": "npx -y openapi-typescript openapi.json -o src/types/api.generated.ts",
+    "test:e2e:isolation": "playwright test e2e/tenant-isolation.spec.ts"
   },
   "dependencies": {
     "@heroicons/react": "^2.2.0",
