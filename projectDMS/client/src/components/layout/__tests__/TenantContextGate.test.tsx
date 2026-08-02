@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import TenantContextGate from "../TenantContextGate";
-import { isContextFreeRoute } from "../MainLayout";
+import { isContextFreeRoute } from "../contextFreeRoutes";
 
 const { useTenant } = vi.hoisted(() => ({ useTenant: vi.fn() }));
 vi.mock("@/contexts/TenantContext", () => ({ useTenant }));
