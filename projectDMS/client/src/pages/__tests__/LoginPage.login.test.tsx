@@ -146,7 +146,7 @@ describe("LoginPage login process", () => {
     );
     expect(
       screen.getByRole("button", { name: /^sign in$/i })
-    ).toHaveClass("bg-ink", "hover:bg-ink/90");
+    ).toHaveClass("bg-blue-600", "hover:bg-blue-700");
     expect(screen.getByLabelText(/^work email$/i)).toHaveClass("login-input");
     expect(screen.getByLabelText(/^password$/i)).toHaveClass("login-input");
     expect(

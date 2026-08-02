@@ -355,7 +355,7 @@ const LoginPage = () => {
 
                   <Button
                     type="submit"
-                    className="h-11 w-full bg-ink font-semibold text-white shadow-[0_10px_24px_-14px_rgba(13,27,46,0.7)] hover:bg-ink/90"
+                    className="h-11 w-full bg-blue-600 font-semibold text-white shadow-[0_10px_24px_-14px_rgba(59,130,246,0.7)] hover:bg-blue-700 disabled:opacity-50"
                     disabled={form.formState.isSubmitting}
                   >
                     {form.formState.isSubmitting ? (
