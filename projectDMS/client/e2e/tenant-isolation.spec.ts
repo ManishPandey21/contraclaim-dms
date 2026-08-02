@@ -89,6 +89,41 @@ async function apiStatus(request: APIRequestContext, url: string): Promise<numbe
   return response.status();
 }
 
+/**
+ * An API session authenticated purely over HTTP.
+ *
+ * The API assertions must not depend on the UI: the deployed frontend may lag
+ * the branch under test, and tenant isolation is enforced by the server
+ * regardless of what the client renders. Binding baseURL to E2E_BASE_URL here
+ * also avoids inheriting the config's dev-server baseURL, which would silently
+ * point these checks at localhost instead of the target deployment.
+ */
+async function apiSession(
+  playwright: typeof import("@playwright/test").request,
+  user: { email: string; password: string },
+): Promise<APIRequestContext> {
+  const context = await playwright.newContext({ baseURL: BASE_URL });
+  const masked = `${user.email.split("@")[0]}***`;
+
+  // /api/login, not /login -- the latter is a frontend route that returns the
+  // SPA shell with HTTP 200 for any input, including a nonexistent user.
+  const response = await context.post("/api/login", {
+    data: { email: user.email, password: user.password },
+    failOnStatusCode: false,
+  });
+  expect(response.status(), `login failed for ${masked}`).toBe(200);
+
+  // Prove the session is real before any isolation assertion runs. Without this
+  // an unauthenticated context would make every cross-tenant check pass on a
+  // 401 -- a vacuous pass that looks identical to enforcement.
+  const me = await context.get("/api/me", { failOnStatusCode: false });
+  expect(me.status(), `session not established for ${masked}`).toBe(200);
+  const profile = await me.json();
+  expect(String(profile.email || "").toLowerCase()).toBe(user.email.toLowerCase());
+
+  return context;
+}
+
 test.describe("two-user tenant isolation", () => {
   let a: { context: BrowserContext; page: Page };
   let b: { context: BrowserContext; page: Page };
@@ -144,64 +179,6 @@ test.describe("two-user tenant isolation", () => {
     // forged pair must be discarded rather than restored.
     const storedOrg = await a.page.evaluate(() => window.localStorage.getItem("org_id"));
     expect(storedOrg).not.toBe(B_ORG_ID);
-  });
-
-  test("user A's API session is refused user B's organisation", async () => {
-    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID to run the API scope test.");
-
-    const request = a.context.request;
-    const status = await apiStatus(request, `/api/letters?organization_id=${B_ORG_ID}`);
-
-    if (status === 200) {
-      // A 200 is only acceptable if the payload is empty -- scoping may filter
-      // rather than refuse. Anything returned would be cross-tenant data.
-      const body = await (await request.get(`/api/letters?organization_id=${B_ORG_ID}`)).json();
-      const rows = Array.isArray(body) ? body : body?.items || body?.results || [];
-      expect(rows, "cross-organisation letters must not be returned").toHaveLength(0);
-    } else {
-      expect(REFUSED).toContain(status);
-    }
-  });
-
-  test("copied document and letter ids do not resolve for the other user", async () => {
-    test.skip(
-      !B_DOCUMENT_ID && !B_LETTER_ID,
-      "Set E2E_B_DOCUMENT_ID and/or E2E_B_LETTER_ID to run direct-object-reference tests.",
-    );
-
-    const request = a.context.request;
-    if (B_DOCUMENT_ID) {
-      expect(REFUSED).toContain(await apiStatus(request, `/api/documents/${B_DOCUMENT_ID}`));
-    }
-    if (B_LETTER_ID) {
-      expect(REFUSED).toContain(await apiStatus(request, `/api/letters/${B_LETTER_ID}`));
-    }
-  });
-
-  test("file download by id is refused across tenants", async () => {
-    test.skip(!B_DOCUMENT_ID, "Set E2E_B_DOCUMENT_ID to run the download test.");
-
-    const status = await apiStatus(a.context.request, `/api/documents/${B_DOCUMENT_ID}/download`);
-    expect(REFUSED).toContain(status);
-  });
-
-  test("search results never contain the other tenant's organisation", async () => {
-    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID to run the search isolation test.");
-
-    const response = await a.context.request.get(
-      `/api/search/documents?q=${encodeURIComponent("a")}&organizations=${B_ORG_ID}`,
-      { failOnStatusCode: false },
-    );
-
-    if (response.status() === 200) {
-      const body = await response.json();
-      const results = body?.results || [];
-      for (const row of results) {
-        expect(String(row.organization_id || "")).not.toBe(B_ORG_ID);
-      }
-    } else {
-      expect(REFUSED).toContain(response.status());
-    }
   });
 
   test("context survives a refresh and stays the user's own", async () => {
@@ -267,6 +244,116 @@ test.describe("project-scoped narrowing is visible to the user", () => {
       expect(secondBody).not.toBe(firstBody);
     } finally {
       await context.close();
+    }
+  });
+});
+
+/**
+ * Server-side isolation, asserted over HTTP with no UI involvement.
+ *
+ * These are the security-critical checks: the API enforces tenancy whatever the
+ * client renders, and the deployed frontend may lag the branch under test.
+ */
+test.describe("two-user API isolation", () => {
+  let aApi: APIRequestContext;
+
+  test.beforeAll(async ({ playwright }) => {
+    aApi = await apiSession(playwright.request, USER_A);
+  });
+
+  test.afterAll(async () => {
+    await aApi?.dispose();
+  });
+
+  /**
+   * Positive control. Every other assertion in this block is satisfied by an
+   * empty result or a 4xx, so a session that simply cannot read anything --
+   * wrong role id, missing permission, expired cookie -- would make them all
+   * pass while proving nothing. This test fails in exactly that situation.
+   */
+  test("the session can read its OWN organisation's data", async () => {
+    const response = await aApi.get("/api/projects", { failOnStatusCode: false });
+    expect(response.status(), "positive control: own projects must be readable").toBe(200);
+    const body = await response.json();
+    const rows = Array.isArray(body) ? body : body?.items || [];
+    expect(
+      rows.length,
+      "session returned no data at all -- the isolation assertions below would pass vacuously",
+    ).toBeGreaterThan(0);
+  });
+
+  test("letters are not returned for the other tenant's organisation", async () => {
+    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID.");
+    const response = await aApi.get(`/api/letters?organization_id=${B_ORG_ID}`, {
+      failOnStatusCode: false,
+    });
+    if (response.status() === 200) {
+      const body = await response.json();
+      const rows = Array.isArray(body) ? body : body?.items || body?.results || [];
+      expect(rows, "cross-organisation letters must not be returned").toHaveLength(0);
+    } else {
+      expect(REFUSED).toContain(response.status());
+    }
+  });
+
+  test("copied document and letter ids do not resolve", async () => {
+    test.skip(!B_DOCUMENT_ID && !B_LETTER_ID, "Set E2E_B_DOCUMENT_ID and/or E2E_B_LETTER_ID.");
+    if (B_DOCUMENT_ID) {
+      expect(REFUSED).toContain(await apiStatus(aApi, `/api/documents/${B_DOCUMENT_ID}`));
+    }
+    if (B_LETTER_ID) {
+      expect(REFUSED).toContain(await apiStatus(aApi, `/api/letters/${B_LETTER_ID}`));
+    }
+  });
+
+  test("file download by foreign document id is refused", async () => {
+    test.skip(!B_DOCUMENT_ID, "Set E2E_B_DOCUMENT_ID.");
+    expect(REFUSED).toContain(await apiStatus(aApi, `/api/documents/${B_DOCUMENT_ID}/download`));
+  });
+
+  test("search returns nothing carrying the other organisation", async () => {
+    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID.");
+    const response = await aApi.get(
+      `/api/search/documents?q=${encodeURIComponent("a")}&organizations=${B_ORG_ID}`,
+      { failOnStatusCode: false },
+    );
+    if (response.status() === 200) {
+      const results = (await response.json())?.results || [];
+      for (const row of results) {
+        expect(String(row.organization_id || "")).not.toBe(B_ORG_ID);
+      }
+    } else {
+      expect(REFUSED).toContain(response.status());
+    }
+  });
+
+  test("projects listing never exposes the other organisation", async () => {
+    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID.");
+    const response = await aApi.get(`/api/projects?organization_id=${B_ORG_ID}`, {
+      failOnStatusCode: false,
+    });
+    if (response.status() === 200) {
+      const body = await response.json();
+      const rows = Array.isArray(body) ? body : body?.items || [];
+      for (const row of rows) {
+        expect(String(row.organization_id || "")).not.toBe(B_ORG_ID);
+      }
+    } else {
+      expect(REFUSED).toContain(response.status());
+    }
+  });
+
+  test("tasks are not returned for the other tenant's organisation", async () => {
+    test.skip(!B_ORG_ID, "Set E2E_B_ORG_ID.");
+    const response = await aApi.get(`/api/tasks?organization_id=${B_ORG_ID}`, {
+      failOnStatusCode: false,
+    });
+    if (response.status() === 200) {
+      const body = await response.json();
+      const rows = Array.isArray(body) ? body : body?.items || [];
+      expect(rows).toHaveLength(0);
+    } else {
+      expect(REFUSED).toContain(response.status());
     }
   });
 });

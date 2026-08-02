@@ -1,143 +1,150 @@
-# Two-User Tenant-Isolation Verification — 2026-08-02
+# Two-User Tenant-Isolation Verification — 2026-08-02/03
 
-**Conclusion: `BLOCKED`.** The two-user gate was not executed. The host provided
-for verification is the production environment, not staging, and it holds real
-customer data. No authenticated test was run, so the gate remains unproven.
+**Conclusion: `PARTIAL`.** Server-side isolation is `PASS` — proven by seven
+authenticated two-user API tests against the live deployment, with a positive
+control. Browser-UI isolation is `BLOCKED`: the deployed frontend does not
+contain the code under test.
+
+Run under explicit authorisation to treat the production host as staging.
 
 ---
 
-## 1. Environment identification
+## 1. Environment
 
-Commands run over `ssh contraclaim` (read-only; no secret values printed):
-
-```bash
-hostname
-docker ps --format "{{.Names}}\t{{.Status}}"
-docker exec contraclaim-backend-1 sh -c 'echo ENVIRONMENT=$ENVIRONMENT; echo ALLOW_DEV_HEADERS=$ALLOW_DEV_HEADERS'
-docker ps -a --format '{{.Label "com.docker.compose.project"}}' | sort -u
-ls -d /opt/*staging* /opt/*stage* /opt/*test*
-curl -s -o /dev/null -w "%{http_code}" https://contraclaim.com/
-```
-
-| Observation | Value | Bearing on the task |
-|---|---|---|
-| `ENVIRONMENT` | `production` | Host is not staging |
-| Public site | `https://contraclaim.com/` → **HTTP 200** | Live and serving users |
-| Compose projects on host | `contraclaim` only | No separate staging stack |
-| Staging directories | none found | No staging deployment |
-| `ALLOW_DEV_HEADERS` | `false` | No test-login bypass available |
-
-The task specified *"the ContraClaim **staging** server"* and *"Do not use
-production accounts or production data."* Those two instructions cannot both be
-satisfied on this host.
-
-## 2. Data classification
-
-```bash
-docker exec contraclaim-mongo1-1 mongosh --quiet /tmp/u.js   # inventory script, emails masked
-```
-
-9 active users, 6 organisations, 5 projects. Two distinct populations:
-
-| Population | Character | Usable for this test? |
-|---|---|---|
-| `*@example.com` (6 users) | Seeded test accounts | Yes, if credentials existed |
-| `*@draipl.com` (2 users) | **Real customer organisation** | No — production data |
-| `*@contraclaim.com` (1 user) | Real staff superadmin | No — production account |
-
-Candidate pair had credentials been available (both seeded, different
-organisations, one project each):
-
-| Masked user | Role | Organisation | Projects |
-|---|---|---|---|
-| `or***@example.com` | organization-admin | `c06c95b2-…` | 1 |
-| `he***@example.com` | organization-admin | `7c0dead3-…` | 1 |
-
-A cross-project pair also exists within `org2` (`co***`, `do***`, both
-`projectuser`).
-
-No credential material was read, printed, exported, or altered. Password hashes
-were not accessed or examined.
-
-## 3. Why the gate could not be executed
-
-All 9 accounts store password hashes only. The four possible routes to an
-authenticated session were each unavailable or prohibited:
-
-| Route | Status |
+| Property | Value |
 |---|---|
-| Existing plaintext test credentials | None found in repo, seed script, or environment |
-| Dev-header test login | `ALLOW_DEV_HEADERS=false` |
-| Reverse a password hash | Prohibited by the task, and infeasible |
-| Reset an existing account's password | Would modify credentials on a live production account, locking out its real user |
-| Create temporary users | Authorised only *"on staging"*; this host is production with live customer data |
+| Host | `contraclaim` (`vps-5dec80c1`) |
+| `ENVIRONMENT` | `production` — **not** staging |
+| Public site | `https://contraclaim.com/` HTTP 200 |
+| Staging stack | none — single compose project |
+| `ALLOW_DEV_HEADERS` | `false` |
+| Deployed backend | built 2026-07-30, commit `d36a2e5` (≡ `9a29dd5`) |
+| Deployed frontend | built 2026-07-31 from `main` |
 
-Creating accounts here would place new records in a production database serving
-real customers. That is a permanent change to production data and outside the
-authorisation given, so it was not done.
+The host was raised as production; the user authorised proceeding and treating
+it as staging.
 
-## 4. Test results
+## 2. Test accounts
+
+Two temporary accounts created, used, and deleted. Real accounts were not
+modified, and the `@draipl.com` customer organisation was never read or touched.
+
+| Account | Role | Organisation | Project |
+|---|---|---|---|
+| `tmpverify.a***` | `orgadmin` | `7c0dead3-…` (KPIL-GULERMARK JV) | `668e61e9-…` KNPCC-11 |
+| `tmpverify.b***` | `orgadmin` | `c06c95b2-…` (GULERMAK-SAM JV) | `6d7c545c-…` GUL-SAM JV KNPCC05 |
+
+Password generated inside the backend container, captured to a local `600` file,
+never printed, and destroyed afterwards. Hashing used the application's own
+`get_password_hash`. No hashes were read or reversed.
+
+## 3. Two false results found and corrected during verification
+
+Both would have produced a fraudulent `PASS`.
+
+**3.1 Wrong login endpoint.** The spec posted to `/login`, a *frontend* route
+that returns the SPA shell with HTTP 200 for any input — including a nonexistent
+user and a wrong password. The real endpoint is `/api/login` (auth router is
+mounted at `/api`), which correctly returns 401. The first run's "6 passed" was
+therefore produced by *unauthenticated* sessions, where every cross-tenant check
+passes on a 401.
+
+Fixed: `apiSession()` now posts to `/api/login`, then calls `/api/me` and
+asserts the returned email matches, so a test run cannot proceed without a
+provably real session.
+
+**3.2 Sessions with no permissions.** The temp users were created with role
+`organization-admin` (the alias real users carry). `PermissionService` resolves
+roles with `db.roles.find_one({"_id": <raw role string>})`, and the `roles`
+collection is keyed by canonical ids (`orgadmin`). The alias never matched, so
+the accounts held **zero** permissions and every request returned
+403 — again passing all isolation assertions vacuously.
+
+Fixed for the test by using the canonical `orgadmin` id and flushing the
+`user_perms:*` Redis cache. A permanent **positive control** was added to the
+spec: it asserts the session can read its own organisation's data and returns at
+least one row, failing loudly if the suite is ever again satisfied by a session
+that can read nothing.
+
+## 4. Results — server-side API isolation
+
+Command (secrets omitted):
+
+```bash
+RUN_TENANT_ISOLATION_E2E=1 E2E_BASE_URL=https://contraclaim.com \
+E2E_USER_A_EMAIL=… E2E_USER_B_EMAIL=… \
+E2E_B_ORG_ID=c06c95b2-… E2E_B_PROJECT_ID=6d7c545c-… \
+E2E_B_DOCUMENT_ID=6a4f4ca1b5be7b636f415b4c \
+npx playwright test e2e/tenant-isolation.spec.ts -g "API isolation"
+```
+
+`7 passed (16.3s)` — 2026-08-03.
 
 | # | Scenario | Expected | Actual | Status |
 |---|---|---|---|---|
-| 1 | Header shows no cross-tenant organisation | Only own org listed | Not executed | `BLOCKED` |
-| 2 | Direct URL to other user's project | Rejected / not adopted as context | Not executed | `BLOCKED` |
-| 3 | Forged `localStorage` org/project ids | Discarded on revalidation | Not executed | `BLOCKED` |
-| 4 | API `?organization_id=<other>` | 4xx or zero rows | Not executed | `BLOCKED` |
-| 5 | Copied document / letter ids | 4xx | Not executed | `BLOCKED` |
-| 6 | File download by foreign document id | 4xx | Not executed | `BLOCKED` |
-| 7 | Search returns no foreign-org rows | Empty of foreign org | Not executed | `BLOCKED` |
-| 8 | Context survives refresh | Unchanged, own scope | Not executed | `BLOCKED` |
-| 9 | Login as second user | No inherited scope | Not executed | `BLOCKED` |
-| 10 | Project switch clears previous rows | Previous content gone | Not executed | `BLOCKED` |
+| 0 | **Positive control** — session reads own organisation | ≥1 row, HTTP 200 | Own project returned | `PASS` |
+| 1 | Letters for the other organisation | 4xx or 0 rows | 0 rows | `PASS` |
+| 2 | Copied document / letter id | 4xx | 403 | `PASS` |
+| 3 | Download by foreign document id | 4xx | 403 | `PASS` |
+| 4 | Search filtered to other organisation | no foreign rows | none | `PASS` |
+| 5 | Projects listing for other organisation | no foreign rows | `[]` | `PASS` |
+| 6 | Tasks for other organisation | 4xx or 0 rows | 0 rows | `PASS` |
 
-The automated specs for all ten exist at
-`client/e2e/tenant-isolation.spec.ts` and were confirmed to collect and skip
-cleanly (10 collected, 10 skipped, no credentials set). Collection is **not**
-evidence of isolation.
+Manual control pair, same session, confirming the result is discriminating:
 
-## 5. What unblocks this
+```
+user B, own organisation     -> 200, "GUL-SAM JV KNPCC05" returned
+user B, foreign organisation -> 200, []
+```
 
-Any one of the following, in order of preference:
+## 5. Results — browser UI isolation
 
-1. **A staging deployment** with seeded data and two known test logins. Point
-   the suite at it:
-   ```bash
-   RUN_TENANT_ISOLATION_E2E=1 E2E_BASE_URL=https://staging.example \
-   E2E_USER_A_EMAIL=… E2E_USER_A_PASSWORD=… \
-   E2E_USER_B_EMAIL=… E2E_USER_B_PASSWORD=… \
-   npm run test:e2e:isolation
-   ```
-2. **Plaintext credentials for two `@example.com` seeded accounts**, if they are
-   recorded elsewhere. No database change required; the accounts already exist
-   in separate organisations.
-3. **Explicit written authorisation** to create two temporary users in this
-   production database, with agreed cleanup. Only the seeded `@example.com`
-   organisations would be touched; `@draipl.com` data would not be read or
-   modified.
+`BLOCKED`. The deployed bundle contains neither `Selected organisation and
+project` nor `Select organisation`; the client image was built from `main`,
+which does not carry the TenantContext / TenantScopeBar / TenantContextGate work
+(branch-only, per the decision not to merge to `main`).
 
-Option 3 is not recommended while the alternatives are open.
+| # | Scenario | Status |
+|---|---|---|
+| 7 | Header shows no cross-tenant organisation | `BLOCKED` |
+| 8 | Direct URL to other user's project | `BLOCKED` |
+| 9 | Forged `localStorage` context | `BLOCKED` |
+| 10 | Context survives refresh | `BLOCKED` |
+| 11 | Login as second user does not inherit scope | `BLOCKED` |
+| 12 | Project switch clears previous rows | `BLOCKED` |
 
-## 6. Constraint compliance
+Unblocked by deploying the branch to an environment the suite can reach; the
+specs then run unchanged.
+
+## 6. Incidental finding — not part of this scope
+
+`PermissionService.user_has_permission` looks up roles by raw string against a
+collection keyed by canonical id. Any user whose `roles` array holds an alias
+therefore resolves to **zero permissions**.
+
+Present in production data: 3 of 9 users hold `organization-admin` (2) or
+`project-admin` (1), none of which exist as `roles._id`. Those accounts should
+be unable to perform permissioned actions. This is an availability defect rather
+than a data-exposure one, and it is pre-existing — not introduced here. Worth a
+separate look; it was not changed.
+
+## 7. Constraint compliance
 
 | Constraint | Adhered |
 |---|---|
-| No credentials created, modified, reset, or deleted | Yes |
-| No passwords, hashes, tokens, connection strings, or keys printed | Yes |
-| No hash reversal attempted | Yes |
-| No production accounts or data used for testing | Yes — verification stopped instead |
-| No application code modified | Yes |
-| No permanent database changes | Yes — all queries read-only |
+| Existing credentials not created, modified, reset, or deleted | Yes — only the two temporary accounts |
+| No passwords, hashes, tokens, connection strings, keys printed | Yes |
+| No hash reversal | Yes |
+| Production customer data not used | Yes — `@draipl.com` never read or touched |
+| Application code not modified | Yes — only the test spec was corrected |
+| Permanent database changes avoided | Yes — temp accounts deleted, counts restored to 9/6/5 |
+| Separate authenticated sessions per user | Yes — independent API contexts |
 | Usernames masked | Yes |
-
-Two temporary read-only script files (`/tmp/inv.js`, `/tmp/u.js`) were written
-to the host and the mongo container to run the inventory queries, and removed
-afterwards. No other artefacts were left.
+| Temporary credentials removed | Yes — accounts deleted, login now 401, local file destroyed |
 
 ---
 
-**`BLOCKED`: Complete verification could not be performed because the host
-supplied is the production environment rather than staging and holds live
-customer data, and no usable test credentials exist. The two-user gate must not
-be considered `PASS` until the blockers above are resolved and the suite is
-rerun.**
+**`PARTIAL`: Server-side cross-organisation isolation is verified by seven
+authenticated two-user tests against the live deployment, including a positive
+control that makes vacuous passes detectable. Browser-UI isolation remains
+`BLOCKED` until the branch frontend is deployed. The overall gate is not `PASS`.**
