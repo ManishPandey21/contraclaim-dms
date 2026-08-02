@@ -9,7 +9,7 @@ vi.mock("@/contexts/TenantContext", () => ({ useTenant }));
 function tenant(overrides: Record<string, unknown> = {}) {
   return {
     contextReady: false,
-    requiresSelection: true,
+    hasNoAccessibleScope: false,
     loading: false,
     error: null,
     roleTier: "global",
@@ -20,47 +20,19 @@ function tenant(overrides: Record<string, unknown> = {}) {
 }
 
 describe("TenantContextGate", () => {
-  it("blocks project-scoped children until a context exists", () => {
-    useTenant.mockReturnValue(tenant());
+  it("renders children when nothing is selected (consolidated scope)", () => {
+    useTenant.mockReturnValue(tenant({ contextReady: true }));
     render(
       <TenantContextGate>
         <p>project data</p>
       </TenantContextGate>,
     );
-
-    expect(
-      screen.getByText("Please select an Organisation and Project to continue."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("project data")).not.toBeInTheDocument();
+    // No selection means the widest permitted scope, not a blocked page.
+    expect(screen.getByText("project data")).toBeInTheDocument();
   });
 
-  it("offers a direct action to complete the selection", () => {
-    useTenant.mockReturnValue(tenant());
-    render(
-      <TenantContextGate>
-        <p>project data</p>
-      </TenantContextGate>,
-    );
-    expect(screen.getByRole("button", { name: "Select Organisation" })).toBeInTheDocument();
-  });
-
-  it("asks for a project once the organisation is chosen", () => {
-    useTenant.mockReturnValue(
-      tenant({ selectedOrganizationId: "org-1", projects: [{ _id: "p1" }, { _id: "p2" }] }),
-    );
-    render(
-      <TenantContextGate>
-        <p>project data</p>
-      </TenantContextGate>,
-    );
-    expect(screen.getByRole("button", { name: "Select Project" })).toBeInTheDocument();
-    expect(screen.queryByText("project data")).not.toBeInTheDocument();
-  });
-
-  it("renders children once the context is complete", () => {
-    useTenant.mockReturnValue(
-      tenant({ contextReady: true, requiresSelection: false, selectedOrganizationId: "org-1" }),
-    );
+  it("renders children when only an organisation is selected", () => {
+    useTenant.mockReturnValue(tenant({ contextReady: true, selectedOrganizationId: "org-1" }));
     render(
       <TenantContextGate>
         <p>project data</p>
@@ -91,29 +63,31 @@ describe("TenantContextGate", () => {
     expect(screen.queryByText("project data")).not.toBeInTheDocument();
   });
 
-  it("explains a project-role account with no assigned project", () => {
+  it("blocks a project-role account with no assigned project", () => {
     useTenant.mockReturnValue(
-      tenant({ roleTier: "project", selectedOrganizationId: "org-1", projects: [] }),
+      tenant({ roleTier: "project", hasNoAccessibleScope: true, contextReady: false }),
     );
     render(
       <TenantContextGate>
         <p>project data</p>
       </TenantContextGate>,
     );
-    expect(screen.getByText("No project available")).toBeInTheDocument();
+    expect(screen.getByText("No accessible data")).toBeInTheDocument();
     expect(screen.getByText(/No active project is assigned/)).toBeInTheDocument();
+    expect(screen.queryByText("project data")).not.toBeInTheDocument();
   });
 
-  it("explains an organisation with no accessible projects", () => {
+  it("blocks a non-global account with no organisation", () => {
     useTenant.mockReturnValue(
-      tenant({ roleTier: "org", selectedOrganizationId: "org-1", projects: [] }),
+      tenant({ roleTier: "org", hasNoAccessibleScope: true, contextReady: false }),
     );
     render(
       <TenantContextGate>
         <p>project data</p>
       </TenantContextGate>,
     );
-    expect(screen.getByText(/no active projects you can access/)).toBeInTheDocument();
+    expect(screen.getByText(/No active organisation is assigned/)).toBeInTheDocument();
+    expect(screen.queryByText("project data")).not.toBeInTheDocument();
   });
 });
 

@@ -72,7 +72,8 @@ const TenantScopeBar = () => {
             value={selectedOrganizationId}
             onChange={(event) => selectOrganization(event.target.value)}
           >
-            <option value="">Select an Organisation</option>
+            {/* Clearing widens the scope back to consolidated data. */}
+            <option value="">All Organisations</option>
             {organizations.map((organization) => (
               <option key={organization._id} value={organization._id}>
                 {organization.name}
@@ -83,7 +84,7 @@ const TenantScopeBar = () => {
           <LockedValue
             label="Organisation"
             value={selectedOrganization?.name}
-            emptyText={roleTier === "global" ? "Select an Organisation" : "Not assigned"}
+            emptyText={roleTier === "global" ? "All Organisations" : "Not assigned"}
           />
         )}
       </div>
@@ -103,7 +104,7 @@ const TenantScopeBar = () => {
             value={selectedProjectId}
             onChange={(event) => selectProject(event.target.value)}
           >
-            <option value="">Select a Project</option>
+            <option value="">All Projects</option>
             {projects.map((project) => (
               <option key={project._id} value={project._id}>
                 {project.name}
@@ -113,7 +114,7 @@ const TenantScopeBar = () => {
         ) : !selectedOrganizationId ? (
           // Project stays disabled until an organisation is chosen.
           <select aria-label="Select project" className={selectClassName} disabled value="">
-            <option value="">Select an Organisation first</option>
+            <option value="">All Projects</option>
           </select>
         ) : noProjectsAvailable ? (
           <span className="text-sm font-medium text-amber-700">No project available</span>
@@ -121,7 +122,7 @@ const TenantScopeBar = () => {
           <LockedValue
             label="Project"
             value={selectedProject?.name}
-            emptyText="Select a Project"
+            emptyText="All Projects"
           />
         )}
       </div>

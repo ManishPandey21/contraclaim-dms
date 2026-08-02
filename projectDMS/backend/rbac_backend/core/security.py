@@ -533,9 +533,16 @@ def build_scope_query(
         allowed_projects = [str(p) for p in (getattr(current_user, "projects", []) or []) if p]
         if not allowed_orgs:
             return _deny_all()
-        q = {org_field: {"$in": _expand_object_ids(list(allowed_orgs))}}
         if organization_id is not None and str(organization_id) not in allowed_orgs:
             return _deny_all()
+        # Selecting an organisation narrows to it. Previously the requested
+        # organisation was validated but never applied, so a Super User who
+        # selected one organisation still received consolidated data from every
+        # organisation assigned to them.
+        if organization_id is not None:
+            q = {org_field: {"$in": _expand_object_ids([str(organization_id)])}}
+        else:
+            q = {org_field: {"$in": _expand_object_ids(list(allowed_orgs))}}
         if project_id is not None:
             if project_field:
                 q[project_field] = {"$in": _expand_object_ids([project_id])}

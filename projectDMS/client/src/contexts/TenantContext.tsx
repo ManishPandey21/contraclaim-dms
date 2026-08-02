@@ -41,9 +41,14 @@ type TenantContextValue = {
   /** True when the value is fixed by the user's role and shown read-only. */
   organizationLocked: boolean;
   projectLocked: boolean;
-  /** True while the user still owes us an organisation and/or project choice. */
-  requiresSelection: boolean;
-  /** True only when a complete, validated pair is active. Gate data loads on this. */
+  /**
+   * True only when the account has no reachable scope at all (a project-role
+   * account with no active assigned project, or a non-global account with no
+   * organisation). A *partial* selection is not a blocked state: it means
+   * consolidated data, not missing data.
+   */
+  hasNoAccessibleScope: boolean;
+  /** True once a scope can be resolved. Gate data loads on this. */
   contextReady: boolean;
   loading: boolean;
   error: string | null;
@@ -226,8 +231,10 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   const selectOrganization = useCallback(
     (organizationId: string) => {
       if (!canSwitchOrganization || organizationId === selectedOrganizationId) return;
-      // Changing organisation always clears the project. Storage is cleared
-      // first so no legacy page can read the outgoing project id.
+      // Changing *or clearing* the organisation always drops the project, so the
+      // scope widens back to "all organisations" rather than stranding a project
+      // from the organisation just left. Storage is written first because legacy
+      // pages read proj_id directly, and must not see the outgoing project.
       writeStorage(organizationId, "");
       setSelectedOrganizationId(organizationId);
       setSelectedProjectId("");
@@ -239,10 +246,15 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   const selectProject = useCallback(
     (projectId: string) => {
       if (projectId === selectedProjectId) return;
-      const project = selectableProjects.find(
-        (candidate) => String(candidate._id) === projectId,
-      );
-      if (!project) return;
+      // An empty id clears the project and returns to consolidated data for the
+      // current organisation. Anything else must be a project the user can
+      // actually reach.
+      if (projectId) {
+        const project = selectableProjects.find(
+          (candidate) => String(candidate._id) === projectId,
+        );
+        if (!project) return;
+      }
       writeStorage(selectedOrganizationId, projectId);
       setSelectedProjectId(projectId);
       announce(selectedOrganizationId, projectId);
@@ -250,8 +262,16 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
     [selectableProjects, selectedOrganizationId, selectedProjectId],
   );
 
-  const requiresSelection = !loading && !error && !(selectedOrganizationId && selectedProjectId);
-  const contextReady = !loading && !error && Boolean(selectedOrganizationId && selectedProjectId);
+  // A partial selection is a legitimate, broader scope -- not a blocked state.
+  // Only an account with nowhere to look at all is blocked: a project-role
+  // account with no active assigned project, or a non-global account with no
+  // organisation.
+  const hasNoAccessibleScope =
+    !loading &&
+    !error &&
+    ((roleTier === "project" && selectableProjects.length === 0) ||
+      (roleTier !== "global" && !selectedOrganizationId));
+  const contextReady = !loading && !error && !hasNoAccessibleScope;
 
   const value = useMemo<TenantContextValue>(
     () => ({
@@ -270,7 +290,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       canSwitchProject,
       organizationLocked,
       projectLocked,
-      requiresSelection,
+      hasNoAccessibleScope,
       contextReady,
       loading,
       error,
@@ -288,7 +308,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       organizationLocked,
       organizations,
       projectLocked,
-      requiresSelection,
+      hasNoAccessibleScope,
       roleTier,
       selectOrganization,
       selectProject,

@@ -33,10 +33,13 @@ function TenantProbe() {
       <span data-testid="can-switch-org">{String(tenant.canSwitchOrganization)}</span>
       <span data-testid="can-switch-project">{String(tenant.canSwitchProject)}</span>
       <span data-testid="org-locked">{String(tenant.organizationLocked)}</span>
-      <span data-testid="requires-selection">{String(tenant.requiresSelection)}</span>
+      <span data-testid="no-scope">{String(tenant.hasNoAccessibleScope)}</span>
       <span data-testid="context-ready">{String(tenant.contextReady)}</span>
       <span data-testid="tier">{tenant.roleTier}</span>
       <span data-testid="project-count">{String(tenant.projects.length)}</span>
+      <button type="button" onClick={() => tenant.selectProject("")}>
+        Clear project
+      </button>
       <button type="button" onClick={() => tenant.selectProject("project-2")}>
         Switch project
       </button>
@@ -89,20 +92,40 @@ describe("TenantProvider", () => {
   });
 
   describe("organisation-level user", () => {
-    it("locks the organisation and requires a project choice when several exist", async () => {
+    it("shows consolidated organisation data when no project is selected", async () => {
       getCurrentUserProfile.mockResolvedValue({ roles: ["orgadmin"], organization_id: "org-1" });
       renderTenant();
 
       await waitFor(() =>
         expect(screen.getByTestId("org")).toHaveTextContent("Acme Infrastructure"),
       );
-      // Two projects in org-1: the user must choose rather than be given one.
+      // Two projects in org-1 and none selected: that is consolidated data
+      // across the organisation, not a blocked state.
       expect(screen.getByTestId("project")).toHaveTextContent("-");
-      expect(screen.getByTestId("requires-selection")).toHaveTextContent("true");
-      expect(screen.getByTestId("context-ready")).toHaveTextContent("false");
+      expect(screen.getByTestId("no-scope")).toHaveTextContent("false");
+      expect(screen.getByTestId("context-ready")).toHaveTextContent("true");
       expect(screen.getByTestId("can-switch-org")).toHaveTextContent("false");
       expect(screen.getByTestId("org-locked")).toHaveTextContent("true");
       expect(screen.getByTestId("can-switch-project")).toHaveTextContent("true");
+    });
+
+    it("returns to consolidated data when the project is cleared", async () => {
+      getCurrentUserProfile.mockResolvedValue({ roles: ["orgadmin"], organization_id: "org-1" });
+      renderTenant();
+
+      await waitFor(() => expect(screen.getByTestId("tier")).toHaveTextContent("org"));
+      act(() => screen.getByRole("button", { name: "Switch project" }).click());
+      await waitFor(() =>
+        expect(screen.getByTestId("project")).toHaveTextContent("South Corridor"),
+      );
+
+      act(() => screen.getByRole("button", { name: "Clear project" }).click());
+      await waitFor(() => {
+        expect(screen.getByTestId("project")).toHaveTextContent("-");
+        expect(window.localStorage.getItem("proj_id")).toBeNull();
+        // Still fully usable -- the scope simply widened.
+        expect(screen.getByTestId("context-ready")).toHaveTextContent("true");
+      });
     });
 
     it("auto-selects when the organisation has exactly one project", async () => {
@@ -234,14 +257,16 @@ describe("TenantProvider", () => {
   });
 
   describe("global roles", () => {
-    it("requires an explicit organisation choice and blocks until complete", async () => {
+    it("shows consolidated data across all organisations when nothing is selected", async () => {
       getCurrentUserProfile.mockResolvedValue({ roles: ["superadmin"], organization_id: null });
       renderTenant();
 
       await waitFor(() => expect(screen.getByTestId("tier")).toHaveTextContent("global"));
       expect(screen.getByTestId("org")).toHaveTextContent("-");
       expect(screen.getByTestId("project")).toHaveTextContent("-");
-      expect(screen.getByTestId("requires-selection")).toHaveTextContent("true");
+      // Nothing selected is the widest legitimate scope, not a blocked state.
+      expect(screen.getByTestId("no-scope")).toHaveTextContent("false");
+      expect(screen.getByTestId("context-ready")).toHaveTextContent("true");
       expect(screen.getByTestId("can-switch-org")).toHaveTextContent("true");
     });
 
@@ -263,7 +288,8 @@ describe("TenantProvider", () => {
         // proj_id directly cannot paint the previous project's data.
         expect(screen.getByTestId("project")).toHaveTextContent("-");
         expect(window.localStorage.getItem("proj_id")).toBeNull();
-        expect(screen.getByTestId("context-ready")).toHaveTextContent("false");
+        // The new organisation's consolidated view is immediately usable.
+        expect(screen.getByTestId("context-ready")).toHaveTextContent("true");
       });
     });
 
@@ -330,7 +356,7 @@ describe("TenantProvider", () => {
       await waitFor(() =>
         expect(screen.getByTestId("context-ready")).toHaveTextContent("false"),
       );
-      expect(screen.getByTestId("requires-selection")).toHaveTextContent("false");
+      expect(screen.getByTestId("no-scope")).toHaveTextContent("false");
     });
   });
 });
