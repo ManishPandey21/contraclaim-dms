@@ -59,6 +59,22 @@ async function login(page: Page, user: { email: string; password: string }) {
   await page.getByLabel(/^work email$/i).fill(user.email);
   await page.getByLabel(/^password$/i).fill(user.password);
   await page.getByRole("button", { name: /^sign in$/i }).click();
+
+  // A first-time account is held at the security-terms gate before the app
+  // shell renders. Accept it so the tenant assertions can reach the header;
+  // an account that has already accepted skips straight past this.
+  const acceptTerms = page.getByRole("button", { name: /accept and continue/i });
+  if (await acceptTerms.isVisible({ timeout: 10_000 }).catch(() => false)) {
+    // The consent checkbox stays inert until the terms have been scrolled to
+    // the end, so scroll the region first rather than clicking a dead control.
+    const terms = page.getByRole("region", { name: /scrollable security terms/i });
+    await terms.evaluate((el) => el.scrollTo(0, el.scrollHeight)).catch(() => {});
+    const consent = page.getByRole("checkbox", { name: /i have read and agree/i });
+    await consent.click();
+    await expect(acceptTerms).toBeEnabled({ timeout: 10_000 });
+    await acceptTerms.click();
+  }
+
   // The header scope bar only renders once the session and tenant scope resolve.
   await expect(page.getByLabel("Selected organisation and project")).toBeVisible({
     timeout: 30_000,
