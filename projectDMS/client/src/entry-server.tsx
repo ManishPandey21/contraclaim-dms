@@ -1,6 +1,5 @@
-import type { ComponentType, ReactNode } from "react";
 import { renderToString } from "react-dom/server";
-import { Route, Routes } from "react-router-dom";
+import { Route, Router, Routes } from "react-router-dom";
 
 import { getIndexablePublicPages } from "@/config/publicSeo";
 import LandingPage from "@/pages/LandingPage";
@@ -9,28 +8,21 @@ import BlogNotFound from "@/pages/BlogNotFound";
 import BlogPage from "@/pages/BlogPage";
 import BlogVideoPage from "@/pages/BlogVideoPage";
 
-type StaticRouterComponent = ComponentType<{
-  location: string;
-  children?: ReactNode;
-}>;
-
-// React Router 6 exposed StaticRouter through react-router-dom/server; v7
-// exports it from react-router. Resolve the build-only renderer lazily so the
-// prerender pipeline remains compatible while the two repository histories
-// converge on the upgraded dependency.
-const legacyServerModule = "react-router-dom/server";
-const StaticRouter = await import(/* @vite-ignore */ legacyServerModule)
-  .then((module) => module.StaticRouter as StaticRouterComponent)
-  .catch(async () => {
-    const module = await import("react-router");
-    return (module as unknown as { StaticRouter: StaticRouterComponent }).StaticRouter;
-  });
+const staticNavigator = {
+  createHref(to) {
+    if (typeof to === "string") return to;
+    return `${to.pathname ?? ""}${to.search ?? ""}${to.hash ?? ""}`;
+  },
+  go() {},
+  push() {},
+  replace() {},
+} satisfies Parameters<typeof Router>[0]["navigator"];
 
 /** Render only approved, bundled public content. Private application routes
  * are intentionally absent so prerendering can never serialize tenant data. */
 export function renderPublicPage(pathname: string): string {
   return renderToString(
-    <StaticRouter location={pathname}>
+    <Router location={pathname} navigator={staticNavigator} static>
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/blog" element={<BlogPage />} />
@@ -38,7 +30,7 @@ export function renderPublicPage(pathname: string): string {
         <Route path="/blog/videos/:slug" element={<BlogVideoPage />} />
         <Route path="/blog/*" element={<BlogNotFound />} />
       </Routes>
-    </StaticRouter>,
+    </Router>,
   );
 }
 
