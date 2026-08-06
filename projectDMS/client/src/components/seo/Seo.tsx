@@ -5,6 +5,7 @@ import {
   SITE_NAME,
   absoluteUrl,
 } from "@/config/site";
+import { isIndexablePublicPath } from "@/config/publicRoutes";
 
 /**
  * Document-head manager for public pages.
@@ -16,9 +17,9 @@ import {
  * navigating away from the blog leaves the landing page's static metadata
  * intact.
  *
- * Note: this is a client-rendered SPA, so these tags exist only after
- * JavaScript runs. Crawlers that execute JavaScript see them; social scrapers
- * that do not will read the static tags in index.html.
+ * Public routes are also emitted as build-time HTML snapshots, so these same
+ * values are available before JavaScript runs. This component keeps the head
+ * correct after client-side navigation.
  */
 
 const MANAGED_ATTR = "data-seo-managed";
@@ -29,7 +30,7 @@ export interface SeoProps {
   title: string;
   description: string;
   /** Site-relative path, e.g. "/blog/articles/my-post". */
-  canonicalPath: string;
+  canonicalPath?: string;
   ogType?: "website" | "article" | "video.other";
   /** Defaults to `description`. */
   ogDescription?: string;
@@ -37,6 +38,8 @@ export interface SeoProps {
   /** Structured data. Rendered as one or more application/ld+json scripts. */
   jsonLd?: Record<string, unknown> | Record<string, unknown>[];
   noIndex?: boolean;
+  publishedTime?: string;
+  modifiedTime?: string;
 }
 
 type Restore = () => void;
@@ -136,34 +139,49 @@ export function Seo({
   image,
   jsonLd,
   noIndex = false,
+  publishedTime,
+  modifiedTime,
 }: SeoProps) {
   const socialDescription = ogDescription ?? description;
   const imageUrl = absoluteUrl(image?.url ?? DEFAULT_SOCIAL_IMAGE);
   const imageAlt = image?.alt ?? SITE_NAME;
-  const canonicalUrl = absoluteUrl(canonicalPath);
+  const canonicalUrl = canonicalPath ? absoluteUrl(canonicalPath) : "";
   const jsonLdKey = jsonLd ? JSON.stringify(jsonLd) : "";
 
   useEffect(() => {
     const previousTitle = document.title;
     document.title = title;
+    const mayIndex =
+      !noIndex &&
+      window.location.hostname === "web.contraclaim.com" &&
+      isIndexablePublicPath(window.location.pathname);
 
     const restores: Restore[] = [
       setMeta("name", "description", description),
-      setMeta("name", "robots", noIndex ? "noindex, nofollow" : "index, follow"),
-      setCanonical(canonicalUrl),
+      setMeta("name", "robots", mayIndex ? "index, follow" : "noindex, nofollow"),
       setMeta("property", "og:type", ogType),
       setMeta("property", "og:site_name", SITE_NAME),
       setMeta("property", "og:title", title),
       setMeta("property", "og:description", socialDescription),
-      setMeta("property", "og:url", canonicalUrl),
       setMeta("property", "og:image", imageUrl),
       setMeta("property", "og:image:alt", imageAlt),
       setMeta("name", "twitter:card", "summary_large_image"),
       setMeta("name", "twitter:title", title),
       setMeta("name", "twitter:description", socialDescription),
       setMeta("name", "twitter:image", imageUrl),
+      setMeta("name", "twitter:image:alt", imageAlt),
     ];
 
+    if (canonicalUrl) {
+      restores.push(setCanonical(canonicalUrl));
+      restores.push(setMeta("property", "og:url", canonicalUrl));
+    }
+    if (publishedTime) {
+      restores.push(setMeta("property", "article:published_time", publishedTime));
+    }
+    if (modifiedTime) {
+      restores.push(setMeta("property", "article:modified_time", modifiedTime));
+    }
     if (jsonLdKey) {
       restores.push(suppressStaticJsonLd());
       const parsed = JSON.parse(jsonLdKey) as
@@ -187,6 +205,8 @@ export function Seo({
     imageUrl,
     imageAlt,
     noIndex,
+    publishedTime,
+    modifiedTime,
     jsonLdKey,
   ]);
 

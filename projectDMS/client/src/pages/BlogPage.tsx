@@ -16,7 +16,7 @@ import type {
   BlogContentType,
   ResolvedEntry,
 } from "@/content/blog/types";
-import { SITE_NAME, SITE_ORIGIN, absoluteUrl } from "@/config/site";
+import { BLOG_SEO } from "@/config/publicSeo";
 import { cn } from "@/lib/utils";
 
 const PAGE_TITLE = "Construction Contract and Claims Insights";
@@ -169,25 +169,6 @@ export function BlogPage() {
   const visible = filtered.slice(start, start + pageSize);
   const typeLabel = type === "videos" ? "Videos" : "Articles";
 
-  const jsonLd = useMemo(
-    () => ({
-      "@context": "https://schema.org",
-      "@type": "Blog",
-      name: `${PAGE_TITLE} | ${SITE_NAME}`,
-      description: PAGE_INTRO,
-      url: `${SITE_ORIGIN}/blog`,
-      publisher: { "@type": "Organization", name: "ContraClaim", url: SITE_ORIGIN },
-      blogPost: getEntries("articles").map((entry) => ({
-        "@type": "BlogPosting",
-        headline: entry.title,
-        url: absoluteUrl(`/blog/articles/${entry.slug}`),
-        datePublished: entry.publishedAt,
-        author: { "@type": "Organization", name: entry.author },
-      })),
-    }),
-    [],
-  );
-
   const panel = (
     <>
       <div className="mt-8 flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
@@ -299,11 +280,12 @@ export function BlogPage() {
   return (
     <BlogLayout>
       <Seo
-        title={`${PAGE_TITLE} | ${SITE_NAME}`}
-        description="Practical guidance on construction contract administration, extension-of-time evidence, project records, chronology building and responsible AI in contractual drafting."
-        canonicalPath="/blog"
-        ogType="website"
-        jsonLd={jsonLd}
+        title={BLOG_SEO.title}
+        description={BLOG_SEO.description}
+        canonicalPath={BLOG_SEO.path}
+        ogType={BLOG_SEO.ogType}
+        image={BLOG_SEO.image}
+        jsonLd={BLOG_SEO.jsonLd}
       />
 
       <section className="border-b border-ink/10 bg-white">

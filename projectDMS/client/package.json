@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run build:client && npm run build:ssr && node scripts/prerender-public.mjs",
+    "build:client": "vite build",
+    "build:ssr": "vite build --ssr src/entry-server.tsx --outDir .seo-ssr --emptyOutDir",
     "build:dev": "vite build --mode development",
     "lint": "eslint . --max-warnings=0",
     "preview": "vite preview",

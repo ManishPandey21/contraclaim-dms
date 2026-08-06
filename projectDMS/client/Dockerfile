@@ -10,11 +10,11 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget \
     && rm -rf /var/lib/apt/lists/*
-RUN npm install -g serve
+COPY --from=builder /app/scripts/serve-dist.mjs ./scripts/serve-dist.mjs
 COPY --from=builder /app/dist ./dist
 RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && chown -R app:app /app
 USER app
 EXPOSE 5173
-CMD ["serve", "-s", "dist", "-l", "5173"]
+CMD ["node", "scripts/serve-dist.mjs"]
