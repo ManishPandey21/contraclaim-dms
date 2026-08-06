@@ -32,6 +32,7 @@ import {
   type SessionProfile,
 } from "@/services/session-api";
 import { extractErrorMessage, logError } from "@/lib/error-logger";
+import Seo from "@/components/seo/Seo";
 
 // Define validation schema for login
 const loginSchema = z.object({
@@ -162,6 +163,12 @@ const LoginPage = () => {
       className="relative min-h-[100svh] overflow-x-hidden bg-paper font-franklin text-ink"
       data-testid="login-page"
     >
+      <Seo
+        title="Secure sign in | ContraClaim DMS"
+        description="Sign in to the private ContraClaim DMS workspace."
+        canonicalPath="/login"
+        noIndex
+      />
       <div
         className="absolute inset-0 bg-gradient-to-br from-brand-soft via-paper to-paper"
         data-testid="login-background"

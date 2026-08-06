@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 
 /** Cards per page above and below the `md` breakpoint. */
 export const DESKTOP_PAGE_SIZE = 6;
@@ -11,6 +11,28 @@ export function pageSizeFor(isDesktop: boolean): number {
   return isDesktop ? DESKTOP_PAGE_SIZE : MOBILE_PAGE_SIZE;
 }
 
+function getClientSnapshot(): boolean {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return true;
+  }
+  return window.matchMedia(DESKTOP_QUERY).matches;
+}
+
+function subscribe(onStoreChange: () => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => {};
+  }
+
+  const query = window.matchMedia(DESKTOP_QUERY);
+  const onChange = () => onStoreChange();
+  if (typeof query.addEventListener === "function") {
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }
+  query.addListener(onChange);
+  return () => query.removeListener(onChange);
+}
+
 /**
  * Cards per page for the current viewport: 6 on desktop, 4 on smaller screens.
  *
@@ -19,30 +41,10 @@ export function pageSizeFor(isDesktop: boolean): number {
  * truncated one.
  */
 export function usePageSize(): number {
-  const [isDesktop, setIsDesktop] = useState(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return true;
-    }
-    return window.matchMedia(DESKTOP_QUERY).matches;
-  });
-
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-
-    const query = window.matchMedia(DESKTOP_QUERY);
-    const onChange = (event: MediaQueryListEvent) => setIsDesktop(event.matches);
-    setIsDesktop(query.matches);
-
-    // Safari below 14 only has the deprecated listener API.
-    if (typeof query.addEventListener === "function") {
-      query.addEventListener("change", onChange);
-      return () => query.removeEventListener("change", onChange);
-    }
-    query.addListener(onChange);
-    return () => query.removeListener(onChange);
-  }, []);
+  // React uses the desktop server snapshot for hydration, then switches to the
+  // real media-query snapshot without a markup mismatch. Client-only renders
+  // (including tests) receive the actual viewport value immediately.
+  const isDesktop = useSyncExternalStore(subscribe, getClientSnapshot, () => true);
 
   return pageSizeFor(isDesktop);
 }

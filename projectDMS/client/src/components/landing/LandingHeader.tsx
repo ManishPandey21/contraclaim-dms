@@ -43,6 +43,9 @@ export function LandingHeader() {
             src="/contraclaim2.png"
             alt="ContraClaim DMS"
             className="h-9 w-auto"
+            width={1077}
+            height={231}
+            decoding="async"
           />
         </Link>
 

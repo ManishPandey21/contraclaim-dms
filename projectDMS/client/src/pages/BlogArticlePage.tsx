@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Clock3 } from "lucide-react";
 
@@ -12,38 +11,14 @@ import ShareLinks from "@/components/blog/ShareLinks";
 import { formatBlogDate, formatReadingTime } from "@/components/blog/format";
 import { getAdjacentArticles, getArticleBySlug, getRelatedArticles } from "@/content/blog";
 import { getCategoryLabel } from "@/content/blog/categories";
-import { DEFAULT_SOCIAL_IMAGE, SITE_ORIGIN, absoluteUrl } from "@/config/site";
+import { absoluteUrl } from "@/config/site";
+import { getPublicPageSeo } from "@/config/publicSeo";
 
 import BlogNotFound from "./BlogNotFound";
 
 export function BlogArticlePage() {
   const { slug = "" } = useParams<{ slug: string }>();
   const article = getArticleBySlug(slug);
-
-  const jsonLd = useMemo(() => {
-    if (!article) return undefined;
-    return {
-      "@context": "https://schema.org",
-      "@type": "Article",
-      headline: article.title,
-      description: article.metaDescription,
-      datePublished: article.publishedAt,
-      dateModified: article.updatedAt ?? article.publishedAt,
-      author: { "@type": "Organization", name: article.author },
-      publisher: {
-        "@type": "Organization",
-        name: "ContraClaim",
-        url: SITE_ORIGIN,
-      },
-      mainEntityOfPage: {
-        "@type": "WebPage",
-        "@id": absoluteUrl(`/blog/articles/${article.slug}`),
-      },
-      image: absoluteUrl(article.featuredImageUrl ?? DEFAULT_SOCIAL_IMAGE),
-      keywords: article.tags.join(", "),
-      articleSection: getCategoryLabel(article.category),
-    };
-  }, [article]);
 
   if (!article) {
     return (
@@ -55,6 +30,7 @@ export function BlogArticlePage() {
   }
 
   const canonicalPath = `/blog/articles/${article.slug}`;
+  const pageSeo = getPublicPageSeo(canonicalPath)!;
   const shareUrl = absoluteUrl(canonicalPath);
   const { previous, next } = getAdjacentArticles(article.slug);
   const related = getRelatedArticles(article.slug, 3);
@@ -62,22 +38,30 @@ export function BlogArticlePage() {
   return (
     <BlogLayout>
       <Seo
-        title={article.seoTitle}
-        description={article.metaDescription}
+        title={pageSeo.title}
+        description={pageSeo.description}
         ogDescription={article.ogDescription}
-        canonicalPath={canonicalPath}
-        ogType="article"
-        image={
-          article.featuredImageUrl
-            ? { url: article.featuredImageUrl, alt: article.featuredImageAlt }
-            : undefined
-        }
-        jsonLd={jsonLd}
+        canonicalPath={pageSeo.path}
+        ogType={pageSeo.ogType}
+        image={pageSeo.image}
+        jsonLd={pageSeo.jsonLd}
+        publishedTime={pageSeo.publishedTime}
+        modifiedTime={pageSeo.modifiedTime}
       />
 
       <article>
         <header className="border-b border-ink/10 bg-white">
           <div className="container max-w-4xl py-12 md:py-16">
+            <nav aria-label="Breadcrumb" className="mb-5 text-sm text-ink/55">
+              <ol className="flex flex-wrap items-center gap-2">
+                <li><Link to="/" className="hover:text-brand">Home</Link></li>
+                <li aria-hidden="true">/</li>
+                <li><Link to="/blog" className="hover:text-brand">Blog</Link></li>
+                <li aria-hidden="true">/</li>
+                <li aria-current="page" className="max-w-full truncate text-ink/75">{article.title}</li>
+              </ol>
+            </nav>
+
             <Link
               to="/blog"
               className="inline-flex items-center gap-1.5 rounded-md text-sm font-semibold text-brand transition hover:text-[#1157a8] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"

@@ -30,5 +30,28 @@ Disallow: /share
 Disallow: /billing
 Disallow: /subscription-management
 Disallow: /api/
+Disallow: /security-terms
+Disallow: /tags
+Disallow: /plan-settings
+Disallow: /notifications
+Disallow: /legal-words
+Disallow: /upload
+Disallow: /email-groups
+Disallow: /folders
+Disallow: /tasks
+Disallow: /parties
+Disallow: /letter-quality
+Disallow: /sla
+Disallow: /key-dates
+Disallow: /variations
+Disallow: /bank-guarantees
+Disallow: /insurance
+Disallow: /ipc-bills
+Disallow: /concerns
+Disallow: /retrieval-console
+Disallow: /observability
+Disallow: /representatives
+Disallow: /health
+
 
 Sitemap: https://web.contraclaim.com/sitemap.xml

@@ -135,7 +135,7 @@ describe("BlogArticlePage SEO", () => {
     ).toMatch(/^https:\/\/web\.contraclaim\.com\//);
   });
 
-  it("emits Article structured data", async () => {
+  it("emits BlogPosting structured data", async () => {
     renderArticle();
     await waitFor(() => {
       expect(document.head.querySelector('script[type="application/ld+json"]')).not.toBeNull();
@@ -143,7 +143,7 @@ describe("BlogArticlePage SEO", () => {
     const data = JSON.parse(
       document.head.querySelector('script[type="application/ld+json"]')?.textContent ?? "{}",
     );
-    expect(data["@type"]).toBe("Article");
+    expect(data["@type"]).toBe("BlogPosting");
     expect(data.headline).toBe("How to Build a Defensible Project Chronology");
     expect(data.datePublished).toBe("2026-08-06");
   });
@@ -163,7 +163,7 @@ describe("BlogArticlePage SEO", () => {
       const types = [
         ...document.head.querySelectorAll('script[type="application/ld+json"]'),
       ].map((node) => JSON.parse(node.textContent ?? "{}")["@type"]);
-      expect(types).toEqual(["Article"]);
+      expect(types).toEqual(["BlogPosting", "BreadcrumbList"]);
     });
 
     unmount();

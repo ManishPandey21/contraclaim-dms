@@ -25,7 +25,6 @@ export function BlogNotFound({
       <Seo
         title={`Not found | ${SITE_NAME}`}
         description={body}
-        canonicalPath="/blog"
         noIndex
       />
       <div className="container max-w-2xl py-24 text-center md:py-32">

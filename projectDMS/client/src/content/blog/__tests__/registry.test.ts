@@ -18,6 +18,7 @@ import {
   validateContent,
 } from "..";
 import { isBlogCategoryId } from "../categories";
+import { INDEXABLE_PUBLIC_ROUTES } from "@/config/publicRoutes";
 import { SITE_ORIGIN } from "@/config/site";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
@@ -155,6 +156,16 @@ describe("sitemap and robots", () => {
       (entry) => `${SITE_ORIGIN}${getEntryPath(entry)}`,
     );
     expect(listed.sort()).toEqual(expected.sort());
+  });
+
+  it("keeps the exact indexable route allow-list in sync with published content", () => {
+    const expected = [
+      "/",
+      "/blog",
+      ...[...publishedArticles, ...publishedVideos].map(getEntryPath),
+    ];
+
+    expect([...INDEXABLE_PUBLIC_ROUTES].sort()).toEqual(expected.sort());
   });
 
   it("allows the blog and points at the sitemap", () => {

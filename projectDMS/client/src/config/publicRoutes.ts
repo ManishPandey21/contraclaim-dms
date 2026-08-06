@@ -22,3 +22,21 @@ export const PUBLIC_ROUTES: readonly string[] = [
   "/blog/*",
   "*",
 ];
+
+/** Exact public URLs allowed to opt into indexing. Keep this deliberately
+ * narrower than PUBLIC_ROUTES: login, wildcards and unknown slugs fail closed. */
+export const INDEXABLE_PUBLIC_ROUTES: readonly string[] = [
+  "/",
+  "/blog",
+  "/blog/articles/why-construction-claims-fail-before-submission",
+  "/blog/articles/seven-records-every-eot-claim-needs",
+  "/blog/articles/excel-registers-versus-connected-contractual-records",
+  "/blog/articles/how-to-build-defensible-project-chronology",
+  "/blog/articles/what-ai-should-and-should-not-do-contractual-drafting",
+];
+
+export function isIndexablePublicPath(pathname: string): boolean {
+  const path = pathname.split(/[?#]/, 1)[0] || "/";
+  const normalized = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  return INDEXABLE_PUBLIC_ROUTES.includes(normalized);
+}

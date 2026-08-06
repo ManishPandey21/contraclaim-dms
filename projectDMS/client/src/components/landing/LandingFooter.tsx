@@ -16,6 +16,9 @@ export function LandingFooter() {
             src="/page.png"
             alt=""
             className="h-8 w-8 rounded-md object-cover"
+            width={1080}
+            height={1080}
+            loading="lazy"
             aria-hidden="true"
           />
           <span className="font-bold text-ink">ContraClaim DMS</span>

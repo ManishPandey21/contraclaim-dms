@@ -28,6 +28,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import LandingFooter from "@/components/landing/LandingFooter";
 import LandingHeader from "@/components/landing/LandingHeader";
+import Seo from "@/components/seo/Seo";
+import { HOME_SEO, LANDING_FAQS } from "@/config/publicSeo";
 import { publicApi } from "@/services/http";
 
 // Honest capability strip — the reference mockup used fictional customer
@@ -156,6 +158,35 @@ const moduleCatalog = [
       "Stay on top of work with a notification center, task tracking and team activity loops.",
   },
 ];
+const MODULE_ANCHORS: Record<string, string> = {
+  "Contract intelligence": "contract-intelligence",
+  "Correspondence drafting service": "ai-assisted-drafting",
+  "Claims & SLA tracking": "claims-management",
+  "Document management": "contract-records",
+  "Organizations & projects": "organisation-project-data",
+  "Stakeholders & email groups": "stakeholder-records",
+  "Access control & SSO": "security-governance",
+  "Dashboards & reporting": "reporting",
+  "Notifications & tasks": "tasks-notifications",
+};
+
+const featuredInsights = [
+  {
+    title: "Why Construction Claims Fail Before They Are Submitted",
+    slug: "why-construction-claims-fail-before-submission",
+    excerpt: "A practical look at entitlement, notice, causation, records and quantum before a claim becomes a narrative.",
+  },
+  {
+    title: "Seven Records Every EOT Claim Needs",
+    slug: "seven-records-every-eot-claim-needs",
+    excerpt: "The contemporaneous project records that help an extension-of-time claim withstand review.",
+  },
+  {
+    title: "What AI Should and Should Not Do in Contractual Drafting",
+    slug: "what-ai-should-and-should-not-do-contractual-drafting",
+    excerpt: "How source-grounded assistance and human review keep contractual drafting controlled.",
+  },
+];
 
 const governanceDetails = [
   {
@@ -277,9 +308,20 @@ const LandingPage = () => {
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-paper font-franklin text-ink antialiased">
+      <Seo
+        title={HOME_SEO.title}
+        description={HOME_SEO.description}
+        canonicalPath={HOME_SEO.path}
+        ogType={HOME_SEO.ogType}
+        image={HOME_SEO.image}
+        jsonLd={HOME_SEO.jsonLd}
+      />
+      <a href="#main-content" className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-ink focus:shadow-lg">
+        Skip to main content
+      </a>
       <LandingHeader />
 
-      <main>
+      <main id="main-content">
         {/* Hero */}
         <section className="relative isolate overflow-hidden bg-ink text-white">
           {/* Relevant contract photo, dimmed by a translucent navy wash so the
@@ -298,11 +340,14 @@ const LandingPage = () => {
                 A governed workspace for contract teams
               </span>
               <h1 className="mt-6 max-w-3xl font-serif text-4xl font-semibold leading-[1.04] tracking-[-0.02em] text-white md:text-6xl">
-                Command every contract, correspondence and claim.
+                Construction Contract and Claims Management, Connected in One Platform
               </h1>
               <p className="mt-6 max-w-xl text-lg leading-8 text-white/72">
                 Keep clauses, correspondence and evidence connected in one
                 defensible record — from first notice through final award.
+              </p>
+              <p className="mt-3 max-w-xl text-base leading-7 text-white/65">
+                Built for construction and infrastructure contract teams managing correspondence, variations, extension-of-time records, project chronology and claims documentation.
               </p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
                 <Button
@@ -495,11 +540,24 @@ const LandingPage = () => {
                 The context stays intact wherever work happens.
               </p>
             </div>
+            <nav aria-label="Product capabilities" className="mt-8 rounded-2xl border border-brand/15 bg-brand-soft/60 p-5">
+              <p className="text-sm font-bold text-ink">Explore construction contract management capabilities</p>
+              <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm font-semibold text-brand">
+                <a href="#contract-intelligence" className="hover:underline">Contract and clause retrieval</a>
+                <a href="#claims-management" className="hover:underline">Claims and variation management</a>
+                <a href="#contract-records" className="hover:underline">Connected contract records</a>
+                <a href="#ai-assisted-drafting" className="hover:underline">AI-assisted contractual drafting</a>
+                <a href="#organisation-project-data" className="hover:underline">Organisation and project isolation</a>
+                <a href="#governance" className="hover:underline">Security and governance</a>
+              </div>
+            </nav>
+
 
             <div className="mt-12 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
               {moduleCatalog.map((feature) => (
                 <Card
                   key={feature.title}
+                  id={MODULE_ANCHORS[feature.title]}
                   className="rounded-2xl border-ink/10 bg-paper shadow-sm transition hover:-translate-y-1 hover:border-brand/30 hover:shadow-[0_30px_70px_-40px_rgba(13,27,46,.4)]"
                 >
                   <CardContent className="p-6">
@@ -574,6 +632,42 @@ const LandingPage = () => {
           </div>
         </section>
 
+        <section id="insights" className="border-y border-ink/10 bg-[#f3f7fc] py-20 md:py-28">
+          <div className="container">
+            <div className="max-w-3xl">
+              <p className="text-sm font-bold uppercase tracking-[0.14em] text-brand">
+                From ContraClaim Insights
+              </p>
+              <h2 className="mt-4 font-serif text-3xl font-semibold leading-tight text-ink md:text-5xl">
+                Construction claims guidance grounded in the project record
+              </h2>
+              <p className="mt-5 text-lg leading-8 text-ink/60">
+                Read practical guidance on claims evidence, extension-of-time records, connected registers and responsible contractual drafting.
+              </p>
+            </div>
+            <div className="mt-10 grid gap-5 lg:grid-cols-3">
+              {featuredInsights.map((item) => (
+                <article key={item.slug} className="rounded-2xl border border-ink/10 bg-white p-6 shadow-sm">
+                  <h3 className="font-serif text-xl font-semibold text-ink">
+                    <Link to={`/blog/articles/${item.slug}`} className="hover:text-brand">
+                      {item.title}
+                    </Link>
+                  </h3>
+                  <p className="mt-3 text-sm leading-6 text-ink/60">{item.excerpt}</p>
+                  <Link to={`/blog/articles/${item.slug}`} className="mt-5 inline-flex items-center gap-2 text-sm font-bold text-brand hover:underline">
+                    Read the article <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                  </Link>
+                </article>
+              ))}
+            </div>
+            <div className="mt-8">
+              <Link to="/blog" className="inline-flex items-center gap-2 rounded-full border border-brand px-5 py-2.5 text-sm font-bold text-brand hover:bg-brand hover:text-white">
+                View all construction contract insights <ArrowRight className="h-4 w-4" aria-hidden="true" />
+              </Link>
+            </div>
+          </div>
+        </section>
+
         {/* FAQ */}
         <section id="faq" className="bg-white py-20 md:py-28">
           <div className="container">
@@ -586,7 +680,7 @@ const LandingPage = () => {
               </h2>
             </div>
             <div className="mt-12 grid gap-5 md:grid-cols-2">
-              {faqs.map((item) => (
+              {LANDING_FAQS.map((item) => (
                 <Card key={item.q} className="border-ink/10 bg-paper shadow-sm">
                   <CardContent className="p-6">
                     <div className="flex items-start gap-3">
