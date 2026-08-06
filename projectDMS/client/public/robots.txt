@@ -1,0 +1,34 @@
+User-agent: *
+Allow: /$
+Allow: /blog
+
+# Authenticated application routes hold no public content and must not be
+# crawled or indexed.
+Disallow: /login
+Disallow: /overview
+Disallow: /dashboard
+Disallow: /organizations
+Disallow: /projects
+Disallow: /documents
+Disallow: /documentsearch
+Disallow: /documentviewer
+Disallow: /contracts
+Disallow: /letters
+Disallow: /letter-templates
+Disallow: /claims
+Disallow: /chronology
+Disallow: /arbitration
+Disallow: /reference
+Disallow: /register
+Disallow: /reports
+Disallow: /settings
+Disallow: /users
+Disallow: /permissions
+Disallow: /admin
+Disallow: /profile
+Disallow: /share
+Disallow: /billing
+Disallow: /subscription-management
+Disallow: /api/
+
+Sitemap: https://web.contraclaim.com/sitemap.xml

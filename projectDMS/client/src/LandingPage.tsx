@@ -26,6 +26,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import LandingFooter from "@/components/landing/LandingFooter";
+import LandingHeader from "@/components/landing/LandingHeader";
 import { publicApi } from "@/services/http";
 
 // Honest capability strip — the reference mockup used fictional customer
@@ -275,52 +277,7 @@ const LandingPage = () => {
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-paper font-franklin text-ink antialiased">
-      <header className="sticky top-0 z-50 border-b border-ink/10 bg-paper/90 backdrop-blur-xl">
-        <div className="container flex h-[4.5rem] items-center justify-between gap-6">
-          <Link
-            to="/"
-            className="flex items-center gap-3"
-            aria-label="ContraClaim DMS home"
-          >
-            <img
-              src="/contraclaim2.png"
-              alt="ContraClaim DMS"
-              className="h-9 w-auto"
-            />
-          </Link>
-          <nav className="hidden items-center gap-4 text-[13px] font-semibold text-ink/70 md:flex xl:gap-7 xl:text-sm">
-            <a href="#platform" className="transition hover:text-brand">
-              Platform
-            </a>
-            <a href="#how" className="transition hover:text-brand">
-              Workflow
-            </a>
-            <a href="#governance" className="transition hover:text-brand">
-              Governance
-            </a>
-            <a href="#faq" className="transition hover:text-brand">
-              FAQ
-            </a>
-          </nav>
-          <div className="flex items-center gap-3">
-            <Button
-              asChild
-              variant="ghost"
-              className="hidden text-ink hover:bg-ink/5 hover:text-brand sm:inline-flex"
-            >
-              <Link to="/login">Sign in</Link>
-            </Button>
-            <Button
-              asChild
-              className="gap-2 rounded-full bg-brand text-white shadow-[0_8px_20px_-6px_rgba(20,102,196,.5)] hover:bg-[#1157a8]"
-            >
-              <a href="#contact">
-                Request a demo <ArrowRight className="h-4 w-4" />
-              </a>
-            </Button>
-          </div>
-        </div>
-      </header>
+      <LandingHeader />
 
       <main>
         {/* Hero */}
@@ -797,40 +754,7 @@ const LandingPage = () => {
         </section>
       </main>
 
-      <footer className="border-t border-ink/10 bg-paper">
-        <div className="container flex flex-col gap-4 py-8 text-sm text-ink/55 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-center gap-3">
-            <img
-              src="/page.png"
-              alt=""
-              className="h-8 w-8 rounded-md object-cover"
-              aria-hidden="true"
-            />
-            <span className="font-bold text-ink">ContraClaim DMS</span>
-            <span className="text-ink/40">© 2026</span>
-          </div>
-          <div className="flex flex-wrap gap-5 font-semibold">
-            <a href="#platform" className="hover:text-brand">
-              Platform
-            </a>
-            <a href="#how" className="hover:text-brand">
-              How it works
-            </a>
-            <a href="#modules" className="hover:text-brand">
-              Modules
-            </a>
-            <a href="#faq" className="hover:text-brand">
-              FAQ
-            </a>
-            <a href="#contact" className="hover:text-brand">
-              Contact
-            </a>
-            <Link to="/login" className="hover:text-brand">
-              Sign in
-            </Link>
-          </div>
-        </div>
-      </footer>
+      <LandingFooter />
     </div>
   );
 };

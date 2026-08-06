@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OPEN_AUTHENTICATED_ROUTES, ROUTE_PERMISSIONS } from "../rolePermissions";
+import { PUBLIC_ROUTES as DECLARED_PUBLIC_ROUTES } from "../publicRoutes";
 
 // Phase 0 — route inventory guard.
 // Parses every <Route path="..."> declared in routes.tsx and asserts each
@@ -18,7 +19,9 @@ const routesSource = readFileSync(
 );
 
 // Public/unauthenticated routes that intentionally have no permission mapping.
-const PUBLIC_ROUTES = new Set(["/", "/login", "*"]);
+// Sourced from the config rather than restated here, so the declared public
+// surface and the guard cannot drift apart.
+const PUBLIC_ROUTES = new Set<string>(DECLARED_PUBLIC_ROUTES);
 // Authenticated routes that are open to any signed-in user by design.
 const OPEN_ROUTES = new Set<string>([...OPEN_AUTHENTICATED_ROUTES]);
 
@@ -58,6 +61,26 @@ describe("Route inventory guard (Phase 0)", () => {
     // sanity: known routes are present
     expect(routePaths).toContain("claims");
     expect(routePaths).toContain("contracts/appraisal");
+  });
+
+  it("declares the public blog routes as public and leaves them unmapped", () => {
+    for (const path of [
+      "/blog",
+      "/blog/articles/:slug",
+      "/blog/videos/:slug",
+      "/blog/*",
+    ]) {
+      expect(routePaths).toContain(path);
+      expect(PUBLIC_ROUTES.has(path)).toBe(true);
+      // A permission mapping on a public route would be a contradiction.
+      expect(ROUTE_PERMISSIONS[path]).toBeUndefined();
+    }
+  });
+
+  it("keeps authenticated application routes out of the public set", () => {
+    for (const path of ["/documents", "/contracts", "/claims", "/organizations"]) {
+      expect(PUBLIC_ROUTES.has(path)).toBe(false);
+    }
   });
 
   it("every <Route> path is permission-mapped, public, or open", () => {
