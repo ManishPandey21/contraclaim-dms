@@ -46,6 +46,10 @@ jobs:
   backend-checks:
     name: Backend lint and tests
     runs-on: ubuntu-latest
+    # Scoped to this job: it is the only one that runs pytest, and the app
+    # fails session checks closed when a configured Redis is unreachable.
+    env:
+      APP_REDIS_URL: redis://localhost:6379/0
     services:
       mongo:
         image: mongo:8.0
@@ -53,6 +57,15 @@ jobs:
           - 27017:27017
         options: >-
           --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\")'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
