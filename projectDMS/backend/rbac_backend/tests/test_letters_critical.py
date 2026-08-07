@@ -14,7 +14,11 @@ from rbac_backend.models.ai_models import LangGraphDraftRequest
 from rbac_backend.models.input_request import InputRequest, InputRequestCreate
 from rbac_backend.models.letter import ConversationTree, Letter, LetterCreate, LetterUpdate
 from rbac_backend.routers.ai_assistant import AIAssistantController
-from rbac_backend.routers.letters import LetterController, get_letter_controller
+from rbac_backend.routers.letters import (
+    LetterController,
+    get_letter_controller,
+    get_policy_service,
+)
 from rbac_backend.routers.input_requests import InputRequestController
 from rbac_backend.utils.error_handler import AuthorizationError
 
@@ -273,8 +277,13 @@ class _FakeConversationService:
 class _FakeLetterController:
     def __init__(self) -> None:
         self._store: Dict[str, _StoredLetter] = {}
+        self.letter_service = SimpleNamespace(get_letter_by_id=self._get_letter_by_id)
         self.conversation_service = _FakeConversationService(self._store)
         self._sequence = 0
+
+    async def _get_letter_by_id(self, letter_id: str) -> Letter | None:
+        stored = self._store.get(letter_id)
+        return stored.model if stored else None
 
     async def create_letter(self, letter_data: LetterCreate, current_user: CurrentUser) -> Letter:
         self._sequence += 1
@@ -319,7 +328,17 @@ def fake_letter_controller():
     def _override_user():
         return _make_user()
 
+    class _Policy:
+        scope_service = SimpleNamespace(is_superadmin=lambda _user: True)
+
+        async def authorize(self, *_args, **_kwargs):
+            return None
+
+    async def _override_policy():
+        return _Policy()
+
     app.dependency_overrides[get_letter_controller] = _override_controller
+    app.dependency_overrides[get_policy_service] = _override_policy
     from rbac_backend.routers.letters import get_current_user as letters_get_current_user
 
     app.dependency_overrides[letters_get_current_user] = _override_user
@@ -327,6 +346,7 @@ def fake_letter_controller():
         yield controller
     finally:
         app.dependency_overrides.pop(get_letter_controller, None)
+        app.dependency_overrides.pop(get_policy_service, None)
         app.dependency_overrides.pop(letters_get_current_user, None)
 
 

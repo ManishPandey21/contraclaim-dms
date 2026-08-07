@@ -40,17 +40,24 @@ import {
   ShieldCheck,
   Eye,
   ListTree,
+  LockKeyhole,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import useRBAC from "@/hooks/useRBAC";
+import useEntitlements from "@/hooks/useEntitlements";
 import { useSidebarIdentity } from "@/hooks/useSidebarIdentity";
-import { isRouteAllowedByPermission, labelForRole } from "@/config/rolePermissions";
+import {
+  isRouteAllowedByEntitlement,
+  isRouteAllowedByPermission,
+  labelForRole,
+} from "@/config/rolePermissions";
 
 const Sidebar = () => {
   const [collapsed, setCollapsed] = useState(false);
   const [arbitrationOpen, setArbitrationOpen] = useState(false);
   const location = useLocation();
   const { roles, can } = useRBAC();
+  const { hasFeature, loading: entitlementsLoading } = useEntitlements();
 
   const { displayName, initials, profilePhotoUrl } = useSidebarIdentity();
 
@@ -327,6 +334,9 @@ const Sidebar = () => {
             ]);
 
             const isSub = "sub" in link && link.sub;
+            const planUnavailable =
+              !entitlementsLoading &&
+              !isRouteAllowedByEntitlement(hasFeature, link.path);
 
             // Hide sub-items when the accordion is closed
             if (isSub && !arbitrationOpen) return null;
@@ -345,6 +355,7 @@ const Sidebar = () => {
                         anySubActive
                           ? "bg-docsumo-blue/10 text-docsumo-blue"
                           : "text-gray-600 hover:bg-docsumo-blue/5 hover:text-docsumo-blue",
+                        planUnavailable && "text-amber-700 hover:bg-amber-50 hover:text-amber-800",
                         collapsed && "justify-center",
                       )}
                     >
@@ -352,6 +363,7 @@ const Sidebar = () => {
                       {!collapsed && (
                         <>
                           <span className="flex-1 text-left">{link.label}</span>
+                          {planUnavailable && <LockKeyhole size={14} aria-label="Plan unavailable" />}
                           <ChevronRight
                             size={14}
                             className={cn(
@@ -377,6 +389,7 @@ const Sidebar = () => {
                 <li>
                   <NavLink
                     to={link.path}
+                    title={planUnavailable ? "Not included in the selected scope's plan" : undefined}
                     className={({ isActive }) =>
                       cn(
                         "flex items-center space-x-3 rounded-md text-sm font-medium transition-all duration-200",
@@ -385,12 +398,14 @@ const Sidebar = () => {
                         isActive
                           ? "bg-docsumo-blue/10 text-docsumo-blue"
                           : "text-gray-600 hover:bg-docsumo-blue/5 hover:text-docsumo-blue",
+                        planUnavailable && "text-amber-700 hover:bg-amber-50 hover:text-amber-800",
                         collapsed && "justify-center",
                       )
                     }
                   >
                     <span>{isSub ? <span className="text-gray-400">›</span> : link.icon}</span>
-                    {!collapsed && <span>{link.label}</span>}
+                    {!collapsed && <span className="flex-1">{link.label}</span>}
+                    {!collapsed && planUnavailable && <LockKeyhole size={14} aria-label="Plan unavailable" />}
                   </NavLink>
                 </li>
                 {dividerAfter.has(link.label) && (

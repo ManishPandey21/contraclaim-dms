@@ -9,9 +9,11 @@ import logging
 from datetime import datetime
 
 from ..core.security import get_current_user, CurrentUser
+from ..core.database import get_db
 from ..services.party_service import PartyService
 from ..services.project_service import ProjectService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..models.party import (
     Party, PartyCreate, PartyUpdate, PartyType, PartyListResponse
 )
@@ -447,15 +449,110 @@ async def get_party_controller() -> PartyController:
     )
 
 
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db)
+
+
+async def _party_scope(
+    controller: PartyController,
+    party: Party,
+    *,
+    project_id_hint: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    organization_id = getattr(party, "organization_id", None)
+    project_ids = list(getattr(party, "projects", None) or [])
+    project_id = project_id_hint or (str(project_ids[0]) if project_ids else None)
+    if project_id:
+        project = await controller.project_service.get_project_by_id(validate_object_id(project_id))
+        if project:
+            project_org = getattr(project, "organization_id", None) or getattr(project, "org_id", None)
+            if isinstance(project, dict):
+                project_org = project_org or project.get("organization_id") or project.get("org_id")
+            if organization_id and project_org and str(organization_id) != str(project_org):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Party and project organization scopes do not match",
+                )
+            organization_id = organization_id or project_org
+    return (
+        str(organization_id) if organization_id else None,
+        str(project_id) if project_id else None,
+    )
+
+
+async def _authorize_party_target(
+    policy: PolicyService,
+    controller: PartyController,
+    current_user: CurrentUser,
+    party_id: str,
+    permission: str,
+    *,
+    project_id_hint: Optional[str] = None,
+) -> Party:
+    party = await controller.party_service.get_party_by_id(validate_object_id(party_id))
+    if not party:
+        raise PartyError("Party not found", status.HTTP_404_NOT_FOUND)
+    organization_id, project_id = await _party_scope(
+        controller, party, project_id_hint=project_id_hint
+    )
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Party has no authoritative organization scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type="party",
+        resource_id=party_id,
+    )
+    return party
+
+
 # API Endpoints
 @router.post("/", response_model=Party, status_code=status.HTTP_201_CREATED)
 @handle_exceptions
 async def create_party(
     party_data: PartyCreate,
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Create new party with validation."""
+    organization_id = party_data.organization_id or getattr(current_user, "organization_id", None)
+    project_ids = list(party_data.projects or [])
+    project_id = str(project_ids[0]) if project_ids else getattr(current_user, "project_id", None)
+    if project_id:
+        project = await controller.project_service.get_project_by_id(validate_object_id(str(project_id)))
+        if not project:
+            raise PartyError("Project not found", status.HTTP_404_NOT_FOUND)
+        project_org = getattr(project, "organization_id", None) or getattr(project, "org_id", None)
+        if isinstance(project, dict):
+            project_org = project_org or project.get("organization_id") or project.get("org_id")
+        if organization_id and project_org and str(organization_id) != str(project_org):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project is outside the party organization")
+        organization_id = organization_id or project_org
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        "parties:create",
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
+        resource_type="party",
+    )
+    if party_data.type == PartyType.INDIVIDUAL:
+        if not project_id and not policy.scope_service.is_superadmin(current_user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Individual parties require an authoritative project scope",
+            )
+        if project_id and str(project_id) not in {str(item) for item in project_ids}:
+            party_data = party_data.model_copy(update={"projects": [*project_ids, str(project_id)]})
+    elif not party_data.organization_id and organization_id:
+        party_data = party_data.model_copy(update={"organization_id": str(organization_id)})
     return await controller.create_party(party_data, current_user)
 
 
@@ -468,7 +565,8 @@ async def get_parties(
     project_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get parties with filtering and pagination."""
     filters = {
@@ -478,7 +576,33 @@ async def get_parties(
     }
     pagination = {"skip": skip, "limit": limit}
     
-    return await controller.get_parties(pagination, filters, current_user)
+    organization_id = getattr(current_user, "organization_id", None)
+    requested_project = project_id or getattr(current_user, "project_id", None)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        "parties:read",
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(requested_project) if requested_project else None,
+        resource_type="party_collection",
+        audit=False,
+    )
+    result = await controller.get_parties(pagination, filters, current_user)
+    for party in result.parties:
+        item_org, item_project = await _party_scope(controller, party)
+        if not item_org and not policy.scope_service.is_superadmin(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Party has no authoritative organization scope")
+        await policy.authorize(
+            current_user,
+            "parties:read",
+            organization_id=item_org,
+            project_id=item_project,
+            resource_type="party",
+            resource_id=str(party.id),
+            audit=False,
+        )
+    return result
 
 
 @router.get("/external", response_model=PartyListResponse)
@@ -489,12 +613,39 @@ async def get_external_parties(
     search: Optional[str] = Query(None),
     party_type: Optional[PartyType] = Query(None),
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get external stakeholders."""
     filters = {"search": search, "party_type": party_type}
     pagination = {"skip": skip, "limit": limit}
-    return await controller.get_external_parties(pagination, filters, current_user)
+    organization_id = getattr(current_user, "organization_id", None)
+    project_id = getattr(current_user, "project_id", None)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        "parties:read",
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
+        resource_type="external_party_collection",
+        audit=False,
+    )
+    result = await controller.get_external_parties(pagination, filters, current_user)
+    for party in result.parties:
+        item_org, item_project = await _party_scope(controller, party)
+        if not item_org and not policy.scope_service.is_superadmin(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Party has no authoritative organization scope")
+        await policy.authorize(
+            current_user,
+            "parties:read",
+            organization_id=item_org,
+            project_id=item_project,
+            resource_type="party",
+            resource_id=str(party.id),
+            audit=False,
+        )
+    return result
 
 
 @router.get("/{party_id}", response_model=Party)
@@ -502,9 +653,13 @@ async def get_external_parties(
 async def get_party(
     party_id: str,
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get specific party by ID."""
+    await _authorize_party_target(
+        policy, controller, current_user, party_id, "parties:read"
+    )
     return await controller.get_party(party_id, current_user)
 
 
@@ -514,9 +669,13 @@ async def update_party(
     party_id: str,
     update_data: PartyUpdate,
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Update party with validation."""
+    await _authorize_party_target(
+        policy, controller, current_user, party_id, "parties:update"
+    )
     return await controller.update_party(party_id, update_data, current_user)
 
 
@@ -525,9 +684,13 @@ async def update_party(
 async def delete_party(
     party_id: str,
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Delete party with cascade validation."""
+    await _authorize_party_target(
+        policy, controller, current_user, party_id, "parties:delete"
+    )
     return await controller.delete_party(party_id, current_user)
 
 
@@ -537,7 +700,16 @@ async def associate_party_with_project(
     party_id: str,
     project_id: str,
     controller: PartyController = Depends(get_party_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Associate party with project."""
+    await _authorize_party_target(
+        policy,
+        controller,
+        current_user,
+        party_id,
+        "parties:update",
+        project_id_hint=project_id,
+    )
     return await controller.associate_party_with_project(party_id, project_id, current_user)

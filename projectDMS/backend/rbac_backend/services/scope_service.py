@@ -100,6 +100,19 @@ class ScopeService:
         project_ids = await self.client_project_ids(user)
         roles = self.role_names(user)
 
+        if roles & {"projectadmin", "projectuser"} and not project_id and not project_ids:
+            # No assignment means no reach, so a collection-level read has
+            # nothing to consolidate over and is denied.
+            #
+            # With assignments it is allowed: "no project selected" is the
+            # caller's consolidated view over their own projects, not a request
+            # to widen. Denying here instead broke every collection-level read
+            # for project-tier users (project stats, task listings) even though
+            # build_scope_query already bounds those queries to `projects`.
+            # Result-bounding is the caller's job -- see docs/AUTHZ.md; this
+            # function answers membership, not row visibility.
+            return False
+
         if organization_id and str(organization_id) not in org_ids:
             return False
 

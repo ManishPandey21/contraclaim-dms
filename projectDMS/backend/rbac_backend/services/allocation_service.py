@@ -56,6 +56,12 @@ class AllocationService:
         rows = await db.expert_allocations.find(query).sort("updated_at", -1).skip(skip).limit(limit).to_list(length=limit)
         return [self._normalize(row) for row in rows]
 
+    async def get_allocation(self, allocation_id: str) -> Optional[Dict[str, Any]]:
+        """Load the authoritative allocation target before authorizing a mutation."""
+        db = await self._get_db()
+        row = await db.expert_allocations.find_one({"_id": self._lookup_id(allocation_id)})
+        return self._normalize(row) if row else None
+
     async def create_allocation(self, payload: ExpertAllocationCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
         now = datetime.utcnow()
@@ -81,10 +87,25 @@ class AllocationService:
         )
         return self._normalize(saved)
 
-    async def update_allocation(self, allocation_id: str, payload: ExpertAllocationUpdate, current_user: Any) -> Dict[str, Any]:
+    async def update_allocation(
+        self,
+        allocation_id: str,
+        payload: ExpertAllocationUpdate,
+        current_user: Any,
+        *,
+        expected_organization_id: str,
+        expected_project_id: str,
+    ) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
         lookup = self._lookup_id(allocation_id)
-        before = await db.expert_allocations.find_one({"_id": lookup})
+        target_query = {
+            "_id": lookup,
+            "organization_id": str(expected_organization_id),
+            "project_id": str(expected_project_id),
+        }
+        before = await db.expert_allocations.find_one(target_query)
+        if not before:
+            return None
         update_doc = {
             key: value
             for key, value in payload.model_dump(mode="json", exclude_unset=True).items()
@@ -95,8 +116,10 @@ class AllocationService:
         if update_doc.get("status") == "revoked":
             update_doc["revoked_at"] = datetime.utcnow()
             update_doc["revoked_by"] = getattr(current_user, "id", None)
-        await db.expert_allocations.update_one({"_id": lookup}, {"$set": update_doc})
-        saved = await db.expert_allocations.find_one({"_id": lookup})
+        result = await db.expert_allocations.update_one(target_query, {"$set": update_doc})
+        if not result.matched_count:
+            return None
+        saved = await db.expert_allocations.find_one(target_query)
         await self.audit_service.emit(
             action="expert_allocation.updated",
             actor_id=getattr(current_user, "id", None),
@@ -107,4 +130,4 @@ class AllocationService:
             before=before,
             after=saved,
         )
-        return self._normalize(saved)
+        return self._normalize(saved) if saved else None

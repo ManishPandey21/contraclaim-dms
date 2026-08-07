@@ -338,8 +338,20 @@ def _first_present(request: Request, names: Sequence[str]) -> str:
     return ""
 
 
-ORG_PARAM_NAMES = ("organization_id", "organizationId", "org_id", "X-Organization-Id")
-PROJECT_PARAM_NAMES = ("project_id", "projectId", "proj_id", "X-Project-Id")
+ORG_PARAM_NAMES = (
+    "organization_id",
+    "organizationId",
+    "org_id",
+    "X-Org-Id",
+    "X-Organization-Id",
+)
+PROJECT_PARAM_NAMES = (
+    "project_id",
+    "projectId",
+    "proj_id",
+    "X-Proj-Id",
+    "X-Project-Id",
+)
 
 
 def tenant_context(*, require_project: bool = True, require_organization: bool = True):

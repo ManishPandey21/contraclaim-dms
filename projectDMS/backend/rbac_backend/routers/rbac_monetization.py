@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 
-from ..core.permissions import Permissions
+from ..core.permissions import PERMISSION_CONTRACT_VERSION, Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..models.rbac_monetization import (
     AddOnCreate,
@@ -27,6 +27,7 @@ from ..models.rbac_monetization import (
     UsageEventCreate,
 )
 from ..services.allocation_service import AllocationService
+from ..services.entitlement_service import EntitlementService
 from ..services.monetization_service import MonetizationService
 from ..services.policy_service import PolicyService
 from ..services.scope_service import ScopeService
@@ -207,6 +208,11 @@ async def list_expert_allocations(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ):
+    if not ScopeService().is_superadmin(current_user) and not (organization_id or project_id):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="organization_id or project_id is required for scoped allocation listing",
+        )
     await policy.authorize(
         current_user,
         Permissions.DRAFTING_REQUEST_ASSIGN,
@@ -251,8 +257,35 @@ async def update_expert_allocation(
     policy: PolicyService = Depends(get_policy_service),
 ):
     await require_step_up(request, current_user, action="expert_allocation.manage")
-    await policy.authorize(current_user, Permissions.DRAFTING_REQUEST_ASSIGN, resource_type="expert_allocation", resource_id=allocation_id)
-    return await AllocationService().update_allocation(allocation_id, payload, current_user)
+    service = AllocationService()
+    allocation = await service.get_allocation(allocation_id)
+    if not allocation:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Expert allocation not found")
+    organization_id = str(allocation.get("organization_id") or "")
+    project_id = str(allocation.get("project_id") or "")
+    if not organization_id or not project_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Allocation has no authoritative tenant scope")
+    await policy.authorize(
+        current_user,
+        Permissions.DRAFTING_REQUEST_ASSIGN,
+        organization_id=organization_id,
+        project_id=project_id,
+        package_id=str(allocation.get("package_id") or "") or None,
+        letter_id=str(allocation.get("letter_id") or "") or None,
+        drafting_request_id=str(allocation.get("drafting_request_id") or "") or None,
+        resource_type="expert_allocation",
+        resource_id=allocation_id,
+    )
+    saved = await service.update_allocation(
+        allocation_id,
+        payload,
+        current_user,
+        expected_organization_id=organization_id,
+        expected_project_id=project_id,
+    )
+    if not saved:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Allocation scope changed during update")
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +354,9 @@ async def get_effective_plan_services(
     if scope.is_superadmin(current_user):
         return {"effective": settings.get("effective", {})}
 
-    if await PolicyService().has_permission(current_user, Permissions.SUBSCRIPTION_ENTITLEMENT_MANAGE):
-        return {"effective": settings.get("effective", {})}
+    policy = PolicyService()
+    if not await policy.has_permission(current_user, Permissions.SUBSCRIPTION_USAGE_VIEW):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription view permission required")
 
     allowed_orgs = await scope.client_organization_ids(current_user)
     allowed_projects = await scope.client_project_ids(current_user)
@@ -354,6 +388,102 @@ async def get_effective_plan_services(
                 if project_id in allowed_projects
             },
         }
+    }
+
+
+@router.get("/entitlements/me", response_model=Dict[str, Any])
+async def get_my_effective_entitlements(
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    """Return only the active actor context's plan features for UI gating."""
+
+    scope = ScopeService()
+    roles = scope.role_names(current_user)
+    if "superadmin" in roles:
+        return {
+            "contract_version": PERMISSION_CONTRACT_VERSION,
+            "scope_mode": "global_unrestricted",
+            "organization_id": None,
+            "project_id": None,
+            "source": "superadmin",
+            "plan_code": None,
+            "features": {"*": True},
+            "dms_enabled": True,
+            "drafting_enabled": True,
+            "unavailable_reason": None,
+        }
+
+    organization_id = getattr(current_user, "organization_id", None)
+    project_id = getattr(current_user, "project_id", None)
+    entitlement_service = EntitlementService()
+
+    if not organization_id and "superuser" in roles:
+        organization_ids = sorted(await scope.client_organization_ids(current_user))
+        if not organization_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No organization scope is assigned",
+            )
+        states = [
+            await entitlement_service.effective_features(
+                organization_id=org_id,
+                project_id=None,
+            )
+            for org_id in organization_ids
+        ]
+        feature_keys = {
+            key
+            for state in states
+            for key in (state.get("features") or {})
+        }
+        features: Dict[str, Any] = {
+            key: all(
+                bool((state.get("features") or {}).get(key, False))
+                for state in states
+            )
+            for key in sorted(feature_keys)
+        }
+        missing_subscription = any(state.get("source") == "none" for state in states)
+        return {
+            "contract_version": PERMISSION_CONTRACT_VERSION,
+            "scope_mode": "assigned_organizations",
+            "organization_id": None,
+            "project_id": None,
+            "source": "aggregate",
+            "plan_code": None,
+            "features": features,
+            "dms_enabled": bool(features.get("feature.dms.enabled", False)),
+            "drafting_enabled": bool(features.get("feature.drafting.enabled", False)),
+            "unavailable_reason": (
+                "incomplete_subscription_coverage" if missing_subscription else None
+            ),
+        }
+
+    if not organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No organization scope is assigned",
+        )
+    if not await scope.is_client_scope_allowed(
+        current_user,
+        organization_id=str(organization_id),
+        project_id=str(project_id) if project_id else None,
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Scope denied")
+
+    effective = await entitlement_service.effective_features(
+        organization_id=str(organization_id),
+        project_id=str(project_id) if project_id else None,
+    )
+    return {
+        "contract_version": PERMISSION_CONTRACT_VERSION,
+        "scope_mode": "project" if project_id else "organization",
+        "organization_id": str(organization_id),
+        "project_id": str(project_id) if project_id else None,
+        **effective,
+        "unavailable_reason": (
+            "no_active_subscription" if effective.get("source") == "none" else None
+        ),
     }
 
 
@@ -470,20 +600,38 @@ async def list_subscriptions(
     if organization_id:
         if str(organization_id) not in {str(org_id) for org_id in allowed_orgs or []}:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Subscription scope denied")
-        return await MonetizationService().list_subscriptions(
+        rows = await MonetizationService().list_subscriptions(
             organization_id=organization_id,
             project_ids=allowed_projects,
         )
+        for row in rows:
+            await _authorize_subscription_scope(
+                policy=policy,
+                current_user=current_user,
+                permission=Permissions.SUBSCRIPTION_USAGE_VIEW,
+                subscription=row,
+                subscription_id=str(row.get("id") or ""),
+            )
+        return rows
 
     if not allowed_orgs and not allowed_projects:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No organization scope available for subscription usage",
         )
-    return await MonetizationService().list_subscriptions(
+    rows = await MonetizationService().list_subscriptions(
         organization_ids=allowed_orgs,
         project_ids=allowed_projects,
     )
+    for row in rows:
+        await _authorize_subscription_scope(
+            policy=policy,
+            current_user=current_user,
+            permission=Permissions.SUBSCRIPTION_USAGE_VIEW,
+            subscription=row,
+            subscription_id=str(row.get("id") or ""),
+        )
+    return rows
 
 
 @router.get("/subscriptions/{subscription_id}", response_model=Dict[str, Any])
@@ -497,12 +645,12 @@ async def get_subscription(
     sub = await svc.get_subscription_by_id(subscription_id)
     if not sub:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Subscription not found")
-    await policy.authorize(
-        current_user,
-        Permissions.SUBSCRIPTION_USAGE_VIEW,
-        organization_id=sub.get("organization_id"),
-        project_id=sub.get("project_id"),
-        resource_type="subscription",
+    await _authorize_subscription_scope(
+        policy=policy,
+        current_user=current_user,
+        permission=Permissions.SUBSCRIPTION_USAGE_VIEW,
+        subscription=sub,
+        subscription_id=subscription_id,
     )
     return sub
 
@@ -522,7 +670,10 @@ async def create_subscription(
         project_id=payload.project_id,
         resource_type="subscription",
     )
-    return await MonetizationService().create_subscription(payload, current_user)
+    try:
+        return await MonetizationService().create_subscription(payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 class CheckoutRequest(BaseModel):
@@ -581,7 +732,10 @@ async def update_subscription(
         subscription=subscription,
         subscription_id=subscription_id,
     )
-    return await service.update_subscription(subscription_id, payload, current_user)
+    try:
+        return await service.update_subscription(subscription_id, payload, current_user)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

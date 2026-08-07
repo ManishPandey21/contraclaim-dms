@@ -59,7 +59,8 @@ class SubscriptionLifecycleService:
                             "trial": False,
                             "updated_at": now,
                             "updated_by": "system:lifecycle",
-                        }
+                        },
+                        "$unset": {"current_scope_key": ""},
                     },
                 )
                 # Record history

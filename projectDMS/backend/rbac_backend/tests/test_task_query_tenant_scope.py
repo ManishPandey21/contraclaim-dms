@@ -27,8 +27,13 @@ def superadmin():
 
 
 def superuser(orgs=("org-A", "org-B")):
+    # organization_id is the *active selection* for a global role, not the home
+    # organisation -- the auth layer clears it and only re-populates it from a
+    # validated X-Org-Id. None is therefore "nothing selected", which is what
+    # yields the consolidated view. See docs/AUTHZ.md and
+    # test_scope_selection_seam.py.
     return SimpleNamespace(
-        id="u2", roles=["superuser"], organization_id=orgs[0], organizations=list(orgs), projects=[]
+        id="u2", roles=["superuser"], organization_id=None, organizations=list(orgs), projects=[]
     )
 
 

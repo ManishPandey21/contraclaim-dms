@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { useTenant } from "@/contexts/TenantContext";
 import { Link } from "react-router-dom";
 import {
   createContractUploadSession,
@@ -106,12 +107,12 @@ const ContractsUploadPage: React.FC = () => {
   const [orgLoading, setOrgLoading] = useState<boolean>(false);
   const [projLoading, setProjLoading] = useState<boolean>(false);
 
-  const [orgId, setOrgId] = useState<string>(
-    () => window.localStorage.getItem("org_id") || ""
-  );
-const [projId, setProjId] = useState<string>(
-  () => window.localStorage.getItem("proj_id") || ""
-);
+  const {
+    selectedOrganizationId: orgId,
+    selectedProjectId: projId,
+    selectOrganization: setOrgId,
+    selectProject: setProjId,
+  } = useTenant();
 
   const parseOrganizationsResponse = useCallback((payload: any): Organization[] => {
     const collection = Array.isArray(payload)
@@ -200,12 +201,6 @@ const [projId, setProjId] = useState<string>(
     };
     fetchProjects();
   }, [orgId]);
-
-  // Persist selections
-  useEffect(() => {
-    if (orgId) window.localStorage.setItem("org_id", orgId);
-    if (projId) window.localStorage.setItem("proj_id", projId);
-  }, [orgId, projId]);
 
   // Load previously uploaded contracts for selected org/project
   const refreshPrevUploads = useCallback(

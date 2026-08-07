@@ -46,6 +46,7 @@ import asyncio
 
 
 
+from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser, authorize_scope
 
 
@@ -68,6 +69,7 @@ from ..services.strategy_context_service import StrategyContextService
 
 
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..services.workflow import workflow_engine
 
 
@@ -1923,6 +1925,50 @@ async def get_letter_controller(db=Depends(get_db)) -> LetterController:
     return LetterController(letter_service, conversation_service, auth_service, rate_limiter)
 
 
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db)
+
+
+def _letter_scope(letter: Any) -> tuple[Optional[str], Optional[str]]:
+    organization_id = getattr(letter, "organization_id", None) or getattr(letter, "org_id", None)
+    project_id = getattr(letter, "project_id", None) or getattr(letter, "proj_id", None)
+    if isinstance(letter, dict):
+        organization_id = organization_id or letter.get("organization_id") or letter.get("org_id")
+        project_id = project_id or letter.get("project_id") or letter.get("proj_id")
+    return (
+        str(organization_id) if organization_id else None,
+        str(project_id) if project_id else None,
+    )
+
+
+async def _authorize_letter_target(
+    policy: PolicyService,
+    controller: LetterController,
+    current_user: CurrentUser,
+    letter_id: str,
+    permission: str,
+) -> Letter:
+    letter = await controller.letter_service.get_letter_by_id(letter_id)
+    if not letter:
+        raise LetterError("Letter not found", status.HTTP_404_NOT_FOUND)
+    organization_id, project_id = _letter_scope(letter)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Letter has no authoritative organization scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=organization_id,
+        project_id=project_id,
+        letter_id=letter_id,
+        resource_type="letter",
+        resource_id=letter_id,
+    )
+    return letter
+
+
 
 
 
@@ -1980,7 +2026,8 @@ async def get_letters(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2024,7 +2071,34 @@ async def get_letters(
 
 
 
-    return await controller.get_letters(filters, pagination, current_user)
+    requested_org = organization_id or getattr(current_user, "organization_id", None)
+    requested_project = project_id or getattr(current_user, "project_id", None)
+    if not requested_org and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        Permissions.DOCUMENT_VIEW,
+        organization_id=str(requested_org) if requested_org else None,
+        project_id=str(requested_project) if requested_project else None,
+        resource_type="letter_collection",
+        audit=False,
+    )
+    letters = await controller.get_letters(filters, pagination, current_user)
+    for letter in letters:
+        item_org, item_project = _letter_scope(letter)
+        if not item_org and not policy.scope_service.is_superadmin(current_user):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Letter has no authoritative organization scope")
+        await policy.authorize(
+            current_user,
+            Permissions.DOCUMENT_VIEW,
+            organization_id=item_org,
+            project_id=item_project,
+            letter_id=str(getattr(letter, "id", "") or ""),
+            resource_type="letter",
+            resource_id=str(getattr(letter, "id", "") or ""),
+            audit=False,
+        )
+    return letters
 
 
 
@@ -2056,7 +2130,8 @@ async def get_letter(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2068,6 +2143,9 @@ async def get_letter(
 
 
 
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_VIEW
+    )
     return await controller.get_letter(letter_id, current_user)
 
 
@@ -2100,7 +2178,8 @@ async def create_letter(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2112,6 +2191,17 @@ async def create_letter(
 
 
 
+    organization_id = getattr(letter_data, "organization_id", None) or getattr(current_user, "organization_id", None)
+    project_id = getattr(letter_data, "project_id", None) or getattr(current_user, "project_id", None)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Organization scope is required")
+    await policy.authorize(
+        current_user,
+        Permissions.DOCUMENT_UPLOAD,
+        organization_id=str(organization_id) if organization_id else None,
+        project_id=str(project_id) if project_id else None,
+        resource_type="letter",
+    )
     return await controller.create_letter(letter_data, current_user)
 
 
@@ -2148,7 +2238,8 @@ async def update_letter(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2160,6 +2251,9 @@ async def update_letter(
 
 
 
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
     return await controller.update_letter(letter_id, update_data, current_user)
 
 
@@ -2262,7 +2356,8 @@ async def get_letter_chain(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2274,7 +2369,23 @@ async def get_letter_chain(
 
 
 
-    return await controller.get_conversation_chain(letter_id, current_user)
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_VIEW
+    )
+    chain = await controller.get_conversation_chain(letter_id, current_user)
+    for letter in chain:
+        organization_id, project_id = _letter_scope(letter)
+        await policy.authorize(
+            current_user,
+            Permissions.DOCUMENT_VIEW,
+            organization_id=organization_id,
+            project_id=project_id,
+            letter_id=str(getattr(letter, "id", "") or ""),
+            resource_type="letter",
+            resource_id=str(getattr(letter, "id", "") or ""),
+            audit=False,
+        )
+    return chain
 
 
 
@@ -2306,7 +2417,8 @@ async def get_conversation_tree(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2318,6 +2430,9 @@ async def get_conversation_tree(
 
 
 
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_VIEW
+    )
     return await controller.conversation_service.build_conversation_tree(letter_id, current_user)
 
 
@@ -2354,7 +2469,8 @@ async def reparent_letter(
 
 
 
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 
 
 
@@ -2394,6 +2510,17 @@ async def reparent_letter(
 
 
 
+    letter = await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
+    new_parent = await _authorize_letter_target(
+        policy, controller, current_user, new_parent_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
+    if _letter_scope(letter) != _letter_scope(new_parent):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Letters can only be reparented within the same organization and project",
+        )
     await controller.conversation_service.reparent_letter_atomic(letter_id, new_parent_id, current_user)
 
 
@@ -2411,8 +2538,12 @@ async def get_letter_context_documents(
     letter_id: str,
     controller: LetterController = Depends(get_letter_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Return curated context documents for the specified letter."""
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_VIEW
+    )
     await controller.get_letter(letter_id, current_user)
     return await controller.letter_service.get_context_documents(letter_id)
 
@@ -2424,9 +2555,13 @@ async def update_letter_context_documents(
     payload: ContextDocumentUpdateRequest,
     controller: LetterController = Depends(get_letter_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Persist curated context documents for a letter."""
-    letter = await controller.get_letter(letter_id, current_user)
+    letter = await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
+    await controller.auth_service.check_letter_access(current_user, letter, "read")
     await controller.auth_service.check_letter_access(current_user, letter, "write")
     return await controller.letter_service.save_context_documents(
         letter_id, payload.document_ids, current_user
@@ -2442,9 +2577,12 @@ async def generate_letter_strategy_context(
     request: StrategyContextRequest,
     controller: LetterController = Depends(get_letter_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Generate consolidated contexts for contractor, engineer, and employer perspectives."""
-    await controller.get_letter(letter_id, current_user)
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
     context_service = StrategyContextService(
         letter_service=controller.letter_service,
         conversation_service=controller.conversation_service,
@@ -2469,9 +2607,12 @@ async def update_strategy_role(
     payload: StrategyRoleUpdateRequest,
     controller: LetterController = Depends(get_letter_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Persist the selected strategy role and target recipient."""
-    await controller.get_letter(letter_id, current_user)
+    await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
     await controller.letter_service.update_letter(
         letter_id,
         {
@@ -2537,14 +2678,12 @@ async def move_letter_to_strategy(
     letter_id: str,
     controller: LetterController = Depends(get_letter_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Transition a letter from Input to the Strategy stage."""
-    letter = await controller.letter_service.get_letter(letter_id)
-    if not letter:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Letter not found",
-        )
+    letter = await _authorize_letter_target(
+        policy, controller, current_user, letter_id, Permissions.DOCUMENT_EDIT_METADATA
+    )
     await controller.auth_service.check_letter_access(current_user, letter, "admin")
     if (letter.status or "").lower() != "input":
         raise HTTPException(
@@ -2771,4 +2910,3 @@ async def complete_letter(
 
 
     )
-

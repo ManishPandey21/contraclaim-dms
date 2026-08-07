@@ -21,6 +21,7 @@ import OrganizationView from "@/components/dashboard/OrganizationView";
 import ProjectView from "@/components/dashboard/ProjectView";
 import DashboardHeader from "@/components/dashboard/DashboardHeader";
 import { getDashboardStats, DashboardStats } from "@/services/dashboard-api";
+import { useTenant } from "@/contexts/TenantContext";
 
 // ---------------------------------------------------------------------------
 // Types matching child component interfaces
@@ -59,6 +60,7 @@ interface Project {
 // ---------------------------------------------------------------------------
 
 const Dashboard = () => {
+  const { selectedOrganizationId, selectedProjectId } = useTenant();
   const [selectedOrg, setSelectedOrg] = useState<string | null>(null);
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -80,7 +82,12 @@ const Dashboard = () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await getDashboardStats({ search, status });
+      const data = await getDashboardStats({
+        search,
+        status,
+        organizationId: selectedOrganizationId || undefined,
+        projectId: selectedProjectId || undefined,
+      });
       setStats(data);
     } catch (err: any) {
       console.error("Failed to load dashboard stats:", err);
@@ -88,7 +95,7 @@ const Dashboard = () => {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedOrganizationId, selectedProjectId]);
 
   // Initial load
   useEffect(() => {

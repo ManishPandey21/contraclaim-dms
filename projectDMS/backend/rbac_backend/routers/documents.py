@@ -837,6 +837,9 @@ class DocumentController:
             # Initialize bulk upload tracking
             bulk_status = BulkUploadStatus(
                 job_id=job_id,
+                organization_id=str(organization_id),
+                project_id=str(project_id),
+                requested_by=str(current_user.id),
                 total_files=len(stored_files),
                 processed_files=0,
                 successful_uploads=0,
@@ -1341,14 +1344,15 @@ class DocumentController:
     async def get_bulk_upload_status(
         self,
         job_id: str,
-        current_user: CurrentUser
+        current_user: CurrentUser,
+        job_status: Optional[BulkUploadStatus] = None,
     ) -> BulkUploadStatus:
         """Get bulk upload job status."""
         try:
             # BUGFIX (H2): a local variable named `status` previously shadowed the
             # imported FastAPI `status` module, so the not-found branch raised an
             # AttributeError that surfaced as a 500 instead of a clean 404.
-            job_status = await self.bulk_upload_service.get_job_status(job_id)
+            job_status = job_status or await self.bulk_upload_service.get_job_status(job_id)
 
             if not job_status:
                 raise DocumentError("Bulk upload job not found", status.HTTP_404_NOT_FOUND)
@@ -2961,7 +2965,18 @@ async def get_bulk_upload_status(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     """Get the status of a bulk upload job."""
-    scope_org, scope_project = _current_user_policy_scope(current_user)
+    job_status = await controller.bulk_upload_service.get_job_status(job_id)
+    if not job_status:
+        raise DocumentError("Bulk upload job not found", status.HTTP_404_NOT_FOUND)
+    scope_org = str(job_status.organization_id or "")
+    scope_project = str(job_status.project_id or "")
+    if not scope_org or not scope_project:
+        # Legacy jobs without a persisted tenant owner are deliberately not
+        # exposed: a job_id alone is not an authorization boundary.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bulk upload job has no authoritative tenant scope",
+        )
     await PolicyService().authorize(
         current_user,
         Permissions.DOCUMENT_UPLOAD,
@@ -2969,7 +2984,7 @@ async def get_bulk_upload_status(
         organization_id=scope_org,
         project_id=scope_project,
     )
-    return await controller.get_bulk_upload_status(job_id, current_user)
+    return await controller.get_bulk_upload_status(job_id, current_user, job_status=job_status)
 
 @router.get("/documents/bulk-upload/template")
 async def download_bulk_upload_template(

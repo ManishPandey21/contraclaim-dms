@@ -138,12 +138,30 @@ class PolicyService:
                 reason = "missing_permission"
                 return await self._deny(reason)
 
-            entitlement_ok, entitlement_reason = await self.entitlement_service.check_permission_entitlement(
-                permission=permission,
-                organization_id=organization_id,
-                project_id=project_id,
-                package_id=package_id,
-            )
+            entitlement_orgs = [str(organization_id)] if organization_id else []
+            roles = ScopeService.role_names(current_user)
+            if not entitlement_orgs and "superuser" in roles:
+                entitlement_orgs = sorted(
+                    await self.scope_service.client_organization_ids(current_user)
+                )
+                if not entitlement_orgs:
+                    reason = "scope_required"
+                    return await self._deny(reason)
+
+            entitlement_ok = True
+            entitlement_reason = "not_entitlement_scoped"
+            entitlement_checks = entitlement_orgs or [None]
+            for entitlement_org in entitlement_checks:
+                entitlement_ok, entitlement_reason = (
+                    await self.entitlement_service.check_permission_entitlement(
+                        permission=permission,
+                        organization_id=entitlement_org,
+                        project_id=project_id if entitlement_org == organization_id else None,
+                        package_id=package_id,
+                    )
+                )
+                if not entitlement_ok:
+                    break
             if not entitlement_ok:
                 reason = entitlement_reason
                 return await self._deny(reason)
@@ -193,7 +211,7 @@ class PolicyService:
                 reason = "scope_required"
                 return await self._deny(reason)
 
-            if domain in {"client_dms", "billing", "system"}:
+            if domain in {"client_dms", "settings", "billing", "system"}:
                 if self.scope_service.is_superadmin(current_user):
                     return await _allow("superadmin")
                 if domain == "billing":

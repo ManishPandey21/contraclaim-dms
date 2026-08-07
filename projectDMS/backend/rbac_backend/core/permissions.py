@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from typing import Dict, List
+
+#: Characters stripped before the fallback role-alias lookup.
+_ROLE_PUNCTUATION = re.compile(r"[^a-z0-9]")
+
+
+PERMISSION_CONTRACT_VERSION = "2026-08-06.1"
 
 
 CLIENT_DMS_PERMISSIONS: List[str] = [
@@ -21,6 +28,14 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.user.manage",
     "dms.project.manage",
     "dms.audit.view",
+    "dms.organization.view",
+    "dms.organization.create",
+    "dms.organization.edit",
+    "dms.organization.delete",
+    "dms.concern.view",
+    "dms.concern.create",
+    "dms.concern.edit",
+    "dms.concern.delete",
     "dms.claim.view",
     "dms.claim.create",
     "dms.claim.edit",
@@ -149,11 +164,25 @@ ROLE_MANAGEMENT_PERMISSIONS: List[str] = [
     "permissions:read",
 ]
 
+SETTINGS_PERMISSIONS: List[str] = [
+    "settings.storage.view",
+    "settings.storage.manage",
+    "settings.smtp.view",
+    "settings.smtp.manage",
+    "settings.notification.view",
+    "settings.notification.manage",
+    "settings.legal.view",
+    "settings.legal.manage",
+    "settings.prompt.view",
+    "settings.prompt.manage",
+]
+
 CANONICAL_PERMISSIONS: List[str] = [
     *CLIENT_DMS_PERMISSIONS,
     *DRAFTING_PERMISSIONS,
     *BILLING_PERMISSIONS,
     *ROLE_MANAGEMENT_PERMISSIONS,
+    *SETTINGS_PERMISSIONS,
 ]
 
 
@@ -175,6 +204,14 @@ class Permissions:
     USER_MANAGE = "dms.user.manage"
     PROJECT_MANAGE = "dms.project.manage"
     AUDIT_VIEW = "dms.audit.view"
+    ORGANIZATION_VIEW = "dms.organization.view"
+    ORGANIZATION_CREATE = "dms.organization.create"
+    ORGANIZATION_EDIT = "dms.organization.edit"
+    ORGANIZATION_DELETE = "dms.organization.delete"
+    CONCERN_VIEW = "dms.concern.view"
+    CONCERN_CREATE = "dms.concern.create"
+    CONCERN_EDIT = "dms.concern.edit"
+    CONCERN_DELETE = "dms.concern.delete"
     CLAIM_VIEW = "dms.claim.view"
     CLAIM_CREATE = "dms.claim.create"
     CLAIM_EDIT = "dms.claim.edit"
@@ -290,6 +327,17 @@ class Permissions:
     SUBSCRIPTION_ARCHIVE_ACCESS = "subscription.archive_access"
     SUBSCRIPTION_OFFBOARDING_EXPORT = "subscription.offboarding_export"
 
+    SETTINGS_STORAGE_VIEW = "settings.storage.view"
+    SETTINGS_STORAGE_MANAGE = "settings.storage.manage"
+    SETTINGS_SMTP_VIEW = "settings.smtp.view"
+    SETTINGS_SMTP_MANAGE = "settings.smtp.manage"
+    SETTINGS_NOTIFICATION_VIEW = "settings.notification.view"
+    SETTINGS_NOTIFICATION_MANAGE = "settings.notification.manage"
+    SETTINGS_LEGAL_VIEW = "settings.legal.view"
+    SETTINGS_LEGAL_MANAGE = "settings.legal.manage"
+    SETTINGS_PROMPT_VIEW = "settings.prompt.view"
+    SETTINGS_PROMPT_MANAGE = "settings.prompt.manage"
+
     PLATFORM_ADMIN = "platform.admin"
     PLATFORM_ROLE_MANAGE = "platform.role.manage"
     PLATFORM_PERMISSION_MANAGE = "platform.permission.manage"
@@ -299,14 +347,23 @@ PERMISSION_DOMAINS: Dict[str, str] = {
     **{permission: "drafting" for permission in DRAFTING_PERMISSIONS},
     **{permission: "billing" for permission in BILLING_PERMISSIONS},
     **{permission: "role_management" for permission in ROLE_MANAGEMENT_PERMISSIONS},
+    **{permission: "settings" for permission in SETTINGS_PERMISSIONS},
 }
 
 LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.dashboard.view": ["projects:read"],
     "dms.report.view": ["reports:view"],
-    "dms.user.manage": ["users:create", "users:update", "users:delete"],
+    "dms.user.manage": ["users:read", "users:create", "users:update", "users:delete"],
     "dms.project.manage": ["projects:create", "projects:update", "projects:delete", "projects:assign"],
     "dms.audit.view": ["audit:read"],
+    "dms.organization.view": ["organizations:read", "orgs:view"],
+    "dms.organization.create": ["organizations:create", "orgs:create"],
+    "dms.organization.edit": ["organizations:update", "orgs:edit"],
+    "dms.organization.delete": ["organizations:delete", "orgs:delete"],
+    "dms.concern.view": ["concerns:read"],
+    "dms.concern.create": ["concerns:create"],
+    "dms.concern.edit": ["concerns:update"],
+    "dms.concern.delete": ["concerns:delete"],
     "dms.claim.manage": ["projects:update"],
     "dms.contract.appraisal.approve": ["projects:update"],
     "dms.contract.appraisal.reject": ["projects:update"],
@@ -337,6 +394,30 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "subscription.usage.view": ["reports:view"],
     "subscription.archive_access": [],
     "subscription.offboarding_export": [],
+    "settings.storage.view": ["settings:view"],
+    "settings.storage.manage": ["settings:edit"],
+    "settings.smtp.view": ["settings:view"],
+    "settings.smtp.manage": ["settings:edit"],
+    "settings.notification.view": ["settings:view"],
+    "settings.notification.manage": ["settings:edit"],
+    "settings.legal.view": ["settings:view"],
+    "settings.legal.manage": ["settings:edit"],
+    "settings.prompt.view": ["system:admin"],
+    "settings.prompt.manage": ["system:admin"],
+}
+
+# The complete compatibility graph used by permission inventory APIs and the
+# generated frontend contract. PolicyService continues to evaluate the
+# canonical/legacy map above; these extra entries only preserve older labels
+# used by the organization and project administration screens.
+PERMISSION_COMPATIBILITY_ALIASES: Dict[str, List[str]] = {
+    **LEGACY_PERMISSION_ALIASES,
+    "organizations:read": ["orgs:view"],
+    "organizations:create": ["orgs:create"],
+    "organizations:update": ["orgs:edit"],
+    "organizations:delete": ["orgs:delete"],
+    "projects:read": ["projects:view"],
+    "projects:update": ["projects:edit"],
 }
 
 ALIAS_TO_CANONICAL: Dict[str, str] = {
@@ -364,3 +445,95 @@ def equivalent_permissions(permission: str) -> set[str]:
 def permission_domain(permission: str) -> str:
     canonical = ALIAS_TO_CANONICAL.get(permission, permission)
     return PERMISSION_DOMAINS.get(canonical, "system")
+
+
+# ---------------------------------------------------------------------------
+# Canonical role aliases (M-09: one source of truth)
+# ---------------------------------------------------------------------------
+#
+# Role-name normalization used to be defined independently in
+# ``core.security``, ``services.authorization_service`` and
+# ``services.permission_service``. The three maps had drifted: 27 of the 40
+# alias keys were present in some modules and absent in others (notably
+# ``authorization_service`` carried none of the ``org-*``/``proj-*`` short
+# forms, and only ``permission_service`` knew the British "organisation"
+# spellings). Where a key existed in more than one map the target always
+# agreed, so this table is their union -- consolidating resolves roles that
+# were previously dropped by whichever module happened to normalize first,
+# and grants nobody a role they were not already assigned.
+CANONICAL_ROLE_ALIASES: Dict[str, str] = {
+    # organisation user
+    "organization-user": "orguser",
+    "org-user": "orguser",
+    "organization user": "orguser",
+    "organizationuser": "orguser",
+    "orguser": "orguser",
+    "organisation-user": "orguser",
+    "organisation user": "orguser",
+    "organisationuser": "orguser",
+    # organisation admin
+    "organization-admin": "orgadmin",
+    "org-admin": "orgadmin",
+    "organization admin": "orgadmin",
+    "organizationadmin": "orgadmin",
+    "organization_admin": "orgadmin",
+    "organisation-admin": "orgadmin",
+    "organisation admin": "orgadmin",
+    "organisationadmin": "orgadmin",
+    "organisation_admin": "orgadmin",
+    "orgadmin": "orgadmin",
+    # project user
+    "project-user": "projectuser",
+    "project user": "projectuser",
+    "projectuser": "projectuser",
+    "proj-user": "projectuser",
+    "proj user": "projectuser",
+    "projuser": "projectuser",
+    # project admin
+    "project-admin": "projectadmin",
+    "project admin": "projectadmin",
+    "projectadmin": "projectadmin",
+    "proj-admin": "projectadmin",
+    "proj admin": "projectadmin",
+    "projadmin": "projectadmin",
+    "project_admin": "projectadmin",
+    "project administrator": "projectadmin",
+    "projectadministrator": "projectadmin",
+    # platform
+    "super-admin": "superadmin",
+    "super admin": "superadmin",
+    "superadministrator": "superadmin",
+    "superadmin": "superadmin",
+    "super-user": "superuser",
+    "super user": "superuser",
+    "superuser": "superuser",
+}
+
+
+def normalize_role_name(value: object) -> str:
+    """Normalize one role name to its canonical spelling.
+
+    Falls back to a punctuation-stripped lookup so ``"Org  Admin"`` and
+    ``"org_admin"`` resolve like ``"orgadmin"``. An unrecognised name is
+    returned lower-cased and unchanged -- it is never mapped to a privileged
+    role, so an unknown role stays unprivileged and is denied downstream.
+    """
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if text in CANONICAL_ROLE_ALIASES:
+        return CANONICAL_ROLE_ALIASES[text]
+    stripped = _ROLE_PUNCTUATION.sub("", text)
+    return CANONICAL_ROLE_ALIASES.get(stripped, text)
+
+
+def normalize_role_names(roles: object) -> List[str]:
+    """Normalize a role collection, de-duplicating while preserving order."""
+    result: List[str] = []
+    seen = set()
+    for role in (roles or []):  # type: ignore[union-attr]
+        normalized = normalize_role_name(role)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result

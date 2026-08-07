@@ -75,6 +75,19 @@ export interface EffectivePlanState {
   inherited_from_organization_id?: string | null;
 }
 
+export interface CurrentEntitlements {
+  contract_version: string;
+  scope_mode: string;
+  organization_id?: string | null;
+  project_id?: string | null;
+  source: string;
+  plan_code?: string | null;
+  features: Record<string, unknown>;
+  dms_enabled: boolean;
+  drafting_enabled: boolean;
+  unavailable_reason?: string | null;
+}
+
 export interface PlanSettingsResponse {
   organizations: PlanSettingsOrganization[];
   projects: PlanSettingsProject[];
@@ -150,6 +163,13 @@ export async function getEffectivePlanServices(): Promise<
 > {
   const { data } = await api.get<Pick<PlanSettingsResponse, "effective">>(
     "/rbac-monetization/plan-settings/effective-services"
+  );
+  return data;
+}
+
+export async function getCurrentEntitlements(): Promise<CurrentEntitlements> {
+  const { data } = await api.get<CurrentEntitlements>(
+    "/rbac-monetization/entitlements/me",
   );
   return data;
 }

@@ -4,6 +4,7 @@ import React, {
   useMemo,
   useState,
 } from "react";
+import { useTenant } from "@/contexts/TenantContext";
 import {
   BarChart,
   Calendar,
@@ -172,14 +173,14 @@ const ReportsAnalyticsPage = () => {
   const [isDownloading, setIsDownloading] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(false);
-  const [selectedProjectId, setSelectedProjectId] = useState(
-    () => window.localStorage.getItem("proj_id") || ""
-  );
+  const {
+    selectedOrganizationId,
+    selectedProjectId,
+    selectOrganization: setSelectedOrganizationId,
+    selectProject: setSelectedProjectId,
+  } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [organizationsLoading, setOrganizationsLoading] = useState(false);
-  const [selectedOrganizationId, setSelectedOrganizationId] = useState(
-    () => window.localStorage.getItem("org_id") || ""
-  );
   const isTagReport = useMemo(
     () =>
       selectedReport?.id === "letter-by-tags" ||

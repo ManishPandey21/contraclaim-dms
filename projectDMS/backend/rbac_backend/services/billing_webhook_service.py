@@ -22,6 +22,7 @@ from pymongo.errors import DuplicateKeyError
 from ..core.database import get_database
 from .audit_event_service import AuditEventService
 from .payment_gateway import PaymentGatewayInterface, WebhookEvent, get_payment_gateway
+from .subscription_scope_key import current_subscription_scope_key
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +131,46 @@ class BillingWebhookService:
                     return await self._record_mismatch(db, subscription, event, bad, now)
 
         update.update({"updated_at": now, "updated_by": f"system:webhook:{self.provider}"})
-        await db.subscriptions.update_one({"_id": subscription["_id"]}, {"$set": update})
+        prospective = {**subscription, **update}
+        current_key = current_subscription_scope_key(prospective)
+        if current_key:
+            update["current_scope_key"] = current_key
+            operation: Dict[str, Any] = {"$set": update}
+        else:
+            operation = {"$set": update, "$unset": {"current_scope_key": ""}}
+        try:
+            await db.subscriptions.update_one({"_id": subscription["_id"]}, operation)
+        except DuplicateKeyError:
+            await db.subscriptions.update_one(
+                {"_id": subscription["_id"]},
+                {
+                    "$set": {
+                        "billing_status": "review",
+                        "subscription_conflict_review_required": True,
+                        "updated_at": now,
+                        "updated_by": f"system:webhook:{self.provider}",
+                    },
+                    "$unset": {"current_scope_key": ""},
+                },
+            )
+            await AuditEventService(db).emit(
+                action="billing.webhook.subscription_scope_conflict",
+                actor_id=f"system:webhook:{self.provider}",
+                resource_type="subscription",
+                resource_id=str(subscription["_id"]),
+                organization_id=str(subscription.get("organization_id", "")),
+                project_id=subscription.get("project_id"),
+                result="failure",
+                reason="current_subscription_scope_conflict",
+                metadata={"event_id": event.event_id, "requires_admin_review": True},
+            )
+            return {
+                "matched": True,
+                "changed": False,
+                "subscription_id": str(subscription["_id"]),
+                "requires_admin_review": True,
+                "reason": "current_subscription_scope_conflict",
+            }
 
         # Billing record (financial audit trail).
         record_status = "paid" if event.event_type == "payment.succeeded" else (

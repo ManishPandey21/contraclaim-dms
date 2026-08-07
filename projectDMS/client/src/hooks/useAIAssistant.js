@@ -1,7 +1,9 @@
 import { useState, useCallback } from "react";
 import { api } from "@/services/api";
+import { useTenant } from "@/contexts/TenantContext";
 
 export const useAIAssistant = () => {
+  const { selectedOrganizationId, selectedProjectId } = useTenant();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [aiHistory, setAiHistory] = useState([]);
@@ -27,12 +29,10 @@ export const useAIAssistant = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const orgId = window.localStorage.getItem("org_id") || undefined;
-      const projId = window.localStorage.getItem("proj_id") || undefined;
       const payload = {
         ...request,
-        organization_id: orgId,
-        project_id: projId,
+        organization_id: selectedOrganizationId || undefined,
+        project_id: selectedProjectId || undefined,
       };
       const { data } = await api.post("/ai-assistant/enhanced-draft", payload);
       return data;
@@ -44,7 +44,7 @@ export const useAIAssistant = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [selectedOrganizationId, selectedProjectId]);
 
   const extractMetadata = useCallback(async (file) => {
     setIsLoading(true);

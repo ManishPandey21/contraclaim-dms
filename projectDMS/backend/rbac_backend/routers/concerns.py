@@ -9,9 +9,11 @@ import logging
 from datetime import datetime
 
 from ..core.security import get_current_user, CurrentUser
+from ..core.permissions import Permissions
 from ..services.concern_service import ConcernService
 from ..services.party_service import PartyService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..models.concern import (
     Concern, ConcernCreate, ConcernUpdate, ConcernListResponse
 )
@@ -282,6 +284,8 @@ class ConcernController:
             ) if concern_data.description else None,
             party_id=validate_object_id(concern_data.party_id) 
                 if concern_data.party_id else None,
+            organization_id=concern_data.organization_id,
+            project_id=concern_data.project_id,
             status=concern_data.status or "open",
             priority=concern_data.priority or "medium"
         )
@@ -329,15 +333,66 @@ async def get_concern_controller() -> ConcernController:
     )
 
 
+def get_policy_service() -> PolicyService:
+    return PolicyService()
+
+
+async def _authorize_concern_target(
+    policy: PolicyService,
+    current_user: CurrentUser,
+    permission: str,
+    concern: Concern,
+) -> None:
+    organization_id = str(concern.organization_id or "") or None
+    project_id = str(concern.project_id or "") or None
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Concern has no authoritative tenant scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type="concern",
+        resource_id=str(concern.id or "") or None,
+    )
+
+
 # API Endpoints
 @router.post("/", response_model=Concern, status_code=status.HTTP_201_CREATED)
 @handle_exceptions
 async def create_concern(
     concern_data: ConcernCreate,
     controller: ConcernController = Depends(get_concern_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Create new concern with validation."""
+    organization_id = str(concern_data.organization_id or "") or None
+    project_id = str(concern_data.project_id or "") or None
+    if concern_data.party_id:
+        party = await controller.party_service.get_party_by_id(concern_data.party_id)
+        if not party:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Party not found")
+        party_org = str(getattr(party, "organization_id", None) or "") or None
+        if organization_id and party_org and organization_id != party_org:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Concern party scope mismatch")
+        organization_id = party_org or organization_id
+    organization_id = organization_id or (str(current_user.organization_id) if current_user.organization_id else None)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Concern tenant scope required")
+    await policy.authorize(
+        current_user,
+        Permissions.CONCERN_CREATE,
+        organization_id=organization_id,
+        project_id=project_id,
+        resource_type="concern",
+    )
+    concern_data = concern_data.model_copy(
+        update={"organization_id": organization_id, "project_id": project_id}
+    )
     return await controller.create_concern(concern_data, current_user)
 
 
@@ -351,7 +406,8 @@ async def get_concerns(
     status: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
     controller: ConcernController = Depends(get_concern_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get concerns with filtering and pagination."""
     filters = {
@@ -362,7 +418,19 @@ async def get_concerns(
     }
     pagination = {"skip": skip, "limit": limit}
     
-    return await controller.get_concerns(pagination, filters, current_user)
+    result = await controller.get_concerns(pagination, filters, current_user)
+    if not result.concerns:
+        organization_ids = await policy.scope_service.client_organization_ids(current_user)
+        organization_id = next(iter(sorted(organization_ids)), None)
+        await policy.authorize(
+            current_user,
+            Permissions.CONCERN_VIEW,
+            organization_id=organization_id,
+            resource_type="concern_collection",
+        )
+    for concern in result.concerns:
+        await _authorize_concern_target(policy, current_user, Permissions.CONCERN_VIEW, concern)
+    return result
 
 
 @router.get("/{concern_id}", response_model=Concern)
@@ -370,10 +438,13 @@ async def get_concerns(
 async def get_concern(
     concern_id: str,
     controller: ConcernController = Depends(get_concern_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get specific concern by ID."""
-    return await controller.get_concern(concern_id, current_user)
+    concern = await controller.get_concern(concern_id, current_user)
+    await _authorize_concern_target(policy, current_user, Permissions.CONCERN_VIEW, concern)
+    return concern
 
 
 @router.put("/{concern_id}", response_model=Concern)
@@ -382,9 +453,14 @@ async def update_concern(
     concern_id: str,
     update_data: ConcernUpdate,
     controller: ConcernController = Depends(get_concern_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Update concern with validation."""
+    concern = await controller.concern_service.get_concern_by_id(concern_id)
+    if not concern:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Concern not found")
+    await _authorize_concern_target(policy, current_user, Permissions.CONCERN_EDIT, concern)
     return await controller.update_concern(concern_id, update_data, current_user)
 
 
@@ -393,7 +469,12 @@ async def update_concern(
 async def delete_concern(
     concern_id: str,
     controller: ConcernController = Depends(get_concern_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Delete concern with authorization checks."""
+    concern = await controller.concern_service.get_concern_by_id(concern_id)
+    if not concern:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Concern not found")
+    await _authorize_concern_target(policy, current_user, Permissions.CONCERN_DELETE, concern)
     return await controller.delete_concern(concern_id, current_user)

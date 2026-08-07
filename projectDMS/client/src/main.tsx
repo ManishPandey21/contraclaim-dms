@@ -1,4 +1,4 @@
-import { createRoot } from "react-dom/client";
+import { createRoot, hydrateRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
 import { ensureCsrfToken, installCsrfFetchInterceptor } from "./services/http";
@@ -18,4 +18,9 @@ if (
 installCsrfFetchInterceptor();
 void ensureCsrfToken();
 
-createRoot(document.getElementById("root")!).render(<App />);
+const root = document.getElementById("root")!;
+if (root.hasChildNodes()) {
+  hydrateRoot(root, <App />);
+} else {
+  createRoot(root).render(<App />);
+}

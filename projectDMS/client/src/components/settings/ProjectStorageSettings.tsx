@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { useTenant } from "@/contexts/TenantContext";
+import { useRBAC } from "@/hooks/useRBAC";
 import {
   Card,
   CardContent,
@@ -99,9 +101,9 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
 
 const ProjectStorageSettings = () => {
   const { toast } = useToast();
-  const [orgId] = useState<string | null>(() =>
-    window.localStorage.getItem("org_id")
-  );
+  const { can } = useRBAC();
+  const canManageStorage = can("settings.storage.manage");
+  const { selectedOrganizationId: orgId } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<ProjectOption[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
@@ -728,7 +730,7 @@ const ProjectStorageSettings = () => {
       <div className="flex justify-end">
         <Button
           onClick={handleSave}
-          disabled={saving || !selectedProject}
+          disabled={saving || !selectedProject || !canManageStorage}
           className="flex items-center gap-2"
         >
           {saving ? (

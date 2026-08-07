@@ -249,8 +249,17 @@ def test_build_scope_query_project_user_no_assignments_denies_all():
 
 
 def test_build_scope_query_superadmin_unrestricted():
-    user = _user(org="org-A", roles=("superadmin",))
+    # For a global role `organization_id` is the *active selection*, not a home
+    # organisation -- get_current_user clears it and only re-populates it from a
+    # validated X-Org-Id. Nothing selected is therefore None, and only then is
+    # the filter unrestricted.
+    user = _user(org=None, projects=(), roles=("superadmin",))
     assert build_scope_query(user) == {}
+
+
+def test_build_scope_query_superadmin_narrows_to_selection():
+    user = _user(org="org-A", projects=(), roles=("superadmin",))
+    assert build_scope_query(user) == {"organization_id": "org-A"}
 
 
 # --- C1 regression: GET /api/projects1 simple listing must be tenant-scoped ---
@@ -287,5 +296,10 @@ def test_projects1_orphan_user_denied_all():
 
 
 def test_projects1_superadmin_unrestricted():
-    user = _user(org="org-A", roles=("superadmin",))
+    user = _user(org=None, projects=(), roles=("superadmin",))
     assert _projects1_scope_filter(user) == {}
+
+
+def test_projects1_superadmin_narrows_to_selection():
+    user = _user(org="org-A", projects=(), roles=("superadmin",))
+    assert _projects1_scope_filter(user) == {"organization_id": "org-A"}

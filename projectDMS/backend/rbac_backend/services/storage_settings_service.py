@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Tuple, List, Dict, Any
 
 from pymongo.database import Database
+from bson import ObjectId
 
 from ..core.database import get_database
 from ..models.storage_settings import (
@@ -30,9 +31,14 @@ class StorageSettingsService:
 
     async def get_org_settings(self, org_id: str) -> Optional[OrganizationStorageSettings]:
         db = await self._get_db()
-        doc = await db.storage_settings.find_one({"type": "org", "org_id": org_id})
-        if not doc:
+        rows = await db.storage_settings.find(
+            {"type": "org", "org_id": str(org_id)}
+        ).limit(2).to_list(length=2)
+        if len(rows) > 1:
+            raise ValueError("Ambiguous organization storage settings")
+        if not rows:
             return None
+        doc = rows[0]
         # Convert ObjectId to string before passing to Pydantic
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
@@ -40,6 +46,7 @@ class StorageSettingsService:
 
     async def upsert_org_settings(self, org_id: str, payload: OrganizationStorageSettings) -> OrganizationStorageSettings:
         db = await self._get_db()
+        await self.get_org_settings(org_id)  # fail closed on duplicate legacy rows
         data = payload.model_dump(by_alias=True, exclude_none=True)
         data.update({"type": "org", "org_id": org_id})
         await db.storage_settings.update_one(
@@ -55,14 +62,36 @@ class StorageSettingsService:
         return OrganizationStorageSettings(**saved)
 
     async def get_project_settings(self, project_id: str) -> Optional[ProjectStorageSettings]:
-        db = await self._get_db()
-        doc = await db.storage_settings.find_one({"type": "project", "project_id": project_id})
-        if not doc:
+        org_id = await self.get_project_organization_id(project_id)
+        if not org_id:
             return None
+        db = await self._get_db()
+        rows = await db.storage_settings.find(
+            {"type": "project", "project_id": str(project_id), "org_id": str(org_id)}
+        ).limit(2).to_list(length=2)
+        if len(rows) > 1:
+            raise ValueError("Ambiguous project storage settings")
+        if not rows:
+            return None
+        doc = rows[0]
         # Convert ObjectId to string before passing to Pydantic
         if "_id" in doc:
             doc["_id"] = str(doc["_id"])
         return ProjectStorageSettings(**doc)
+
+    async def get_project_organization_id(self, project_id: str) -> Optional[str]:
+        """Resolve project ownership from the authoritative projects collection."""
+        db = await self._get_db()
+        candidates: List[Any] = [str(project_id)]
+        try:
+            candidates.append(ObjectId(str(project_id)))
+        except Exception:
+            pass
+        project = await db.projects.find_one({"_id": {"$in": candidates}})
+        if not project:
+            return None
+        org_id = project.get("organization_id") or project.get("organizationId")
+        return str(org_id) if org_id else None
 
     async def upsert_project_settings(
         self,
@@ -71,15 +100,21 @@ class StorageSettingsService:
         payload: ProjectStorageSettings,
     ) -> ProjectStorageSettings:
         db = await self._get_db()
+        authoritative_org_id = await self.get_project_organization_id(project_id)
+        if not authoritative_org_id or str(authoritative_org_id) != str(org_id):
+            raise ValueError("Project does not belong to the supplied organization")
+        await self.get_project_settings(project_id)  # fail closed on duplicate legacy rows
         data = payload.model_dump(by_alias=True, exclude_none=True)
-        data.update({"type": "project", "project_id": project_id, "org_id": org_id})
+        data.update({"type": "project", "project_id": str(project_id), "org_id": str(authoritative_org_id)})
         await db.storage_settings.update_one(
-            {"type": "project", "project_id": project_id},
+            {"type": "project", "project_id": str(project_id), "org_id": str(authoritative_org_id)},
             {"$set": data},
             upsert=True,
         )
         logger.info("Upserted project storage settings for %s", project_id)
-        saved = await db.storage_settings.find_one({"type": "project", "project_id": project_id})
+        saved = await db.storage_settings.find_one(
+            {"type": "project", "project_id": str(project_id), "org_id": str(authoritative_org_id)}
+        )
         # Convert ObjectId to string before passing to Pydantic
         if saved and "_id" in saved:
             saved["_id"] = str(saved["_id"])
@@ -132,6 +167,9 @@ class StorageSettingsService:
         org_settings = await self.get_org_settings(org_id)
         project_settings: Optional[ProjectStorageSettings] = None
         if project_id:
+            authoritative_org_id = await self.get_project_organization_id(project_id)
+            if not authoritative_org_id or str(authoritative_org_id) != str(org_id):
+                raise ValueError("Project does not belong to the supplied organization")
             project_settings = await self.get_project_settings(project_id)
 
         # Defaults

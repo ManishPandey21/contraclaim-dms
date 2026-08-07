@@ -83,10 +83,24 @@ async def get_roles(
     is_system: Optional[bool] = Query(None),
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:read")),
 ):
     """Get roles with basic filtering and pagination."""
     try:
+        organization_id = getattr(current_user, "organization_id", None)
+        project_id = getattr(current_user, "project_id", None)
+        if not project_id:
+            projects = [str(item) for item in (getattr(current_user, "projects", None) or []) if item]
+            project_id = projects[0] if len(projects) == 1 else None
+        await policy.authorize(
+            current_user,
+            "roles:read",
+            organization_id=organization_id,
+            project_id=project_id,
+            resource_type="role_collection",
+            audit=False,
+        )
         if not role_service.can_view_roles(current_user):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view roles")
 
@@ -118,6 +132,7 @@ async def get_role(
     role_id: str,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:read")),
 ):
     """Get specific role by ID."""
@@ -128,6 +143,18 @@ async def get_role(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Role not found"
             )
+        organization_id, project_id = _role_policy_scope(role)
+        organization_id = organization_id or getattr(current_user, "organization_id", None)
+        project_id = project_id or getattr(current_user, "project_id", None)
+        await policy.authorize(
+            current_user,
+            "roles:read",
+            organization_id=str(organization_id) if organization_id else None,
+            project_id=str(project_id) if project_id else None,
+            resource_type="role",
+            resource_id=role_id,
+            audit=False,
+        )
         if not await role_service.can_view_role(current_user, role):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         return role
@@ -287,6 +314,7 @@ async def get_role_permissions(
     role_id: str,
     role_service: RoleService = Depends(get_role_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("roles:read")),
 ):
     """Get permissions for a role."""
@@ -297,6 +325,18 @@ async def get_role_permissions(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Role not found"
             )
+        organization_id, project_id = _role_policy_scope(role)
+        organization_id = organization_id or getattr(current_user, "organization_id", None)
+        project_id = project_id or getattr(current_user, "project_id", None)
+        await policy.authorize(
+            current_user,
+            "roles:read",
+            organization_id=str(organization_id) if organization_id else None,
+            project_id=str(project_id) if project_id else None,
+            resource_type="role",
+            resource_id=role_id,
+            audit=False,
+        )
         if not await role_service.can_view_role(current_user, role):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         permissions = await role_service.get_role_permissions(role_id)

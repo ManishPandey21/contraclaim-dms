@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useTenant } from "@/contexts/TenantContext";
 import {
   searchContracts,
   ContractSearchResponse,
@@ -435,6 +436,13 @@ const SEARCH_TIMEOUT_MS = 30_000;
 
 const ContractsSearchPage: React.FC = () => {
   const navigate = useNavigate();
+  const {
+    selectedOrganizationId: orgId,
+    selectedProjectId: projId,
+    selectOrganization: setOrgId,
+    selectProject: setProjId,
+    contextReady,
+  } = useTenant();
   // Organization / Project fetching and selection
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -443,14 +451,6 @@ const ContractsSearchPage: React.FC = () => {
   const [projLoading, setProjLoading] = useState<boolean>(false);
   const [docsLoading, setDocsLoading] = useState<boolean>(false);
   const [docsError, setDocsError] = useState<string | null>(null);
-  const [orgId, setOrgId] = useState<string>(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("organization_id") || window.localStorage.getItem("org_id") || "";
-  });
-  const [projId, setProjId] = useState<string>(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("project_id") || window.localStorage.getItem("proj_id") || "";
-  });
   const [docId, setDocId] = useState<string>(() => {
     const params = new URLSearchParams(window.location.search);
     return params.get("document_id") || window.localStorage.getItem("doc_id") || "";
@@ -697,24 +697,23 @@ const ContractsSearchPage: React.FC = () => {
     fetchDocuments();
   }, [orgId, projId]);
 
-  // Persist org/proj/doc
+  // Apply validated deep-link scope through the shared tenant authority.
   useEffect(() => {
-    if (orgId) {
-      window.localStorage.setItem("org_id", orgId);
-    } else {
-      window.localStorage.removeItem("org_id");
-    }
-    if (projId) {
-      window.localStorage.setItem("proj_id", projId);
-    } else {
-      window.localStorage.removeItem("proj_id");
-    }
+    if (!contextReady) return;
+    const params = new URLSearchParams(window.location.search);
+    const requestedOrg = params.get("organization_id");
+    const requestedProject = params.get("project_id");
+    if (requestedOrg && requestedOrg !== orgId) setOrgId(requestedOrg);
+    if (requestedProject && requestedProject !== projId) setProjId(requestedProject);
+  }, [contextReady, orgId, projId, setOrgId, setProjId]);
+
+  useEffect(() => {
     if (docId) {
       window.localStorage.setItem("doc_id", docId);
     } else {
       window.localStorage.removeItem("doc_id");
     }
-  }, [orgId, projId, docId]);
+  }, [docId]);
 
   useEffect(() => {
     if (docId && !documents.some((doc) => doc.id === docId)) {

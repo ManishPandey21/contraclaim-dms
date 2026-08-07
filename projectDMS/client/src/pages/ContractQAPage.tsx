@@ -19,6 +19,7 @@ import {
   IterationTrace,
 } from "@/services/contracts-api";
 import { extractErrorMessage } from "@/lib/error-logger";
+import { useTenant } from "@/contexts/TenantContext";
 import {
   Building2,
   Eye,
@@ -69,10 +70,14 @@ function buildProbingQuestions(answer: string, question: string): string[] {
 
 const ContractQAPage: React.FC = () => {
   const navigate = useNavigate();
+  const {
+    selectedOrganizationId: orgId,
+    selectedProjectId: projId,
+    selectOrganization: setOrgId,
+    selectProject: setProjId,
+  } = useTenant();
   const [organizations, setOrganizations] = useState<Organization[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [orgId, setOrgId] = useState<string>(() => window.localStorage.getItem("org_id") || "");
-  const [projId, setProjId] = useState<string>(() => window.localStorage.getItem("proj_id") || "");
   const [uploads, setUploads] = useState<UploadOption[]>([]);
   const [selectedUpload, setSelectedUpload] = useState<string>("");
   const [question, setQuestion] = useState<string>("");
@@ -155,21 +160,14 @@ const ContractQAPage: React.FC = () => {
 
   useEffect(() => {
     if (orgId) {
-      window.localStorage.setItem("org_id", orgId);
       loadProjects(orgId).catch(() => {});
     } else {
-      window.localStorage.removeItem("org_id");
       setProjects([]);
       setUploads([]);
     }
   }, [orgId, loadProjects]);
 
   useEffect(() => {
-    if (projId) {
-      window.localStorage.setItem("proj_id", projId);
-    } else {
-      window.localStorage.removeItem("proj_id");
-    }
     if (orgId) {
       loadUploads(orgId, projId).catch(() => {});
     }

@@ -34,4 +34,18 @@ class Project(BaseModel):
             return str(value)
         return value
 
+
+class ProjectStats(BaseModel):
+    """Live per-project counts rendered on the project cards.
+
+    Returned by GET /projects/stats for every project the caller is allowed to
+    list, so the UI never issues one request per card.
+    """
+
+    project_id: str = Field(...)
+    letterCount: int = Field(default=0, ge=0)
+    incomingCount: int = Field(default=0, ge=0)
+    outgoingCount: int = Field(default=0, ge=0)
+    teamSize: int = Field(default=0, ge=0)
+
     

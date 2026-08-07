@@ -24,6 +24,7 @@ from ..core.security import (
     get_current_user,
     require_permission,
 )
+from ..services.policy_service import PolicyService
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +239,8 @@ async def get_dashboard_stats(
         alias="status",
         description="Filter by document status",
     ),
+    organization_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None),
     current_user: CurrentUser = Depends(get_current_user),
     db=Depends(get_db),
 ):
@@ -254,7 +257,24 @@ async def get_dashboard_stats(
         # -----------------------------------------------------------------
         # 1. Build the RBAC-scoped base query for the documents collection
         # -----------------------------------------------------------------
-        base_query = build_scope_query(current_user)
+        # Validate an explicitly selected tenant against authoritative
+        # membership and project ownership before building the data query.
+        # Consolidated Super User views intentionally omit an organisation and
+        # remain restricted by build_scope_query to their assigned orgs.
+        policy_org = organization_id or getattr(current_user, "organization_id", None)
+        if organization_id or project_id or policy_org:
+            await PolicyService(db).authorize(
+                current_user,
+                "dms.dashboard.view",
+                organization_id=str(policy_org) if policy_org else None,
+                project_id=str(project_id) if project_id else None,
+                resource_type="dashboard",
+            )
+        base_query = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
 
         # Optional search filter
         if search:

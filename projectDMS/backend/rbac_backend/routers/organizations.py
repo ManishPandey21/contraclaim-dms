@@ -10,10 +10,12 @@ import logging
 from datetime import datetime
 import re
 
-from ..core.security import get_current_user, CurrentUser, authorize_scope, require_permission
+from ..core.security import get_current_user, CurrentUser, authorize_scope
+from ..core.permissions import Permissions
 from ..core.database import get_db
 from ..services.organization_service import OrganizationService
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
 from ..models.organization import (
     Organization, OrganizationCreate, OrganizationUpdate, 
@@ -423,6 +425,10 @@ async def get_organization_controller() -> OrganizationController:
         window_seconds=60,
         scope="organizations",
     )
+
+
+def get_policy_service() -> PolicyService:
+    return PolicyService()
     audit_logger = AuditLogger()
     
     return OrganizationController(
@@ -437,9 +443,14 @@ async def create_organization(
     org_data: OrganizationCreate,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:create")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Create new organization with validation."""
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_CREATE,
+        resource_type="organization",
+    )
     return await controller.create_organization(org_data, current_user)
 
 
@@ -453,7 +464,7 @@ async def get_organizations(
     state: Optional[str] = Query(None),
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get organizations with filtering and pagination."""
     filters = {
@@ -462,7 +473,12 @@ async def get_organizations(
         'state': state
     }
     pagination = {'skip': skip, 'limit': limit}
-    
+
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_VIEW,
+        resource_type="organization_collection",
+    )
     return await controller.get_organizations(pagination, filters, current_user)
 
 
@@ -472,9 +488,16 @@ async def get_organization(
     organization_id: str,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get specific organization by ID."""
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_VIEW,
+        organization_id=organization_id,
+        resource_type="organization",
+        resource_id=organization_id,
+    )
     return await controller.get_organization(organization_id, current_user)
 
 
@@ -485,9 +508,16 @@ async def update_organization(
     update_data: OrganizationUpdate,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:update")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Update organization with validation."""
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_EDIT,
+        organization_id=organization_id,
+        resource_type="organization",
+        resource_id=organization_id,
+    )
     return await controller.update_organization(organization_id, update_data, current_user)
 
 
@@ -498,10 +528,17 @@ async def delete_organization(
     request: Request,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:delete")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Delete organization with dependency checks."""
     await require_step_up(request, current_user, action="organizations.delete")
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_DELETE,
+        organization_id=organization_id,
+        resource_type="organization",
+        resource_id=organization_id,
+    )
     return await controller.delete_organization(organization_id, current_user)
 
 
@@ -512,9 +549,16 @@ async def get_organization_stats(
     organization_id: str,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:read")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get organization statistics."""
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_VIEW,
+        organization_id=organization_id,
+        resource_type="organization_stats",
+        resource_id=organization_id,
+    )
     await controller.auth_service.check_organization_access(
         current_user, organization_id, "read"
     )
@@ -528,9 +572,16 @@ async def validate_organization_data(
     organization_id: str,
     controller: OrganizationController = Depends(get_organization_controller),
     current_user: CurrentUser = Depends(get_current_user),
-    _: None = Depends(require_permission("organizations:update")),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Validate organization data integrity."""
+    await policy.authorize(
+        current_user,
+        Permissions.ORGANIZATION_EDIT,
+        organization_id=organization_id,
+        resource_type="organization_validation",
+        resource_id=organization_id,
+    )
     await controller.auth_service.check_organization_access(
         current_user, organization_id, "admin"
     )

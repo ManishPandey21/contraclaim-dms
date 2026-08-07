@@ -13,6 +13,20 @@ Contract:
 
 A selection must always *narrow*. Any combination that would widen the result
 beyond the caller's entitlement is a defect.
+
+How a selection reaches this layer
+----------------------------------
+
+For the global roles (Super Admin / Super User) ``current_user.organization_id``
+means "the organisation currently selected", **not** "the organisation this
+account belongs to". ``get_current_user`` clears the home organisation for those
+roles and re-populates the field only from an ``X-Org-Id`` the tenant-context
+resolver has validated. A selection therefore arrives either through that field
+or through the explicit ``organization_id=`` argument; nothing selected is
+``None`` in both.
+
+For the tenant-bound roles (org / project tiers) the field keeps its ordinary
+meaning -- the account's own organisation -- and the server pins them to it.
 """
 
 from __future__ import annotations
@@ -46,7 +60,21 @@ def superadmin():
 
 
 def superuser():
-    return _user(["superuser"], org="org-A", orgs=["org-A", "org-B"])
+    """A Super User with *nothing selected*.
+
+    For a global role, ``organization_id`` carries the caller's **active
+    selection**, not their home organisation: the auth layer clears it and only
+    re-populates it from a validated ``X-Org-Id``. So "nothing selected" is
+    ``organization_id=None`` while the assigned organisations stay in
+    ``organizations``. ``test_scope_selection_seam.py`` pins the auth-layer half
+    of this contract.
+    """
+    return _user(["superuser"], org=None, orgs=["org-A", "org-B"])
+
+
+def superuser_with_org_selected():
+    """The same Super User after selecting ``org-B`` in the UI."""
+    return _user(["superuser"], org="org-B", orgs=["org-A", "org-B"])
 
 
 def project_user():
@@ -114,6 +142,31 @@ def test_superuser_narrows_to_the_selected_organisation():
     """Regression: the selection was validated but never applied."""
     query = build_scope_query(superuser(), organization_id="org-B")
     assert _orgs_in(query) == {"org-B"}, "selecting one organisation must exclude the others"
+
+
+def test_superuser_narrows_when_the_selection_arrives_on_the_actor():
+    """The selection narrows whether it arrives as an argument or on the actor.
+
+    The UI does not pass ``organization_id=`` to every call site; it sets
+    ``X-Org-Id``, which the auth layer validates onto ``current_user``. Both
+    routes into this function must produce the same filter, or a route that
+    reads the selection off the actor would silently serve consolidated data.
+    """
+    from_actor = build_scope_query(superuser_with_org_selected())
+    from_argument = build_scope_query(superuser(), organization_id="org-B")
+    assert _orgs_in(from_actor) == {"org-B"}
+    assert _orgs_in(from_actor) == _orgs_in(from_argument)
+
+
+def test_superuser_home_organisation_never_narrows_on_its_own():
+    """A Super User whose assigned orgs are unknown still cannot widen.
+
+    Guards the seam from the other side: if the auth layer ever leaks a home
+    organisation into ``organization_id`` while ``organizations`` is empty, the
+    result must stay bounded by that organisation rather than becoming ``{}``.
+    """
+    leaked = _user(["superuser"], org="org-A", orgs=[])
+    assert _orgs_in(build_scope_query(leaked)) == {"org-A"}
 
 
 def test_superuser_narrows_to_organisation_and_project():

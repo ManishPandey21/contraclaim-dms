@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
@@ -32,8 +33,18 @@ from ..models.rbac_monetization import (
     CancelSubscriptionRequest,
 )
 from ..services.audit_event_service import AuditEventService
+from .subscription_scope_key import (
+    CURRENT_SUBSCRIPTION_STATUSES as CURRENT_SCOPE_STATUSES,
+    current_subscription_scope_key,
+)
 
 logger = logging.getLogger(__name__)
+
+# One message for one condition. The pre-flight check and the unique index that
+# backs it up are two guards on the same invariant -- callers must not be able to
+# tell which one fired, or a lost race would surface as a different (and much
+# less actionable) failure than a lost check.
+CURRENT_SCOPE_CONFLICT_MESSAGE = "A current subscription already exists for this exact scope"
 
 
 class MonetizationService:
@@ -492,6 +503,35 @@ class MonetizationService:
     # Subscription CRUD
     # ------------------------------------------------------------------
 
+    CURRENT_SUBSCRIPTION_STATUSES = set(CURRENT_SCOPE_STATUSES)
+
+    async def _assert_no_current_subscription_conflict(
+        self,
+        *,
+        organization_id: str,
+        project_id: Optional[str],
+        package_id: Optional[str],
+        status_value: Any,
+        exclude_subscription_id: Optional[str] = None,
+    ) -> None:
+        """Fail closed when more than one current row would occupy a scope."""
+        normalized_status = str(getattr(status_value, "value", status_value) or "").lower()
+        if normalized_status not in self.CURRENT_SUBSCRIPTION_STATUSES:
+            return
+        db = await self._get_db()
+        query: Dict[str, Any] = {
+            "organization_id": str(organization_id),
+            "status": {"$in": sorted(self.CURRENT_SUBSCRIPTION_STATUSES)},
+            "$and": [
+                {"$or": [{"project_id": str(project_id)}] if project_id else [{"project_id": None}, {"project_id": ""}, {"project_id": {"$exists": False}}]},
+                {"$or": [{"package_id": str(package_id)}] if package_id else [{"package_id": None}, {"package_id": ""}, {"package_id": {"$exists": False}}]},
+            ],
+        }
+        if exclude_subscription_id:
+            query["_id"] = {"$ne": self._lookup_id(exclude_subscription_id)}
+        if await db.subscriptions.count_documents(query, limit=1):
+            raise ValueError(CURRENT_SCOPE_CONFLICT_MESSAGE)
+
     async def list_subscriptions(
         self,
         organization_id: Optional[str] = None,
@@ -518,6 +558,12 @@ class MonetizationService:
         db = await self._get_db()
         now = datetime.utcnow()
         doc = payload.model_dump(mode="json")
+        await self._assert_no_current_subscription_conflict(
+            organization_id=payload.organization_id,
+            project_id=payload.project_id,
+            package_id=payload.package_id,
+            status_value=payload.status,
+        )
 
         # Compute current billing period boundaries
         if not doc.get("current_period_start"):
@@ -533,7 +579,17 @@ class MonetizationService:
                 "updated_by": getattr(current_user, "id", None),
             }
         )
-        result = await db.subscriptions.insert_one(doc)
+        current_key = current_subscription_scope_key(doc)
+        if current_key:
+            doc["current_scope_key"] = current_key
+        try:
+            result = await db.subscriptions.insert_one(doc)
+        except DuplicateKeyError as exc:
+            # The pre-flight check above is check-then-act: two concurrent
+            # creates can both observe a free scope. The partial unique index on
+            # current_scope_key is what actually serialises them, so translate
+            # its rejection into the same conflict the check would have raised.
+            raise ValueError(CURRENT_SCOPE_CONFLICT_MESSAGE) from exc
         saved = await db.subscriptions.find_one({"_id": result.inserted_id})
 
         # Record history
@@ -631,10 +687,33 @@ class MonetizationService:
         db = await self._get_db()
         lookup = self._lookup_id(subscription_id)
         before = await db.subscriptions.find_one({"_id": lookup})
+        if not before:
+            raise ValueError("Subscription not found")
         update_doc = payload.model_dump(mode="json", exclude_unset=True)
+        await self._assert_no_current_subscription_conflict(
+            organization_id=str(before.get("organization_id") or ""),
+            project_id=update_doc.get("project_id", before.get("project_id")),
+            package_id=update_doc.get("package_id", before.get("package_id")),
+            status_value=update_doc.get("status", before.get("status")),
+            exclude_subscription_id=subscription_id,
+        )
         update_doc["updated_at"] = datetime.utcnow()
         update_doc["updated_by"] = getattr(current_user, "id", None)
-        await db.subscriptions.update_one({"_id": lookup}, {"$set": update_doc})
+        prospective = {**before, **update_doc}
+        current_key = current_subscription_scope_key(prospective)
+        if current_key:
+            update_doc["current_scope_key"] = current_key
+            update_operation: Dict[str, Any] = {"$set": update_doc}
+        else:
+            update_doc.pop("current_scope_key", None)
+            update_operation = {"$set": update_doc, "$unset": {"current_scope_key": ""}}
+        try:
+            await db.subscriptions.update_one({"_id": lookup}, update_operation)
+        except DuplicateKeyError as exc:
+            # Same race as create_subscription: an update that moves a row into
+            # an occupied scope loses to the unique index rather than to the
+            # pre-flight check.
+            raise ValueError(CURRENT_SCOPE_CONFLICT_MESSAGE) from exc
         saved = await db.subscriptions.find_one({"_id": lookup})
         await self.audit_service.emit(
             action="subscription.updated",
@@ -1526,7 +1605,8 @@ class MonetizationService:
                         "billing_status": "inactive",
                         "updated_at": datetime.utcnow(),
                         "updated_by": getattr(current_user, "id", None),
-                    }
+                    },
+                    "$unset": {"current_scope_key": ""},
                 },
             )
             await self.audit_service.emit(
@@ -1560,7 +1640,8 @@ class MonetizationService:
                     "billing_status": "inactive",
                     "updated_at": now,
                     "updated_by": getattr(current_user, "id", None),
-                }
+                },
+                "$unset": {"current_scope_key": ""},
             },
         )
         doc = {
@@ -1583,6 +1664,9 @@ class MonetizationService:
             "created_by": getattr(current_user, "id", None),
             "updated_by": getattr(current_user, "id", None),
         }
+        current_key = current_subscription_scope_key(doc)
+        if current_key:
+            doc["current_scope_key"] = current_key
         result = await db.subscriptions.insert_one(doc)
         await self.audit_service.emit(
             action="subscription.scope_plan_set",

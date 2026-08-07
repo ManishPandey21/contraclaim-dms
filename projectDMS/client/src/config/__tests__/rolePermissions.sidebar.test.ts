@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   expandPermissionSet,
   getRouteAccessDescriptor,
+  isRouteAllowedByEntitlement,
   isRouteAllowedByPermission,
   OPEN_AUTHENTICATED_ROUTES,
   ROUTE_PERMISSIONS,
@@ -89,13 +90,13 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     }
   });
 
-  it("Claims, SLA, Contract Appraisal and Tasks are reachable for a document viewer", () => {
+  it("Document permission does not unlock paid module shells", () => {
     const can = canFor(["dms.document.view"]);
     for (const path of ["/claims", "/sla", "/contracts/appraisal", "/tasks"]) {
       expect(
         isRouteAllowedByPermission(can, path),
-        `${path} should be allowed for a document viewer`,
-      ).toBe(true);
+        `${path} must require its module permission`,
+      ).toBe(false);
     }
   });
 
@@ -113,8 +114,8 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     expect(isRouteAllowedByPermission(can, "/contracts/appraisal")).toBe(true);
   });
 
-  it("Contract Timeline honours its graph permission, not just the /contracts prefix", () => {
-    const can = canFor(["dms.evidence_graph.view"]);
+  it("Contract Timeline requires its own module permission", () => {
+    const can = canFor(["dms.contract.timeline.view"]);
     expect(isRouteAllowedByPermission(can, "/contracts/timeline")).toBe(true);
   });
 
@@ -168,5 +169,44 @@ describe("SideBar route ↔ permission parity (Phase 1)", () => {
     expect(isRouteAllowedByPermission(canFor([]), "/legal-words")).toBe(true);
     expect(isRouteAllowedByPermission(canFor(["dms.document.view"]), "/admin/legal-words")).toBe(false);
     expect(isRouteAllowedByPermission(canFor(["system:admin"]), "/admin/legal-words")).toBe(true);
+  });
+
+  it("commercial modules carry generated plan requirements", () => {
+    const expectedFeatures: Record<string, string[]> = {
+      "/documents": ["feature.dms.enabled"],
+      "/claims": ["feature.dms.claims", "feature.dms.enabled"],
+      "/contracts/appraisal": [
+        "feature.dms.contract_appraisal",
+        "feature.dms.enabled",
+      ],
+      // drafting.request.view requires the drafting base feature *and* the
+      // requests feature, matching contracts/permission_contract.json.
+      "/letters": ["feature.drafting.enabled", "feature.drafting.requests"],
+      "/arbitration/cases": ["feature.dms.arbitration", "feature.dms.enabled"],
+    };
+
+    for (const [path, features] of Object.entries(expectedFeatures)) {
+      expect(getRouteAccessDescriptor(path).requiredAllFeatures).toEqual(features);
+    }
+  });
+
+  it("route entitlement checks require every generated feature and deny unmapped paths", () => {
+    const enabled = new Set(["feature.dms.enabled", "feature.dms.claims"]);
+    const hasFeature = (feature: string) => enabled.has(feature);
+    expect(isRouteAllowedByEntitlement(hasFeature, "/claims")).toBe(true);
+    expect(isRouteAllowedByEntitlement(hasFeature, "/contracts/appraisal")).toBe(false);
+    expect(isRouteAllowedByEntitlement(() => true, "/future-commercial-screen")).toBe(false);
+  });
+
+  it("subscription recovery and account routes remain reachable without a plan", () => {
+    for (const path of [
+      "/profile",
+      "/settings",
+      "/subscription-management",
+      "/plan-settings",
+      "/security-terms",
+    ]) {
+      expect(getRouteAccessDescriptor(path).requiredAllFeatures, path).toEqual([]);
+    }
   });
 });

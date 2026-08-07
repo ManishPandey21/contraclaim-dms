@@ -64,6 +64,66 @@ cursor = db.documents.find(query)
 _: bool = Depends(require_permission("dms.report.view"))
 ```
 
+## Scope contract — what a selection means
+
+`build_scope_query` narrows a listing to what the caller may see. Two inputs
+decide the result: the caller's **role tier** and the **active selection**.
+
+### What "selected" means
+
+For the two global roles, `current_user.organization_id` carries the caller's
+**active selection — not the organisation their account belongs to**. The auth
+layer guarantees this: `get_current_user` clears the home organisation for
+Super Admin / Super User, then re-populates the field only from an `X-Org-Id`
+that `TenantContextResolver` has validated against the caller's entitlement.
+Nothing selected is therefore `None`.
+
+For the tenant-bound roles the field keeps its ordinary meaning — the account's
+own organisation — and the server pins them to it, rejecting any mismatched
+request rather than silently rewriting it.
+
+A selection may arrive either as the explicit `organization_id=` / `project_id=`
+argument or on the actor. Both must produce the same filter; a route that reads
+only the argument will serve consolidated data to a caller who has selected an
+organisation.
+
+### Decision table
+
+| Role tier | Nothing selected | Organisation selected | Org + project selected |
+|---|---|---|---|
+| **Super Admin** | everything (`{}`) | that organisation | that org + project |
+| **Super User** | consolidated across *assigned* orgs | that organisation (deny if unassigned) | that org + project |
+| **Org Admin / Org User** | whole own organisation | own org, deny if a different one is asked for | own org + that project |
+| **Project Admin / User** | own org + *assigned* projects | own org, deny if a different one is asked for | deny unless the project is assigned |
+| **any role, no reach** | deny-all (`{"_id": {"$in": []}}`) | deny-all | deny-all |
+
+### The gate and the query are different jobs
+
+`ScopeService.is_client_scope_allowed` (reached through `PolicyService.authorize`)
+answers **membership** — may this caller act in this org/project at all. It does
+*not* bound rows. `build_scope_query` does that. A collection read by a
+tenant-bound caller therefore passes the gate on the strength of having *some*
+reach, and is then narrowed to exactly that reach by the query.
+
+Getting this backwards in either direction has already caused a bug: denying
+project-tier callers at the gate whenever no project was selected locked them
+out of listing their own projects, while the older behaviour of letting the read
+through *org*-filtered leaked same-org projects they were not assigned to. The
+gate refuses only a caller with no reach at all.
+
+Two invariants hold across every row:
+
+1. **A selection only ever narrows.** No combination may widen the result past
+   the caller's entitlement — selecting an unassigned organisation denies, it
+   does not fall back to a consolidated view.
+2. **Absence of a selection is not a licence to widen.** Only a genuinely
+   global role consolidates; every other tier stays bounded by its assignment.
+
+Pinned by `test_progressive_scope_narrowing.py` (the query half),
+`test_scope_selection_seam.py` (the auth-layer half — that a home organisation
+never reaches the query as a selection), and the `build_scope_query` cases in
+`test_tenant_isolation.py`.
+
 ## Removed / forbidden
 
 These were removed in the Week-1 consolidation and are blocked by a pre-commit hook

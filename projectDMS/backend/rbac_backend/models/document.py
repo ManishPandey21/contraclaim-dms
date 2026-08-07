@@ -272,6 +272,9 @@ class DocumentProcessingJobStatus(BaseModel):
 class BulkUploadStatus(BaseModel):
     """Status tracking for bulk upload jobs."""
     job_id: str = Field(...)
+    organization_id: Optional[str] = Field(default=None)
+    project_id: Optional[str] = Field(default=None)
+    requested_by: Optional[str] = Field(default=None)
     total_files: int = Field(...)
     processed_files: int = Field(...)
     successful_uploads: int = Field(...)

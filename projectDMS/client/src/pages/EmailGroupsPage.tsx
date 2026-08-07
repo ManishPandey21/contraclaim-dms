@@ -11,6 +11,7 @@ import {
 import { listProjects, type Project } from "@/services/projects-api";
 import { emailService, EmailSuggestion } from "@/services/email-service";
 import { toast } from "sonner";
+import { useTenant } from "@/contexts/TenantContext";
 
 const CATEGORIES = [
   "Project Team",
@@ -28,6 +29,12 @@ type GroupForm = {
 };
 
 const EmailGroupsPage: React.FC = () => {
+  const {
+    selectedOrganizationId: selectedOrgId,
+    selectedProjectId,
+    selectOrganization: setSelectedOrgId,
+    selectProject: setSelectedProjectId,
+  } = useTenant();
   const [groups, setGroups] = React.useState<EmailGroup[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [saving, setSaving] = React.useState(false);
@@ -37,12 +44,6 @@ const EmailGroupsPage: React.FC = () => {
   const [organizations, setOrganizations] = React.useState<Organization[]>([]);
   const [projects, setProjects] = React.useState<Project[]>([]);
   const [scope, setScope] = React.useState<"org" | "project">("org");
-  const [selectedOrgId, setSelectedOrgId] = React.useState<string>(
-    (localStorage.getItem("org_id") || "").toString()
-  );
-  const [selectedProjectId, setSelectedProjectId] = React.useState<string>(
-    (localStorage.getItem("proj_id") || "").toString()
-  );
 
   const [form, setForm] = React.useState<GroupForm>({
     name: "",

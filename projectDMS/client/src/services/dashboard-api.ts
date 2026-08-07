@@ -94,6 +94,8 @@ export interface DashboardStats {
 export async function getDashboardStats(params?: {
   search?: string;
   status?: string;
+  organizationId?: string;
+  projectId?: string;
 }): Promise<DashboardStats> {
   await ensureValidToken(120);
 
@@ -106,6 +108,9 @@ export async function getDashboardStats(params?: {
   if (params?.search) searchParams.set("search", params.search);
   if (params?.status && params.status !== "all")
     searchParams.set("status", params.status);
+  if (params?.organizationId)
+    searchParams.set("organization_id", params.organizationId);
+  if (params?.projectId) searchParams.set("project_id", params.projectId);
   const qs = searchParams.toString();
 
   const url = `${API_BASE_URL}/dashboard/stats${qs ? `?${qs}` : ""}`;

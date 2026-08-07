@@ -8,7 +8,7 @@ from ..core.security import (
     validate_role_assignment as core_validate_role_assignment,
     authorize_scope,
 )
-from ..core.permissions import Permissions
+from ..core.permissions import CANONICAL_ROLE_ALIASES, Permissions, normalize_role_name
 from ..core.database import get_database
 from ..services.policy_service import PolicyService
 from ..services.permission_service import PermissionService
@@ -16,26 +16,13 @@ from ..utils.audit_logger import get_audit_logger
 
 logger = logging.getLogger(__name__)
 
-ROLE_ALIASES = {
-    "super-admin": "superadmin",
-    "super admin": "superadmin",
-    "superadministrator": "superadmin",
-    "organization-admin": "orgadmin",
-    "organization admin": "orgadmin",
-    "organizationadmin": "orgadmin",
-    "organization-user": "orguser",
-    "organization user": "orguser",
-    "organizationuser": "orguser",
-    "project-admin": "projectadmin",
-    "project admin": "projectadmin",
-    "project-user": "projectuser",
-    "project user": "projectuser",
-}
+# Re-exported from the canonical contract so this module cannot drift from
+# core.security / permission_service (M-09).
+ROLE_ALIASES = CANONICAL_ROLE_ALIASES
 
 
 def _normalize_role_name(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    return ROLE_ALIASES.get(text, ROLE_ALIASES.get(re.sub(r"[^a-z0-9]", "", text), text))
+    return normalize_role_name(value)
 
 
 class AuthorizationService:

@@ -60,34 +60,11 @@ async def _handle_session_store_unavailable(exc: Exception) -> None:
         exc,
     )
 
-# Compatibility role aliases to normalize various role naming schemes
-ROLE_ALIASES = {
-    "organization-user": "orguser",
-    "org-user": "orguser",
-    "organization user": "orguser",
-    "organizationuser": "orguser",
-    "orguser": "orguser",
-    "organization-admin": "orgadmin",
-    "org-admin": "orgadmin",
-    "organization admin": "orgadmin",
-    "organizationadmin": "orgadmin",
-    "orgadmin": "orgadmin",
-    "project-user": "projectuser",
-    "project user": "projectuser",
-    "projectuser": "projectuser",
-    "proj-user": "projectuser",
-    "proj user": "projectuser",
-    "projuser": "projectuser",
-    "project-admin": "projectadmin",
-    "project admin": "projectadmin",
-    "projectadmin": "projectadmin",
-    "proj-admin": "projectadmin",
-    "proj admin": "projectadmin",
-    "projadmin": "projectadmin",
-    "super-admin": "superadmin",
-    "super admin": "superadmin",
-    "superadministrator": "superadmin",
-}
+from .permissions import CANONICAL_ROLE_ALIASES
+
+# Compatibility role aliases. Re-exported from the canonical contract in
+# core.permissions so every module normalizes role names identically (M-09).
+ROLE_ALIASES = CANONICAL_ROLE_ALIASES
 
 def _normalize_roles_list(roles):
     out = []
@@ -115,10 +92,42 @@ class CurrentUser(BaseModel):
     job_title: Optional[str] = None
     roles: List[str]
     organization_id: Optional[str] = None
+    project_id: Optional[str] = None
     organizations: List[str] = Field(default_factory=list)
     projects: List[str] = Field(default_factory=list)
     account_type: str = "client_user"
     disabled: bool = False
+
+
+async def _apply_request_tenant_context(
+    user: CurrentUser,
+    request: Request,
+    db: Any,
+) -> CurrentUser:
+    """Validate and apply the browser's active tenant selection to the actor."""
+
+    requested_org = request.headers.get("x-org-id")
+    requested_project = request.headers.get("x-proj-id")
+    if not requested_org and not requested_project:
+        roles = {str(role).lower() for role in (user.roles or [])}
+        if not roles.intersection({"projectadmin", "projectuser"}):
+            return user
+
+    from .tenant_context import TenantContextResolver
+
+    context = await TenantContextResolver(db).resolve(
+        user,
+        organization_id=requested_org,
+        project_id=requested_project,
+        require_project=False,
+        require_organization=bool(requested_org or requested_project),
+    )
+    return user.model_copy(
+        update={
+            "organization_id": context.organization_id,
+            "project_id": context.project_id,
+        }
+    )
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """
@@ -162,6 +171,13 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             if email:
                 user = await db.users.find_one({"email": email})
                 if user:
+                    # Account state is re-read from the database on every
+                    # authenticated request. Deactivation therefore revokes an
+                    # already-issued token immediately, without waiting for its
+                    # expiry or relying on individual routers to opt in to the
+                    # active-user dependency.
+                    if bool(user.get("disabled")):
+                        raise credentials_exception
                     user_id_str = str(user["_id"])
                     
                     # JWT Invalidation Check (Phase 3)
@@ -206,11 +222,12 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                     org_id_sanitized = org_id
                     orgs_sanitized = orgs or []
                     projects_sanitized = (user.get("projects", []) or [])
-                    if "superadmin" in roles:
+                    if roles and set(roles) & {"superadmin", "superuser"}:
                         org_id_sanitized = None
-                        orgs_sanitized = []
-                        projects_sanitized = []
-                    return CurrentUser(
+                        if "superadmin" in roles:
+                            orgs_sanitized = []
+                            projects_sanitized = []
+                    resolved_user = CurrentUser(
                         id=str(user["_id"]),
                         username=user.get("username", email),
                         email=user.get("email", email),
@@ -224,6 +241,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                         account_type=user.get("account_type", "client_user"),
                         disabled=user.get("disabled", False),
                     )
+                    return await _apply_request_tenant_context(resolved_user, request, db)
         except JWTError:
             # Try the next credential source before falling through to dev mode.
             continue
@@ -274,6 +292,8 @@ async def get_current_user(request: Request, db = Depends(get_db)):
         org_id = x_org_id or (user_doc.get("organization_id") if user_doc else None)
         projects = [x_proj_id] if x_proj_id else (user_doc.get("projects", []) if user_doc else [])
         disabled = bool(user_doc.get("disabled")) if user_doc else False
+        if disabled:
+            raise credentials_exception
         orgs = (user_doc.get("organizations", []) if user_doc else [])
         # If orgs empty but org_id present, seed with single org for convenience
         if not orgs and org_id:
@@ -282,13 +302,22 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             except Exception:
                 orgs = [org_id]
 
+        # A Super User's home organisation is an attribute, not a selection, so
+        # it must not narrow the scope on its own. Only an explicit X-Org-Id
+        # counts as a selection -- this mirrors the token path, which clears
+        # organization_id and lets the tenant context apply the active
+        # selection. Without this the dev-header path silently pinned a Super
+        # User to their home org and lost the consolidated view.
+        if "superuser" in roles and not x_org_id:
+            org_id = None
+
         # Sanitize for superadmin: reflect global access (no tenant scoping)
         if "superadmin" in roles:
             org_id = None
             orgs = []
             projects = []
 
-        return CurrentUser(
+        resolved_user = CurrentUser(
             id=str(user_doc["_id"]) if user_doc and user_doc.get("_id") else str(x_user_id),
             username=username,
             email=email,
@@ -302,6 +331,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
             account_type=(user_doc.get("account_type") if user_doc else None) or "client_user",
             disabled=disabled,
         )
+        return await _apply_request_tenant_context(resolved_user, request, db)
 
     # No valid auth found
     raise credentials_exception
@@ -509,6 +539,13 @@ def build_scope_query(
     - projectadmin/projectuser: restricted to assigned project(s) and their organization
     """
     roles = set([str(r).lower() for r in (current_user.roles or [])])
+    selected_project_id = getattr(current_user, "project_id", None)
+    if project_id is None and selected_project_id:
+        project_id = str(selected_project_id)
+    if organization_id is None and roles & {"superadmin", "superuser"}:
+        selected_organization_id = getattr(current_user, "organization_id", None)
+        if selected_organization_id:
+            organization_id = str(selected_organization_id)
 
     # Helper to return an empty-result filter
     def _deny_all() -> Dict[str, Any]:
@@ -548,8 +585,6 @@ def build_scope_query(
                 q[project_field] = {"$in": _expand_object_ids([project_id])}
             else:
                 q[id_field] = {"$in": _expand_object_ids([project_id])}
-        elif allowed_projects and project_field:
-            q[project_field] = {"$in": _expand_object_ids(allowed_projects)}
         return q
 
     if "orgadmin" in roles or "orguser" in roles:
@@ -559,15 +594,11 @@ def build_scope_query(
         if organization_id is not None and str(organization_id) != str(org_id_val):
             return _deny_all()
         q = {org_field: str(org_id_val)}
-        # If user has explicit project assignments, optionally restrict
-        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
         if project_id is not None:
             if project_field:
                 q[project_field] = {"$in": _expand_object_ids([project_id])}
             else:
                 q[id_field] = {"$in": _expand_object_ids([project_id])}
-        elif proj_ids and project_field:
-            q[project_field] = {"$in": _expand_object_ids(proj_ids)}
         return q
 
     if "projectadmin" in roles or "projectuser" in roles:

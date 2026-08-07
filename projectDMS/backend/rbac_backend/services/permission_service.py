@@ -10,7 +10,12 @@ from bson import ObjectId
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import LEGACY_PERMISSION_ALIASES, equivalent_permissions
+from ..core.permissions import (
+    CANONICAL_ROLE_ALIASES,
+    PERMISSION_COMPATIBILITY_ALIASES,
+    equivalent_permissions,
+    normalize_role_name,
+)
 from ..models.permission import (
     Permission,
     PermissionCreate,
@@ -26,48 +31,12 @@ from .runtime_state import get_runtime_state
 
 logger = logging.getLogger(__name__)
 
-ROLE_ALIASES = {
-    "organization-user": "orguser",
-    "org-user": "orguser",
-    "organization user": "orguser",
-    "organizationuser": "orguser",
-    "orguser": "orguser",
-    "organisation-user": "orguser",
-    "organisation user": "orguser",
-    "organisationuser": "orguser",
-    "organization-admin": "orgadmin",
-    "org-admin": "orgadmin",
-    "organization admin": "orgadmin",
-    "organizationadmin": "orgadmin",
-    "organization_admin": "orgadmin",
-    "organisation-admin": "orgadmin",
-    "organisation admin": "orgadmin",
-    "organisationadmin": "orgadmin",
-    "organisation_admin": "orgadmin",
-    "orgadmin": "orgadmin",
-    "project-user": "projectuser",
-    "project user": "projectuser",
-    "projectuser": "projectuser",
-    "project-admin": "projectadmin",
-    "project admin": "projectadmin",
-    "projectadmin": "projectadmin",
-    "project_admin": "projectadmin",
-    "project administrator": "projectadmin",
-    "projectadministrator": "projectadmin",
-    "super-admin": "superadmin",
-    "super admin": "superadmin",
-    "superadministrator": "superadmin",
-    "superadmin": "superadmin",
-    "super-user": "superuser",
-    "super user": "superuser",
-    "superuser": "superuser",
-}
+# Re-exported from the canonical contract so this module cannot drift from
+# core.security / authorization_service (M-09).
+ROLE_ALIASES = CANONICAL_ROLE_ALIASES
 
 def _normalize_role_name(value: Any) -> str:
-    raw = str(value or "").strip().lower()
-    if not raw:
-        return ""
-    return ROLE_ALIASES.get(raw, raw)
+    return normalize_role_name(value)
 
 
 async def _find_role_doc(db: Any, rid: Any) -> Optional[Dict[str, Any]]:
@@ -153,6 +122,7 @@ class PermissionService:
         "administer": PermissionLevel.ADMIN.value,
         "manage": PermissionLevel.ADMIN.value,
     }
+    PERMISSION_CACHE_VERSION = "v2"
     
     def __init__(self):
         self.db = None
@@ -160,17 +130,10 @@ class PermissionService:
         # Non-document aliases retained for older project/org labels. Document
         # access is intentionally canonical-only and enforced by PolicyService.
         self._permission_aliases = {
-            **LEGACY_PERMISSION_ALIASES,
-            # Organizations
-            "organizations:read": ["orgs:view"],
-            "organizations:create": ["orgs:create"],
-            "organizations:update": ["orgs:edit"],
-            "organizations:delete": ["orgs:delete"],
-            # Projects
-            "projects:read": ["projects:view"],
-            "projects:update": ["projects:edit"],
+            canonical: list(aliases)
+            for canonical, aliases in PERMISSION_COMPATIBILITY_ALIASES.items()
         }
-        for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
+        for canonical, aliases in PERMISSION_COMPATIBILITY_ALIASES.items():
             for alias in aliases:
                 self._permission_aliases.setdefault(alias, []).append(canonical)
         
@@ -728,7 +691,7 @@ class PermissionService:
 
         granted = False
         redis = None
-        cache_key = f"user_perms:{user_id}"
+        cache_key = f"user_perms:{self.PERMISSION_CACHE_VERSION}:{user_id}"
         
         try:
             runtime = get_runtime_state()
@@ -781,7 +744,13 @@ class PermissionService:
                 granted = False
             else:
                 role_ids = user_doc.get("roles", []) or []
-                raw_permissions: List[str] = []
+                # Direct user grants and role grants are resolved through the
+                # same effective-permission path used by /users/me.
+                raw_permissions: List[str] = [
+                    str(permission)
+                    for permission in (user_doc.get("permissions", []) or [])
+                    if permission is not None and str(permission).strip()
+                ]
                 perm_names: set[str] = set()
                 role_names: set[str] = set()
                 for rid in role_ids:

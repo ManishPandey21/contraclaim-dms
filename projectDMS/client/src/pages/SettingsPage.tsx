@@ -1,8 +1,7 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Bell, Building, FolderClosed, Settings, Cloud, Mail, ShieldCheck } from 'lucide-react';
+import { Bell, Building, FolderClosed, Settings, Mail, ShieldCheck } from 'lucide-react';
 import OrganizationStorageSettings from '@/components/settings/OrganizationStorageSettings';
 import ProjectStorageSettings from '@/components/settings/ProjectStorageSettings';
-import StorageProvidersSettings from '@/components/settings/StorageProvidersSettings';
 import NotificationSettings from '@/components/settings/NotificationSettings';
 import SmtpSettingsPanel from '@/components/settings/SmtpSettingsPanel';
 import PromptSettingsPanel from '@/components/settings/PromptSettingsPanel';
@@ -10,8 +9,22 @@ import LegalSettingsPanel from '@/components/settings/LegalSettingsPanel';
 import { useRBAC } from '@/hooks/useRBAC';
 
 const SettingsPage = () => {
-  const { roles } = useRBAC();
+  const { roles, can } = useRBAC();
   const isSuperadmin = roles.includes('superadmin');
+  const canViewStorage = isSuperadmin || can('settings.storage.view');
+  const canViewNotifications = isSuperadmin || can('settings.notification.view');
+  const canViewSmtp = isSuperadmin || can('settings.smtp.view');
+  const canViewLegal = isSuperadmin || can('settings.legal.view');
+  const canViewPrompts = isSuperadmin || can('settings.prompt.view');
+  const defaultSettingsTab = canViewStorage
+    ? 'organization'
+    : canViewNotifications
+      ? 'notifications'
+      : canViewSmtp
+        ? 'organization-smtp'
+        : canViewLegal
+          ? 'legal'
+          : 'ai-prompts';
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -25,37 +38,33 @@ const SettingsPage = () => {
         </div>
       </div>
 
-      <Tabs defaultValue="organization" className="w-full">
-        <TabsList className={`grid w-full grid-cols-3 gap-1 ${isSuperadmin ? 'sm:grid-cols-4 lg:w-[1200px] lg:grid-cols-8' : 'sm:grid-cols-4 lg:w-[1050px] lg:grid-cols-7'}`}>
-          <TabsTrigger value="organization" className="flex items-center gap-2">
+      <Tabs defaultValue={defaultSettingsTab} className="w-full">
+        <TabsList className="grid w-full grid-cols-2 gap-1 sm:grid-cols-4 lg:w-[1050px] lg:grid-cols-7">
+          {canViewStorage && <TabsTrigger value="organization" className="flex items-center gap-2">
             <Building className="h-4 w-4" />
             <span className="hidden sm:inline">Organization</span>
-          </TabsTrigger>
-          <TabsTrigger value="project" className="flex items-center gap-2">
+          </TabsTrigger>}
+          {canViewStorage && <TabsTrigger value="project" className="flex items-center gap-2">
             <FolderClosed className="h-4 w-4" />
             <span className="hidden sm:inline">Project</span>
-          </TabsTrigger>
-          <TabsTrigger value="providers" className="flex items-center gap-2">
-            <Cloud className="h-4 w-4" />
-            <span className="hidden sm:inline">Providers</span>
-          </TabsTrigger>
-          <TabsTrigger value="notifications" className="flex items-center gap-2">
+          </TabsTrigger>}
+          {canViewNotifications && <TabsTrigger value="notifications" className="flex items-center gap-2">
             <Bell className="h-4 w-4" />
             <span className="hidden sm:inline">Notifications</span>
-          </TabsTrigger>
-          <TabsTrigger value="organization-smtp" className="flex items-center gap-2">
+          </TabsTrigger>}
+          {canViewSmtp && <TabsTrigger value="organization-smtp" className="flex items-center gap-2">
             <Mail className="h-4 w-4" />
             <span className="hidden sm:inline">Org SMTP</span>
-          </TabsTrigger>
-          <TabsTrigger value="project-smtp" className="flex items-center gap-2">
+          </TabsTrigger>}
+          {canViewSmtp && <TabsTrigger value="project-smtp" className="flex items-center gap-2">
             <Mail className="h-4 w-4" />
             <span className="hidden sm:inline">Project SMTP</span>
-          </TabsTrigger>
-          <TabsTrigger value="legal" className="flex items-center gap-2">
+          </TabsTrigger>}
+          {canViewLegal && <TabsTrigger value="legal" className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4" />
             <span className="hidden sm:inline">Legal</span>
-          </TabsTrigger>
-          {isSuperadmin && (
+          </TabsTrigger>}
+          {canViewPrompts && (
             <TabsTrigger value="ai-prompts" className="flex items-center gap-2">
               <Settings className="h-4 w-4" />
               <span className="hidden sm:inline">AI Prompts</span>
@@ -63,35 +72,31 @@ const SettingsPage = () => {
           )}
         </TabsList>
 
-        <TabsContent value="organization" className="mt-6">
+        {canViewStorage && <TabsContent value="organization" className="mt-6">
           <OrganizationStorageSettings />
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="project" className="mt-6">
+        {canViewStorage && <TabsContent value="project" className="mt-6">
           <ProjectStorageSettings />
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="providers" className="mt-6">
-          <StorageProvidersSettings />
-        </TabsContent>
-
-        <TabsContent value="notifications" className="mt-6">
+        {canViewNotifications && <TabsContent value="notifications" className="mt-6">
           <NotificationSettings />
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="organization-smtp" className="mt-6">
+        {canViewSmtp && <TabsContent value="organization-smtp" className="mt-6">
           <SmtpSettingsPanel scope="organization" />
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="project-smtp" className="mt-6">
+        {canViewSmtp && <TabsContent value="project-smtp" className="mt-6">
           <SmtpSettingsPanel scope="project" />
-        </TabsContent>
+        </TabsContent>}
 
-        <TabsContent value="legal" className="mt-6">
+        {canViewLegal && <TabsContent value="legal" className="mt-6">
           <LegalSettingsPanel />
-        </TabsContent>
+        </TabsContent>}
 
-        {isSuperadmin && (
+        {canViewPrompts && (
           <TabsContent value="ai-prompts" className="mt-6">
             <PromptSettingsPanel />
           </TabsContent>

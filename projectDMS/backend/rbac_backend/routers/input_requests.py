@@ -12,11 +12,12 @@ from datetime import timezone
 from bson import ObjectId
 
 from ..core.security import get_current_user, CurrentUser
-from ..core.database import get_database
+from ..core.database import get_database, get_db
 from ..services.input_request_service import InputRequestService
 from ..services.letter_service import LetterService
 from ..dependencies import get_notification_service
 from ..services.authorization_service import AuthorizationService
+from ..services.policy_service import PolicyService
 from ..models.input_request import (
     InputRequest, InputRequestCreate, InputRequestUpdate, 
     InputRequestResponse, InputRequestListResponse, SuggestedKeyPoints
@@ -546,6 +547,72 @@ async def get_input_request_controller() -> InputRequestController:
     )
 
 
+async def get_policy_service(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db)
+
+
+def _letter_scope(letter: Any) -> tuple[Optional[str], Optional[str]]:
+    organization_id = getattr(letter, "organization_id", None) or getattr(letter, "org_id", None)
+    project_id = getattr(letter, "project_id", None) or getattr(letter, "proj_id", None)
+    if isinstance(letter, dict):
+        organization_id = organization_id or letter.get("organization_id") or letter.get("org_id")
+        project_id = project_id or letter.get("project_id") or letter.get("proj_id")
+    return (
+        str(organization_id) if organization_id else None,
+        str(project_id) if project_id else None,
+    )
+
+
+async def _authorize_input_letter(
+    policy: PolicyService,
+    controller: InputRequestController,
+    current_user: CurrentUser,
+    letter_id: str,
+    permission: str,
+) -> Any:
+    letter = await controller.letter_service.get_letter_by_id(validate_object_id(letter_id))
+    if not letter:
+        raise InputRequestError("Letter not found", status.HTTP_404_NOT_FOUND)
+    organization_id, project_id = _letter_scope(letter)
+    if not organization_id and not policy.scope_service.is_superadmin(current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Letter has no authoritative organization scope",
+        )
+    await policy.authorize(
+        current_user,
+        permission,
+        organization_id=organization_id,
+        project_id=project_id,
+        letter_id=letter_id,
+        resource_type="input_request",
+        resource_id=letter_id,
+    )
+    return letter
+
+
+async def _authorize_input_request(
+    policy: PolicyService,
+    controller: InputRequestController,
+    current_user: CurrentUser,
+    request_id: str,
+    permission: str,
+) -> Any:
+    input_request = await controller.input_request_service.get_request_by_id(
+        validate_object_id(request_id)
+    )
+    if not input_request:
+        raise InputRequestError("Input request not found", status.HTTP_404_NOT_FOUND)
+    await _authorize_input_letter(
+        policy,
+        controller,
+        current_user,
+        str(input_request.letter_id),
+        permission,
+    )
+    return input_request
+
+
 # API Endpoints
 @router.get("/input-requests/letter/{letter_id}", response_model=InputRequestListResponse)
 @handle_exceptions
@@ -554,9 +621,13 @@ async def get_input_requests_for_letter(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get input requests for specific letter with pagination."""
+    await _authorize_input_letter(
+        policy, controller, current_user, letter_id, "input_requests:read"
+    )
     pagination = {"skip": skip, "limit": limit}
     return await controller.get_input_requests_for_letter(
         letter_id, pagination, current_user
@@ -569,9 +640,13 @@ async def create_input_request_for_letter(
     letter_id: str,
     request_data: InputRequestCreate,
     controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Create input request for specific letter."""
+    await _authorize_input_letter(
+        policy, controller, current_user, letter_id, "input_requests:create"
+    )
     return await controller.create_input_request(letter_id, request_data, current_user)
 
 
@@ -581,9 +656,13 @@ async def respond_to_input_request(
     request_id: str,
     response_data: InputRequestResponse,
     controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Respond to input request."""
+    await _authorize_input_request(
+        policy, controller, current_user, request_id, "input_requests:respond"
+    )
     return await controller.respond_to_request(request_id, response_data, current_user)
 
 
@@ -592,9 +671,13 @@ async def respond_to_input_request(
 async def close_input_request(
     request_id: str,
     controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Close input request."""
+    await _authorize_input_request(
+        policy, controller, current_user, request_id, "input_requests:update"
+    )
     return await controller.close_request(request_id, current_user)
 
 
@@ -603,7 +686,11 @@ async def close_input_request(
 async def get_suggested_key_points_for_letter(
     letter_id: str,
     controller: InputRequestController = Depends(get_input_request_controller),
-    current_user: CurrentUser = Depends(get_current_user)
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
 ):
     """Get AI-suggested key points for letter."""
+    await _authorize_input_letter(
+        policy, controller, current_user, letter_id, "drafting.draft.create"
+    )
     return await controller.get_suggested_key_points(letter_id, current_user)
