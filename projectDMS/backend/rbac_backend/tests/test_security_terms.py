@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pymongo.errors import DuplicateKeyError
 
 from rbac_backend.models.security_terms import SecurityTermsAcceptRequest, SecurityTermsVersionCreate
 from rbac_backend.services.security_terms_service import SecurityTermsService
@@ -37,6 +38,10 @@ class _Coll:
     async def insert_one(self, doc):
         doc = dict(doc)
         doc.setdefault("_id", f"auto-{len(self.docs) + 1}")
+        if doc["_id"] in self.docs:
+            # Mongo enforces _id uniqueness; the fake must too or key-collision
+            # regressions pass here and 500 in production.
+            raise DuplicateKeyError(f"E11000 duplicate key error: _id {doc['_id']}")
         self.docs[doc["_id"]] = dict(doc)
         return SimpleNamespace(inserted_id=doc["_id"])
 
@@ -149,6 +154,71 @@ async def test_new_active_terms_version_requires_acceptance_again():
     assert new_version["is_active"] is True
     assert status["active_version"]["version"] == "2026.2"
     assert status["requires_acceptance"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_org", [None, "org-B"])
+async def test_accepting_again_under_a_different_org_scope_does_not_collide(second_org):
+    """Acceptance is per (user, org, version, hash), so a second org scope inserts a new row.
+
+    The row key used to omit ``org_id`` while the lookup included it, so this
+    path missed the existing row and then collided on ``_id`` — surfacing as an
+    opaque 500 and a "Failed to accept security terms" toast.
+    """
+    db = _DB()
+    svc = SecurityTermsService(db)
+    await svc.accept_active(
+        _user(org_id="org-A"), SecurityTermsAcceptRequest(accepted=True), ip_address=None, user_agent=None
+    )
+
+    second_user = _user(org_id=second_org)
+    accepted = await svc.accept_active(
+        second_user, SecurityTermsAcceptRequest(accepted=True), ip_address=None, user_agent=None
+    )
+
+    assert accepted["org_id"] == second_org
+    assert (await svc.status_for_user(second_user))["requires_acceptance"] is False
+    # The org-A acceptance must survive as its own row.
+    assert (await svc.status_for_user(_user(org_id="org-A")))["requires_acceptance"] is False
+    assert len(db.security_terms_acceptances.docs) == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_acceptance_insert_is_idempotent_not_a_500():
+    """A racing insert must record acceptance, not raise DuplicateKeyError."""
+    db = _DB()
+    svc = SecurityTermsService(db)
+    user = _user()
+    active = await svc.active_version()
+    # Simulate the row landing between this request's lookup and its insert.
+    row_id = SecurityTermsService._acceptance_id(
+        user_id="u1", org_id="org-A", version=active["version"], terms_hash=active["terms_hash"]
+    )
+    db.security_terms_acceptances.docs[row_id] = {
+        "_id": row_id,
+        "user_id": "u1",
+        "org_id": "org-A",
+        "terms_version": active["version"],
+        "terms_hash": active["terms_hash"],
+        "accepted_at": datetime(2026, 1, 1),
+        "acceptance_method": "checkbox_accept_continue",
+    }
+    original_find_one = db.security_terms_acceptances.find_one
+
+    async def _find_one_missing_once(query):
+        db.security_terms_acceptances.find_one = original_find_one
+        return None
+
+    db.security_terms_acceptances.find_one = _find_one_missing_once
+
+    accepted = await svc.accept_active(
+        user, SecurityTermsAcceptRequest(accepted=True), ip_address="203.0.113.7", user_agent="pytest"
+    )
+
+    assert accepted["terms_version"] == active["version"]
+    assert (await svc.status_for_user(user))["requires_acceptance"] is False
+    assert len(db.security_terms_acceptances.docs) == 1
+    assert db.security_terms_acceptances.docs[row_id]["ip_address"] == "203.0.113.7"
 
 
 @pytest.mark.asyncio

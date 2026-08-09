@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
+from pymongo.errors import DuplicateKeyError
 
 from ..models.security_terms import SecurityTermsAcceptRequest, SecurityTermsVersionCreate
 from .audit_event_service import AuditEventService
@@ -67,6 +68,17 @@ class SecurityTermsService:
     @staticmethod
     def _user_id(current_user: Any) -> str:
         return str(getattr(current_user, "id", "") or "")
+
+    @staticmethod
+    def _acceptance_id(*, user_id: str, org_id: Optional[str], version: str, terms_hash: str) -> str:
+        """Derive ``_id`` from the same natural key the lookup and unique index use.
+
+        Acceptance identity is per (user, org, version, hash). Deriving ``_id``
+        from a narrower key made a second acceptance under a different org scope
+        miss the org-scoped lookup and then collide on insert.
+        """
+        material = "|".join([user_id, org_id or "", version, terms_hash])
+        return f"terms-accept-{hashlib.sha1(material.encode('utf-8')).hexdigest()[:24]}"
 
     @staticmethod
     def _normalize_version(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -230,8 +242,26 @@ class SecurityTermsService:
             doc["_id"] = existing["_id"]
             await self.db.security_terms_acceptances.update_one({"_id": existing["_id"]}, {"$set": doc})
         else:
-            doc["_id"] = f"terms-accept-{hashlib.sha1((doc['user_id'] + active['terms_hash']).encode('utf-8')).hexdigest()[:24]}"
-            await self.db.security_terms_acceptances.insert_one(doc)
+            doc["_id"] = self._acceptance_id(
+                user_id=doc["user_id"],
+                org_id=doc["org_id"],
+                version=doc["terms_version"],
+                terms_hash=doc["terms_hash"],
+            )
+            try:
+                await self.db.security_terms_acceptances.insert_one(doc)
+            except DuplicateKeyError:
+                # Concurrent accepts: the row landed between the lookup and this
+                # insert. Acceptance is idempotent, so record it rather than 500.
+                await self.db.security_terms_acceptances.update_one(
+                    {
+                        "user_id": doc["user_id"],
+                        "org_id": doc["org_id"],
+                        "terms_version": doc["terms_version"],
+                        "terms_hash": doc["terms_hash"],
+                    },
+                    {"$set": {key: value for key, value in doc.items() if key != "_id"}},
+                )
         await self.audit.emit(
             action="security_terms.accepted",
             actor_id=doc["user_id"],
