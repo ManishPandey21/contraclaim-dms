@@ -538,114 +538,48 @@ def build_scope_query(
     - orgadmin/orguser: restricted to user's organization (all projects within it)
     - projectadmin/projectuser: restricted to assigned project(s) and their organization
     """
-    roles = set([str(r).lower() for r in (current_user.roles or [])])
-    selected_project_id = getattr(current_user, "project_id", None)
-    if project_id is None and selected_project_id:
-        project_id = str(selected_project_id)
-    if organization_id is None and roles & {"superadmin", "superuser"}:
-        selected_organization_id = getattr(current_user, "organization_id", None)
-        if selected_organization_id:
-            organization_id = str(selected_organization_id)
+    from .effective_scope import UNBOUNDED, EffectiveScope
 
-    # Helper to return an empty-result filter
-    def _deny_all() -> Dict[str, Any]:
+    # Access decisions belong to EffectiveScope; this function only renders them
+    # into the Mongo shape callers already expect. Keeping one owner of the
+    # rules is what stops a second implementation drifting -- the Document
+    # Library once had its own and returned every organisation's documents while
+    # a single organisation was selected.
+    scope = EffectiveScope.resolve(
+        current_user, organization_id=organization_id, project_id=project_id
+    )
+    if scope.is_denied:
         return {"_id": {"$in": []}}
+
+    roles = scope.roles
+    target_field = project_field or id_field
+    effective_orgs = scope.effective_org_ids()
+    effective_projects = scope.effective_project_ids()
 
     if "superadmin" in roles:
         q: Dict[str, Any] = {}
-        if organization_id is not None:
-            q[org_field] = str(organization_id)
-        if project_id is not None:
-            if project_field:
-                q[project_field] = str(project_id)
-            else:
-                q[id_field] = str(project_id)
+        if scope.selected_org_id:
+            q[org_field] = str(scope.selected_org_id)
+        if scope.selected_project_id:
+            q[target_field] = str(scope.selected_project_id)
         return q
 
     if "superuser" in roles:
-        allowed_orgs = {str(o) for o in (getattr(current_user, "organizations", []) or []) if o}
-        org_id_val = getattr(current_user, "organization_id", None)
-        if org_id_val:
-            allowed_orgs.add(str(org_id_val))
-        allowed_projects = [str(p) for p in (getattr(current_user, "projects", []) or []) if p]
-        if not allowed_orgs:
-            return _deny_all()
-        if organization_id is not None and str(organization_id) not in allowed_orgs:
-            return _deny_all()
-        # Selecting an organisation narrows to it. Previously the requested
-        # organisation was validated but never applied, so a Super User who
-        # selected one organisation still received consolidated data from every
-        # organisation assigned to them.
-        if organization_id is not None:
-            q = {org_field: {"$in": _expand_object_ids([str(organization_id)])}}
-        else:
-            q = {org_field: {"$in": _expand_object_ids(list(allowed_orgs))}}
-        if project_id is not None:
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids([project_id])}
-            else:
-                q[id_field] = {"$in": _expand_object_ids([project_id])}
+        q = {}
+        if effective_orgs is not UNBOUNDED:
+            q[org_field] = {"$in": _expand_object_ids(sorted(effective_orgs))}
+        if scope.selected_project_id:
+            q[target_field] = {"$in": _expand_object_ids([scope.selected_project_id])}
         return q
 
-    if "orgadmin" in roles or "orguser" in roles:
-        org_id_val = getattr(current_user, "organization_id", None)
-        if not org_id_val:
-            return _deny_all()
-        if organization_id is not None and str(organization_id) != str(org_id_val):
-            return _deny_all()
-        q = {org_field: str(org_id_val)}
-        if project_id is not None:
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids([project_id])}
-            else:
-                q[id_field] = {"$in": _expand_object_ids([project_id])}
-        return q
-
-    if "projectadmin" in roles or "projectuser" in roles:
-        org_id_val = getattr(current_user, "organization_id", None)
-        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
-        if not proj_ids:
-            return _deny_all()
-        if organization_id is not None and (org_id_val is None or str(organization_id) != str(org_id_val)):
-            return _deny_all()
-        q: Dict[str, Any] = {}
-        if org_id_val is not None:
-            q[org_field] = str(org_id_val)
-        if project_id is not None:
-            if str(project_id) not in proj_ids:
-                return _deny_all()
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids([project_id])}
-            else:
-                q[id_field] = {"$in": _expand_object_ids([project_id])}
-        else:
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids(proj_ids)}
-            else:
-                q[id_field] = {"$in": _expand_object_ids(proj_ids)}
-        return q
-
-    expert_roles = {"contraclaim_expert_drafter", "contraclaim_expert_reviewer", "contraclaim_drafting_manager", "contract_expert"}
-    if roles & expert_roles:
-        proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
-        if not proj_ids:
-            return _deny_all()
-        q: Dict[str, Any] = {}
-        if project_id is not None:
-            if str(project_id) not in proj_ids:
-                return _deny_all()
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids([project_id])}
-            else:
-                q[id_field] = {"$in": _expand_object_ids([project_id])}
-        else:
-            if project_field:
-                q[project_field] = {"$in": _expand_object_ids(proj_ids)}
-            else:
-                q[id_field] = {"$in": _expand_object_ids(proj_ids)}
-        return q
-
-    return {"_id": {"$in": []}}
+    # Organisation and project tiers own exactly one organisation; experts are
+    # bounded by their project allocations across organisations.
+    q = {}
+    if effective_orgs is not UNBOUNDED and effective_orgs:
+        q[org_field] = str(sorted(effective_orgs)[0])
+    if effective_projects is not UNBOUNDED and effective_projects:
+        q[target_field] = {"$in": _expand_object_ids(sorted(effective_projects))}
+    return q
 
 
 def validate_role_assignment(actor: CurrentUser, target_roles: List[str]) -> None:

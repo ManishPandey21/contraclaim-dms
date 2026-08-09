@@ -1,13 +1,14 @@
 import logging
 import re
 from datetime import date, datetime, time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from bson import ObjectId
 from ..utils.error_handler import AuthorizationError
 from ..core.security import (
     validate_role_assignment as core_validate_role_assignment,
     authorize_scope,
 )
+from ..core.effective_scope import UNBOUNDED, EffectiveScope
 from ..core.permissions import CANONICAL_ROLE_ALIASES, Permissions, normalize_role_name
 from ..core.database import get_database
 from ..services.policy_service import PolicyService
@@ -324,14 +325,21 @@ class AuthorizationService:
             if value:
                 sanitized[key] = value
 
-        if "superadmin" in role_names:
-            return sanitized
+        # This drives the organisation selector: the set the caller may *switch
+        # to*. It is therefore bounded by entitlement only and deliberately not
+        # by the current selection -- intersecting with the active organisation
+        # would collapse the list to one entry and strand the user there.
+        #
+        # RBAC is the maximum boundary; the navbar chooses within it. This
+        # function answers the boundary, not the choice.
+        scope = EffectiveScope.resolve(current_user)
 
-        allowed_ids = self._collect_user_org_ids(current_user)
-        if not allowed_ids:
+        if scope.authorized_org_ids is UNBOUNDED:
+            return sanitized
+        if not scope.authorized_org_ids:
             raise AuthorizationError("No organization scope assigned to the current user")
 
-        sanitized["allowed_ids"] = sorted(allowed_ids)
+        sanitized["allowed_ids"] = sorted(scope.authorized_org_ids)
         return sanitized
 
     async def check_organization_access(
@@ -402,37 +410,30 @@ class AuthorizationService:
                 # ignore invalid regex patterns
                 pass
 
-        # Scope enforcement
-        if "superadmin" in role_names:
-            return query
-
-        allowed_orgs = self._collect_user_org_ids(current_user)
-
-        # Checked before the branch below. The explicit-filter path was guarded
-        # by "if allowed_orgs and ...", so a caller with no reachable
-        # organisation skipped both the validation and the implicit-scoping
-        # raise: passing ?organization_id=<any org> returned that organisation's
-        # users. Only the filtered path was exposed; the no-filter path already
-        # raised.
-        if not allowed_orgs:
+        # Scope enforcement. Superadmin returned here unfiltered, so a user
+        # listing ignored the selected organisation; the rest read raw
+        # entitlement rather than the effective scope.
+        scope = EffectiveScope.resolve(
+            current_user, organization_id=str(org_id) if org_id else None
+        )
+        if scope.has_no_reach:
             raise AuthorizationError("No organization scope available for user queries")
-
-        if org_id:
-            # When an explicit org filter is provided, validate it
-            if str(org_id) not in allowed_orgs:
+        if scope.is_denied:
+            if org_id and not scope.permits_organization(str(org_id)):
                 raise AuthorizationError("Access denied to this organization")
-        else:
-            query["organization_id"] = {"$in": sorted(allowed_orgs)}
+            return {"_id": {"$in": []}}
 
-        # Project-scoped roles: restrict to own organization for safety
-        if {"projectadmin", "projectuser"} & role_names:
-            org = getattr(current_user, "organization_id", None)
-            if org:
-                query["organization_id"] = str(org)
-            # Limit to users whose project list intersects current user's projects
-            allowed_projects = self._collect_user_project_ids(current_user)
-            if allowed_projects:
-                query["projects"] = {"$in": sorted(allowed_projects)}
+        effective_orgs = scope.effective_org_ids()
+        if effective_orgs is not UNBOUNDED and not org_id:
+            # An explicit org filter was already applied verbatim above.
+            query["organization_id"] = {"$in": sorted(effective_orgs)}
+
+        # Project-bounded callers additionally see only users who share one of
+        # their projects. Membership of a user record is the `projects` array,
+        # so this is a field mapping rather than a second scope rule.
+        effective_projects = scope.effective_project_ids()
+        if effective_projects is not UNBOUNDED and effective_projects:
+            query["projects"] = {"$in": sorted(effective_projects)}
 
         return query
 
@@ -601,8 +602,11 @@ class AuthorizationService:
         role_names = self._extract_role_names(current_user)
         query: Dict[str, Any] = {}
 
-        # Simple pass-through fields
-        for key in ("organization_id", "project_id", "uploadType", "status"):
+        # Document-specific pass-through only. organization_id/project_id are
+        # deliberately absent: the tenant predicate is owned by EffectiveScope
+        # and applied at the end of this function, so a client-supplied value is
+        # treated as a *selection to validate*, never as a filter to trust.
+        for key in ("uploadType", "status"):
             value = filters.get(key)
             if value:
                 query[key] = value
@@ -668,37 +672,39 @@ class AuthorizationService:
             if expanded_sub_tags:
                 query["subTags"] = {"$in": expanded_sub_tags}
 
-        allowed_orgs = self._collect_user_org_ids(current_user)
-        allowed_projects = self._collect_user_project_ids(current_user)
+        # --- tenant predicate: one owner, no local rules -------------------
+        #
+        # This used to reimplement organisation/project access here, and the two
+        # implementations drifted: it exempted superadmin entirely and never
+        # read the validated navbar selection, so the Document Library returned
+        # every organisation's documents while one organisation was selected.
+        # It now delegates, and a client-supplied organisation/project is passed
+        # in as a selection for EffectiveScope to validate against entitlement.
+        requested_org = filters.get("organization_id")
+        requested_project = filters.get("project_id")
 
-        if "superadmin" not in role_names:
-            if query.get("organization_id"):
-                if query["organization_id"] not in allowed_orgs:
-                    raise AuthorizationError(
-                        "Access denied to documents for this organization"
-                    )
-            elif allowed_orgs:
-                query["organization_id"] = {"$in": sorted(allowed_orgs)}
-            else:
+        scope = EffectiveScope.resolve(
+            current_user,
+            organization_id=str(requested_org) if requested_org else None,
+            project_id=str(requested_project) if requested_project else None,
+        )
+
+        if scope.is_denied:
+            # An explicit out-of-entitlement request is a 403, not an empty
+            # page -- an empty list is indistinguishable from "no documents".
+            if requested_org and not scope.permits_organization(str(requested_org)):
                 raise AuthorizationError(
-                    "No organization scope available for document queries"
+                    "Access denied to documents for this organization"
                 )
+            if requested_project and not scope.permits_project(str(requested_project)):
+                raise AuthorizationError(
+                    "Access denied to documents for this project"
+                )
+            raise AuthorizationError(
+                "No organization scope available for document queries"
+            )
 
-            project_scoped_roles = {"projectadmin", "projectuser"}
-            if query.get("project_id"):
-                if query["project_id"] not in allowed_projects and not (
-                    {"orgadmin", "orguser"} & role_names
-                ):
-                    raise AuthorizationError(
-                        "Access denied to documents for this project"
-                    )
-            elif project_scoped_roles & role_names:
-                if not allowed_projects:
-                    raise AuthorizationError(
-                        "No project scope assigned to the current user"
-                    )
-                query["project_id"] = {"$in": sorted(allowed_projects)}
-
+        query.update(scope.mongo_filter())
         return query
 
     async def build_authorized_query(
@@ -789,46 +795,40 @@ class AuthorizationService:
         role_names = self._extract_role_names(current_user)
 
         query: Dict[str, Any] = {}
-        # pass-through filters when provided
-        for key in ("organization_id", "project_id", "search", "name"):
+        # Non-tenant pass-through only; organisation/project are handled below
+        # as a selection to validate rather than a filter to trust.
+        for key in ("search", "name"):
             val = filters.get(key)
             if val:
                 query[key] = val
 
-        if "superadmin" in role_names:
-            return query
+        org_id = filters.get("organization_id")
+        proj_id = filters.get("project_id")
 
-        allowed_orgs = self._collect_user_org_ids(current_user)
-        allowed_projects = self._collect_user_project_ids(current_user)
-
-        # A non-superadmin with no reachable organisation must see nothing.
-        # Previously an empty allow-list skipped both branches below, leaving the
-        # query unconstrained -- so a role with no organisation assignment (e.g.
-        # reporter, doccontroller, which carry no organisation invariant on the
-        # User model) listed every tenant's email groups.
-        if not allowed_orgs:
+        # Superadmin used to return here unfiltered, so an email group listing
+        # ignored the selected organisation entirely.
+        scope = EffectiveScope.resolve(
+            current_user,
+            organization_id=str(org_id) if org_id else None,
+            project_id=str(proj_id) if proj_id else None,
+        )
+        if scope.has_no_reach:
+            # Nothing to show at all -- an empty result, not a 403.
+            return {"_id": {"$in": []}}
+        if scope.is_denied:
+            if org_id and not scope.permits_organization(str(org_id)):
+                raise AuthorizationError("Access denied to this organization")
+            if proj_id and not scope.permits_project(str(proj_id)):
+                raise AuthorizationError("Access denied to this project")
             return {"_id": {"$in": []}}
 
-        # constrain organization if not specified
-        org_id = query.get("organization_id")
+        query.update(scope.mongo_filter())
+        # An explicitly requested id narrows to exactly that one; it has already
+        # been validated against entitlement by the resolve above.
         if org_id:
-            if str(org_id) not in allowed_orgs:
-                raise AuthorizationError("Access denied to this organization")
-        else:
-            query["organization_id"] = {"$in": sorted(allowed_orgs)}
-
-        # constrain project if not specified
-        proj_id = query.get("project_id")
+            query["organization_id"] = str(org_id)
         if proj_id:
-            if (
-                allowed_projects
-                and str(proj_id) not in allowed_projects
-                and not ({"orgadmin", "orguser"} & role_names)
-            ):
-                raise AuthorizationError("Access denied to this project")
-        elif allowed_projects and ({"projectadmin", "projectuser"} & role_names):
-            query["project_id"] = {"$in": sorted(allowed_projects)}
-
+            query["project_id"] = str(proj_id)
         return query
 
     async def check_email_group_access(
@@ -921,55 +921,40 @@ class AuthorizationService:
                 }
             )
 
-        # Scope enforcement
-        scope_clause_count = len(and_clauses)
-        if "superadmin" in role_names:
-            # no additional constraints
-            pass
-        else:
-            allowed_orgs = self._collect_user_org_ids(current_user)
-            allowed_projects = self._collect_user_project_ids(current_user)
-
-            # organization constraint
-            if allowed_orgs:
-                and_clauses.append(
-                    {
-                        "$or": [
-                            {"organization_id": {"$in": sorted(allowed_orgs)}},
-                            {"organizationId": {"$in": sorted(allowed_orgs)}},
-                        ]
-                    }
-                )
-            else:
-                if {"orgadmin", "orguser", "projectadmin", "projectuser"} & role_names:
-                    # constrained roles must have an org context
-                    org_id = getattr(current_user, "organization_id", None)
-                    if not org_id:
-                        raise AuthorizationError("No organization scope available for party queries")
-                    and_clauses.append(
-                        {
-                            "$or": [
-                                {"organization_id": str(org_id)},
-                                {"organizationId": str(org_id)},
-                            ]
-                        }
-                    )
-
-            # project-scoped roles: optionally constrain by assigned projects
-            if {"projectadmin", "projectuser"} & role_names:
-                if proj_id:
-                    # if explicit project filter provided, ensure it's allowed
-                    if allowed_projects and str(proj_id) not in allowed_projects:
-                        raise AuthorizationError("Access denied to this project")
-                elif allowed_projects:
-                    and_clauses.append({"projects": {"$in": sorted(allowed_projects)}})
-
-        # A non-superadmin that produced no scope clause must see nothing. The
-        # constrained roles raise above, but a role carrying no organisation
-        # invariant (reporter, doccontroller) with no assignments reached here
-        # with an empty clause list and returned {} -- every tenant's parties.
-        if "superadmin" not in role_names and len(and_clauses) == scope_clause_count:
+        # Scope enforcement.
+        #
+        # Parties are stored with two spellings of the owning organisation and
+        # hold their projects in an array, so the field mapping is local -- but
+        # *which* organisations and projects are in scope is decided centrally.
+        # This branch used to leave superadmin unconstrained and to read raw
+        # entitlement, so it ignored the navbar selection like the rest.
+        scope = EffectiveScope.resolve(
+            current_user, project_id=str(proj_id) if proj_id else None
+        )
+        if scope.is_denied:
+            if proj_id and not scope.permits_project(str(proj_id)):
+                raise AuthorizationError("Access denied to this project")
             return {"_id": {"$in": []}}
+
+        effective_orgs = scope.effective_org_ids()
+        effective_projects = scope.effective_project_ids()
+
+        if effective_orgs is not UNBOUNDED:
+            org_values = sorted(effective_orgs)
+            and_clauses.append(
+                {
+                    "$or": [
+                        {"organization_id": {"$in": org_values}},
+                        {"organizationId": {"$in": org_values}},
+                    ]
+                }
+            )
+
+        # Only narrow by project when the caller is actually project-bounded;
+        # an organisation-tier caller sees every party in their organisation.
+        if effective_projects is not UNBOUNDED and not proj_id:
+            and_clauses.append({"projects": {"$in": sorted(effective_projects)}})
+
         if not and_clauses:
             return {}
         if len(and_clauses) == 1:
@@ -1027,11 +1012,12 @@ class AuthorizationService:
             }
         )
 
-        # Scope: for external parties, keep permissive but still allow superadmin bypass
-        if "superadmin" not in role_names:
-            # For org/project scoped roles, we still allow reading external records
-            # No additional constraints necessary; permission checks handled elsewhere.
-            pass
+        # No tenant predicate, deliberately: the clause above defines "external"
+        # as a record with no owning organisation, so there is nothing to scope
+        # by. This is a proven non-tenant collection rather than an unscoped one.
+        #
+        # The dead `if superadmin: pass` that used to sit here read like a
+        # bypass and invited someone to "fix" it by adding one.
 
         if not and_clauses:
             return {}
@@ -1072,68 +1058,55 @@ class AuthorizationService:
         org_id = filters.get("organization_id")
         proj_id = filters.get("project_id")
 
-        if "superadmin" in role_names:
-            if org_id:
-                query["organization_id"] = str(org_id)
-            if proj_id:
-                query["project_id"] = str(proj_id)
-            return query
+        # Scope enforcement. Same defect as the other builders: superadmin
+        # returned here unfiltered, so a superadmin working in Organisation A
+        # still saw every organisation's templates, and the conditions below
+        # were built from raw entitlement rather than the effective scope.
+        scope = EffectiveScope.resolve(
+            current_user,
+            organization_id=str(org_id) if org_id else None,
+            project_id=str(proj_id) if proj_id else None,
+        )
+        if scope.is_denied:
+            if org_id and not scope.permits_organization(str(org_id)):
+                raise AuthorizationError("Access denied to this organization")
+            if proj_id and not scope.permits_project(str(proj_id)):
+                raise AuthorizationError("Access denied to this project")
+            raise AuthorizationError("No project scope assigned to the current user")
 
-        allowed_orgs = self._collect_user_org_ids(current_user)
-        allowed_projects = self._collect_user_project_ids(current_user)
+        effective_orgs = scope.effective_org_ids()
+        effective_projects = scope.effective_project_ids()
 
-        scope_conditions = []
+        scope_conditions: List[Dict[str, Any]] = []
 
-        if {"orgadmin", "orguser"} & role_names:
-            if allowed_orgs:
-                scope_conditions.append(
-                    {
-                        "visibility": "organization",
-                        "organization_id": {"$in": sorted(allowed_orgs)},
-                    }
-                )
-                scope_conditions.append(
-                    {
-                        "visibility": "project",
-                        "organization_id": {"$in": sorted(allowed_orgs)},
-                    }
-                )
-            else:
-                org = getattr(current_user, "organization_id", None)
-                if org:
-                    scope_conditions.append(
-                        {"visibility": "organization", "organization_id": str(org)}
-                    )
-                    scope_conditions.append(
-                        {"visibility": "project", "organization_id": str(org)}
-                    )
+        # Global templates belong to no tenant. Only the global tier could see
+        # them before, and narrowing to an organisation must not take them away;
+        # organisation and project tiers still do not get them.
+        if scope.tier == "global":
+            scope_conditions.append({"visibility": "global"})
 
-        if {"projectadmin", "projectuser"} & role_names:
-            if allowed_projects:
-                scope_conditions.append(
-                    {
-                        "visibility": "project",
-                        "project_id": {"$in": sorted(allowed_projects)},
-                    }
-                )
-            else:
-                raise AuthorizationError("No project scope assigned to the current user")
+        if effective_orgs is not UNBOUNDED:
+            org_values = sorted(effective_orgs)
+            scope_conditions.append(
+                {"visibility": "organization", "organization_id": {"$in": org_values}}
+            )
+            scope_conditions.append(
+                {"visibility": "project", "organization_id": {"$in": org_values}}
+            )
 
+        if effective_projects is not UNBOUNDED:
+            scope_conditions.append(
+                {"visibility": "project", "project_id": {"$in": sorted(effective_projects)}}
+            )
+
+        # No conditions means nothing bounds the caller (platform-wide with
+        # nothing selected), which is unrestricted rather than empty.
         if scope_conditions:
             query["$or"] = scope_conditions
-        else:
-            query["visibility"] = "__none__"
 
         if org_id:
-            if allowed_orgs and str(org_id) not in allowed_orgs:
-                raise AuthorizationError("Access denied to this organization")
             query["organization_id"] = str(org_id)
-
         if proj_id:
-            if allowed_projects and str(proj_id) not in allowed_projects and not (
-                {"orgadmin", "orguser"} & role_names
-            ):
-                raise AuthorizationError("Access denied to this project")
             query["project_id"] = str(proj_id)
 
         return query
@@ -1252,62 +1225,50 @@ class AuthorizationService:
                 ]
             }
 
-        # Visibility and scope enforcement
-        if "superadmin" in role_names:
-            # superadmin can see all tags, apply org/project filter if provided
-            if org_id:
-                query["organization_id"] = str(org_id)
-            if proj_id:
-                query["project_id"] = str(proj_id)
-            if search_clause:
-                query["$and"] = [search_clause]
-            return query
+        # Visibility and scope enforcement.
+        #
+        # Tags carry a visibility level, so the tenant predicate is an $or over
+        # those levels rather than a flat org/project filter. Global tags belong
+        # to no tenant and stay visible to everyone; organisation and project
+        # tags are bounded by the effective scope.
+        #
+        # This used to return early for superadmin -- so a superadmin working in
+        # Organisation A still saw every organisation's tags -- and to build the
+        # conditions from raw entitlement, ignoring the navbar selection.
+        scope = EffectiveScope.resolve(
+            current_user,
+            organization_id=str(org_id) if org_id else None,
+            project_id=str(proj_id) if proj_id else None,
+        )
+        if scope.is_denied:
+            if org_id and not scope.permits_organization(str(org_id)):
+                raise AuthorizationError("Access denied to this organization")
+            if proj_id and not scope.permits_project(str(proj_id)):
+                raise AuthorizationError("Access denied to this project")
+            return {"_id": {"$in": []}}
 
-        allowed_orgs = self._collect_user_org_ids(current_user)
-        allowed_projects = self._collect_user_project_ids(current_user)
+        effective_orgs = scope.effective_org_ids()
+        effective_projects = scope.effective_project_ids()
 
-        visibility_conditions = []
+        # Global tags are visible to every role, in every scope.
+        visibility_conditions: List[Dict[str, Any]] = [{"visibility": "global"}]
 
-        # Global tags are visible to all roles
-        visibility_conditions.append({"visibility": "global"})
+        organization_condition: Dict[str, Any] = {"visibility": "organization"}
+        if effective_orgs is not UNBOUNDED:
+            organization_condition["organization_id"] = {"$in": sorted(effective_orgs)}
+        visibility_conditions.append(organization_condition)
 
-        # Organization tags visible to orgadmin/orguser/projectadmin/projectuser for their orgs
-        if allowed_orgs:
-            visibility_conditions.append(
-                {
-                    "visibility": "organization",
-                    "organization_id": {"$in": sorted(allowed_orgs)},
-                }
-            )
-        # If project-scoped user lacks explicit org assignment, allow organization-level tags (permissive stub)
-        elif {"projectadmin", "projectuser"} & role_names:
-            visibility_conditions.append({"visibility": "organization"})
+        # A project tag is reachable either through the project itself or,
+        # for organisation-tier callers who are not bounded to specific
+        # projects, through its owning organisation.
+        project_condition: Dict[str, Any] = {"visibility": "project"}
+        if effective_projects is not UNBOUNDED:
+            project_condition["project_id"] = {"$in": sorted(effective_projects)}
+        elif effective_orgs is not UNBOUNDED:
+            project_condition["organization_id"] = {"$in": sorted(effective_orgs)}
+        visibility_conditions.append(project_condition)
 
-        # Project tags visible to projectadmin/projectuser for their projects
-        if allowed_projects and (
-            {"projectadmin", "projectuser"} & role_names
-        ):
-            visibility_conditions.append(
-                {
-                    "visibility": "project",
-                    "project_id": {"$in": sorted(allowed_projects)},
-                }
-            )
-
-        # Also allow orgadmin/orguser to see all project-level tags within their organizations
-        if allowed_orgs and ({"orgadmin", "orguser"} & role_names):
-            visibility_conditions.append(
-                {
-                    "visibility": "project",
-                    "organization_id": {"$in": sorted(allowed_orgs)},
-                }
-            )
-
-        if visibility_conditions:
-            visibility_clause: Dict[str, Any] = {"$or": visibility_conditions}
-        else:
-            # If no visibility conditions, restrict to empty result
-            visibility_clause = {"visibility": "__none__"}
+        visibility_clause: Dict[str, Any] = {"$or": visibility_conditions}
 
         and_clauses = [visibility_clause]
         if search_clause:
@@ -1318,17 +1279,12 @@ class AuthorizationService:
         else:
             query["$and"] = and_clauses
 
-        # Additional filters for org_id and proj_id if provided
+        # An explicit organisation/project filter narrows further. Entitlement
+        # was already checked when the scope resolved above, so reaching here
+        # means the request is permitted.
         if org_id:
-            if allowed_orgs and str(org_id) not in allowed_orgs:
-                raise AuthorizationError("Access denied to this organization")
             query["organization_id"] = str(org_id)
-
         if proj_id:
-            if allowed_projects and str(proj_id) not in allowed_projects and not (
-                {"orgadmin", "orguser"} & role_names
-            ):
-                raise AuthorizationError("Access denied to this project")
             query["project_id"] = str(proj_id)
 
         return query

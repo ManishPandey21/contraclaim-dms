@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from ..core.database import get_database
+from ..core.effective_scope import UNBOUNDED, EffectiveScope
 from ..core.security import get_current_user
 from ..models.user import User
 from ..services.policy_service import PolicyService
@@ -55,26 +56,24 @@ async def search_documents(
         pipeline = []
         match_conditions = {}
 
-        # RBAC scoping
-        roles = set(current_user.roles or [])
-        if "superadmin" not in roles:
-            scope = ScopeService()
-            allowed_orgs = await scope.client_organization_ids(current_user)
-            allowed_projects = await scope.client_project_ids(current_user)
-            if "orgadmin" in roles or "orguser" in roles:
-                if allowed_orgs:
-                    match_conditions["organization_id"] = {"$in": sorted(allowed_orgs)}
-                else:
-                    # No org context => no results
-                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-            elif "projectadmin" in roles or "projectuser" in roles:
-                if allowed_projects:
-                    match_conditions["project_id"] = {"$in": sorted(allowed_projects)}
-                else:
-                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-            else:
-                return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-        
+        # Tenant scoping. This used to be hand-written here and skipped entirely
+        # for superadmin, so search answered across every organisation while one
+        # was selected -- and it read raw entitlement rather than the validated
+        # navbar selection, so results disagreed with the Document Library for
+        # the same context. Both now resolve through the same central scope.
+        #
+        # superadmin is not exempt: platform-wide entitlement still narrows to
+        # whatever the navbar currently has selected.
+        effective_scope = EffectiveScope.resolve(
+            current_user,
+            organization_id=requested_org,
+            project_id=requested_project,
+        )
+        if effective_scope.is_denied:
+            return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
+        match_conditions.update(effective_scope.mongo_filter())
+
+
         # Text search. Uses the wildcard text index created once at startup in
         # core/database.py (ensure_indexes); per-request index creation was removed
         # (M5) — it added latency and silently failed against the existing index.
@@ -103,32 +102,36 @@ async def search_documents(
             file_type_regex = "|".join([rf"\.{re.escape(ft)}$" for ft in file_types])
             match_conditions["filename"] = {"$regex": file_type_regex, "$options": "i"}
         
+        empty_page = {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
+
+        def _narrow(requested_values, permitted_values):
+            """Intersect an explicit filter with the effective scope.
+
+            The filter may only narrow. It used to *overwrite* the scope
+            predicate, and only checked entitlement for non-superadmins, so an
+            explicit organisation could pull results from outside the current
+            working context. Anything not permitted is dropped; if that leaves
+            nothing, the answer is an empty page, never the wider scope.
+            """
+            requested = {str(v) for v in requested_values if v is not None}
+            if permitted_values is not UNBOUNDED:
+                requested &= {str(v) for v in permitted_values}
+            return sorted(requested)
+
         # Organization filter
         if organizations:
-            try:
-                org_ids = [ObjectId(org_id) if ObjectId.is_valid(org_id) else org_id for org_id in organizations]
-            except Exception:
-                org_ids = organizations
-            if "superadmin" not in roles:
-                requested = {str(item) for item in organizations}
-                permitted = requested & allowed_orgs
-                if not permitted:
-                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-                org_ids = sorted(permitted)
-            match_conditions["organization_id"] = {"$in": org_ids}
-        
+            org_ids = _narrow(organizations, effective_scope.effective_org_ids())
+            if not org_ids:
+                return empty_page
+            match_conditions["organization_id"] = {
+                "$in": [ObjectId(o) if ObjectId.is_valid(o) else o for o in org_ids]
+            }
+
         # Project filter
         if projects:
-            try:
-                project_ids = [ObjectId(proj_id) if ObjectId.is_valid(proj_id) else proj_id for proj_id in projects]
-            except Exception:
-                project_ids = projects
-            if "superadmin" not in roles:
-                requested = {str(item) for item in projects}
-                permitted = requested & allowed_projects
-                if not permitted:
-                    return {"results": [], "total": 0, "page": page, "limit": limit, "time_ms": 0}
-                project_ids = sorted(permitted)
+            project_ids = _narrow(projects, effective_scope.effective_project_ids())
+            if not project_ids:
+                return empty_page
             match_conditions["project_id"] = {"$in": project_ids}
         
         # Category filter
@@ -274,21 +277,10 @@ async def get_search_suggestions(
         match_condition: Dict[str, Any] = {
             "name": {"$regex": re.escape(q), "$options": "i"}
         }
-        roles = set(current_user.roles or [])
-        if "superadmin" not in roles:
-            scope = ScopeService()
-            allowed_orgs = await scope.client_organization_ids(current_user)
-            allowed_projects = await scope.client_project_ids(current_user)
-            if "orgadmin" in roles or "orguser" in roles:
-                if not allowed_orgs:
-                    return {"suggestions": []}
-                match_condition["organization_id"] = {"$in": sorted(allowed_orgs)}
-            elif "projectadmin" in roles or "projectuser" in roles:
-                if not allowed_projects:
-                    return {"suggestions": []}
-                match_condition["project_id"] = {"$in": sorted(allowed_projects)}
-            else:
-                return {"suggestions": []}
+        suggestion_scope = EffectiveScope.resolve(current_user)
+        if suggestion_scope.is_denied:
+            return {"suggestions": []}
+        match_condition.update(suggestion_scope.mongo_filter())
 
         # Get suggestions from document names
         name_pipeline = [

@@ -210,6 +210,21 @@ class TenantContextResolver:
             effective_org = own_org
         elif tier == "global":
             if not effective_org:
+                if requested_project:
+                    # "All Organisations + a specific Project" is not a valid
+                    # working context: a project is only meaningful under a
+                    # known parent organisation, and accepting it would let a
+                    # bare X-Proj-Id pick a project out of any organisation.
+                    # The UI disables the project selector while All
+                    # Organisations is active; this is the server-side half,
+                    # and it fails closed rather than silently widening to
+                    # "All Projects".
+                    raise self._forbid(
+                        user,
+                        "Select an organisation before selecting a project.",
+                        requested_org,
+                        requested_project,
+                    )
                 if require_organization:
                     raise self._require_selection("Please select an Organisation and Project to continue.")
                 return TenantContext(None, None, tier, True, True)

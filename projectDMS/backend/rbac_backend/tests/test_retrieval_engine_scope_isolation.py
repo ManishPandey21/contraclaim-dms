@@ -234,17 +234,41 @@ async def test_blank_scope_is_rejected_even_for_superadmin():
 
 
 @pytest.mark.asyncio
-async def test_superadmin_allowed_any_scope():
+async def test_superadmin_with_nothing_selected_may_retrieve_any_scope():
+    """Platform-wide entitlement, no working context -- any scope is reachable."""
     svc = _RecordingRetrieval()
     resp = await search(
         _search_request("org-ZZZ", "proj-ZZZ"),
         retrieval_service=svc,
-        current_user=_user(org="org-A", roles=("superadmin",)),
+        current_user=_user(org=None, roles=("superadmin",)),
         policy=_policy(),
     )
 
     assert svc.search_called is True
     assert resp.strategy_used is not None
+
+
+@pytest.mark.asyncio
+async def test_superadmin_cannot_retrieve_outside_the_selected_organisation():
+    """`superadmin` is not a scoping exemption.
+
+    A superadmin working in Organisation A must not be able to ground a RAG
+    answer in Organisation ZZZ by naming it in the request body. Entitlement is
+    the outer boundary; the navbar selection is the working context, and
+    retrieval has to agree with what every other module is showing -- otherwise
+    the model cites documents the user cannot see anywhere else.
+    """
+    svc = _RecordingRetrieval()
+    with pytest.raises(HTTPException) as exc:
+        await search(
+            _search_request("org-ZZZ", "proj-ZZZ"),
+            retrieval_service=svc,
+            current_user=_user(org="org-A", roles=("superadmin",)),
+            policy=_policy(),
+        )
+
+    assert exc.value.status_code == 403
+    assert svc.search_called is False, "retrieval must not run before the scope check"
 
 
 @pytest.mark.asyncio

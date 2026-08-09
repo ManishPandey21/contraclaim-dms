@@ -73,24 +73,34 @@ def _client(user, holder):
     return TestClient(app)
 
 
-def test_suggestions_scoped_to_caller_org(monkeypatch):
-    # An org user's name suggestions must be filtered to their allowed orgs.
-    async def _orgs(_self, _user):
-        return {"org-A"}
+def _orgs_in(predicate):
+    """Normalise an organisation predicate to a set of ids.
 
-    async def _projects(_self, _user):
-        return set()
+    A scalar and a one-element ``$in`` select identically; the security
+    property is *which organisations*, not how the predicate is spelled.
+    """
+    if predicate is None:
+        return None
+    if isinstance(predicate, dict):
+        return {str(v) for v in predicate.get("$in", [])}
+    return {str(predicate)}
 
-    monkeypatch.setattr(scope_module.ScopeService, "client_organization_ids", _orgs)
-    monkeypatch.setattr(scope_module.ScopeService, "client_project_ids", _projects)
 
+def test_suggestions_scoped_to_caller_org():
+    """An org user's name suggestions must be filtered to their organisation.
+
+    Suggestions are drawn from document names, so an unscoped pipeline leaks
+    other tenants' document titles. Scope now comes from EffectiveScope rather
+    than a hand-rolled ScopeService lookup here, so there is nothing to stub --
+    the caller's own entitlement and selection decide it.
+    """
     holder: dict = {}
     client = _client(_user(roles=("orguser",)), holder)
     try:
         resp = client.get("/api/search/suggestions", params={"q": "alpha"})
         assert resp.status_code == 200, resp.text
         match = holder["pipeline"][0]["$match"]
-        assert match.get("organization_id") == {"$in": ["org-A"]}
+        assert _orgs_in(match.get("organization_id")) == {"org-A"}
     finally:
         app.dependency_overrides.clear()
 

@@ -10,6 +10,7 @@ from ..agents.service import DraftingAgentService
 from ..agents.models import AgentRequest, AgentResponse
 from ..core.config import settings
 from ..core.database import get_db
+from ..core.effective_scope import EffectiveScope
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
 from ..services.policy_service import PolicyService
@@ -119,6 +120,23 @@ async def _authorize_scope(
         organization_id=org,
         project_id=project,
     )
+
+    # The claimed scope arrives in the request body, so entitlement alone is not
+    # enough: it must also fall inside the *working* scope the navbar has
+    # selected. Without this a caller working in Organisation A could ask for
+    # Organisation B and the model would be grounded in documents the rest of
+    # the application is currently hiding -- retrieval would disagree with the
+    # Document Library for the same context, and evidence and citations would
+    # come from outside it.
+    #
+    # Entitlement is still the outer boundary (PolicyService above); this is the
+    # narrowing half.
+    scope = EffectiveScope.resolve(current_user)
+    if not scope.permits_within_selection(organization_id=org, project_id=project):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Requested scope is outside the active organisation/project selection",
+        )
 
 
 @router.post("/ingestion/jobs", response_model=IngestionJob)
