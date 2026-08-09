@@ -222,33 +222,74 @@ def test_a_query_parameter_cannot_widen_beyond_entitlement():
     assert visible(build_scope_query(user, organization_id="org-B")) == set()
 
 
-def test_an_explicit_parameter_still_cannot_exceed_entitlement():
-    """A superuser entitled to {A,B} may name either, and nothing outside.
+def test_an_explicit_organisation_cannot_switch_the_working_context():
+    """Entitled to {A,B}, working in A, filtering for B: nothing.
 
-    Documents the current contract precisely, including where it stops short of
-    the specification.
+        Final Data Scope = EffectiveScope ∩ Explicit Resource Filter
 
-    An explicit ``organization_id`` *overrides* the navbar selection rather than
-    intersecting with it. That is not a privilege escalation -- the parameter is
-    still capped by entitlement, which is what section 9 requires ("may narrow,
-    never expand") and what the row below proves. But it does mean a caller
-    working in Organisation A can ask an endpoint for Organisation B and be
-    served, which sits awkwardly beside the section 12 promise that every module
-    reflects the same selection.
-
-    Left as precedence deliberately: the 144-case differential that made the
-    EffectiveScope migration safe locked in this behaviour, several routers pass
-    the parameter through from a query string that normally *equals* the header,
-    and changing it is a product decision about whether a conflicting parameter
-    is a deliberate narrowing or a stale request. Raised for adjudication rather
-    than changed silently.
+    Organisation B is inside the caller's entitlement, so this is not privilege
+    escalation -- it is the working context refusing to be replaced. Serving B
+    would let one request disagree with every other module on screen while the
+    navbar still said A.
     """
     user = actor(["superuser"], org="org-A", orgs=["org-A", "org-B"])
+    assert visible(build_scope_query(user, organization_id="org-B")) == set()
 
-    # Within entitlement: served, even though it overrides the selection.
+
+def test_an_explicit_organisation_may_narrow_a_wider_context():
+    """The filter is still a filter: it narrows when it lies inside the scope."""
+    user = actor(["superuser"], orgs=["org-A", "org-B"])  # nothing selected
+    assert visible(build_scope_query(user)) == ALL_IDS
     assert visible(build_scope_query(user, organization_id="org-B")) == ORG_B_IDS
-    # Outside entitlement: refused. This is the security boundary.
-    assert visible(build_scope_query(user, organization_id="org-ZZZ")) == set()
+
+
+def test_an_explicit_project_cannot_escape_the_selected_project():
+    """Working in Project A1, filtering for A2: nothing, even when assigned both."""
+    user = actor(
+        ["projectuser"], org="org-A", project="proj-A1", projects=["proj-A1", "proj-A2"]
+    )
+    assert visible(build_scope_query(user, project_id="proj-A2")) == set()
+    # The same filter naming the project actually being worked in is fine.
+    assert visible(build_scope_query(user, project_id="proj-A1")) == PROJ_A1_IDS
+
+
+def test_an_explicit_project_may_narrow_within_all_projects():
+    user = actor(["projectuser"], org="org-A", projects=["proj-A1", "proj-A2"])
+    assert visible(build_scope_query(user)) == ORG_A_IDS
+    assert visible(build_scope_query(user, project_id="proj-A2")) == PROJ_A2_IDS
+
+
+def test_an_explicit_filter_still_cannot_exceed_entitlement():
+    """The outer boundary is unchanged: unreachable ids stay unreachable."""
+    for user in (
+        actor(["superuser"], orgs=["org-A", "org-B"]),
+        actor(["superadmin"]),
+        actor(["orgadmin"], org="org-A", orgs=["org-A"]),
+    ):
+        assert visible(build_scope_query(user, organization_id="org-ZZZ")) == set()
+
+
+@pytest.mark.parametrize(
+    "carrier,filters",
+    [
+        ("query parameter / route parameter", {"organization_id": "org-B"}),
+        ("request body / export filter", {"project_id": "proj-B1"}),
+        ("both at once", {"organization_id": "org-B", "project_id": "proj-B1"}),
+    ],
+)
+def test_the_document_path_refuses_a_filter_outside_the_working_context(carrier, filters):
+    """Whatever carries the filter, it lands in the same place.
+
+    Query strings, route parameters, request bodies and export filters all
+    arrive as ``filters`` on the builder, so one refusal covers every carrier --
+    which is the point of resolving scope in one place.
+    """
+    user = actor(["superadmin"], org="org-A")
+    try:
+        query = document_query(user, filters)
+    except Exception:
+        return  # refused outright, which is the stronger answer
+    assert visible(query) == set(), carrier
 
 
 def test_a_manipulated_project_cannot_reach_another_organisation():

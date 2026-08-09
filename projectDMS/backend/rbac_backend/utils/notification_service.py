@@ -10,6 +10,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from bson import ObjectId
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect, status
+
+from ..core.effective_scope import EffectiveScope
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..models.notification import (
@@ -301,6 +303,7 @@ class NotificationService:
         search: Optional[str] = None,
         limit: int = 50,
         skip: int = 0,
+        scope: Optional["EffectiveScope"] = None,
     ) -> NotificationListResponse:
         await self._ensure_indexes()
 
@@ -331,6 +334,19 @@ class NotificationService:
                     {"data.filename": {"$regex": pattern, "$options": "i"}},
                     {"resource_id": {"$regex": pattern, "$options": "i"}},
                 ]
+
+        if scope is not None:
+            # Recipient membership says a notification was addressed to you;
+            # it says nothing about whether it belongs to the organisation and
+            # project you are currently working in. Ownership semantics live on
+            # EffectiveScope so notifications narrow with the navbar without a
+            # second tenant-scope implementation growing here.
+            #
+            # Composed with $and because the search filter above may already
+            # occupy $or, and merging the two keys would silently drop one.
+            ownership = scope.ownership_filter()
+            if ownership:
+                query = {"$and": [query, ownership]}
 
         cursor = (
             self.db.notifications.find(query)

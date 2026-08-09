@@ -83,8 +83,13 @@ class EffectiveScope:
     # None => unbounded at this level; empty frozenset => no reach at all.
     authorized_org_ids: Optional[FrozenSet[str]]
     authorized_project_ids: Optional[FrozenSet[str]]
+    # The navbar working context.
     selected_org_id: Optional[str]
     selected_project_id: Optional[str]
+    # An explicit route/query/body filter. A *record-selection criterion within*
+    # the working context, never a way to switch to another one.
+    requested_org_id: Optional[str] = None
+    requested_project_id: Optional[str] = None
 
     # -- construction ---------------------------------------------------
 
@@ -96,12 +101,18 @@ class EffectiveScope:
         organization_id: Optional[str] = None,
         project_id: Optional[str] = None,
     ) -> "EffectiveScope":
-        """Intersect the caller's entitlement with the active selection.
+        """Resolve the working scope, then narrow it by any explicit filter.
 
-        ``organization_id``/``project_id`` are an explicit selection from the
-        call site. When omitted, the selection already validated onto the actor
-        by the request tenant context is used, so a route that simply passes the
-        actor still honours the navbar.
+            Final Data Scope = EffectiveScope ∩ Explicit Resource Filter
+            EffectiveScope   = RBAC Entitlement ∩ Validated Navbar Selection
+
+        ``organization_id``/``project_id`` are an explicit filter from the call
+        site -- a query string, route parameter, request body or export filter.
+        They may *narrow* the working context and nothing more. A filter naming
+        an organisation the caller is entitled to but is not currently working
+        in resolves to nothing rather than switching context to it, because
+        otherwise a single request could disagree with every other module on
+        screen.
         """
         roles = role_names(current_user)
         tier = role_tier(roles)
@@ -109,9 +120,9 @@ class EffectiveScope:
         actor_org = getattr(current_user, "organization_id", None)
         actor_project = getattr(current_user, "project_id", None)
 
-        selected_project = str(project_id) if project_id else (
-            str(actor_project) if actor_project else None
-        )
+        # The navbar selection alone; the explicit filter is kept separate so
+        # it can be intersected rather than substituted.
+        selected_project = str(actor_project) if actor_project else None
 
         assigned_orgs = _clean(getattr(current_user, "organizations", None))
         assigned_projects = _clean(getattr(current_user, "projects", None))
@@ -120,9 +131,7 @@ class EffectiveScope:
             # For a global role the actor's organization_id is the *selection*
             # (get_current_user clears the home organisation for these roles),
             # so it is read as one rather than as an entitlement bound.
-            selected_org = str(organization_id) if organization_id else (
-                str(actor_org) if actor_org else None
-            )
+            selected_org = str(actor_org) if actor_org else None
             if "superadmin" in roles:
                 authorized_orgs: Optional[FrozenSet[str]] = UNBOUNDED
                 authorized_projects: Optional[FrozenSet[str]] = UNBOUNDED
@@ -144,7 +153,9 @@ class EffectiveScope:
             # organisation and is an entitlement bound, not a selection. The
             # server pins them to it.
             own = _clean([actor_org]) if actor_org else frozenset()
-            selected_org = str(organization_id) if organization_id else None
+            # A tenant-bound account's organisation is an entitlement bound, not
+            # a selection; the server pins them to it.
+            selected_org = None
             if tier == "project":
                 # A project-tier account is bounded by its assignments. When the
                 # account carries no organisation, the project assignments alone
@@ -165,6 +176,8 @@ class EffectiveScope:
             authorized_project_ids=authorized_projects,
             selected_org_id=selected_org,
             selected_project_id=selected_project,
+            requested_org_id=str(organization_id) if organization_id else None,
+            requested_project_id=str(project_id) if project_id else None,
         )
 
     # -- shape ----------------------------------------------------------
@@ -215,6 +228,14 @@ class EffectiveScope:
         if self.selected_project_id and self.authorized_project_ids is not UNBOUNDED:
             if self.selected_project_id not in (self.authorized_project_ids or frozenset()):
                 return True
+        # An explicit filter that intersects the working context to nothing.
+        # Covers both "not yours" and "yours, but not what you are working in".
+        orgs = self.effective_org_ids()
+        if orgs is not UNBOUNDED and not orgs:
+            return True
+        projects = self.effective_project_ids()
+        if self.requested_project_id and projects is not UNBOUNDED and not projects:
+            return True
         return False
 
     # -- entitlement questions -------------------------------------------
@@ -258,16 +279,36 @@ class EffectiveScope:
 
     # -- the intersection -----------------------------------------------
 
-    def effective_org_ids(self) -> Optional[FrozenSet[str]]:
-        """Entitlement ∩ selection. None means unbounded."""
+    def working_org_ids(self) -> Optional[FrozenSet[str]]:
+        """Entitlement ∩ navbar selection, before any explicit filter."""
         if self.selected_org_id:
             return frozenset({self.selected_org_id})
         return self.authorized_org_ids
 
-    def effective_project_ids(self) -> Optional[FrozenSet[str]]:
+    def working_project_ids(self) -> Optional[FrozenSet[str]]:
         if self.selected_project_id:
             return frozenset({self.selected_project_id})
         return self.authorized_project_ids
+
+    def effective_org_ids(self) -> Optional[FrozenSet[str]]:
+        """The working scope narrowed by any explicit filter. None = unbounded.
+
+        The filter intersects; it cannot substitute. Naming an organisation
+        outside the working context yields the empty set, which ``is_denied``
+        reports and ``mongo_filter`` renders as a deny-all.
+        """
+        working = self.working_org_ids()
+        if not self.requested_org_id:
+            return working
+        requested = frozenset({self.requested_org_id})
+        return requested if working is UNBOUNDED else (working & requested)
+
+    def effective_project_ids(self) -> Optional[FrozenSet[str]]:
+        working = self.working_project_ids()
+        if not self.requested_project_id:
+            return working
+        requested = frozenset({self.requested_project_id})
+        return requested if working is UNBOUNDED else (working & requested)
 
     # -- consumption ----------------------------------------------------
 
@@ -302,6 +343,60 @@ class EffectiveScope:
             query[target] = {"$in": _values(projects)}
 
         return query
+
+    def ownership_filter(
+        self,
+        org_field: str = "organization_id",
+        project_field: str = "project_id",
+    ) -> Dict[str, Any]:
+        """Filter for collections whose records are owned at differing levels.
+
+        ``mongo_filter`` assumes every record is project-owned, which is wrong
+        for things like notifications: a subscription-expiry notice belongs to
+        an organisation and to no project, and narrowing to a project would hide
+        exactly the messages that matter most.
+
+        Three ownership levels, each judged on its own terms:
+
+        * **platform** -- no organisation, no project. Belongs to no tenant, so
+          the tenant scope does not exclude it.
+        * **organisation** -- an organisation, no project. Visible whenever that
+          organisation is in scope, *including* while a specific project is
+          selected, because it applies to the whole organisation.
+        * **project** -- both. Visible only when the project is in scope.
+
+        So Organisation A / Project A1 shows organisation-A-wide notices and
+        project-A1 notices, and never project A2 or anything under B.
+        """
+        if self.is_denied:
+            return {"_id": {"$in": []}}
+
+        orgs = self.effective_org_ids()
+        projects = self.effective_project_ids()
+        if orgs is UNBOUNDED and projects is UNBOUNDED:
+            return {}  # platform-wide: every record is permitted
+
+        def _absent(field: str) -> Dict[str, Any]:
+            # Stored either as null or omitted entirely, depending on writer.
+            return {"$or": [{field: None}, {field: {"$exists": False}}]}
+
+        org_predicate: Dict[str, Any] = (
+            {"$exists": True} if orgs is UNBOUNDED else {"$in": sorted(orgs)}
+        )
+        project_predicate: Dict[str, Any] = (
+            {"$exists": True} if projects is UNBOUNDED else {"$in": sorted(projects or [])}
+        )
+
+        return {
+            "$or": [
+                # platform-level
+                {"$and": [_absent(org_field), _absent(project_field)]},
+                # organisation-level: survives a project selection
+                {"$and": [{org_field: org_predicate}, _absent(project_field)]},
+                # project-level
+                {"$and": [{org_field: org_predicate}, {project_field: project_predicate}]},
+            ]
+        }
 
     def describe(self) -> Dict[str, Any]:
         """Audit/debug view. Safe to log -- ids only, no record content."""

@@ -558,18 +558,26 @@ def build_scope_query(
 
     if "superadmin" in roles:
         q: Dict[str, Any] = {}
-        if scope.selected_org_id:
-            q[org_field] = str(scope.selected_org_id)
-        if scope.selected_project_id:
-            q[target_field] = str(scope.selected_project_id)
+        if effective_orgs is not UNBOUNDED:
+            q[org_field] = (
+                str(next(iter(effective_orgs)))
+                if len(effective_orgs) == 1
+                else {"$in": sorted(effective_orgs)}
+            )
+        if effective_projects is not UNBOUNDED and effective_projects:
+            q[target_field] = (
+                str(next(iter(effective_projects)))
+                if len(effective_projects) == 1
+                else {"$in": sorted(effective_projects)}
+            )
         return q
 
     if "superuser" in roles:
         q = {}
         if effective_orgs is not UNBOUNDED:
             q[org_field] = {"$in": _expand_object_ids(sorted(effective_orgs))}
-        if scope.selected_project_id:
-            q[target_field] = {"$in": _expand_object_ids([scope.selected_project_id])}
+        if effective_projects is not UNBOUNDED and effective_projects:
+            q[target_field] = {"$in": _expand_object_ids(sorted(effective_projects))}
         return q
 
     # Organisation and project tiers own exactly one organisation; experts are

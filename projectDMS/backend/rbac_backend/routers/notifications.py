@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..core.database import get_db
+from ..core.effective_scope import EffectiveScope
 from ..core.security import CurrentUser, get_current_user
 from ..dependencies import get_email_service, get_notification_service
 from ..models.notification import (
@@ -67,6 +68,10 @@ async def list_notifications(
         search=search,
         limit=limit,
         skip=skip,
+        # Recipient membership decides what was addressed to this user; the
+        # effective scope decides which of it belongs to the organisation and
+        # project they are currently working in.
+        scope=EffectiveScope.resolve(current_user),
     )
 
 
