@@ -73,6 +73,7 @@ async def get_permissions(
     search: Optional[str] = Query(None),
     permission_service: PermissionService = Depends(get_permission_service),
     current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy_service),
     _: None = Depends(require_permission("permissions:read")),
 ):
     """Get permissions with basic filtering and pagination."""

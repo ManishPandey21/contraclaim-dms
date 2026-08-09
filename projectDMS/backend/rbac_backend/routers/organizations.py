@@ -425,15 +425,15 @@ async def get_organization_controller() -> OrganizationController:
         window_seconds=60,
         scope="organizations",
     )
+    audit_logger = AuditLogger()
+
+    return OrganizationController(
+        org_service, auth_service, rate_limiter, audit_logger
+    )
 
 
 def get_policy_service() -> PolicyService:
     return PolicyService()
-    audit_logger = AuditLogger()
-    
-    return OrganizationController(
-        org_service, auth_service, rate_limiter, audit_logger
-    )
 
 
 # API Endpoints

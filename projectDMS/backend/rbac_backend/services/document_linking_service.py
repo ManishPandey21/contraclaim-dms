@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 from fastapi import HTTPException
