@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { PERMISSION_CONTRACT_VERSION } from "@/config/rolePermissions";
 import {
@@ -19,9 +19,15 @@ export function useEntitlements(enabled = true): EntitlementState {
   const [entitlements, setEntitlements] = useState<CurrentEntitlements | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const hasResolvedRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    // Only the initial entitlement lookup blocks the protected application
+    // shell. Tenant/auth events are background refreshes: making those set
+    // `loading` to true causes ProtectedRoute to unmount MainLayout, which
+    // recreates TenantProvider and emits another tenant-context-changed event.
+    // That feedback loop repeatedly remounts every protected page.
+    if (!hasResolvedRef.current) setLoading(true);
     setError(null);
     try {
       const next = await getCurrentEntitlements();
@@ -42,12 +48,14 @@ export function useEntitlements(enabled = true): EntitlementState {
             : requestError?.message || "entitlements_unavailable",
       );
     } finally {
+      hasResolvedRef.current = true;
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     if (!enabled) {
+      hasResolvedRef.current = false;
       setEntitlements(null);
       setError(null);
       setLoading(false);

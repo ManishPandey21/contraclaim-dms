@@ -88,6 +88,17 @@ export interface CurrentEntitlements {
   unavailable_reason?: string | null;
 }
 
+let currentEntitlementsInFlight:
+  | { scopeKey: string; request: Promise<CurrentEntitlements> }
+  | null = null;
+
+function currentEntitlementScopeKey(): string {
+  if (typeof window === "undefined") return ":";
+  return `${window.localStorage.getItem("org_id") || ""}:${
+    window.localStorage.getItem("proj_id") || ""
+  }`;
+}
+
 export interface PlanSettingsResponse {
   organizations: PlanSettingsOrganization[];
   projects: PlanSettingsProject[];
@@ -168,10 +179,21 @@ export async function getEffectivePlanServices(): Promise<
 }
 
 export async function getCurrentEntitlements(): Promise<CurrentEntitlements> {
-  const { data } = await api.get<CurrentEntitlements>(
-    "/rbac-monetization/entitlements/me",
-  );
-  return data;
+  const scopeKey = currentEntitlementScopeKey();
+  if (currentEntitlementsInFlight?.scopeKey === scopeKey) {
+    return currentEntitlementsInFlight.request;
+  }
+
+  const request = api
+    .get<CurrentEntitlements>("/rbac-monetization/entitlements/me")
+    .then(({ data }) => data)
+    .finally(() => {
+      if (currentEntitlementsInFlight?.request === request) {
+        currentEntitlementsInFlight = null;
+      }
+    });
+  currentEntitlementsInFlight = { scopeKey, request };
+  return request;
 }
 
 // ---------------------------------------------------------------------------

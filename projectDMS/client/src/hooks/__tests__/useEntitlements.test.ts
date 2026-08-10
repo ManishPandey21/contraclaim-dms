@@ -47,6 +47,30 @@ describe("useEntitlements", () => {
     await waitFor(() => expect(mocks.getCurrentEntitlements).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps the protected shell mounted during a tenant entitlement refresh", async () => {
+    let resolveRefresh!: (value: typeof entitled) => void;
+    const pendingRefresh = new Promise<typeof entitled>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    mocks.getCurrentEntitlements
+      .mockResolvedValueOnce(entitled)
+      .mockReturnValueOnce(pendingRefresh);
+
+    const { result } = renderHook(() => useEntitlements());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    act(() => window.dispatchEvent(new Event("tenant-context-changed")));
+    await waitFor(() => expect(mocks.getCurrentEntitlements).toHaveBeenCalledTimes(2));
+
+    // A background scope refresh must retain the last verified snapshot and
+    // must not make ProtectedRoute replace MainLayout with its loading shell.
+    expect(result.current.loading).toBe(false);
+    expect(result.current.entitlements).toEqual(entitled);
+
+    await act(async () => resolveRefresh(entitled));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+  });
+
   it("fails closed when generated frontend and backend contracts differ", async () => {
     mocks.getCurrentEntitlements.mockResolvedValue({
       ...entitled,
