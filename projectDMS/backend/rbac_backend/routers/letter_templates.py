@@ -18,7 +18,7 @@ from ..models.letter_template import (
 from ..services.authorization_service import AuthorizationService
 from ..services.letter_template_service import LetterTemplateService
 from ..services.policy_service import PolicyService
-from ..utils.error_handler import AuthorizationError, TemplateError, handle_exceptions
+from ..utils.error_handler import BaseDomainError, AuthorizationError, TemplateError, handle_exceptions
 from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,7 @@ class LetterTemplateController:
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"],
             )
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Failed to get templates: %s", exc)
@@ -85,7 +85,7 @@ class LetterTemplateController:
                 current_user, template, "read"
             )
             return template
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -105,7 +105,7 @@ class LetterTemplateController:
                 current_user, "letter_templates:create"
             )
             return await self.template_service.create_template(data, current_user)
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -136,7 +136,7 @@ class LetterTemplateController:
             return await self.template_service.update_template(
                 template_id, update_data, current_user
             )
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except TemplateError:
             raise
@@ -163,7 +163,7 @@ class LetterTemplateController:
             )
             await self.template_service.delete_template(template_id, current_user)
             return {"message": "Template deleted successfully"}
-        except (AuthorizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except TemplateError:
             raise

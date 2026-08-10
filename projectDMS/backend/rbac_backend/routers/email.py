@@ -31,7 +31,7 @@ from ..models.email_models import (
     EmailRequest, EmailResponse, EmailTemplate, EmailAttachment
 )
 from ..utils.validation import validate_input, sanitize_html, validate_email
-from ..utils.error_handler import handle_exceptions, EmailError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, EmailError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -118,7 +118,7 @@ class EmailController:
                 status="queued"
             )
             
-        except (EmailError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email sending failed: {str(e)}")
@@ -177,7 +177,7 @@ class EmailController:
                 status="queued"
             )
             
-        except (EmailError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Notification email failed: {str(e)}")

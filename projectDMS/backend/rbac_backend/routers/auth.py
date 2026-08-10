@@ -22,7 +22,7 @@ from ..models.user_models import (
     LoginRequest, LoginResponse, TokenResponse, RefreshTokenRequest, UserResponse
 )
 from ..utils.validation import validate_email, validate_input
-from ..utils.error_handler import handle_exceptions, AuthenticationError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, AuthenticationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 from ..services.step_up_service import StepUpService, STEP_UP_TTL_MINUTES
@@ -228,7 +228,7 @@ class AuthController:
                 user=user_info
             )
             
-        except (AuthenticationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Login failed: {str(e)}")
@@ -302,7 +302,7 @@ class AuthController:
                 expires_in=3600
             )
             
-        except (AuthenticationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Token refresh failed: {str(e)}")
@@ -357,7 +357,7 @@ class AuthController:
 
             return await self._build_user_response(user)
             
-        except (AuthenticationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Get user info failed: {str(e)}")

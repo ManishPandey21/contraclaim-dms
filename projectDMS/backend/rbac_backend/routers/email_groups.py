@@ -16,7 +16,7 @@ from ..models.email_group import (
     EmailGroup, EmailGroupCreate, EmailGroupUpdate, EmailGroupListResponse
 )
 from ..utils.validation import validate_email, validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, EmailGroupError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, EmailGroupError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -167,7 +167,7 @@ class EmailGroupController:
             
             return group
             
-        except (EmailGroupError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Email group creation failed: {str(e)}")
@@ -210,7 +210,7 @@ class EmailGroupController:
             
             return group
             
-        except (EmailGroupError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get email group: {str(e)}")
@@ -280,7 +280,7 @@ class EmailGroupController:
             
             return updated_group
             
-        except (EmailGroupError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update email group: {str(e)}")
@@ -331,7 +331,7 @@ class EmailGroupController:
             
             return {"message": "Email group deleted successfully"}
             
-        except (EmailGroupError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete email group: {str(e)}")
@@ -375,7 +375,7 @@ class EmailGroupController:
             # Return deduplicated emails
             return await self.email_group_service.get_unique_emails(group.emails)
             
-        except (EmailGroupError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to resolve group emails: {str(e)}")

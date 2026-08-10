@@ -16,7 +16,7 @@ from ..services.step_up_service import require_step_up
 from ..models.performance_models import (
     HealthStatus, PerformanceMetrics, EndpointStats, JobStats
 )
-from ..utils.error_handler import handle_exceptions, PerformanceError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, PerformanceError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 from ..utils.cache_service import cache_with_ttl
@@ -93,7 +93,7 @@ class PerformanceController:
             
             return PerformanceMetrics(**metrics)
             
-        except (PerformanceError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting performance metrics: {str(e)}")
@@ -264,7 +264,7 @@ class PerformanceController:
             
             return {"message": f"Job {job_id} cancelled successfully"}
             
-        except (PerformanceError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error cancelling job: {str(e)}")

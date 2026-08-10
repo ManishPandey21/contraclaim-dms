@@ -18,7 +18,7 @@ from ..models.concern import (
     Concern, ConcernCreate, ConcernUpdate, ConcernListResponse
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, ConcernError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, ConcernError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -87,7 +87,7 @@ class ConcernController:
             
             return concern
             
-        except (ConcernError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Concern creation failed: {str(e)}")
@@ -163,7 +163,7 @@ class ConcernController:
             
             return concern
             
-        except (ConcernError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get concern {concern_id}: {str(e)}")
@@ -215,7 +215,7 @@ class ConcernController:
             
             return updated_concern
             
-        except (ConcernError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update concern {concern_id}: {str(e)}")
@@ -261,7 +261,7 @@ class ConcernController:
             
             return {"message": "Concern deleted successfully"}
             
-        except (ConcernError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete concern {concern_id}: {str(e)}")

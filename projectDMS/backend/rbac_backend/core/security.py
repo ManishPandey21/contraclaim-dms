@@ -157,6 +157,14 @@ async def get_current_user(request: Request, db = Depends(get_db)):
         if cookie_token not in token_candidates:
             token_candidates.append(cookie_token)
 
+    # The credential is resolved inside this loop, but the navbar selection is
+    # applied *after* it. ``TenantContextResolver`` raises 403 ``context_forbidden``
+    # for a scope the caller may not work in, and 400 ``selection_required`` when
+    # the UI must prompt for one. Applying it inside the loop put those raises
+    # under the broad ``except HTTPException`` below, which swallowed them and let
+    # the loop fall through to ``credentials_exception`` -- so an authorisation
+    # refusal reached the browser as a generic 401 and logged the user out.
+    authenticated_user: Optional[CurrentUser] = None
     for token in token_candidates:
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
@@ -241,7 +249,8 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                         account_type=user.get("account_type", "client_user"),
                         disabled=user.get("disabled", False),
                     )
-                    return await _apply_request_tenant_context(resolved_user, request, db)
+                    authenticated_user = resolved_user
+                    break
         except JWTError:
             # Try the next credential source before falling through to dev mode.
             continue
@@ -256,6 +265,11 @@ async def get_current_user(request: Request, db = Depends(get_db)):
         except Exception:
             # Any unexpected token error -> try the next credential source.
             continue
+
+    # Outside the loop on purpose: a tenant-context refusal is an authorisation
+    # outcome, not a credential problem, so it propagates with its own status.
+    if authenticated_user is not None:
+        return await _apply_request_tenant_context(authenticated_user, request, db)
 
     # Fallback: Dev headers (explicitly disabled unless ALLOW_DEV_HEADERS is True)
     if not settings.ALLOW_DEV_HEADERS:

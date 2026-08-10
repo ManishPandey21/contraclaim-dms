@@ -97,7 +97,7 @@ from ..utils.validation import validate_input, sanitize_text
 
 
 
-from ..utils.error_handler import handle_exceptions, LetterError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, LetterError
 
 
 
@@ -426,7 +426,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -590,7 +590,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -738,7 +738,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -862,7 +862,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -986,7 +986,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 
@@ -1150,7 +1150,7 @@ class LetterController:
 
 
 
-        except (LetterError, HTTPException):
+        except (BaseDomainError, HTTPException):
 
 
 

@@ -25,7 +25,7 @@ from ..utils.validation import (
     validate_input, sanitize_text, validate_pan_number, 
     validate_gst_number, validate_email, validate_phone
 )
-from ..utils.error_handler import handle_exceptions, OrganizationError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, OrganizationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -79,7 +79,7 @@ class OrganizationController:
             
             return organization
             
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             # Let 429s from the rate limiter and auth errors keep their real
             # status instead of being masked as a 500 "unavailable".
             raise
@@ -158,7 +158,7 @@ class OrganizationController:
                 limit=pagination["limit"]
             )
 
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             # Rate-limit (429) and authorization errors must surface with
             # their real status; masking them as 500 "temporarily unavailable"
             # made intermittent rate-limit hits look like service outages.
@@ -195,7 +195,7 @@ class OrganizationController:
             
             return organization
             
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get organization {organization_id}: {str(e)}")
@@ -246,7 +246,7 @@ class OrganizationController:
             
             return updated_org
             
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update organization {organization_id}: {str(e)}")
@@ -298,7 +298,7 @@ class OrganizationController:
             
             return {"message": "Organization deleted successfully"}
             
-        except (OrganizationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete organization {organization_id}: {str(e)}")

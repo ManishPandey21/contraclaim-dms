@@ -25,7 +25,7 @@ from ..models.folder_models import (
     UploadFileRequest, UploadFileResponse
 )
 from ..utils.validation import validate_input, sanitize_filename, secure_path_join
-from ..utils.error_handler import handle_exceptions, FolderError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, FolderError
 from ..utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ class FolderController:
                 path=safe_path
             )
             
-        except (FolderError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Folder creation failed: {str(e)}")
@@ -235,7 +235,7 @@ class FolderController:
                 size=len(content)
             )
             
-        except (FolderError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"File upload failed: {str(e)}")
@@ -279,7 +279,7 @@ class FolderController:
                 self.s3_service.cleanup_deleted_items(safe_path)
             )
             
-        except (FolderError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Deletion failed: {str(e)}")

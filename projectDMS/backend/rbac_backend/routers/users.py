@@ -232,7 +232,7 @@ class UserController:
                 user=user_response
             )
             
-        except (AuthenticationError, UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
@@ -290,7 +290,7 @@ class UserController:
             
             return user_response
             
-        except (UserError, AuthenticationError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except (ValueError, ValidationError, UserServiceError) as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
@@ -479,7 +479,7 @@ class UserController:
             
             return user_response
             
-        except (UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
@@ -539,7 +539,7 @@ class UserController:
             
             return {"message": "User deleted successfully"}
             
-        except (UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete user {user_id}: {str(e)}")
