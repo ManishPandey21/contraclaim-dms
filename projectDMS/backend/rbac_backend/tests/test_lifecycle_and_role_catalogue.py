@@ -114,11 +114,47 @@ def test_superuser_can_actually_use_the_product():
         assert required in perms, f"superuser cannot {required}"
 
 
-def test_superuser_is_least_privilege_relative_to_org_admin():
-    """Its multi-org reach comes from EffectiveScope, not from extra permissions."""
+def test_superuser_has_the_same_capabilities_as_super_admin():
+    """Capability and tenancy are independent axes for this role.
+
+    Super User does everything Super Admin can do, but only inside the
+    organisations assigned to the account -- that bound is enforced by
+    EffectiveScope, not by withholding permissions.
+    """
     su = next(r for r in DEFAULT_ROLES if r["_id"] == "superuser")
-    oa = next(r for r in DEFAULT_ROLES if r["_id"] == "orgadmin")
-    assert set(su["permissions"]) == set(oa["permissions"])
+    sa = next(r for r in DEFAULT_ROLES if r["_id"] == "superadmin")
+    assert set(su["permissions"]) == set(sa["permissions"])
+
+
+def test_superuser_capabilities_do_not_include_a_wildcard():
+    """A concrete list, never ``*``.
+
+    ``permission_service`` short-circuits to ``["*"]`` on the *role name*
+    superadmin. Super User must not acquire that blanket grant through its
+    permission list, or the tenancy bound would be the only thing left holding.
+    """
+    su = next(r for r in DEFAULT_ROLES if r["_id"] == "superuser")
+    assert "*" not in su["permissions"]
+
+
+def test_superuser_remains_tenancy_bounded_not_platform_wide():
+    """The capability change must not turn it into a second superadmin."""
+    from rbac_backend.core.effective_scope import EffectiveScope, UNBOUNDED
+
+    class _Actor:
+        id = "u1"
+        roles = ["superuser"]
+        organization_id = None
+        project_id = None
+        organizations = ["org-a"]
+        projects = []
+
+    scope = EffectiveScope.resolve(_Actor())
+    assert scope.authorized_org_ids is not UNBOUNDED, (
+        "a Super User is bounded by its assigned organisations; only superadmin "
+        "is unbounded"
+    )
+    assert scope.authorized_org_ids == frozenset({"org-a"})
 
 
 @pytest.mark.parametrize(

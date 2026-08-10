@@ -427,14 +427,24 @@ _merge_role_permissions(
 
 
 def _derive_superuser_role() -> dict:
-    """Build the Super User role from the fully-merged Organization Admin set.
+    """Build the Super User role with the same capabilities as Super Admin.
 
-    ``superuser`` is a *global-tier* role in ``core.effective_scope``: its reach
-    spans the organisations assigned to the account, and that reach is enforced
-    by ``EffectiveScope``, not by holding extra permissions. So the capability
-    set is Organization Admin's -- least privilege -- and only the tenancy tier
-    differs. Deriving it rather than copying keeps the two in step: a permission
-    added to orgadmin later is inherited instead of silently missed.
+    ``superuser`` is a *global-tier* role in ``core.effective_scope``, but the
+    two axes are independent: this sets the **capability** set equal to Super
+    Admin's, while the **tenancy** reach stays bounded to the organisations
+    assigned to the account and is enforced by ``EffectiveScope``. A Super User
+    can therefore do everything a Super Admin can, inside its own organisations
+    only.
+
+    Nothing usable is lost by taking Super Admin's set rather than Organization
+    Admin's: the three permissions unique to orgadmin
+    (``organizations:create/update/delete``) are gated in
+    ``authorization_service.check_organization_access`` on the *role names*
+    ``superadmin``/``orgadmin``, which a Super User does not hold, so they were
+    unreachable for this role either way.
+
+    Deriving rather than copying keeps the two in step: a permission added to
+    superadmin later is inherited instead of silently missed.
 
     The role was absent from this catalogue entirely, so every ``superuser``
     account resolved to zero permissions and was denied everywhere, while the
@@ -445,7 +455,7 @@ def _derive_superuser_role() -> dict:
     Derived after the ``_merge_role_permissions`` calls above so it picks up the
     merged CLIENT_DMS_PERMISSIONS, not the pre-merge literal.
     """
-    org_admin = next(role for role in DEFAULT_ROLES if role.get("_id") == "orgadmin")
+    super_admin = next(role for role in DEFAULT_ROLES if role.get("_id") == "superadmin")
     return {
         "_id": "superuser",
         "name": "Super User",
@@ -455,7 +465,7 @@ def _derive_superuser_role() -> dict:
         "is_active": True,
         "created_at": datetime.utcnow(),
         "updated_at": datetime.utcnow(),
-        "permissions": list(org_admin.get("permissions") or []),
+        "permissions": list(super_admin.get("permissions") or []),
     }
 
 
