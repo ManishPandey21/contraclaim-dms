@@ -1,10 +1,11 @@
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
-from jose import JWTError, jwt
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 
 from ..core.config import settings
+from ..core.database import get_database
+from ..core.security import verify_access_token
 from ..dependencies import get_notification_service
 from ..utils.notification_service import NotificationService
 
@@ -28,11 +29,26 @@ async def websocket_notifications(
     user_id: Optional[str] = None
 
     if token:
+        # Held to the same contract as HTTP. Previously this decoded the
+        # signature and connected on the user id alone, so a deactivated,
+        # deleted or logged-out user's unexpired token -- and a step-up token,
+        # which HTTP rejects outright -- could still open a live stream.
         try:
-            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-            user_id = str(payload.get("user_id") or payload.get("sub"))
-        except JWTError as exc:
+            user = await verify_access_token(token, await get_database())
+        except HTTPException as exc:
+            # Session store configured but unreachable under the fail-closed
+            # policy: refuse the socket rather than serve unverifiable state.
+            logger.warning("WebSocket auth unavailable: %s", exc.detail)
+            await websocket.close(code=4503)
+            return
+        except Exception as exc:  # noqa: BLE001
             logger.warning("WebSocket auth failed: %s", exc)
+            user = None
+        if user:
+            user_id = str(user["_id"])
+        else:
+            logger.warning("WebSocket auth rejected a token that HTTP would also refuse")
+
     if not user_id and settings.ALLOW_DEV_HEADERS:
         user_id = websocket.query_params.get("user_id")
 

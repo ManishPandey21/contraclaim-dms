@@ -1487,6 +1487,7 @@ async def controller_list_documents(
         )
 
         enriched_documents: List[Document] = []
+        dropped: List[str] = []
         for doc in documents:
             if not doc:
                 continue
@@ -1495,11 +1496,33 @@ async def controller_list_documents(
                     await self.document_service.enrich_document(doc)
                 )
             except Exception as enrich_err:
+                # ``doc`` is a Mongo mapping here, so the previous
+                # ``getattr(doc, 'id', 'unknown')`` always reported "unknown" and
+                # the offending row could never be found from the logs.
+                doc_id = (
+                    doc.get("_id") if isinstance(doc, dict) else getattr(doc, "id", None)
+                )
+                doc_id = str(doc_id) if doc_id is not None else "unknown"
+                dropped.append(doc_id)
                 logger.warning(
-                    "Failed to enrich document %s: %s",
-                    getattr(doc, 'id', 'unknown'),
+                    "Failed to enrich document %s: %s: %s",
+                    doc_id,
+                    type(enrich_err).__name__,
                     enrich_err,
                 )
+
+        if dropped:
+            # ``total`` below is a separate count_documents over the same filter,
+            # so it still includes these rows. Saying so out loud is the point:
+            # the list silently came back shorter than the total it reported, and
+            # nothing in the response revealed the gap.
+            logger.warning(
+                "%d document(s) omitted from a listing that reports total=%s; "
+                "the count includes rows the response could not return: %s",
+                len(dropped),
+                total_count,
+                ", ".join(dropped[:20]),
+            )
 
         limit = pagination.get("limit", 0) or len(enriched_documents) or 1
         skip = pagination.get("skip", 0) or 0

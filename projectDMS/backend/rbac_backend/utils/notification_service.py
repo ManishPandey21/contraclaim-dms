@@ -45,6 +45,49 @@ def _notification_from_doc(doc: Dict[str, Any]) -> Notification:
     return Notification(**raw)
 
 
+def _notifications_from_docs(docs: Any, *, where: str) -> List[Notification]:
+    """Map stored rows to models, dropping any the model can no longer read.
+
+    A single malformed document used to abort the entire response: the mapping
+    ran in a bare list comprehension inside the request, so one bad row returned
+    500 to *every* recipient in *every* tenant -- not just to whoever owned it.
+    A notification feed is a list of independent entries; one unreadable entry
+    must cost that entry, not the feed. Any legacy row, or one written by an
+    older schema, reproduces the outage.
+
+    Dropping is not the same as hiding: every skipped row is logged with its id
+    and the validation failure, and an aggregate line records how many were lost,
+    so this degrades visibly rather than silently returning a short list.
+
+    Single-document reads deliberately keep using ``_notification_from_doc``: if
+    the one row you asked for is unreadable, that request should fail.
+    """
+    items: List[Notification] = []
+    skipped: List[str] = []
+    for doc in docs:
+        try:
+            items.append(_notification_from_doc(doc))
+        except Exception as exc:  # noqa: BLE001 - any model failure is per-row
+            doc_id = str((doc or {}).get("_id", "<no id>"))
+            skipped.append(doc_id)
+            logger.warning(
+                "Skipping unreadable notification %s during %s: %s: %s",
+                doc_id,
+                where,
+                type(exc).__name__,
+                exc,
+            )
+    if skipped:
+        logger.warning(
+            "%d notification row(s) skipped during %s and omitted from the "
+            "response: %s",
+            len(skipped),
+            where,
+            ", ".join(skipped[:20]),
+        )
+    return items
+
+
 _TYPE_DEFAULT_CATEGORY: dict[NotificationType, NotificationCategory] = {
     NotificationType.DRAFT_SAVED: NotificationCategory.DRAFTING,
     NotificationType.DRAFT_APPROVED: NotificationCategory.APPROVALS,
@@ -355,7 +398,7 @@ class NotificationService:
             .limit(max(limit, 1))
         )
         raw_items = await cursor.to_list(length=None)
-        notifications = [_notification_from_doc(item) for item in raw_items]
+        notifications = _notifications_from_docs(raw_items, where="list_notifications")
         responses = [NotificationResponse.from_notification(item, user_id) for item in notifications]
 
         total = await self.db.notifications.count_documents(query)
@@ -510,7 +553,7 @@ class NotificationService:
             query["category"] = category.value
         cursor = self.db.notifications.find(query).sort("created_at", -1)
         items = await cursor.to_list(length=None)
-        return [_notification_from_doc(item) for item in items]
+        return _notifications_from_docs(items, where="recent_unread")
 
     def _status_for_action(self, action_key: str, current_status: Optional[str]) -> Optional[str]:
         normalized = (current_status or "").strip().lower()

@@ -36,6 +36,58 @@ class NotificationActionRequest(BaseModel):
     payload: dict[str, Any] = {}
 
 
+async def require_any_granted_permission(
+    current_user: CurrentUser = Depends(get_current_user),
+) -> CurrentUser:
+    """Deny a principal the permission system grants nothing.
+
+    The inbox is authorised by *recipient membership*, not by a permission, and
+    that is a legitimate model -- it is why no cross-tenant content ever leaked
+    here. But it meant the endpoint sat outside the permission system entirely:
+    a ``superuser`` whose role resolved to zero permissions, and was therefore
+    refused by the Dashboard, Document Library and Search, still read its
+    notification feed in full.
+
+    This closes exactly that hole and no more. It deliberately does *not*
+    introduce a dedicated inbox permission: no such permission exists in the
+    catalogue today, so requiring one would deny every user until the roles were
+    re-seeded -- trading a contained inconsistency for a platform-wide outage.
+    Introducing one is the right long-term fix and needs a seeded catalogue
+    first; see ISSUE-04 for why that is not automatic.
+
+    Recipient filtering below remains the row-level rule; this is only the gate.
+    """
+    roles = {str(role).strip().lower() for role in (current_user.roles or [])}
+    if "superadmin" in roles:
+        return current_user
+
+    from ..services.permission_service import PermissionService
+
+    try:
+        granted = await PermissionService().get_effective_permission_names(
+            str(current_user.id)
+        )
+    except HTTPException:
+        # A meaningful status from inside the lookup -- a 429 from the rate
+        # limiter, a 403 -- must reach the client intact. Rewrapping it as a 503
+        # is the same masking defect this codebase already guards against.
+        raise
+    except Exception:  # noqa: BLE001
+        # Never convert a permission-lookup fault into a silent grant; but an
+        # infrastructure failure should not masquerade as a permission denial.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Permission service temporarily unavailable",
+        )
+
+    if not granted:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No permissions are granted to this account",
+        )
+    return current_user
+
+
 def _is_notification_admin(current_user: CurrentUser) -> bool:
     roles = {str(role).lower() for role in current_user.roles or []}
     return bool(roles & {"superadmin", "orgadmin", "projectadmin"})
@@ -57,7 +109,7 @@ async def list_notifications(
     limit: int = Query(50, ge=1, le=200),
     skip: int = Query(0, ge=0),
     notification_service: NotificationService = Depends(get_notification_service),
-    current_user: CurrentUser = Depends(get_current_user),
+    current_user: CurrentUser = Depends(require_any_granted_permission),
 ) -> NotificationListResponse:
     return await notification_service.list_notifications(
         current_user.id,

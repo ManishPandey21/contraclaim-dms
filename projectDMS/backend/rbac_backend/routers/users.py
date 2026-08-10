@@ -14,6 +14,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError
 
+from ..core.effective_scope import EffectiveScope
 from ..core.security import (
     create_access_token, get_password_hash, verify_password, get_current_user, CurrentUser, require_permission
 )
@@ -735,8 +736,24 @@ class UserController:
         user_roles = set(current_user.roles or [])
         
         if "superadmin" in user_roles:
-            # Superadmin can create users in any organization
-            pass
+            # Being superadmin authorises the *operation*, not the tenant it
+            # lands in. This is a write: creating an account in an organisation
+            # the admin is not currently working in is almost always a mistake,
+            # and it is the one superadmin bypass with lasting side effects.
+            # Platform-wide creation stays available with no selection active.
+            effective = EffectiveScope.resolve(current_user)
+            target_org = str(user_data.organization_id or "") or None
+            if target_org:
+                if not effective.permits_within_selection(organization_id=target_org):
+                    raise UserError(
+                        "Not authorized to create a user outside the current "
+                        "organisation selection",
+                        status.HTTP_403_FORBIDDEN,
+                    )
+            elif effective.selected_org_id:
+                # No organisation supplied while working in one: land the account
+                # there rather than creating an org-less user.
+                user_data.organization_id = effective.selected_org_id
         else:
             # Other roles must create users within their own organization
             current_org = getattr(current_user, "organization_id", None)

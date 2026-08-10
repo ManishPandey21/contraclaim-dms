@@ -358,6 +358,21 @@ class AuthorizationService:
         if str(organization_id) not in allowed_orgs:
             raise AuthorizationError("Access denied to this organization")
 
+        # Entitlement is the outer bound; the working context is the inner one.
+        # Testing only the former let a detail route escape the navbar selection:
+        # an org-admin listed in two organisations, working in the first, could
+        # still read the second organisation's record by id while every list,
+        # dashboard, search and export surface correctly returned the first
+        # organisation alone. Reading a record by id must obey the same
+        # Entitlement n Selection rule as reading it in a list.
+        #
+        # superadmin returned above, so platform administration is unaffected.
+        scope = EffectiveScope.resolve(current_user)
+        if not scope.permits_within_selection(organization_id=str(organization_id)):
+            raise AuthorizationError(
+                "This organisation is not the one currently being worked in"
+            )
+
         if action and action.lower() in {"create", "update", "delete", "admin", "write"}:
             if action.lower() == "create":
                 raise AuthorizationError(

@@ -27,6 +27,21 @@ from ..services.ai_guardrails import AIOutputGuardrailService
 from ..services.contract_service import ContractService
 
 router = APIRouter(prefix="/v1", tags=["retrieval-engine"])
+
+
+def _selection_defaults(current_user, org_id, project_id):
+    """Fall back to the caller's active navbar selection, not to "everything".
+
+    ``superadmin`` means entitlement *may* be platform-wide, not that scoping is
+    skipped. When the caller has selected an organisation these endpoints must
+    report on that organisation, or an admin sees platform-wide figures beside a
+    scoped Document Library and cannot tell which one is lying. With no
+    selection active the scope really is platform-wide and both stay ``None``.
+    """
+    scope = EffectiveScope.resolve(current_user)
+    return (org_id or scope.selected_org_id, project_id or scope.selected_project_id)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -244,6 +259,13 @@ async def list_logs(
         )
     elif "superadmin" not in (current_user.roles or []):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require scope")
+    else:
+        # superadmin means *entitlement may be platform-wide*, not "skip
+        # scoping" (core/effective_scope). A superadmin who has selected an
+        # organisation is working in it, so unscoped logs would disagree with
+        # every other surface on screen. With no selection active the scope is
+        # genuinely platform-wide and this stays unscoped.
+        org_id, project_id = _selection_defaults(current_user, org_id, project_id)
     try:
         start = datetime.fromisoformat(from_ts) if from_ts else None
         end = datetime.fromisoformat(to_ts) if to_ts else None
@@ -265,6 +287,12 @@ async def analytics(
         )
     elif "superadmin" not in (current_user.roles or []):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require org_id and project_id")
+    else:
+        # Same rule as the logs endpoint: an active selection narrows the
+        # aggregate, so the numbers match the records the caller can see.
+        request.org_id, request.project_id = _selection_defaults(
+            current_user, request.org_id, request.project_id
+        )
     return await observability.analytics(request)
 
 
@@ -279,4 +307,14 @@ async def reconcile_vectors(
 ):
     if "superadmin" not in (current_user.roles or []):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin required for reconciliation")
+    # Being superadmin authorises the *operation*; it does not authorise it
+    # against an arbitrary tenant. This rewrites vector state, so a request
+    # naming an organisation outside the caller's current working context is
+    # refused rather than silently reaching across it.
+    scope = EffectiveScope.resolve(current_user)
+    if not scope.permits_within_selection(organization_id=org_id, project_id=project_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Reconciliation target is outside the current working scope",
+        )
     return await reconciler.reconcile_document(document_id=document_id, org_id=org_id, project_id=project_id, namespace=namespace)

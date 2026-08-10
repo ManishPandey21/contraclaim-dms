@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from pydantic import BaseModel, Field
 
 from ..core.permissions import PERMISSION_CONTRACT_VERSION, Permissions
+from ..core.effective_scope import EffectiveScope
 from ..core.security import CurrentUser, get_current_user
 from ..models.rbac_monetization import (
     AddOnCreate,
@@ -85,6 +86,16 @@ async def _subscription_scope_filters(
     """
     scope = ScopeService()
     if scope.is_superadmin(current_user):
+        # Platform-wide entitlement is not the same as ignoring the working
+        # context: a superadmin who has selected an organisation is working in
+        # it, and billing figures spanning every tenant would contradict every
+        # other panel on screen. Unfiltered only when nothing is selected.
+        effective = EffectiveScope.resolve(current_user)
+        if effective.selected_org_id:
+            return (
+                [effective.selected_org_id],
+                [effective.selected_project_id] if effective.selected_project_id else None,
+            )
         return None, None
 
     roles = _role_names(current_user)

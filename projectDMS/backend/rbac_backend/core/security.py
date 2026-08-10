@@ -128,6 +128,74 @@ async def _apply_request_tenant_context(
             "project_id": context.project_id,
         }
     )
+async def verify_access_token(token: str, db: Any) -> Optional[Dict[str, Any]]:
+    """Validate an access token and return the live user document, or ``None``.
+
+    The single statement of "is this credential currently good", so a transport
+    that is not HTTP cannot quietly enforce less. It checks, in order:
+
+    * a valid signature;
+    * that the token is an **access** token -- a ``step_up`` token shares the
+      signing key and must never open a session;
+    * that the account still exists and is not disabled -- account state is read
+      from the database on every use, so deactivation takes effect immediately
+      rather than at token expiry;
+    * that the revocation store still considers the session live, when one is
+      configured.
+
+    The WebSocket endpoint enforced none of these: it decoded the signature and
+    connected on the user id alone, so a logged-out, deactivated or deleted
+    user's unexpired token -- or a step-up token -- could keep receiving live
+    notifications long after HTTP had stopped answering it.
+
+    Raises ``HTTPException(503)`` when the session store is configured but
+    unreachable under the fail-closed policy; the caller chooses how to surface
+    that for its transport.
+    """
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError:
+        return None
+
+    if payload.get("typ") == "step_up" or payload.get("type") not in (None, "access"):
+        return None
+
+    email = payload.get("sub")
+    if not email:
+        return None
+
+    user = await db.users.find_one({"email": email})
+    if not user or bool(user.get("disabled")):
+        return None
+
+    user_id_str = str(user["_id"])
+    iat: int = payload.get("iat", 0)
+
+    from ..services.runtime_state import get_runtime_state
+
+    runtime = get_runtime_state()
+    if runtime.redis_url:
+        try:
+            redis = await runtime.get_redis()
+            if redis is None:
+                raise _SessionStoreUnavailableError("runtime Redis unreachable")
+            min_iat = await redis.get(f"user_jwt_min_iat:{user_id_str}")
+            if min_iat and iat < int(min_iat):
+                return None
+            session_id = payload.get("session_id")
+            if session_id:
+                from ..services.authentication_service import AuthenticationService
+
+                if not await AuthenticationService().is_session_active(str(session_id)):
+                    return None
+        except HTTPException:
+            raise
+        except Exception as exc:
+            await _handle_session_store_unavailable(exc)
+
+    return user
+
+
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """

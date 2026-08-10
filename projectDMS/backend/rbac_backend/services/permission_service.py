@@ -39,6 +39,30 @@ def _normalize_role_name(value: Any) -> str:
     return normalize_role_name(value)
 
 
+def _warn_unresolved_role(rid: Any, *, where: str) -> None:
+    """Surface a role name that resolves to no role document.
+
+    Granting nothing is the right outcome -- an unknown role must never confer
+    permissions -- but it used to happen in complete silence, so an account could
+    authenticate successfully and then be denied on every endpoint with nothing
+    in the logs pointing at why. ``superuser`` sat in exactly that state: a
+    tenancy tier implemented in ``effective_scope``, ``security`` and
+    ``policy_service``, absent from the role catalogue, and therefore powerless
+    for a reason no operator could see.
+
+    Deliberately a warning rather than a raise: the deny already happened, and
+    turning an unrecognised legacy role name into a hard error would lock out
+    accounts instead of merely explaining them.
+    """
+    logger.warning(
+        "Role %r resolved to no role document during %s; it contributes no "
+        "permissions. Check DEFAULT_ROLES in initial_data/default_roles.py and "
+        "the roles collection for a missing or renamed entry.",
+        str(rid),
+        where,
+    )
+
+
 async def _find_role_doc(db: Any, rid: Any) -> Optional[Dict[str, Any]]:
     """Look up a role document, tolerating alias role ids.
 
@@ -467,6 +491,7 @@ class PermissionService:
             for rid in role_ids:
                 role = await _find_role_doc(db, rid)
                 if not role:
+                    _warn_unresolved_role(rid, where="get_user_permissions")
                     continue
                 rperms = role.get("permissions", []) or []
                 if "*" in rperms:
@@ -539,6 +564,7 @@ class PermissionService:
 
                 role = await _find_role_doc(db, rid)
                 if not role:
+                    _warn_unresolved_role(rid, where="get_effective_permission_names")
                     continue
 
                 role_name = str(role.get("name", "")).strip()
@@ -762,6 +788,7 @@ class PermissionService:
                             role_names.add(normalized_rid)
                     role = await _find_role_doc(db, rid)
                     if not role:
+                        _warn_unresolved_role(rid, where="user_has_permission")
                         continue
                     role_name = str(role.get("name", "")).lower()
                     if role_name:

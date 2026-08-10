@@ -12,6 +12,7 @@ from bson.objectid import ObjectId
 from bson.errors import InvalidId
 
 from ..core.database import get_database
+from ..core.document_lifecycle import apply_hidden_lifecycle
 from ..core.config import settings
 from ..models.document import (
     Document,
@@ -667,10 +668,7 @@ class DocumentService:
         query = dict(query or {})
         # Deleted documents never list; documents held for duplicate review and
         # confirmed duplicates are unpublished until/unless they are released.
-        query.setdefault(
-            "lifecycle_state",
-            {"$nin": ["deleted", "duplicate_review", "duplicate"]},
-        )
+        apply_hidden_lifecycle(query)
         raw_items, page = await fetch_paginated(
             db.documents,
             filter=query,

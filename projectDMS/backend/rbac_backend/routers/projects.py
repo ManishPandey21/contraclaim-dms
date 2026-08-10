@@ -4,6 +4,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pymongo import ReturnDocument
 
+from ..core.effective_scope import EffectiveScope
 from ..core.security import (
     require_permission,
     get_current_user,
@@ -31,7 +32,9 @@ permission_service = PermissionService()
 LETTER_UPLOAD_TYPE_PATTERN = r"^(incoming|outgoing)$"
 # Mirrors DocumentService.list_documents so the card count matches exactly what
 # the Letters Library shows when the user clicks through.
-HIDDEN_LIFECYCLE_STATES = ["deleted", "duplicate_review", "duplicate"]
+from ..core.document_lifecycle import hidden_lifecycle_states
+
+HIDDEN_LIFECYCLE_STATES = hidden_lifecycle_states()
 
 async def _find_by_id(coll, id_str: str):
     # Standard MongoDB IDs are 24-character hex strings
@@ -60,7 +63,23 @@ async def _ensure_project_access(
     if db is not None:
         project = await _find_by_id(db.projects, project_id)
         if project:
-            organization_id = str(project.get("organization_id") or organization_id or "")
+            target_org = str(project.get("organization_id") or "")
+            # The requested object used to *supply* the organisation this check
+            # ran against, so the question became "is this permission valid
+            # inside the resource's own organisation" rather than "may this
+            # caller reach that organisation" -- a confused deputy: any holder of
+            # the permission passed, whichever tenant owned the project.
+            #
+            # The caller's working scope decides instead, and the target's
+            # organisation is only used to confirm the project belongs to it.
+            if target_org:
+                scope = EffectiveScope.resolve(current_user)
+                if not scope.permits_within_selection(organization_id=target_org):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Not authorized for this project",
+                    )
+                organization_id = target_org
     await PolicyService(db).authorize(
         current_user,
         canonical_permission,

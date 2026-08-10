@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..core.database import get_db
+from ..core.document_lifecycle import apply_hidden_lifecycle
 from ..core.security import (
     CurrentUser,
     build_scope_query,
@@ -275,6 +276,11 @@ async def get_dashboard_stats(
             organization_id=organization_id,
             project_id=project_id,
         )
+        # The Library hides soft-deleted and duplicate-held documents, so the
+        # counts summarising it must hide the same rows. Without this the
+        # Dashboard aggregated over a strictly wider set than the list it
+        # described and reported more documents than the user could open.
+        apply_hidden_lifecycle(base_query)
 
         # Optional search filter
         if search:

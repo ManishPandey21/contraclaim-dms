@@ -424,3 +424,40 @@ _merge_role_permissions(
         "dms.dashboard.view",
     ],
 )
+
+
+def _derive_superuser_role() -> dict:
+    """Build the Super User role from the fully-merged Organization Admin set.
+
+    ``superuser`` is a *global-tier* role in ``core.effective_scope``: its reach
+    spans the organisations assigned to the account, and that reach is enforced
+    by ``EffectiveScope``, not by holding extra permissions. So the capability
+    set is Organization Admin's -- least privilege -- and only the tenancy tier
+    differs. Deriving it rather than copying keeps the two in step: a permission
+    added to orgadmin later is inherited instead of silently missed.
+
+    The role was absent from this catalogue entirely, so every ``superuser``
+    account resolved to zero permissions and was denied everywhere, while the
+    tier stayed implemented in ``effective_scope``, ``security`` and
+    ``policy_service``. An account that authenticates and can do nothing is a
+    worse failure than one that cannot sign in at all.
+
+    Derived after the ``_merge_role_permissions`` calls above so it picks up the
+    merged CLIENT_DMS_PERMISSIONS, not the pre-merge literal.
+    """
+    org_admin = next(role for role in DEFAULT_ROLES if role.get("_id") == "orgadmin")
+    return {
+        "_id": "superuser",
+        "name": "Super User",
+        "is_system": True,
+        # Global tier: bounded by assigned organisations, not by a home org.
+        "scope": "system",
+        "is_active": True,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+        "permissions": list(org_admin.get("permissions") or []),
+    }
+
+
+if not any(role.get("_id") == "superuser" for role in DEFAULT_ROLES):
+    DEFAULT_ROLES.append(_derive_superuser_role())
