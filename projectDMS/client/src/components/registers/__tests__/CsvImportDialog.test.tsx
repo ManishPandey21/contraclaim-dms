@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CsvImportDialog, {
@@ -116,5 +116,58 @@ describe("CsvImportDialog tenant scope", () => {
         project_id: "project-2",
       }),
     );
+  });
+
+  it("renders every preview row inside a bounded vertical scroll region", async () => {
+    const user = userEvent.setup();
+    const rows = Array.from({ length: 15 }, (_, index) => ({
+      row_number: index + 2,
+      data: { title: `Milestone ${index + 1}` },
+      errors: [],
+      warnings: [],
+      duplicate: false,
+    }));
+    const onPreview = vi.fn().mockResolvedValue({
+      ...emptyPreview,
+      total_rows: rows.length,
+      valid_rows: rows.length,
+      rows,
+    });
+
+    render(
+      <TenantProvider>
+        <CsvImportDialog
+          open
+          onOpenChange={vi.fn()}
+          title="Upload Key Dates CSV"
+          description="Preview imported milestones."
+          sampleFileName="key-date-import-template.csv"
+          onDownloadTemplate={vi.fn()}
+          onPreview={onPreview}
+          onImport={vi.fn()}
+          onImported={vi.fn()}
+          rowLabel={(row) => String(row.data.title)}
+        />
+      </TenantProvider>,
+    );
+
+    await screen.findByText("Acme Infrastructure");
+    await user.click(screen.getByRole("combobox", { name: "Project" }));
+    await user.click(await screen.findByRole("option", { name: "North Corridor" }));
+
+    await user.upload(
+      screen.getByLabelText("CSV file"),
+      new File(["title,contractual_week_number\nMilestone 1,5"], "key-dates.csv", {
+        type: "text/csv",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    const previewRows = await screen.findByRole("region", {
+      name: "Uploaded CSV rows",
+    });
+    expect(previewRows).toHaveClass("max-h-[40vh]", "overflow-y-auto");
+    expect(within(previewRows).getByText("Milestone 1")).toBeInTheDocument();
+    expect(within(previewRows).getByText("Milestone 15")).toBeInTheDocument();
   });
 });

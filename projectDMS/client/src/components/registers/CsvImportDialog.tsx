@@ -296,9 +296,14 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
                 {status === "invalid" && <span className="flex items-center gap-1 text-sm text-red-700"><AlertCircle className="h-4 w-4" />Fix errors before import</span>}
               </div>
 
-              <div className="rounded-md border">
+              <div
+                aria-label="Uploaded CSV rows"
+                className="max-h-[40vh] overflow-y-auto rounded-md border"
+                role="region"
+                tabIndex={0}
+              >
                 <Table>
-                  <TableHeader>
+                  <TableHeader className="sticky top-0 z-10 bg-background">
                     <TableRow>
                       <TableHead className="w-20">Row</TableHead>
                       <TableHead>Record</TableHead>
