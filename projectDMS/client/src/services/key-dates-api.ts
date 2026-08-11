@@ -272,11 +272,13 @@ export async function exportKeyDates(
   return data instanceof Blob ? data : new Blob([data]);
 }
 
-function csvFormData(file: File, params?: { project_id?: string; organization_id?: string }): FormData {
+type CSVImportScope = { project_id: string; organization_id: string };
+
+function csvFormData(file: File, scope: CSVImportScope): FormData {
   const form = new FormData();
   form.append("file", file);
-  if (params?.project_id) form.append("project_id", params.project_id);
-  if (params?.organization_id) form.append("organization_id", params.organization_id);
+  form.append("project_id", scope.project_id);
+  form.append("organization_id", scope.organization_id);
   return form;
 }
 
@@ -287,9 +289,9 @@ export async function downloadKeyDatesImportTemplate(): Promise<Blob> {
 
 export async function previewKeyDatesCsv(
   file: File,
-  params?: { project_id?: string; organization_id?: string },
+  scope: CSVImportScope,
 ): Promise<CSVImportPreviewDTO> {
-  const { data } = await api.post("/key-dates/import/preview", csvFormData(file, params), {
+  const { data } = await api.post("/key-dates/import/preview", csvFormData(file, scope), {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data as CSVImportPreviewDTO;
@@ -297,9 +299,9 @@ export async function previewKeyDatesCsv(
 
 export async function importKeyDatesCsv(
   file: File,
-  params?: { project_id?: string; organization_id?: string },
+  scope: CSVImportScope,
 ): Promise<CSVImportResultDTO> {
-  const { data } = await api.post("/key-dates/import", csvFormData(file, params), {
+  const { data } = await api.post("/key-dates/import", csvFormData(file, scope), {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data as CSVImportResultDTO;

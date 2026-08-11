@@ -173,12 +173,14 @@ export async function exportBGs(format: "csv" | "xlsx" | "pdf", params?: { proje
   return data instanceof Blob ? data : new Blob([data]);
 }
 
-function csvFormData(file: File, params?: { project_id?: string; organization_id?: string; contract_id?: string }): FormData {
+type CSVImportScope = { project_id: string; organization_id: string; contract_id?: string };
+
+function csvFormData(file: File, scope: CSVImportScope): FormData {
   const form = new FormData();
   form.append("file", file);
-  if (params?.project_id) form.append("project_id", params.project_id);
-  if (params?.organization_id) form.append("organization_id", params.organization_id);
-  if (params?.contract_id) form.append("contract_id", params.contract_id);
+  form.append("project_id", scope.project_id);
+  form.append("organization_id", scope.organization_id);
+  if (scope.contract_id) form.append("contract_id", scope.contract_id);
   return form;
 }
 
@@ -189,9 +191,9 @@ export async function downloadBGImportTemplate(): Promise<Blob> {
 
 export async function previewBGsCsv(
   file: File,
-  params?: { project_id?: string; organization_id?: string; contract_id?: string },
+  scope: CSVImportScope,
 ): Promise<CSVImportPreviewDTO> {
-  const { data } = await api.post("/bank-guarantees/import/preview", csvFormData(file, params), {
+  const { data } = await api.post("/bank-guarantees/import/preview", csvFormData(file, scope), {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data as CSVImportPreviewDTO;
@@ -199,9 +201,9 @@ export async function previewBGsCsv(
 
 export async function importBGsCsv(
   file: File,
-  params?: { project_id?: string; organization_id?: string; contract_id?: string },
+  scope: CSVImportScope,
 ): Promise<CSVImportResultDTO> {
-  const { data } = await api.post("/bank-guarantees/import", csvFormData(file, params), {
+  const { data } = await api.post("/bank-guarantees/import", csvFormData(file, scope), {
     headers: { "Content-Type": "multipart/form-data" },
   });
   return data as CSVImportResultDTO;

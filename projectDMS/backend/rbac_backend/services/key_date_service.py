@@ -222,7 +222,9 @@ class KeyDateService:
     async def create_milestone(self, payload: KeyDateMilestoneCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
         start, basis = await self._start_and_basis(
-            payload.project_id, payload.project_start_date, getattr(current_user, "organization_id", None)
+            payload.project_id,
+            payload.project_start_date,
+            payload.organization_id or getattr(current_user, "organization_id", None),
         )
         calc = calculate_key_date(start, payload.contractual_week_number, basis)
         doc = KeyDateMilestone(**payload.model_dump(exclude={"project_start_date"})).model_dump(by_alias=True)

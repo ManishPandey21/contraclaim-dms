@@ -14,6 +14,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useTenant } from "@/contexts/TenantContext";
+import {
   Table,
   TableBody,
   TableCell,
@@ -45,6 +53,11 @@ export interface CSVImportResult extends CSVImportPreview {
   created_ids: string[];
 }
 
+export interface CSVImportScope {
+  organization_id: string;
+  project_id: string;
+}
+
 interface CsvImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -52,8 +65,8 @@ interface CsvImportDialogProps {
   description: string;
   sampleFileName: string;
   onDownloadTemplate: () => Promise<Blob>;
-  onPreview: (file: File) => Promise<CSVImportPreview>;
-  onImport: (file: File) => Promise<CSVImportResult>;
+  onPreview: (file: File, scope: CSVImportScope) => Promise<CSVImportPreview>;
+  onImport: (file: File, scope: CSVImportScope) => Promise<CSVImportResult>;
   onImported: () => Promise<void> | void;
   rowLabel: (row: CSVImportRow) => string;
 }
@@ -79,9 +92,13 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   onImported,
   rowLabel,
 }) => {
+  const tenant = useTenant();
+  const { selectedOrganizationId, selectedProjectId, selectProject } = tenant;
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CSVImportPreview | null>(null);
   const [busy, setBusy] = useState<"template" | "preview" | "import" | null>(null);
+  const onlyProjectId =
+    tenant.projects.length === 1 ? String(tenant.projects[0]._id) : "";
 
   useEffect(() => {
     if (!open) {
@@ -90,6 +107,42 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
       setBusy(null);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (
+      open &&
+      selectedOrganizationId &&
+      !selectedProjectId &&
+      onlyProjectId
+    ) {
+      selectProject(onlyProjectId);
+    }
+  }, [
+    onlyProjectId,
+    open,
+    selectProject,
+    selectedOrganizationId,
+    selectedProjectId,
+  ]);
+
+  useEffect(() => {
+    if (open) setPreview(null);
+  }, [open, selectedOrganizationId, selectedProjectId]);
+
+  const selectedProject = tenant.projects.find(
+    (project) => String(project._id) === tenant.selectedProjectId,
+  );
+  const scopeReady = Boolean(
+    tenant.contextReady &&
+      tenant.selectedOrganizationId &&
+      tenant.selectedProjectId &&
+      selectedProject &&
+      String(selectedProject.organization_id) === tenant.selectedOrganizationId,
+  );
+  const selectedScope: CSVImportScope = {
+    organization_id: tenant.selectedOrganizationId,
+    project_id: tenant.selectedProjectId,
+  };
 
   const status = useMemo(() => {
     if (!preview) return null;
@@ -110,13 +163,17 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   };
 
   const previewFile = async () => {
+    if (!scopeReady) {
+      toast.error("Select an Organisation and Project first");
+      return;
+    }
     if (!file) {
       toast.error("Select a CSV file first");
       return;
     }
     setBusy("preview");
     try {
-      const result = await onPreview(file);
+      const result = await onPreview(file, selectedScope);
       setPreview(result);
       if (result.invalid_rows > 0) toast.error(`${result.invalid_rows} row(s) need correction`);
       else toast.success(`${result.valid_rows} row(s) ready to import`);
@@ -129,10 +186,10 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   };
 
   const importFile = async () => {
-    if (!file || !preview?.can_import) return;
+    if (!file || !preview?.can_import || !scopeReady) return;
     setBusy("import");
     try {
-      const result = await onImport(file);
+      const result = await onImport(file, selectedScope);
       setPreview(result);
       if (!result.can_import || result.invalid_rows > 0) {
         toast.error(`${result.invalid_rows} row(s) need correction`);
@@ -157,6 +214,53 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
         </DialogHeader>
 
         <div className="space-y-4 overflow-y-auto pr-1">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="csv-import-organization">Organisation *</Label>
+              <Select
+                value={tenant.selectedOrganizationId || undefined}
+                onValueChange={tenant.selectOrganization}
+                disabled={tenant.loading || tenant.organizationLocked}
+              >
+                <SelectTrigger id="csv-import-organization" aria-label="Organisation">
+                  <SelectValue placeholder="Select Organisation" />
+                </SelectTrigger>
+                <SelectContent>
+                  {tenant.organizations.map((organization) => (
+                    <SelectItem key={String(organization._id)} value={String(organization._id)}>
+                      {organization.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="csv-import-project">Project *</Label>
+              <Select
+                value={tenant.selectedProjectId || undefined}
+                onValueChange={tenant.selectProject}
+                disabled={
+                  tenant.loading ||
+                  !tenant.selectedOrganizationId ||
+                  tenant.projectLocked
+                }
+              >
+                <SelectTrigger id="csv-import-project" aria-label="Project">
+                  <SelectValue placeholder="Select Project" />
+                </SelectTrigger>
+                <SelectContent>
+                  {tenant.projects.map((project) => (
+                    <SelectItem key={String(project._id)} value={String(project._id)}>
+                      {project.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {tenant.error && <p className="text-sm text-destructive">{tenant.error}</p>}
+
           <div className="grid gap-3 md:grid-cols-[1fr_auto_auto] md:items-end">
             <div>
               <Label htmlFor="csv-import-file">CSV file</Label>
@@ -174,7 +278,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               {busy === "template" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
               Sample CSV
             </Button>
-            <Button variant="outline" onClick={previewFile} disabled={!file || busy !== null}>
+            <Button variant="outline" onClick={previewFile} disabled={!file || !scopeReady || busy !== null}>
               {busy === "preview" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
               Preview
             </Button>
@@ -240,7 +344,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy !== null}>Cancel</Button>
-          <Button onClick={importFile} disabled={!file || !preview?.can_import || busy !== null}>
+          <Button onClick={importFile} disabled={!file || !preview?.can_import || !scopeReady || busy !== null}>
             {busy === "import" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
             Import
           </Button>
