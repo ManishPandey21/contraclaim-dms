@@ -6,6 +6,7 @@ import {
   achievementText,
   maxRevisionCount,
   revisionAt,
+  milestoneRevisionLineage,
 } from "../key-date-helpers";
 
 describe("key-date-helpers", () => {
@@ -51,5 +52,36 @@ describe("key-date-helpers", () => {
     expect(revisionAt(rows[2], 2)?.revision_number).toBe(2);
     expect(revisionAt(rows[2], 3)).toBeUndefined();
     expect(revisionAt(rows[0], 1)).toBeUndefined();
+  });
+
+  it("preserves EOT-1 and EOT-2 independently while EOT-1 is pending and later granted", () => {
+    const baseWorkflow: any = {
+      submissions: [
+        {
+          id: "e1", revision_label: "EOT-1",
+          items: [{ key_date_id: "m1", milestone_ref: "KD-01", eot_submitted_date: "2026-03-01", contractual_date_at_submission: "2026-01-01" }],
+        },
+        {
+          id: "e2", revision_label: "EOT-2",
+          items: [{ key_date_id: "m1", milestone_ref: "KD-01", eot_submitted_date: "2026-05-01", contractual_date_at_submission: "2026-01-01" }],
+        },
+      ],
+      determinations: [],
+    };
+    const pending = milestoneRevisionLineage(baseWorkflow, { id: "m1", milestone_ref: "KD-01" });
+    expect(pending.map((entry) => entry.submission.revision_label)).toEqual(["EOT-1", "EOT-2"]);
+    expect(pending.every((entry) => entry.item.contractual_date_at_submission === "2026-01-01")).toBe(true);
+    expect(pending.every((entry) => entry.determinations.length === 0)).toBe(true);
+
+    const later = milestoneRevisionLineage({
+      ...baseWorkflow,
+      determinations: [{
+        id: "d1", eot_submission_ids: ["e1"],
+        items: [{ key_date_id: "m1", milestone_ref: "KD-01", determination_result: "partially_granted", eot_granted_date: "2026-02-15" }],
+      }],
+    } as any, { id: "m1", milestone_ref: "KD-01" });
+    expect(later[0].determinations[0].item.eot_granted_date).toBe("2026-02-15");
+    expect(later[1].item.eot_submitted_date).toBe("2026-05-01");
+    expect(later[1].determinations).toEqual([]);
   });
 });

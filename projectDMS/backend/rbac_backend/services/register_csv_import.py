@@ -342,6 +342,13 @@ async def preview_key_dates_csv(
     org = str(organization_id).strip()
     selected_project_id = str(project_id).strip()
     service = KeyDateService(db)
+    try:
+        await service._assert_original_baseline_editable({  # type: ignore[attr-defined]
+            "project_id": selected_project_id,
+            "organization_id": org,
+        })
+    except KeyDateError as exc:
+        raise ValueError(str(exc)) from exc
     existing = await _existing_key_date_keys(db, org, [selected_project_id])
     seen: set[Tuple[str, str, str]] = set()
     out: List[CSVImportRow] = []

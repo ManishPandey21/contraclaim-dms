@@ -71,6 +71,10 @@ from .v20260806_0001_subscription_current_scope_unique import DESCRIPTION as SUB
 from .v20260806_0001_subscription_current_scope_unique import NAME as SUBSCRIPTION_SCOPE_NAME
 from .v20260806_0001_subscription_current_scope_unique import VERSION as SUBSCRIPTION_SCOPE_VERSION
 from .v20260806_0001_subscription_current_scope_unique import upgrade as upgrade_subscription_scope_unique
+from .v20260811_0001_key_date_eot_revision_workflow import DESCRIPTION as KEY_DATE_EOT_DESCRIPTION
+from .v20260811_0001_key_date_eot_revision_workflow import NAME as KEY_DATE_EOT_NAME
+from .v20260811_0001_key_date_eot_revision_workflow import VERSION as KEY_DATE_EOT_VERSION
+from .v20260811_0001_key_date_eot_revision_workflow import upgrade as upgrade_key_date_eot_revision
 
 
 MIGRATIONS = [
@@ -169,5 +173,11 @@ MIGRATIONS = [
         name=SUBSCRIPTION_SCOPE_NAME,
         description=SUBSCRIPTION_SCOPE_DESCRIPTION,
         upgrade=upgrade_subscription_scope_unique,
+    ),
+    Migration(
+        version=KEY_DATE_EOT_VERSION,
+        name=KEY_DATE_EOT_NAME,
+        description=KEY_DATE_EOT_DESCRIPTION,
+        upgrade=upgrade_key_date_eot_revision,
     ),
 ]
