@@ -508,8 +508,8 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         description="Preview imported bank guarantees and fix row errors before saving."
         sampleFileName="bank-guarantee-import-template.csv"
         onDownloadTemplate={downloadBGImportTemplate}
-        onPreview={(file) => previewBGsCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
-        onImport={(file) => importBGsCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onPreview={(file, scope) => previewBGsCsv(file, scope)}
+        onImport={(file, scope) => importBGsCsv(file, scope)}
         onImported={load}
         rowLabel={(row) => String(row.data?.bg_number || row.data?.issuing_bank || `Row ${row.row_number}`)}
       />

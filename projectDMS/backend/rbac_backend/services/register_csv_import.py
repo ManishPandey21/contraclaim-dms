@@ -13,15 +13,15 @@ from ..models.csv_import import CSVImportPreview, CSVImportResult, CSVImportRow
 from ..models.key_date import KeyDateMilestoneCreate
 from .bank_guarantee_service import BankGuaranteeService
 from .key_date_service import KeyDateError, KeyDateService, calculate_key_date
+from .scope_service import ScopeService
 
 
 MAX_CSV_BYTES = 2 * 1024 * 1024
 MAX_CSV_ROWS = 1000
 
-KEY_DATE_REQUIRED_HEADERS = ["title", "project_id", "contractual_week_number"]
+KEY_DATE_REQUIRED_HEADERS = ["title", "contractual_week_number"]
 KEY_DATE_TEMPLATE_HEADERS = [
     "title",
-    "project_id",
     "contractual_week_number",
     "project_start_date",
     "milestone_ref",
@@ -31,9 +31,8 @@ KEY_DATE_TEMPLATE_HEADERS = [
     "remarks",
 ]
 
-BG_REQUIRED_HEADERS = ["project_id", "bg_number"]
+BG_REQUIRED_HEADERS = ["bg_number"]
 BG_TEMPLATE_HEADERS = [
-    "project_id",
     "contract_id",
     "bg_number",
     "bg_type",
@@ -52,7 +51,6 @@ BG_TEMPLATE_HEADERS = [
 
 KEY_DATE_SAMPLE_ROW = {
     "title": "Basement 2 Structure Complete",
-    "project_id": "project-id",
     "contractual_week_number": "8",
     "project_start_date": "2026-01-05",
     "milestone_ref": "M-001",
@@ -63,7 +61,6 @@ KEY_DATE_SAMPLE_ROW = {
 }
 
 BG_SAMPLE_ROW = {
-    "project_id": "project-id",
     "contract_id": "primary",
     "bg_number": "BG-2026-001",
     "bg_type": "performance",
@@ -142,6 +139,14 @@ def parse_csv_rows(content: bytes) -> List[Dict[str, Any]]:
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     if not reader.fieldnames:
         raise ValueError("CSV header row is missing.")
+    normalized_headers = {_header_key(str(header)) for header in reader.fieldnames if header is not None}
+    prohibited_scope_headers = normalized_headers & {"organization_id", "project_id"}
+    if prohibited_scope_headers:
+        columns = ", ".join(sorted(prohibited_scope_headers))
+        raise ValueError(
+            f"Remove scope column(s) from the CSV: {columns}. "
+            "Select the Organisation and Project in the import dialog instead."
+        )
 
     rows: List[Dict[str, Any]] = []
     for row_number, row in enumerate(reader, start=2):
@@ -159,21 +164,39 @@ def parse_csv_rows(content: bytes) -> List[Dict[str, Any]]:
     return rows
 
 
-def collect_project_ids(content: bytes, default_project_id: Optional[str] = None) -> List[str]:
-    ids = set()
-    for row in parse_csv_rows(content):
-        project_id = str(row.get("project_id") or default_project_id or "").strip()
-        if project_id:
-            ids.add(project_id)
-    return sorted(ids)
-
-
 def template_csv(headers: Sequence[str], sample_row: Dict[str, Any]) -> str:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=list(headers), lineterminator="\n")
     writer.writeheader()
     writer.writerow({key: sample_row.get(key, "") for key in headers})
     return buffer.getvalue()
+
+
+async def validate_csv_import_scope(
+    db: Any,
+    *,
+    organization_id: Optional[str],
+    project_id: Optional[str],
+) -> Tuple[str, str]:
+    """Validate the UI-selected import target's ownership relationship.
+
+    The project-to-organisation check is deliberately performed even for
+    system-level users, whose normal policy authorization may otherwise bypass
+    tenant membership checks.
+    """
+    selected_organization_id = str(organization_id or "").strip()
+    selected_project_id = str(project_id or "").strip()
+    if not selected_organization_id or not selected_project_id:
+        raise ValueError("Organisation and Project must be selected before previewing or importing a CSV.")
+
+    scope_service = ScopeService(db=db)
+    if not await scope_service.project_belongs_to_organization(
+        project_id=selected_project_id,
+        organization_id=selected_organization_id,
+    ):
+        raise ValueError("Selected Project does not belong to the selected Organisation.")
+
+    return selected_organization_id, selected_project_id
 
 
 def _blank_to_none(value: Any) -> Optional[str]:
@@ -313,23 +336,20 @@ async def preview_key_dates_csv(
     project_id: Optional[str] = None,
     organization_id: Optional[str] = None,
 ) -> _Preview:
+    if not str(organization_id or "").strip() or not str(project_id or "").strip():
+        raise ValueError("Organisation and Project must be selected before previewing a CSV.")
     raw_rows = parse_csv_rows(content)
-    org = organization_id or getattr(current_user, "organization_id", None)
+    org = str(organization_id).strip()
+    selected_project_id = str(project_id).strip()
     service = KeyDateService(db)
-    project_ids = [
-        str(row.get("project_id") or project_id or "").strip()
-        for row in raw_rows
-        if str(row.get("project_id") or project_id or "").strip()
-    ]
-    for selected_project_id in sorted(set(project_ids)):
-        try:
-            await service._assert_original_baseline_editable({  # type: ignore[attr-defined]
-                "project_id": selected_project_id,
-                "organization_id": org,
-            })
-        except KeyDateError as exc:
-            raise ValueError(str(exc)) from exc
-    existing = await _existing_key_date_keys(db, org, project_ids)
+    try:
+        await service._assert_original_baseline_editable({  # type: ignore[attr-defined]
+            "project_id": selected_project_id,
+            "organization_id": org,
+        })
+    except KeyDateError as exc:
+        raise ValueError(str(exc)) from exc
+    existing = await _existing_key_date_keys(db, org, [selected_project_id])
     seen: set[Tuple[str, str, str]] = set()
     out: List[CSVImportRow] = []
     payloads: List[Tuple[int, KeyDateMilestoneCreate]] = []
@@ -339,16 +359,8 @@ async def preview_key_dates_csv(
         warnings: List[str] = []
         row_number = int(raw.get("_row_number") or 0)
         title = _blank_to_none(raw.get("title"))
-        row_project = _blank_to_none(raw.get("project_id")) or project_id
-        if project_id and raw.get("project_id") and str(raw.get("project_id")).strip() != project_id:
-            errors.append("project_id does not match the selected project")
-        row_org = _blank_to_none(raw.get("organization_id"))
-        if row_org and org and row_org != org:
-            errors.append("organization_id does not match the current organization")
         if not title:
             errors.append("title is required")
-        if not row_project:
-            errors.append("project_id is required")
         week = _int(raw.get("contractual_week_number"), "contractual_week_number", errors, minimum=1)
         if week is None:
             errors.append("contractual_week_number is required")
@@ -356,16 +368,16 @@ async def preview_key_dates_csv(
         start = _date(raw.get("project_start_date"), "project_start_date", errors)
         original = _date(raw.get("original_planned_key_date"), "original_planned_key_date", errors)
         calculated: Optional[datetime] = None
-        if row_project and week is not None:
+        if week is not None:
             try:
-                resolved_start, basis = await service._start_and_basis(row_project, start, org)  # type: ignore[attr-defined]
+                resolved_start, basis = await service._start_and_basis(selected_project_id, start, org)  # type: ignore[attr-defined]
                 calculated = calculate_key_date(resolved_start, week, basis)
             except KeyDateError as exc:
                 errors.append(str(exc))
         key_date = original or calculated
-        duplicate_key = (str(row_project or ""), _norm_text(title), _date_key(key_date))
+        duplicate_key = (selected_project_id, _norm_text(title), _date_key(key_date))
         duplicate = False
-        if key_date and title and row_project:
+        if key_date and title:
             if duplicate_key in existing:
                 errors.append("duplicate key date already exists for this project/title/date")
                 duplicate = True
@@ -376,7 +388,6 @@ async def preview_key_dates_csv(
 
         data = {
             "title": title,
-            "project_id": row_project,
             "contractual_week_number": week,
             "project_start_date": start.isoformat() if start else None,
             "calculated_key_date": calculated.isoformat() if calculated else None,
@@ -392,7 +403,7 @@ async def preview_key_dates_csv(
             try:
                 payload = KeyDateMilestoneCreate(
                     title=title or "",
-                    project_id=str(row_project),
+                    project_id=selected_project_id,
                     contractual_week_number=int(week or 1),
                     project_start_date=start,
                     original_planned_key_date=original,
@@ -443,14 +454,12 @@ async def preview_bank_guarantees_csv(
     contract_id: Optional[str] = None,
     organization_id: Optional[str] = None,
 ) -> _Preview:
+    if not str(organization_id or "").strip() or not str(project_id or "").strip():
+        raise ValueError("Organisation and Project must be selected before previewing a CSV.")
     raw_rows = parse_csv_rows(content)
-    org = organization_id or getattr(current_user, "organization_id", None)
-    project_ids = [
-        str(row.get("project_id") or project_id or "").strip()
-        for row in raw_rows
-        if str(row.get("project_id") or project_id or "").strip()
-    ]
-    existing = await _existing_bg_numbers(db, org, project_ids)
+    org = str(organization_id).strip()
+    selected_project_id = str(project_id).strip()
+    existing = await _existing_bg_numbers(db, org, [selected_project_id])
     seen: set[Tuple[str, str]] = set()
     out: List[CSVImportRow] = []
     payloads: List[Tuple[int, BankGuaranteeCreate]] = []
@@ -461,14 +470,6 @@ async def preview_bank_guarantees_csv(
         errors: List[str] = []
         warnings: List[str] = []
         row_number = int(raw.get("_row_number") or 0)
-        row_project = _blank_to_none(raw.get("project_id")) or project_id
-        if project_id and raw.get("project_id") and str(raw.get("project_id")).strip() != project_id:
-            errors.append("project_id does not match the selected project")
-        row_org = _blank_to_none(raw.get("organization_id"))
-        if row_org and org and row_org != org:
-            errors.append("organization_id does not match the current organization")
-        if not row_project:
-            errors.append("project_id is required")
         bg_number = _blank_to_none(raw.get("bg_number"))
         if not bg_number:
             errors.append("bg_number is required")
@@ -484,9 +485,9 @@ async def preview_bank_guarantees_csv(
         required_up_to = _date(raw.get("contractual_required_up_to"), "contractual_required_up_to", errors)
         expiry = _date(raw.get("bg_expiry_date"), "bg_expiry_date", errors)
         claim_expiry = _date(raw.get("claim_expiry_date"), "claim_expiry_date", errors)
-        duplicate_key = (str(row_project or ""), _norm_text(bg_number))
+        duplicate_key = (selected_project_id, _norm_text(bg_number))
         duplicate = False
-        if bg_number and row_project:
+        if bg_number:
             if duplicate_key in existing:
                 errors.append("duplicate bank guarantee number already exists for this project")
                 duplicate = True
@@ -496,7 +497,6 @@ async def preview_bank_guarantees_csv(
             seen.add(duplicate_key)
 
         data = {
-            "project_id": row_project,
             "contract_id": _blank_to_none(raw.get("contract_id")) or contract_id or "primary",
             "bg_number": bg_number,
             "bg_type": bg_type,
@@ -517,7 +517,7 @@ async def preview_bank_guarantees_csv(
         if not errors:
             try:
                 payload = BankGuaranteeCreate(
-                    project_id=str(row_project),
+                    project_id=selected_project_id,
                     contract_id=data["contract_id"],
                     bg_number=bg_number,
                     bg_type=bg_type,

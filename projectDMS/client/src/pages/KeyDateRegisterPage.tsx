@@ -499,8 +499,8 @@ const KeyDateRegisterPage: React.FC = () => {
         description="Preview imported milestones and fix row errors before saving."
         sampleFileName="key-date-import-template.csv"
         onDownloadTemplate={downloadKeyDatesImportTemplate}
-        onPreview={(file) => previewKeyDatesCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
-        onImport={(file) => importKeyDatesCsv(file, projectFilter !== "all" ? { project_id: projectFilter } : undefined)}
+        onPreview={(file, scope) => previewKeyDatesCsv(file, scope)}
+        onImport={(file, scope) => importKeyDatesCsv(file, scope)}
         onImported={load}
         rowLabel={(row) => String(row.data?.title || row.data?.milestone_ref || `Row ${row.row_number}`)}
       />

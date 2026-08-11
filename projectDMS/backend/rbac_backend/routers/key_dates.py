@@ -47,7 +47,7 @@ from ..services.policy_service import PolicyService
 from ..services.register_csv_import import (
     KEY_DATE_SAMPLE_ROW,
     KEY_DATE_TEMPLATE_HEADERS,
-    collect_project_ids,
+    validate_csv_import_scope,
     import_key_dates_csv,
     preview_key_dates_csv,
     template_csv,
@@ -81,44 +81,6 @@ async def _read_csv(file: UploadFile) -> bytes:
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is empty")
     return content
-
-
-async def _authorize_csv_projects(
-    content: bytes,
-    current_user,
-    policy: PolicyService,
-    *,
-    permission: str,
-    organization_id: Optional[str],
-    project_id: Optional[str],
-) -> None:
-    try:
-        project_ids = collect_project_ids(content, project_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    if not project_ids and project_id:
-        project_ids = [project_id]
-    if not project_ids:
-        # Let row validation return the project_id required errors; this call
-        # still checks the user has create rights in the organization.
-        await policy.authorize(
-            current_user,
-            permission,
-            resource_type="key_dates",
-            organization_id=organization_id or getattr(current_user, "organization_id", None),
-            project_id=None,
-            audit=False,
-        )
-        return
-    for row_project_id in project_ids:
-        await policy.authorize(
-            current_user,
-            permission,
-            resource_type="key_date_milestone",
-            organization_id=organization_id or getattr(current_user, "organization_id", None),
-            project_id=row_project_id,
-            audit=False,
-        )
 
 
 async def _load_submission(submission_id: str, permission: str, db, current_user, policy) -> dict:
@@ -290,22 +252,27 @@ async def key_dates_import_template(
 @router.post("/key-dates/import/preview", response_model=CSVImportPreview)
 async def preview_key_dates_import(
     file: UploadFile = File(...),
-    organization_id: Optional[str] = Form(None),
-    project_id: Optional[str] = Form(None),
+    organization_id: str = Form(..., min_length=1),
+    project_id: str = Form(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
     content = await _read_csv(file)
-    await _authorize_csv_projects(
-        content,
-        current_user,
-        policy,
-        permission=Permissions.KEYDATE_CREATE,
-        organization_id=organization_id,
-        project_id=project_id,
-    )
     try:
+        organization_id, project_id = await validate_csv_import_scope(
+            db,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        await policy.authorize(
+            current_user,
+            Permissions.KEYDATE_CREATE,
+            resource_type="key_date_milestone",
+            organization_id=organization_id,
+            project_id=project_id,
+            audit=False,
+        )
         preview = await preview_key_dates_csv(
             db,
             content,
@@ -321,22 +288,27 @@ async def preview_key_dates_import(
 @router.post("/key-dates/import", response_model=CSVImportResult)
 async def import_key_dates(
     file: UploadFile = File(...),
-    organization_id: Optional[str] = Form(None),
-    project_id: Optional[str] = Form(None),
+    organization_id: str = Form(..., min_length=1),
+    project_id: str = Form(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
     content = await _read_csv(file)
-    await _authorize_csv_projects(
-        content,
-        current_user,
-        policy,
-        permission=Permissions.KEYDATE_CREATE,
-        organization_id=organization_id,
-        project_id=project_id,
-    )
     try:
+        organization_id, project_id = await validate_csv_import_scope(
+            db,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        await policy.authorize(
+            current_user,
+            Permissions.KEYDATE_CREATE,
+            resource_type="key_date_milestone",
+            organization_id=organization_id,
+            project_id=project_id,
+            audit=False,
+        )
         return await import_key_dates_csv(
             db,
             content,
