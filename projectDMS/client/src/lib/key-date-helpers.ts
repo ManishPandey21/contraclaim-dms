@@ -1,4 +1,9 @@
-import type { MilestoneStatus, MilestoneDTO, MilestoneRevision } from "@/services/key-dates-api";
+import type {
+  KeyDateWorkflowSummaryDTO,
+  MilestoneStatus,
+  MilestoneDTO,
+  MilestoneRevision,
+} from "@/services/key-dates-api";
 
 // Pure helpers for the Key Date Tracker (status colour-coding + labels).
 // Colour scheme per spec §10: green achieved, amber ≤30d, orange ≤15d,
@@ -72,4 +77,25 @@ export function revisionAt(
 ): MilestoneRevision | undefined {
   const revs = m.revisions ?? [];
   return revs[k - 1];
+}
+
+/** Immutable project-revision lineage for one milestone. */
+export function milestoneRevisionLineage(
+  workflow: Pick<KeyDateWorkflowSummaryDTO, "submissions" | "determinations">,
+  milestone: Pick<MilestoneDTO, "id" | "milestone_ref">,
+) {
+  return workflow.submissions.flatMap((submission) => {
+    const item = submission.items.find(
+      (entry) => entry.key_date_id === milestone.id || entry.milestone_ref === milestone.milestone_ref,
+    );
+    if (!item) return [];
+    const determinations = workflow.determinations.flatMap((determination) => {
+      if (!determination.eot_submission_ids.includes(submission.id)) return [];
+      const determined = determination.items.find(
+        (entry) => entry.key_date_id === milestone.id || entry.milestone_ref === milestone.milestone_ref,
+      );
+      return determined ? [{ determination, item: determined }] : [];
+    });
+    return [{ submission, item, determinations }];
+  });
 }

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-
 CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.document.view",
     "dms.document.upload",
@@ -45,6 +44,10 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.keydate.delete",
     "dms.keydate.eot_submit",
     "dms.keydate.eot_approve",
+    "dms.keydate.baseline.freeze",
+    "dms.keydate.eot.lock_submission",
+    "dms.keydate.eot.determine",
+    "dms.keydate.eot.freeze_determination",
     "dms.keydate.achievement",
     "dms.keydate.export",
     "dms.keydate.manage",
@@ -205,6 +208,10 @@ class Permissions:
     KEYDATE_DELETE = "dms.keydate.delete"
     KEYDATE_EOT_SUBMIT = "dms.keydate.eot_submit"
     KEYDATE_EOT_APPROVE = "dms.keydate.eot_approve"
+    KEYDATE_BASELINE_FREEZE = "dms.keydate.baseline.freeze"
+    KEYDATE_EOT_LOCK_SUBMISSION = "dms.keydate.eot.lock_submission"
+    KEYDATE_EOT_DETERMINE = "dms.keydate.eot.determine"
+    KEYDATE_EOT_FREEZE_DETERMINATION = "dms.keydate.eot.freeze_determination"
     KEYDATE_ACHIEVEMENT = "dms.keydate.achievement"
     KEYDATE_EXPORT = "dms.keydate.export"
     KEYDATE_MANAGE = "dms.keydate.manage"
@@ -312,6 +319,10 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.contract.appraisal.reject": ["projects:update"],
     "dms.task.manage": ["projects:update"],
     "dms.keydate.eot_approve": ["projects:update"],
+    "dms.keydate.baseline.freeze": ["projects:update"],
+    "dms.keydate.eot.lock_submission": ["projects:update"],
+    "dms.keydate.eot.determine": ["projects:update"],
+    "dms.keydate.eot.freeze_determination": ["projects:update"],
     "dms.keydate.manage": ["projects:update"],
     "dms.variation.approve": ["projects:update"],
     "dms.bankguarantee.release": ["projects:update"],

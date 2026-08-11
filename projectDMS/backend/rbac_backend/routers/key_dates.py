@@ -7,7 +7,9 @@ filtered with build_scope_query, so Org A never sees Org B's key dates.
 
 from __future__ import annotations
 
-from typing import List, Optional
+import csv
+import io
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
@@ -16,17 +18,31 @@ from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.key_date import (
     AchievementRecord,
+    BaselineFreezeRequest,
+    EOTDetermination,
+    EOTDeterminationCreate,
+    EOTDeterminationUpdate,
     EOTApplication,
     EOTApplicationCreate,
     EOTReview,
+    EOTSubmission,
+    EOTSubmissionCreate,
+    EOTSubmissionUpdate,
     ExtensionHistory,
     KeyDateDashboard,
+    KeyDateBaseline,
     KeyDateMilestone,
     KeyDateMilestoneCreate,
     KeyDateMilestoneUpdate,
+    KeyDateWorkflowSummary,
 )
 from ..models.csv_import import CSVImportPreview, CSVImportResult
 from ..services.key_date_service import KeyDateError, KeyDateService
+from ..services.key_date_revision_service import (
+    DETERMINATION_TEMPLATE_HEADERS,
+    SUBMISSION_TEMPLATE_HEADERS,
+    KeyDateRevisionService,
+)
 from ..services.policy_service import PolicyService
 from ..services.register_csv_import import (
     KEY_DATE_SAMPLE_ROW,
@@ -103,6 +119,67 @@ async def _authorize_csv_projects(
             project_id=row_project_id,
             audit=False,
         )
+
+
+async def _load_submission(submission_id: str, permission: str, db, current_user, policy) -> dict:
+    submission = await KeyDateRevisionService(db).get_submission(submission_id)
+    if not submission:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EOT submission not found")
+    await policy.authorize_document(
+        current_user, permission, submission, resource_type="key_date_eot_submission"
+    )
+    return submission
+
+
+async def _load_determination(determination_id: str, permission: str, db, current_user, policy) -> dict:
+    determination = await KeyDateRevisionService(db).get_determination(determination_id)
+    if not determination:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EOT determination not found")
+    await policy.authorize_document(
+        current_user, permission, determination, resource_type="key_date_eot_determination"
+    )
+    return determination
+
+
+def _organization_id(current_user: CurrentUser, supplied: Optional[str] = None) -> Optional[str]:
+    return supplied or getattr(current_user, "organization_id", None)
+
+
+async def _authorize_workflow_scope(
+    *, permission: str, project_id: str, organization_id: Optional[str],
+    current_user: CurrentUser, policy: PolicyService,
+) -> Optional[str]:
+    org = _organization_id(current_user, organization_id)
+    await policy.authorize(
+        current_user, permission, resource_type="key_date_revision",
+        organization_id=org, project_id=project_id,
+    )
+    return org
+
+
+async def _export_metadata(db: Any, resource: Dict[str, Any], title: str) -> Dict[str, Any]:
+    org_id = resource.get("organization_id")
+    project_id = resource.get("project_id")
+    organization = await db.organizations.find_one({"_id": org_id}) if org_id else None
+    project = await db.projects.find_one({"_id": project_id}) if project_id else None
+    return {
+        "Organisation": (organization or {}).get("name") or org_id or "",
+        "Project": (project or {}).get("name") or project_id or "",
+        "Contract": resource.get("contract_id") or "primary",
+        "Record": title,
+    }
+
+
+def _download_response(content: str | bytes, format: str, filename: str) -> Response:
+    media = {
+        "csv": "text/csv",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pdf": "application/pdf",
+    }[format]
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}.{format}"'},
+    )
 
 
 @router.get("/key-dates", response_model=List[KeyDateMilestone])
@@ -313,6 +390,439 @@ async def recalculate_key_dates(
         return await KeyDateService(db).recalculate_project(scope, project_id, current_user)
     except KeyDateError as exc:
         raise _bad_request(exc)
+
+
+# --- project/contract baseline + successive EOT revisions ----------------
+
+
+@router.get("/key-dates/workflow", response_model=KeyDateWorkflowSummary)
+@router.get("/key-dates/revisions", response_model=KeyDateWorkflowSummary)
+async def key_date_workflow(
+    project_id: str = Query(..., min_length=1),
+    contract_id: str = Query("primary", min_length=1),
+    organization_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_VIEW, project_id=project_id,
+        organization_id=organization_id, current_user=current_user, policy=policy,
+    )
+    return KeyDateWorkflowSummary(**await KeyDateRevisionService(db).workflow_summary(
+        org, project_id, contract_id
+    ))
+
+
+@router.post("/key-dates/baseline/freeze", response_model=KeyDateBaseline)
+async def freeze_original_key_dates(
+    payload: BaselineFreezeRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    if not payload.confirmation:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Baseline freeze was not confirmed")
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_BASELINE_FREEZE, project_id=payload.project_id,
+        organization_id=payload.organization_id, current_user=current_user, policy=policy,
+    )
+    try:
+        return KeyDateBaseline(**await KeyDateRevisionService(db).freeze_baseline(
+            org, payload.project_id, payload.contract_id, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-submissions", response_model=EOTSubmission, status_code=status.HTTP_201_CREATED)
+async def create_eot_submission_revision(
+    payload: EOTSubmissionCreate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_EOT_SUBMIT, project_id=payload.project_id,
+        organization_id=payload.organization_id, current_user=current_user, policy=policy,
+    )
+    payload.organization_id = org
+    try:
+        return EOTSubmission(**await KeyDateRevisionService(db).create_submission(payload, current_user))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.put("/key-dates/eot-submissions/{submission_id}", response_model=EOTSubmission)
+async def update_eot_submission_revision(
+    submission_id: str,
+    payload: EOTSubmissionUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+    )
+    try:
+        return EOTSubmission(**await KeyDateRevisionService(db).update_submission(
+            submission, payload, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-submissions/{submission_id}/lock", response_model=EOTSubmission)
+async def lock_eot_submission_revision(
+    submission_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_LOCK_SUBMISSION, db, current_user, policy
+    )
+    try:
+        return EOTSubmission(**await KeyDateRevisionService(db).lock_submission(
+            submission, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.get("/key-dates/eot-submissions/{submission_id}/template")
+async def eot_submission_template(
+    submission_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+    )
+    milestones = await KeyDateService(db).list(
+        build_scope_query(
+            current_user,
+            organization_id=submission.get("organization_id"),
+            project_id=submission.get("project_id"),
+        ),
+        project_id=submission.get("project_id"), limit=5000,
+    )
+    milestones = [
+        row for row in milestones
+        if str(row.get("contract_id") or "primary") == str(submission.get("contract_id") or "primary")
+    ]
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(SUBMISSION_TEMPLATE_HEADERS)
+    existing = {
+        str(item.get("milestone_ref") or "").casefold(): item
+        for item in submission.get("items") or []
+    }
+    for milestone in milestones:
+        item = existing.get(str(milestone.get("milestone_ref") or "").casefold(), {})
+        writer.writerow([
+            milestone.get("milestone_ref"),
+            milestone.get("description") or milestone.get("title"),
+            milestone.get("original_planned_key_date"),
+            milestone.get("current_approved_key_date"),
+            item.get("eot_submitted_date"),
+            item.get("claimed_extension_days"),
+            item.get("remarks"),
+        ])
+    return Response(
+        content=buffer.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{submission.get("revision_label")}-submission-template.csv"'},
+    )
+
+
+@router.post("/key-dates/eot-submissions/{submission_id}/import/preview", response_model=CSVImportPreview)
+async def preview_eot_submission_csv(
+    submission_id: str,
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+    )
+    try:
+        preview, _items = await KeyDateRevisionService(db).submission_csv_preview(
+            submission, await _read_csv(file)
+        )
+        return preview
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-submissions/{submission_id}/import", response_model=CSVImportResult)
+async def import_eot_submission_csv(
+    submission_id: str,
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+    )
+    try:
+        return await KeyDateRevisionService(db).import_submission_csv(
+            submission, await _read_csv(file), current_user
+        )
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-determinations", response_model=EOTDetermination, status_code=status.HTTP_201_CREATED)
+async def create_eot_determination(
+    payload: EOTDeterminationCreate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_EOT_DETERMINE, project_id=payload.project_id,
+        organization_id=payload.organization_id, current_user=current_user, policy=policy,
+    )
+    payload.organization_id = org
+    try:
+        return EOTDetermination(**await KeyDateRevisionService(db).create_determination(
+            payload, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.put("/key-dates/eot-determinations/{determination_id}", response_model=EOTDetermination)
+async def update_eot_determination(
+    determination_id: str,
+    payload: EOTDeterminationUpdate,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+    )
+    try:
+        return EOTDetermination(**await KeyDateRevisionService(db).update_determination(
+            determination, payload, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-determinations/{determination_id}/freeze", response_model=EOTDetermination)
+async def freeze_eot_determination(
+    determination_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EOT_FREEZE_DETERMINATION,
+        db, current_user, policy,
+    )
+    try:
+        return EOTDetermination(**await KeyDateRevisionService(db).freeze_determination(
+            determination, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.get("/key-dates/eot-determinations/{determination_id}/template")
+async def eot_determination_template(
+    determination_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+    )
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerow(DETERMINATION_TEMPLATE_HEADERS)
+    existing = {
+        str(item.get("milestone_ref") or "").casefold(): item
+        for item in determination.get("items") or []
+    }
+    covered: Dict[str, Dict[str, Any]] = {}
+    svc = KeyDateRevisionService(db)
+    for submission_id in determination.get("eot_submission_ids") or []:
+        submission = await svc.get_submission(str(submission_id))
+        for item in (submission or {}).get("items") or []:
+            covered[str(item.get("milestone_ref") or "").casefold()] = item
+    for key, submitted in sorted(covered.items(), key=lambda entry: entry[0]):
+        item = existing.get(key, {})
+        milestone = await db.key_date_milestones.find_one({"_id": str(submitted.get("key_date_id"))}) or {}
+        writer.writerow([
+            submitted.get("milestone_ref"), submitted.get("description"),
+            submitted.get("eot_submitted_date"), milestone.get("current_approved_key_date"),
+            item.get("eot_granted_date"), item.get("granted_extension_days"),
+            item.get("determination_result") or "pending", item.get("remarks"),
+        ])
+    return Response(
+        content=buffer.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="eot-determination-template.csv"'},
+    )
+
+
+@router.post("/key-dates/eot-determinations/{determination_id}/import/preview", response_model=CSVImportPreview)
+async def preview_eot_determination_csv(
+    determination_id: str,
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+    )
+    try:
+        preview, _items = await KeyDateRevisionService(db).determination_csv_preview(
+            determination, await _read_csv(file)
+        )
+        return preview
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.post("/key-dates/eot-determinations/{determination_id}/import", response_model=CSVImportResult)
+async def import_eot_determination_csv(
+    determination_id: str,
+    file: UploadFile = File(...),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+    )
+    try:
+        return await KeyDateRevisionService(db).import_determination_csv(
+            determination, await _read_csv(file), current_user
+        )
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
+@router.get("/key-dates/baseline/export")
+async def export_frozen_baseline(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    project_id: str = Query(..., min_length=1),
+    contract_id: str = Query("primary", min_length=1),
+    organization_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_EXPORT, project_id=project_id,
+        organization_id=organization_id, current_user=current_user, policy=policy,
+    )
+    baseline = await KeyDateRevisionService(db).baseline(org, project_id, contract_id)
+    if not baseline or baseline.get("status") != "frozen":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Frozen baseline not found")
+    from ..services import key_date_revision_export as kx
+    metadata = await _export_metadata(db, baseline, "Original Contractual Key Dates")
+    metadata.update({
+        "Revision": 0, "Status": "Frozen", "Frozen By": baseline.get("frozen_by"),
+        "Frozen On": baseline.get("frozen_at"),
+    })
+    headers, rows = kx.baseline_table(baseline)
+    return _download_response(
+        kx.render(format, metadata, headers, rows, "Frozen Original Key Dates"),
+        format, "key-dates-original-frozen",
+    )
+
+
+@router.get("/key-dates/eot-submissions/{submission_id}/export")
+async def export_eot_submission(
+    submission_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EXPORT, db, current_user, policy
+    )
+    from ..services import key_date_revision_export as kx
+    metadata = await _export_metadata(db, submission, f"{submission.get('revision_label')} Submission")
+    metadata.update({
+        "Revision": submission.get("revision_number"), "Status": submission.get("status"),
+        "Contractor Submission Date": submission.get("contractor_submission_date"),
+        "Contractor Letter Reference": submission.get("contractor_letter_reference"),
+        "Locked By": submission.get("locked_by"), "Locked On": submission.get("locked_at"),
+    })
+    headers, rows = kx.submission_table(submission)
+    filename = f"{str(submission.get('revision_label') or 'eot').lower()}-submission"
+    return _download_response(kx.render(format, metadata, headers, rows, "EOT Submission"), format, filename)
+
+
+@router.get("/key-dates/eot-determinations/{determination_id}/export")
+async def export_eot_determination(
+    determination_id: str,
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    determination = await _load_determination(
+        determination_id, Permissions.KEYDATE_EXPORT, db, current_user, policy
+    )
+    from ..services import key_date_revision_export as kx
+    covered = ", ".join(determination.get("covered_revision_labels") or [])
+    metadata = await _export_metadata(db, determination, f"Determination covering {covered}")
+    metadata.update({
+        "Determination Status": determination.get("status"),
+        "Determination Reference": determination.get("determination_reference"),
+        "Determination Date": determination.get("determination_date"),
+        "Approval / Grant Reference": determination.get("approval_grant_reference"),
+        "Frozen By": determination.get("frozen_by"), "Frozen On": determination.get("frozen_at"),
+    })
+    headers, rows = kx.determination_table(determination)
+    return _download_response(
+        kx.render(format, metadata, headers, rows, "EOT Determination"),
+        format, "eot-determination",
+    )
+
+
+@router.get("/key-dates/history/export")
+async def export_complete_key_date_history(
+    format: str = Query("csv", pattern="^(csv|xlsx|pdf)$"),
+    project_id: str = Query(..., min_length=1),
+    contract_id: str = Query("primary", min_length=1),
+    organization_id: Optional[str] = Query(None),
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    org = await _authorize_workflow_scope(
+        permission=Permissions.KEYDATE_EXPORT, project_id=project_id,
+        organization_id=organization_id, current_user=current_user, policy=policy,
+    )
+    scope = build_scope_query(current_user, organization_id=org, project_id=project_id)
+    milestones = await KeyDateService(db).list(scope, project_id=project_id, limit=5000)
+    milestones = [
+        row for row in milestones
+        if str(row.get("contract_id") or "primary") == str(contract_id or "primary")
+    ]
+    svc = KeyDateRevisionService(db)
+    submissions = await svc.list_submissions(org, project_id, contract_id)
+    determinations = await svc.list_determinations(org, project_id, contract_id)
+    from ..services import key_date_revision_export as kx
+    resource = {"organization_id": org, "project_id": project_id, "contract_id": contract_id}
+    metadata = await _export_metadata(db, resource, "Complete Key Date / EOT History")
+    headers, rows = kx.history_table(milestones, submissions, determinations)
+    return _download_response(
+        kx.render(format, metadata, headers, rows, "Complete Key Date EOT History"),
+        format, "key-date-eot-history",
+    )
 
 
 @router.get("/key-dates/{milestone_id}", response_model=KeyDateMilestone)

@@ -49,6 +49,7 @@ import {
 import { CalendarClock, Download, Edit, Eye, Loader2, PlusCircle, RefreshCw, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import CsvImportDialog from "@/components/registers/CsvImportDialog";
+import KeyDateRevisionWorkflow from "@/components/key-dates/KeyDateRevisionWorkflow";
 import {
   createMilestone,
   deleteMilestone,
@@ -112,6 +113,7 @@ const KeyDateRegisterPage: React.FC = () => {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<MForm>({ ...EMPTY });
   const [saving, setSaving] = useState(false);
+  const [baselineFrozen, setBaselineFrozen] = useState(false);
   const navigate = useNavigate();
 
   const load = useCallback(async () => {
@@ -144,12 +146,20 @@ const KeyDateRegisterPage: React.FC = () => {
   }, []);
 
   const openCreate = () => {
+    if (baselineFrozen) {
+      toast.error("Original Key Dates are frozen. Create an EOT submission instead.");
+      return;
+    }
     setEditingId(null);
     setForm({ ...EMPTY, project_id: projectFilter !== "all" ? projectFilter : "" });
     setDialogOpen(true);
   };
 
   const openEdit = (m: MilestoneDTO) => {
+    if (baselineFrozen) {
+      toast.error("Frozen Original Key Dates are read-only.");
+      return;
+    }
     setEditingId(m.id);
     setForm({
       title: m.title,
@@ -208,6 +218,10 @@ const KeyDateRegisterPage: React.FC = () => {
   };
 
   const remove = async (m: MilestoneDTO) => {
+    if (baselineFrozen) {
+      toast.error("Frozen Original Key Dates cannot be deleted.");
+      return;
+    }
     try {
       await deleteMilestone(m.id);
       await load();
@@ -254,7 +268,7 @@ const KeyDateRegisterPage: React.FC = () => {
             variant="outline"
             size="sm"
             onClick={onRecalculate}
-            disabled={projectFilter === "all"}
+            disabled={projectFilter === "all" || baselineFrozen}
             title={projectFilter === "all" ? "Select a project first" : "Recalculate key dates from LOA + week basis"}
           >
             <RefreshCw className="mr-2 h-4 w-4" />Recalculate
@@ -262,7 +276,7 @@ const KeyDateRegisterPage: React.FC = () => {
           <Button variant="outline" size="sm" onClick={() => onExport("csv")}>
             <Download className="mr-2 h-4 w-4" />CSV
           </Button>
-          <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)}>
+          <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)} disabled={baselineFrozen}>
             <Upload className="mr-2 h-4 w-4" />Upload CSV
           </Button>
           <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}>
@@ -271,7 +285,7 @@ const KeyDateRegisterPage: React.FC = () => {
           <Button variant="outline" size="sm" onClick={() => onExport("pdf")}>
             <Download className="mr-2 h-4 w-4" />PDF
           </Button>
-          <Button onClick={openCreate}>
+          <Button onClick={openCreate} disabled={baselineFrozen}>
             <PlusCircle className="mr-2 h-4 w-4" />
             New Milestone
           </Button>
@@ -284,9 +298,18 @@ const KeyDateRegisterPage: React.FC = () => {
           <Stat label="Achieved" value={dash.achieved} cls="text-green-600" />
           <Stat label="Overdue" value={dash.overdue} cls="text-red-600" />
           <Stat label="Due ≤30d" value={dash.due_30} cls="text-amber-600" />
-          <Stat label="EOT under review" value={dash.eot_under_review} cls="text-blue-600" />
-          <Stat label="Extensions approved" value={dash.eot_approved} cls="text-purple-600" />
+          <Stat label="Pending EOTs" value={dash.eot_under_review} cls="text-blue-600" />
+          <Stat label="Frozen grants" value={dash.eot_approved} cls="text-purple-600" />
         </div>
+      )}
+
+      {projectFilter !== "all" && (
+        <KeyDateRevisionWorkflow
+          projectId={projectFilter}
+          milestones={items}
+          onChanged={load}
+          onBaselineStatusChange={setBaselineFrozen}
+        />
       )}
 
       <Card>
@@ -325,6 +348,7 @@ const KeyDateRegisterPage: React.FC = () => {
                   <TableHead key={`eot-h-${i}`} className="whitespace-nowrap">EOT-{i + 1}</TableHead>
                 ))}
                 <TableHead>Current</TableHead>
+                <TableHead>Latest EOT Submitted</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>EOT</TableHead>
                 <TableHead>Achievement</TableHead>
@@ -335,7 +359,7 @@ const KeyDateRegisterPage: React.FC = () => {
             <TableBody>
               {items.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={10 + eotCols} className="py-8 text-center text-muted-foreground">
+                  <TableCell colSpan={11 + eotCols} className="py-8 text-center text-muted-foreground">
                     No milestones yet.
                   </TableCell>
                 </TableRow>
@@ -359,8 +383,17 @@ const KeyDateRegisterPage: React.FC = () => {
                       );
                     })}
                     <TableCell>{fmtDate(m.current_approved_key_date)}</TableCell>
+                    <TableCell className="whitespace-nowrap text-xs">
+                      <div>
+                        {m.latest_eot_submission_label || "—"}
+                        {m.latest_eot_submitted_date ? ` · ${fmtDate(m.latest_eot_submitted_date)}` : ""}
+                      </div>
+                      {m.pending_eot_count ? (
+                        <div className="text-muted-foreground">{m.pending_eot_count} pending</div>
+                      ) : null}
+                    </TableCell>
                     <TableCell><Badge className={statusColor(m.status)}>{statusLabel(m.status)}</Badge></TableCell>
-                    <TableCell className="text-xs">{m.eot_status || "—"}</TableCell>
+                    <TableCell className="text-xs">{m.latest_eot_status || m.eot_status || "—"}</TableCell>
                     <TableCell className="text-xs">{achievementText(m)}</TableCell>
                     <TableCell className="text-xs">{alertText(m)}</TableCell>
                     <TableCell className="text-right">
@@ -368,12 +401,12 @@ const KeyDateRegisterPage: React.FC = () => {
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Open" onClick={() => navigate(`/key-dates/${m.id}`)}>
                           <Eye className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(m)}>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title={baselineFrozen ? "Frozen baseline" : "Edit"} onClick={() => openEdit(m)} disabled={baselineFrozen}>
                           <Edit className="h-4 w-4" />
                         </Button>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" title="Delete">
+                            <Button variant="ghost" size="icon" className="h-8 w-8" title={baselineFrozen ? "Frozen baseline" : "Delete"} disabled={baselineFrozen}>
                               <Trash2 className="h-4 w-4 text-destructive" />
                             </Button>
                           </AlertDialogTrigger>

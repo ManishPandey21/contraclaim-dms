@@ -27,9 +27,11 @@ import {
   EOTDTO,
   ExtensionHistoryDTO,
   getExtensionHistory,
+  getKeyDateWorkflow,
   getMilestone,
   listEOTs,
   MilestoneDTO,
+  KeyDateWorkflowSummaryDTO,
   recordAchievement,
   reviewEOT,
   submitEOT,
@@ -51,6 +53,7 @@ const KeyDateDetailPage: React.FC = () => {
   const [m, setM] = useState<MilestoneDTO | null>(null);
   const [eots, setEots] = useState<EOTDTO[]>([]);
   const [history, setHistory] = useState<ExtensionHistoryDTO[]>([]);
+  const [workflow, setWorkflow] = useState<KeyDateWorkflowSummaryDTO | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -66,10 +69,16 @@ const KeyDateDetailPage: React.FC = () => {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [mi, es, hs] = await Promise.all([getMilestone(id), listEOTs(id), getExtensionHistory(id)]);
+      const mi = await getMilestone(id);
+      const [es, hs, wf] = await Promise.all([
+        listEOTs(id),
+        getExtensionHistory(id),
+        mi.project_id ? getKeyDateWorkflow(mi.project_id) : Promise.resolve(null),
+      ]);
       setM(mi);
       setEots(es);
       setHistory(hs);
+      setWorkflow(wf);
     } catch {
       toast.error("Failed to load milestone");
     } finally {
@@ -183,9 +192,14 @@ const KeyDateDetailPage: React.FC = () => {
           <Link to="/key-dates"><ArrowLeft className="mr-2 h-4 w-4" />Register</Link>
         </Button>
         <div className="flex gap-2">
-          {!achieved && (
+          {!achieved && workflow?.baseline_status !== "frozen" && (
             <Button variant="outline" size="sm" onClick={() => setEotOpen(true)}>
               <FilePlus2 className="mr-2 h-4 w-4" />Submit EOT
+            </Button>
+          )}
+          {!achieved && workflow?.baseline_status === "frozen" && (
+            <Button asChild variant="outline" size="sm">
+              <Link to="/key-dates"><FilePlus2 className="mr-2 h-4 w-4" />Create project EOT submission</Link>
             </Button>
           )}
           {!achieved && (
@@ -217,6 +231,53 @@ const KeyDateDetailPage: React.FC = () => {
           <Field label="Revisions" value={m.current_revision} />
         </CardContent>
       </Card>
+
+      {workflow?.baseline_status === "frozen" && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Contractual lineage</CardTitle>
+            <CardDescription>
+              Pending contractor submissions do not change the Current Contractual Date.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="rounded-md border p-3 text-sm">
+              <p className="font-medium">Original Contractual Date</p>
+              <p>{fmt(m.original_planned_key_date)}</p>
+            </div>
+            {workflow.submissions.flatMap((submission) => {
+              const item = submission.items.find((entry) => entry.key_date_id === m.id || entry.milestone_ref === m.milestone_ref);
+              if (!item) return [];
+              const determinations = workflow.determinations.flatMap((determination) => {
+                if (!determination.eot_submission_ids.includes(submission.id)) return [];
+                const determined = determination.items.find((entry) => entry.key_date_id === m.id || entry.milestone_ref === m.milestone_ref);
+                return determined ? [{ determination, determined }] : [];
+              });
+              return [(
+                <div key={submission.id} className="rounded-md border p-3 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-medium">{submission.revision_label}</p>
+                    <Badge variant="outline">{submission.status}</Badge>
+                  </div>
+                  <p>Submitted: {fmt(item.eot_submitted_date)} · Base at submission: {fmt(item.contractual_date_at_submission)}</p>
+                  {determinations.length === 0 ? (
+                    <p className="text-muted-foreground">Determination: Pending</p>
+                  ) : determinations.map(({ determination, determined }) => (
+                    <p key={determination.id} className="text-muted-foreground">
+                      Determination: {determined.determination_result} · Granted: {fmt(determined.eot_granted_date)}
+                      {determination.frozen_at ? " · Frozen" : " · Not frozen"}
+                    </p>
+                  ))}
+                </div>
+              )];
+            })}
+            <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm dark:bg-blue-950/20">
+              <p className="font-medium">Current Contractual Date</p>
+              <p>{fmt(m.current_approved_key_date)}</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>

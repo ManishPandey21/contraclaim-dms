@@ -63,6 +63,10 @@ from .v20260723_0001_arbitration_effect_recovery import DESCRIPTION as ARB_EFFEC
 from .v20260723_0001_arbitration_effect_recovery import NAME as ARB_EFFECT_RECOVERY_NAME
 from .v20260723_0001_arbitration_effect_recovery import VERSION as ARB_EFFECT_RECOVERY_VERSION
 from .v20260723_0001_arbitration_effect_recovery import upgrade as upgrade_arbitration_effect_recovery
+from .v20260811_0001_key_date_eot_revision_workflow import DESCRIPTION as KEY_DATE_EOT_DESCRIPTION
+from .v20260811_0001_key_date_eot_revision_workflow import NAME as KEY_DATE_EOT_NAME
+from .v20260811_0001_key_date_eot_revision_workflow import VERSION as KEY_DATE_EOT_VERSION
+from .v20260811_0001_key_date_eot_revision_workflow import upgrade as upgrade_key_date_eot_revision
 
 
 MIGRATIONS = [
@@ -149,5 +153,11 @@ MIGRATIONS = [
         name=ARB_EFFECT_RECOVERY_NAME,
         description=ARB_EFFECT_RECOVERY_DESCRIPTION,
         upgrade=upgrade_arbitration_effect_recovery,
+    ),
+    Migration(
+        version=KEY_DATE_EOT_VERSION,
+        name=KEY_DATE_EOT_NAME,
+        description=KEY_DATE_EOT_DESCRIPTION,
+        upgrade=upgrade_key_date_eot_revision,
     ),
 ]

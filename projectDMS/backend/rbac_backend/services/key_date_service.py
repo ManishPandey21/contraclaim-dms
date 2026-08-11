@@ -181,6 +181,29 @@ class KeyDateService:
     async def _get_db(self) -> Any:
         return self.db if self.db is not None else await get_database()
 
+    async def _assert_original_baseline_editable(self, milestone_or_project: Dict[str, Any]) -> None:
+        """Prevent every legacy write path from changing a frozen baseline."""
+        project_id = milestone_or_project.get("project_id")
+        if not project_id:
+            return
+        db = await self._get_db()
+        try:
+            baselines = db.key_date_baselines
+        except AttributeError:
+            # Lightweight unit-test databases predating the workflow collection.
+            return
+        query: Dict[str, Any] = {
+            "project_id": str(project_id),
+            "contract_id": str(milestone_or_project.get("contract_id") or "primary"),
+            "status": "frozen",
+        }
+        if milestone_or_project.get("organization_id"):
+            query["organization_id"] = str(milestone_or_project.get("organization_id"))
+        if await baselines.find_one(query):
+            raise KeyDateError(
+                "Original Key Dates are frozen. Use the project EOT revision workflow for contractual changes."
+            )
+
     async def _start_and_basis(
         self, project_id: str, override: Optional[datetime],
         organization_id: Optional[str] = None,
@@ -221,6 +244,11 @@ class KeyDateService:
 
     async def create_milestone(self, payload: KeyDateMilestoneCreate, current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
+        await self._assert_original_baseline_editable({
+            "project_id": payload.project_id,
+            "organization_id": payload.organization_id or getattr(current_user, "organization_id", None),
+            "contract_id": payload.contract_id,
+        })
         start, basis = await self._start_and_basis(
             payload.project_id, payload.project_start_date, getattr(current_user, "organization_id", None)
         )
@@ -263,6 +291,63 @@ class KeyDateService:
             })
         return out
 
+    async def _workflow_summary_for(self, milestone_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Latest project-level EOT submission projection per milestone."""
+        ids = [str(value) for value in milestone_ids if value is not None]
+        if not ids:
+            return {}
+        db = await self._get_db()
+        try:
+            items = [row async for row in db.key_date_eot_submission_items.find(
+                {"key_date_id": {"$in": ids}}
+            )]
+            submission_ids = list({str(row.get("eot_submission_id")) for row in items})
+            submissions = [row async for row in db.key_date_eot_submissions.find(
+                {"_id": {"$in": submission_ids}}
+            )] if submission_ids else []
+            determinations = [row async for row in db.key_date_eot_determinations.find(
+                {"eot_submission_ids": {"$in": submission_ids}}
+            )] if submission_ids else []
+        except Exception:
+            return {}
+        submission_by_id = {str(row.get("_id")): row for row in submissions}
+        determinations_by_submission: Dict[str, List[Dict[str, Any]]] = {}
+        for determination in determinations:
+            for submission_id in determination.get("eot_submission_ids") or []:
+                determinations_by_submission.setdefault(str(submission_id), []).append(determination)
+        frozen_covered = {
+            str(submission_id)
+            for determination in determinations
+            if determination.get("frozen_at")
+            for submission_id in determination.get("eot_submission_ids") or []
+        }
+        out: Dict[str, Dict[str, Any]] = {}
+        grouped: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+        for item in items:
+            submission = submission_by_id.get(str(item.get("eot_submission_id")))
+            if submission:
+                grouped.setdefault(str(item.get("key_date_id")), []).append((submission, item))
+        for milestone_id, pairs in grouped.items():
+            pairs.sort(key=lambda pair: int(pair[0].get("revision_number") or 0))
+            submission, item = pairs[-1]
+            linked = determinations_by_submission.get(str(submission.get("_id")), [])
+            linked.sort(key=lambda row: row.get("created_at") or datetime.min)
+            latest_status = linked[-1].get("status") if linked else (
+                "pending" if submission.get("status") in {"submitted", "locked"} else submission.get("status")
+            )
+            pending_count = sum(
+                1 for candidate, _candidate_item in pairs
+                if candidate.get("status") in {"submitted", "locked"}
+                and str(candidate.get("_id")) not in frozen_covered
+            )
+            out[milestone_id] = {
+                "latest_eot_submission_label": submission.get("revision_label"),
+                "latest_eot_submitted_date": item.get("eot_submitted_date"),
+                "latest_eot_status": latest_status,
+                "pending_eot_count": pending_count,
+            }
+        return out
+
     async def get(self, milestone_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
         m = await db.key_date_milestones.find_one({"_id": milestone_id})
@@ -270,6 +355,7 @@ class KeyDateService:
             return None
         d = decorate(m)
         d["revisions"] = (await self._revisions_for([str(milestone_id)])).get(str(milestone_id), [])
+        d.update((await self._workflow_summary_for([str(milestone_id)])).get(str(milestone_id), {}))
         return d
 
     async def list(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
@@ -286,12 +372,15 @@ class KeyDateService:
         if status:
             items = [m for m in items if m["status"] == status]
         revisions = await self._revisions_for([str(it.get("_id")) for it in items])
+        workflow = await self._workflow_summary_for([str(it.get("_id")) for it in items])
         for it in items:
             it["revisions"] = revisions.get(str(it.get("_id")), [])
+            it.update(workflow.get(str(it.get("_id")), {}))
         return items
 
     async def update(self, milestone: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        await self._assert_original_baseline_editable(milestone)
         update = {k: v for k, v in payload.items() if v is not None and k != "project_start_date"}
         # Recalculate only the calculated/current date (never the original baseline)
         # and only while no approved extension is in force.
@@ -314,6 +403,7 @@ class KeyDateService:
 
     async def delete(self, milestone: Dict[str, Any], current_user: Any) -> bool:
         db = await self._get_db()
+        await self._assert_original_baseline_editable(milestone)
         res = await db.key_date_milestones.delete_one({"_id": milestone["_id"]})
         await self._emit("keydate.milestone.deleted", current_user, milestone, before=milestone)
         return res.deleted_count > 0
@@ -330,6 +420,10 @@ class KeyDateService:
         date untouched (the original is never overwritten by this action).
         """
         db = await self._get_db()
+        await self._assert_original_baseline_editable({
+            "project_id": project_id,
+            "organization_id": getattr(current_user, "organization_id", None),
+        })
         start, basis = await self._start_and_basis(
             project_id, override_start, getattr(current_user, "organization_id", None)
         )
@@ -362,6 +456,7 @@ class KeyDateService:
     # --- EOT --------------------------------------------------------------
 
     async def submit_eot(self, milestone: Dict[str, Any], payload: EOTApplicationCreate, current_user: Any) -> Dict[str, Any]:
+        await self._assert_original_baseline_editable(milestone)
         if payload.submit and not (payload.eot_letter_reference or "").strip():
             raise KeyDateError("EOT letter reference is mandatory when submitting an EOT")
         db = await self._get_db()
@@ -529,7 +624,36 @@ class KeyDateService:
             query["project_id"] = project_id
         cursor = db.key_date_milestones.find(query)
         milestones = [m async for m in cursor]
-        return build_dashboard(milestones)
+        dashboard = build_dashboard(milestones)
+        try:
+            submissions = [row async for row in db.key_date_eot_submissions.find(query)]
+            determinations = [row async for row in db.key_date_eot_determinations.find(query)]
+            frozen_covered = {
+                str(submission_id)
+                for determination in determinations
+                if determination.get("frozen_at")
+                for submission_id in determination.get("eot_submission_ids") or []
+            }
+            open_submissions = [
+                row for row in submissions
+                if row.get("status") in {"submitted", "locked"}
+                and str(row.get("_id")) not in frozen_covered
+            ]
+            dashboard["eot_submitted"] = len(open_submissions)
+            dashboard["eot_under_review"] = len(open_submissions)
+            dashboard["eot_approved"] = sum(
+                1 for row in determinations
+                if row.get("frozen_at") and row.get("status") in {"granted", "partially_granted"}
+            )
+            dashboard["eot_rejected"] = sum(
+                1 for row in determinations
+                if row.get("frozen_at") and row.get("status") in {"rejected", "no_extension"}
+            )
+        except Exception:
+            # Compatibility with lightweight databases/older deployments while
+            # migrations create the normalized workflow collections.
+            pass
+        return dashboard
 
     # --- audit ------------------------------------------------------------
 

@@ -38,6 +38,38 @@ class EOTStatus(str, Enum):
     WITHDRAWN = "withdrawn"
 
 
+class BaselineStatus(str, Enum):
+    DRAFT = "draft"
+    FROZEN = "frozen"
+
+
+class EOTSubmissionStatus(str, Enum):
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    LOCKED = "locked"
+    WITHDRAWN = "withdrawn"
+    SUPERSEDED = "superseded"
+
+
+class EOTDeterminationStatus(str, Enum):
+    NOT_STARTED = "not_started"
+    UNDER_REVIEW = "under_review"
+    PENDING = "pending"
+    GRANTED = "granted"
+    PARTIALLY_GRANTED = "partially_granted"
+    REJECTED = "rejected"
+    NO_EXTENSION = "no_extension"
+    SUPERSEDED = "superseded"
+
+
+class EOTDeterminationResult(str, Enum):
+    GRANTED = "granted"
+    PARTIALLY_GRANTED = "partially_granted"
+    REJECTED = "rejected"
+    NO_CHANGE = "no_change"
+    PENDING = "pending"
+
+
 # --- milestone ------------------------------------------------------------
 
 
@@ -57,6 +89,7 @@ class KeyDateMilestoneBase(BaseModel):
     linked_letter_ids: List[str] = Field(default_factory=list)
     organization_id: Optional[str] = None
     project_id: Optional[str] = None
+    contract_id: str = "primary"
 
 
 class KeyDateMilestoneCreate(KeyDateMilestoneBase):
@@ -92,6 +125,10 @@ class KeyDateMilestone(KeyDateMilestoneBase):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()), alias="_id")
     eot_status: Optional[str] = None  # latest EOT lifecycle state
     current_revision: int = 0
+    latest_eot_submission_label: Optional[str] = None
+    latest_eot_submitted_date: Optional[datetime] = None
+    latest_eot_status: Optional[str] = None
+    pending_eot_count: int = 0
     # Derived: one entry per approved EOT (original date + these = the per-EOT columns).
     revisions: List[MilestoneRevision] = Field(default_factory=list)
     # Achievement summary (full record also stored in key_date_achievements).
@@ -225,3 +262,174 @@ class KeyDateDashboard(BaseModel):
     eot_rejected: int = 0
     achieved_late: int = 0
     achieved_early: int = 0
+
+
+# --- project/contract baseline + successive EOT workflow -----------------
+
+
+class KeyDateWorkflowScope(BaseModel):
+    project_id: str = Field(..., min_length=1)
+    contract_id: str = Field(default="primary", min_length=1)
+    organization_id: Optional[str] = None
+
+
+class BaselineFreezeRequest(KeyDateWorkflowScope):
+    confirmation: bool = True
+
+
+class KeyDateBaseline(BaseModel):
+    id: Optional[str] = Field(default=None, alias="_id")
+    organization_id: Optional[str] = None
+    project_id: str
+    contract_id: str = "primary"
+    status: BaselineStatus = BaselineStatus.DRAFT
+    revision_number: int = 0
+    frozen_at: Optional[datetime] = None
+    frozen_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    created_by: Optional[str] = None
+    next_revision_number: int = 0
+    items: List[dict] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class EOTSubmissionItemInput(BaseModel):
+    milestone_ref: str = Field(..., min_length=1, max_length=100)
+    eot_submitted_date: datetime
+    claimed_extension_days: Optional[int] = Field(None, ge=0)
+    remarks: Optional[str] = None
+
+
+class EOTSubmissionCreate(KeyDateWorkflowScope):
+    eot_reference: Optional[str] = None
+    contractor_submission_date: Optional[datetime] = None
+    contractor_letter_reference: Optional[str] = None
+    claim_cutoff_date: Optional[datetime] = None
+    remarks: Optional[str] = None
+    status: EOTSubmissionStatus = EOTSubmissionStatus.DRAFT
+    items: List[EOTSubmissionItemInput] = Field(default_factory=list)
+
+
+class EOTSubmissionUpdate(BaseModel):
+    eot_reference: Optional[str] = None
+    contractor_submission_date: Optional[datetime] = None
+    contractor_letter_reference: Optional[str] = None
+    claim_cutoff_date: Optional[datetime] = None
+    remarks: Optional[str] = None
+    status: Optional[EOTSubmissionStatus] = None
+    items: Optional[List[EOTSubmissionItemInput]] = None
+
+
+class EOTSubmissionItem(EOTSubmissionItemInput):
+    id: Optional[str] = Field(default=None, alias="_id")
+    eot_submission_id: str
+    key_date_id: str
+    contractual_date_at_submission: Optional[datetime] = None
+    original_contractual_date: Optional[datetime] = None
+    description: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class EOTSubmission(BaseModel):
+    id: str = Field(alias="_id")
+    organization_id: Optional[str] = None
+    project_id: str
+    contract_id: str = "primary"
+    revision_number: int
+    revision_label: str
+    eot_reference: Optional[str] = None
+    contractor_submission_date: Optional[datetime] = None
+    contractor_letter_reference: Optional[str] = None
+    claim_cutoff_date: Optional[datetime] = None
+    status: EOTSubmissionStatus
+    remarks: Optional[str] = None
+    created_at: datetime
+    created_by: Optional[str] = None
+    locked_at: Optional[datetime] = None
+    locked_by: Optional[str] = None
+    items: List[EOTSubmissionItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class EOTDeterminationItemInput(BaseModel):
+    milestone_ref: str = Field(..., min_length=1, max_length=100)
+    eot_granted_date: Optional[datetime] = None
+    granted_extension_days: Optional[int] = Field(None, ge=0)
+    determination_result: EOTDeterminationResult = EOTDeterminationResult.PENDING
+    remarks: Optional[str] = None
+
+
+class EOTDeterminationCreate(KeyDateWorkflowScope):
+    eot_submission_ids: List[str] = Field(..., min_length=1)
+    determination_reference: Optional[str] = None
+    determination_date: Optional[datetime] = None
+    approval_grant_reference: Optional[str] = None
+    approved_by: Optional[str] = None
+    status: EOTDeterminationStatus = EOTDeterminationStatus.UNDER_REVIEW
+    remarks: Optional[str] = None
+    supersedes_determination_ids: List[str] = Field(default_factory=list)
+    items: List[EOTDeterminationItemInput] = Field(default_factory=list)
+
+
+class EOTDeterminationUpdate(BaseModel):
+    determination_reference: Optional[str] = None
+    determination_date: Optional[datetime] = None
+    approval_grant_reference: Optional[str] = None
+    approved_by: Optional[str] = None
+    status: Optional[EOTDeterminationStatus] = None
+    remarks: Optional[str] = None
+    supersedes_determination_ids: Optional[List[str]] = None
+    items: Optional[List[EOTDeterminationItemInput]] = None
+
+
+class EOTDeterminationItem(EOTDeterminationItemInput):
+    id: Optional[str] = Field(default=None, alias="_id")
+    determination_id: str
+    key_date_id: str
+    contractual_date_before_determination: Optional[datetime] = None
+    submitted_date: Optional[datetime] = None
+    claimed_extension_days: Optional[int] = None
+    description: Optional[str] = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class EOTDetermination(BaseModel):
+    id: str = Field(alias="_id")
+    organization_id: Optional[str] = None
+    project_id: str
+    contract_id: str = "primary"
+    eot_submission_ids: List[str]
+    covered_revision_labels: List[str] = Field(default_factory=list)
+    determination_reference: Optional[str] = None
+    determination_date: Optional[datetime] = None
+    approval_grant_reference: Optional[str] = None
+    approved_by: Optional[str] = None
+    status: EOTDeterminationStatus
+    remarks: Optional[str] = None
+    supersedes_determination_ids: List[str] = Field(default_factory=list)
+    created_at: datetime
+    created_by: Optional[str] = None
+    frozen_at: Optional[datetime] = None
+    frozen_by: Optional[str] = None
+    items: List[EOTDeterminationItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class KeyDateWorkflowSummary(BaseModel):
+    project_id: str
+    contract_id: str = "primary"
+    baseline_status: BaselineStatus = BaselineStatus.DRAFT
+    baseline_frozen_at: Optional[datetime] = None
+    baseline_frozen_by: Optional[str] = None
+    current_contractual_baseline: str = "Original"
+    latest_eot_submission: Optional[str] = None
+    pending_determinations: int = 0
+    open_eot_submissions: int = 0
+    oldest_pending_submission: Optional[str] = None
+    submissions: List[EOTSubmission] = Field(default_factory=list)
+    determinations: List[EOTDetermination] = Field(default_factory=list)
