@@ -181,6 +181,25 @@ async def test_preview_rejects_legacy_scope_columns_in_csv():
 
 
 @pytest.mark.asyncio
+async def test_bank_guarantee_preview_rejects_legacy_scope_columns_in_csv():
+    content = _csv(
+        """
+        project_id,contract_id,bg_number,bg_type
+        proj-A,primary,BG-2026-001,performance
+        """
+    )
+
+    with pytest.raises(ValueError, match="Select the Organisation and Project"):
+        await preview_bank_guarantees_csv(
+            _DB(),
+            content,
+            _user(),
+            organization_id="org-A",
+            project_id="proj-A",
+        )
+
+
+@pytest.mark.asyncio
 async def test_key_date_preview_reports_row_errors_and_csv_duplicates():
     content = _csv(
         """

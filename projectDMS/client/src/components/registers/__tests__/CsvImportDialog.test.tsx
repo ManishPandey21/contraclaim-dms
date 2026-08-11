@@ -118,6 +118,57 @@ describe("CsvImportDialog tenant scope", () => {
     );
   });
 
+  it("locks a project-restricted user to the assigned organisation and project", async () => {
+    const user = userEvent.setup();
+    const onPreview = vi.fn().mockResolvedValue(emptyPreview);
+    getCurrentUserProfile.mockResolvedValue({
+      roles: ["projectuser"],
+      organization_id: "org-1",
+      projects: ["project-2"],
+    });
+
+    render(
+      <TenantProvider>
+        <CsvImportDialog
+          open
+          onOpenChange={vi.fn()}
+          title="Upload Bank Guarantees CSV"
+          description="Preview imported guarantees."
+          sampleFileName="bank-guarantee-import-template.csv"
+          onDownloadTemplate={vi.fn()}
+          onPreview={onPreview}
+          onImport={vi.fn()}
+          onImported={vi.fn()}
+          rowLabel={(row) => String(row.data.bg_number)}
+        />
+      </TenantProvider>,
+    );
+
+    const organization = await screen.findByRole("combobox", {
+      name: "Organisation",
+    });
+    const project = screen.getByRole("combobox", { name: "Project" });
+    expect(organization).toBeDisabled();
+    expect(project).toBeDisabled();
+    expect(screen.getByText("Acme Infrastructure")).toBeInTheDocument();
+    expect(screen.getByText("South Corridor")).toBeInTheDocument();
+
+    const file = new File(
+      ["contract_id,bg_number,bg_type\nprimary,BG-2026-001,performance"],
+      "bank-guarantees.csv",
+      { type: "text/csv" },
+    );
+    await user.upload(screen.getByLabelText("CSV file"), file);
+    await user.click(screen.getByRole("button", { name: "Preview" }));
+
+    await waitFor(() =>
+      expect(onPreview).toHaveBeenCalledWith(file, {
+        organization_id: "org-1",
+        project_id: "project-2",
+      }),
+    );
+  });
+
   it("renders every preview row inside a bounded vertical scroll region", async () => {
     const user = userEvent.setup();
     const rows = Array.from({ length: 15 }, (_, index) => ({
