@@ -134,21 +134,31 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     if (!open) return;
 
     // Some browser/extension combinations update the native file control but
-    // do not deliver its change/input event to React. The window regains focus
-    // when the picker closes, so reconcile from the control itself as a
-    // standards-based fallback without retaining or reading any file path.
+    // do not deliver its change/input/focus lifecycle to React. Reconcile from
+    // the control while the dialog is open without retaining or reading a path.
     const syncSelectedFile = () => {
-      window.setTimeout(() => {
-        const selectedFile = fileInputRef.current?.files?.[0] || null;
-        if (selectedFile) {
-          setFile(selectedFile);
-          setPreview(null);
+      const selectedFile = fileInputRef.current?.files?.[0] || null;
+      if (!selectedFile) return;
+      setFile((currentFile) => {
+        if (
+          currentFile &&
+          currentFile.name === selectedFile.name &&
+          currentFile.size === selectedFile.size &&
+          currentFile.lastModified === selectedFile.lastModified
+        ) {
+          return currentFile;
         }
-      }, 0);
+        setPreview(null);
+        return selectedFile;
+      });
     };
 
     window.addEventListener("focus", syncSelectedFile);
-    return () => window.removeEventListener("focus", syncSelectedFile);
+    const reconciliationTimer = window.setInterval(syncSelectedFile, 250);
+    return () => {
+      window.removeEventListener("focus", syncSelectedFile);
+      window.clearInterval(reconciliationTimer);
+    };
   }, [open]);
 
   const selectedProject = tenant.projects.find(
