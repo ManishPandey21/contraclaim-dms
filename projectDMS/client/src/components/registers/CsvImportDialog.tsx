@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Download, Loader2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -97,6 +97,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CSVImportPreview | null>(null);
   const [busy, setBusy] = useState<"template" | "preview" | "import" | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const onlyProjectId =
     tenant.projects.length === 1 ? String(tenant.projects[0]._id) : "";
 
@@ -128,6 +129,27 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   useEffect(() => {
     if (open) setPreview(null);
   }, [open, selectedOrganizationId, selectedProjectId]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    // Some browser/extension combinations update the native file control but
+    // do not deliver its change/input event to React. The window regains focus
+    // when the picker closes, so reconcile from the control itself as a
+    // standards-based fallback without retaining or reading any file path.
+    const syncSelectedFile = () => {
+      window.setTimeout(() => {
+        const selectedFile = fileInputRef.current?.files?.[0] || null;
+        if (selectedFile) {
+          setFile(selectedFile);
+          setPreview(null);
+        }
+      }, 0);
+    };
+
+    window.addEventListener("focus", syncSelectedFile);
+    return () => window.removeEventListener("focus", syncSelectedFile);
+  }, [open]);
 
   const selectedProject = tenant.projects.find(
     (project) => String(project._id) === tenant.selectedProjectId,
@@ -271,6 +293,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               <Label htmlFor="csv-import-file">CSV file</Label>
               <Input
                 id="csv-import-file"
+                ref={fileInputRef}
                 type="file"
                 accept=".csv,text/csv"
                 onChange={selectFile}
