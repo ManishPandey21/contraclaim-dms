@@ -106,18 +106,39 @@ Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` 
 ## Deployment
 
 Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
-`/opt/contraclaim-dms/projectDMS`, remote `contraclaim-dms`, Docker Compose
-(`docker-compose.yml` + `docker-compose.prod.yml`: gateway/backend/client/contract-worker/
-qdrant/falkordb/redis/graphiti/clamav).
+`/opt/contraclaim-dms/projectDMS`, remote `contraclaim-dms`
+(gateway/backend/client/contract-worker/qdrant/falkordb/redis/graphiti/clamav).
 
-- **The runbook's branch is wrong.** `docs/CONTRACLAIM_DOCKER_DEPLOYMENT_UPDATE_GUIDE.md`
-  says `main`; production has been checked out on a `codex/*` branch that diverges from
-  `main` by well over a hundred commits. **Always read the server's own
-  `git branch --show-current` before deploying.**
-- Deploy = push the branch to both remotes → on the server `git pull --ff-only origin <that
-  branch>` → rebuild only affected services (`build backend contract-worker client`) →
-  `up -d --no-deps`. Gates: `scripts/pre_deploy_readiness.sh`, `python scripts/preflight.py`,
-  migration dry-run; after: `scripts/post_deploy_verify.sh`.
+- **The live stack runs `docker-compose.prod.yml` + `docker-compose.mongo-replicaset.yml`
+  — *not* the base `docker-compose.yml`.** Verified 2026-08-12 from the running container's
+  own `com.docker.compose.project.config_files` label; check that label rather than assuming.
+  Including the base file makes `up` fail with `client/.env.development not found`, because
+  that dev-only file is the sole reference to it. `config` and `ps` still succeed with the
+  wrong file set, so the mistake only surfaces at `up`.
+- **Always read the server's own `git branch --show-current` before deploying.** The runbook
+  (`docs/CONTRACLAIM_DOCKER_DEPLOYMENT_UPDATE_GUIDE.md`) says `main`; production has sat on a
+  `codex/*` branch for long stretches, and was back on `main` as of 2026-08-12. Neither
+  answer is durable — read it every time.
+- **The two remotes' `main` branches have diverged** (69 vs 70 commits on 2026-08-12) and
+  carry the *same work under different SHAs*. So `git branch --contains <sha>` answers "is
+  this commit shipped?" with a confident **no** even when an equivalent commit is live.
+  Compare subjects/content, or read the deployed artefact, before claiming something was
+  never deployed.
+- Deploy = get the commit onto the branch the server tracks (push to both remotes; the
+  feature branch alone does not reach production) → on the server
+  `git pull --ff-only origin <that branch>` → rebuild only affected services
+  (`build client` for a frontend-only change) → `up -d --no-deps <service>`.
+  Gates: `scripts/pre_deploy_readiness.sh`, migration dry-run; after:
+  `scripts/post_deploy_verify.sh`.
+- **`preflight.py` and the migration dry-run must run inside the backend container.** The
+  host interpreter has none of the app's dependencies, so on the host they fail with
+  `No module named 'motor'` / `'dotenv'` — an environment artefact, not a real gate failure
+  (same trap as the backend test interpreter). Use
+  `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml exec -T
+  backend python -m rbac_backend.scripts.migrate_database --fail-on-warning`.
+- A frontend fix is not deployed until the `client` image is rebuilt. Confirm by fetching the
+  hashed asset from `contraclaim.com` and reading the compiled code — the chunk name changes
+  on every content change, so the old name still being served means the build didn't ship.
 - Before trusting any code read of production, verify the checkout is byte-identical to the
   running container (tree-wide `sha256sum` compare). Patches scp'd in for testing must be
   reverted and fast-forwarded afterwards.
@@ -175,3 +196,7 @@ qdrant/falkordb/redis/graphiti/clamav).
   crash/restart drills, legal HITL review, and version diff/restore UI.
 - Release-gate evidence (restore drill, live-integration/E2E proof) is still uncaptured;
   `scripts/production_readiness_score.py` scores low for that reason alone.
+- `cd client && npx tsc -b` reports **146 pre-existing errors** (2026-08-12, mostly
+  `src/tests/testing-library.tsx` and `src/utils/*`), so it cannot be used as a pass/fail
+  gate as written above — check that your files are absent from the output instead.
+  `npm run build` is unaffected: Vite/esbuild does not type-check.
