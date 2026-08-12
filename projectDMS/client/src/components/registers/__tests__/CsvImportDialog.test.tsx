@@ -263,6 +263,54 @@ describe("CsvImportDialog tenant scope", () => {
     );
   });
 
+  it("reconciles a selected file when the browser suppresses picker events", async () => {
+    const user = userEvent.setup();
+    const onPreview = vi.fn().mockResolvedValue(emptyPreview);
+
+    render(
+      <TenantProvider>
+        <CsvImportDialog
+          open
+          onOpenChange={vi.fn()}
+          title="Upload Key Dates CSV"
+          description="Preview imported milestones."
+          sampleFileName="key-date-import-template.csv"
+          onDownloadTemplate={vi.fn()}
+          onPreview={onPreview}
+          onImport={vi.fn()}
+          onImported={vi.fn()}
+          rowLabel={(row) => String(row.data.title)}
+        />
+      </TenantProvider>,
+    );
+
+    await screen.findByText("Acme Infrastructure");
+    await user.click(screen.getByRole("combobox", { name: "Project" }));
+    await user.click(await screen.findByRole("option", { name: "North Corridor" }));
+
+    const file = new File(
+      ["title,contractual_week_number\nFoundation complete,5"],
+      "key-dates.csv",
+      { type: "text/csv" },
+    );
+    Object.defineProperty(screen.getByLabelText("CSV file"), "files", {
+      configurable: true,
+      value: [file],
+    });
+
+    const previewButton = screen.getByRole("button", { name: "Preview" });
+    await waitFor(() => expect(previewButton).toBeEnabled());
+    await user.click(previewButton);
+
+    await waitFor(() => expect(onPreview).toHaveBeenCalledWith(file, {
+      organization_id: "org-1",
+      project_id: "project-1",
+    }));
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    await new Promise((resolve) => window.setTimeout(resolve, 350));
+    expect(screen.getByText("Ready")).toBeInTheDocument();
+  });
+
   it("renders every preview row inside a bounded vertical scroll region", async () => {
     const user = userEvent.setup();
     const rows = Array.from({ length: 15 }, (_, index) => ({
