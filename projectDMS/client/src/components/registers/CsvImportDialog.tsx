@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, Download, Loader2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -97,7 +97,6 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CSVImportPreview | null>(null);
   const [busy, setBusy] = useState<"template" | "preview" | "import" | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const onlyProjectId =
     tenant.projects.length === 1 ? String(tenant.projects[0]._id) : "";
 
@@ -130,37 +129,6 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     if (open) setPreview(null);
   }, [open, selectedOrganizationId, selectedProjectId]);
 
-  useEffect(() => {
-    if (!open) return;
-
-    // Some browser/extension combinations update the native file control but
-    // do not deliver its change/input/focus lifecycle to React. Reconcile from
-    // the control while the dialog is open without retaining or reading a path.
-    const syncSelectedFile = () => {
-      const selectedFile = fileInputRef.current?.files?.[0] || null;
-      if (!selectedFile) return;
-      setFile((currentFile) => {
-        if (
-          currentFile &&
-          currentFile.name === selectedFile.name &&
-          currentFile.size === selectedFile.size &&
-          currentFile.lastModified === selectedFile.lastModified
-        ) {
-          return currentFile;
-        }
-        setPreview(null);
-        return selectedFile;
-      });
-    };
-
-    window.addEventListener("focus", syncSelectedFile);
-    const reconciliationTimer = window.setInterval(syncSelectedFile, 250);
-    return () => {
-      window.removeEventListener("focus", syncSelectedFile);
-      window.clearInterval(reconciliationTimer);
-    };
-  }, [open]);
-
   const selectedProject = tenant.projects.find(
     (project) => String(project._id) === tenant.selectedProjectId,
   );
@@ -174,11 +142,6 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   const selectedScope: CSVImportScope = {
     organization_id: tenant.selectedOrganizationId,
     project_id: tenant.selectedProjectId,
-  };
-
-  const selectFile = (event: React.FormEvent<HTMLInputElement>) => {
-    setFile(event.currentTarget.files?.[0] || null);
-    setPreview(null);
   };
 
   const status = useMemo(() => {
@@ -303,11 +266,12 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               <Label htmlFor="csv-import-file">CSV file</Label>
               <Input
                 id="csv-import-file"
-                ref={fileInputRef}
                 type="file"
                 accept=".csv,text/csv"
-                onChange={selectFile}
-                onInput={selectFile}
+                onChange={(event) => {
+                  setFile(event.target.files?.[0] || null);
+                  setPreview(null);
+                }}
               />
             </div>
             <Button variant="outline" onClick={template} disabled={busy !== null}>
