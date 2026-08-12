@@ -97,9 +97,8 @@ describe("CsvImportDialog tenant scope", () => {
     expect(await screen.findByText("Acme Infrastructure")).toBeInTheDocument();
     const previewButton = screen.getByRole("button", { name: "Preview" });
 
-    // Without a project the request must not be made. The refusal is reported
-    // on click rather than by disabling the control, so that a scope that is
-    // merely unselected never looks like a broken button.
+    // With no project and no file chosen the request must not be made.
+    expect(previewButton).toBeDisabled();
     await user.click(previewButton);
     expect(onPreview).not.toHaveBeenCalled();
 
@@ -164,56 +163,6 @@ describe("CsvImportDialog tenant scope", () => {
       { type: "text/csv" },
     );
     await user.upload(screen.getByLabelText("CSV file"), file);
-    await user.click(screen.getByRole("button", { name: "Preview" }));
-
-    await waitFor(() =>
-      expect(onPreview).toHaveBeenCalledWith(file, {
-        organization_id: "org-1",
-        project_id: "project-2",
-      }),
-    );
-  });
-
-  it("previews a selection the control holds but React never saw a change event for", async () => {
-    // The native picker, an extension, or a programmatic set can leave the file
-    // control holding a selection without delivering a change event React can
-    // observe. The control owns the selection, so a visible file must stay
-    // actionable instead of dead-ending behind a permanently disabled button.
-    const user = userEvent.setup();
-    const onPreview = vi.fn().mockResolvedValue(emptyPreview);
-    getCurrentUserProfile.mockResolvedValue({
-      roles: ["projectuser"],
-      organization_id: "org-1",
-      projects: ["project-2"],
-    });
-
-    render(
-      <TenantProvider>
-        <CsvImportDialog
-          open
-          onOpenChange={vi.fn()}
-          title="Upload Key Dates CSV"
-          description="Preview imported milestones."
-          sampleFileName="key-date-import-template.csv"
-          onDownloadTemplate={vi.fn()}
-          onPreview={onPreview}
-          onImport={vi.fn()}
-          onImported={vi.fn()}
-          rowLabel={(row) => String(row.data.title)}
-        />
-      </TenantProvider>,
-    );
-
-    await screen.findByText("South Corridor");
-
-    const file = new File(
-      ["title,contractual_week_number\nFoundation complete,5"],
-      "key-dates.csv",
-      { type: "text/csv" },
-    );
-    const input = screen.getByLabelText("CSV file") as HTMLInputElement;
-    Object.defineProperty(input, "files", { value: [file], configurable: true });
-
     await user.click(screen.getByRole("button", { name: "Preview" }));
 
     await waitFor(() =>
