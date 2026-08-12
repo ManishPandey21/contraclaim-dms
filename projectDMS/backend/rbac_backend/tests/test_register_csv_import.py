@@ -162,6 +162,36 @@ async def test_import_scope_requires_matching_project_organization():
 
 
 @pytest.mark.asyncio
+async def test_import_scope_denies_missing_blank_and_unknown_targets():
+    """Deny by default: the target must be stated and must resolve."""
+    db = _DB()
+    await db.projects.insert_one({"_id": "proj-A", "organization_id": "org-A"})
+
+    for organization_id, project_id in (
+        (None, "proj-A"),
+        ("org-A", None),
+        ("", "proj-A"),
+        ("org-A", "   "),
+        (None, None),
+    ):
+        with pytest.raises(ValueError, match="must be selected"):
+            await validate_csv_import_scope(
+                db,
+                organization_id=organization_id,
+                project_id=project_id,
+            )
+
+    # A syntactically fine but non-existent project resolves to nothing, so it
+    # cannot be shown to belong to the organisation and must be refused.
+    with pytest.raises(ValueError, match="does not belong"):
+        await validate_csv_import_scope(
+            db,
+            organization_id="org-A",
+            project_id="proj-does-not-exist",
+        )
+
+
+@pytest.mark.asyncio
 async def test_preview_rejects_legacy_scope_columns_in_csv():
     content = _csv(
         """

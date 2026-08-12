@@ -93,18 +93,60 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   rowLabel,
 }) => {
   const tenant = useTenant();
-  const { selectedOrganizationId, selectedProjectId, selectProject } = tenant;
+  const { selectProject } = tenant;
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CSVImportPreview | null>(null);
+  // The scope the preview was produced for. Import is only allowed to proceed
+  // against this exact scope, so the target cannot drift between the two calls.
+  const [previewScope, setPreviewScope] = useState<CSVImportScope | null>(null);
   const [busy, setBusy] = useState<"template" | "preview" | "import" | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const onlyProjectId =
     tenant.projects.length === 1 ? String(tenant.projects[0]._id) : "";
 
+  // Read only the fields every TenantContext revision guarantees. An earlier
+  // version of this dialog also required `tenant.contextReady`, which exists on
+  // some branches and not others; where it is absent the expression is
+  // `undefined && ...`, so the scope was never ready and a correctly selected
+  // Organisation and Project were rejected on every click. Type-checking does
+  // not catch that here because the production build does not type-check.
+  const selectedOrganizationId = String(tenant.selectedOrganizationId || "");
+  const selectedProjectId = String(tenant.selectedProjectId || "");
+  const selectedProject =
+    tenant.projects.find((project) => String(project._id) === selectedProjectId) || null;
+
+  // Canonical ids drive both the guard and the request, so what is validated is
+  // exactly what is submitted. Names are display only.
+  const selectedScope: CSVImportScope = {
+    organization_id: selectedOrganizationId,
+    project_id: selectedProjectId,
+  };
+
+  // One reason string, so the message always names the condition that failed.
+  const scopeIssue = useMemo(() => {
+    if (tenant.loading) return "Organisation and project details are still loading.";
+    if (tenant.error) return tenant.error;
+    if (!selectedOrganizationId) return "Please select an Organisation.";
+    if (!selectedProjectId) return "Please select a Project.";
+    if (!selectedProject)
+      return "The selected Project is not available to you. Choose another Project.";
+    if (String(selectedProject.organization_id) !== selectedOrganizationId)
+      return "The selected Project does not belong to the selected Organisation.";
+    return null;
+  }, [
+    selectedOrganizationId,
+    selectedProject,
+    selectedProjectId,
+    tenant.error,
+    tenant.loading,
+  ]);
+  const scopeReady = scopeIssue === null;
+
   useEffect(() => {
     if (!open) {
       setFile(null);
       setPreview(null);
+      setPreviewScope(null);
       setBusy(null);
     }
   }, [open]);
@@ -126,24 +168,13 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     selectedProjectId,
   ]);
 
+  // A scope change invalidates any preview taken under the previous scope.
   useEffect(() => {
-    if (open) setPreview(null);
+    if (open) {
+      setPreview(null);
+      setPreviewScope(null);
+    }
   }, [open, selectedOrganizationId, selectedProjectId]);
-
-  const selectedProject = tenant.projects.find(
-    (project) => String(project._id) === tenant.selectedProjectId,
-  );
-  const scopeReady = Boolean(
-    tenant.contextReady &&
-      tenant.selectedOrganizationId &&
-      tenant.selectedProjectId &&
-      selectedProject &&
-      String(selectedProject.organization_id) === tenant.selectedOrganizationId,
-  );
-  const selectedScope: CSVImportScope = {
-    organization_id: tenant.selectedOrganizationId,
-    project_id: tenant.selectedProjectId,
-  };
 
   const status = useMemo(() => {
     if (!preview) return null;
@@ -171,35 +202,56 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     fileInputRef.current?.files?.[0] || file;
 
   const previewFile = async () => {
-    if (!scopeReady) {
-      toast.error("Select an Organisation and Project first");
+    if (busy) return;
+    if (scopeIssue) {
+      toast.error(scopeIssue);
       return;
     }
     const selectedFile = resolveSelectedFile();
     if (!selectedFile) {
-      toast.error("Select a CSV file first");
+      toast.error("Please choose a CSV file.");
       return;
     }
     if (selectedFile !== file) setFile(selectedFile);
+    const scope = selectedScope;
     setBusy("preview");
     try {
-      const result = await onPreview(selectedFile, selectedScope);
+      const result = await onPreview(selectedFile, scope);
       setPreview(result);
+      setPreviewScope(scope);
       if (result.invalid_rows > 0) toast.error(`${result.invalid_rows} row(s) need correction`);
       else toast.success(`${result.valid_rows} row(s) ready to import`);
     } catch (error: any) {
       toast.error(error?.response?.data?.detail || "CSV preview failed");
       setPreview(null);
+      setPreviewScope(null);
     } finally {
       setBusy(null);
     }
   };
 
   const importFile = async () => {
-    if (!preview?.can_import || !scopeReady) return;
+    if (busy) return;
+    if (scopeIssue) {
+      toast.error(scopeIssue);
+      return;
+    }
+    if (!preview?.can_import) return;
+    // Import must land in the scope the preview validated, never a scope the
+    // navbar moved to in between.
+    if (
+      !previewScope ||
+      previewScope.organization_id !== selectedScope.organization_id ||
+      previewScope.project_id !== selectedScope.project_id
+    ) {
+      setPreview(null);
+      setPreviewScope(null);
+      toast.error("The Organisation or Project changed — preview again before importing.");
+      return;
+    }
     const selectedFile = resolveSelectedFile();
     if (!selectedFile) {
-      toast.error("Select a CSV file first");
+      toast.error("Please choose a CSV file.");
       return;
     }
     // The preview is the validated artefact. Importing a file swapped in since
@@ -207,12 +259,14 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     if (file && selectedFile !== file) {
       setFile(selectedFile);
       setPreview(null);
+      setPreviewScope(null);
       toast.error("The selected file changed — preview it again");
       return;
     }
     setBusy("import");
     try {
-      const result = await onImport(selectedFile, selectedScope);
+      // Deliberately the previewed scope, not a freshly read one.
+      const result = await onImport(selectedFile, previewScope);
       setPreview(result);
       if (!result.can_import || result.invalid_rows > 0) {
         toast.error(`${result.invalid_rows} row(s) need correction`);
@@ -241,9 +295,9 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
             <div className="space-y-1.5">
               <Label htmlFor="csv-import-organization">Organisation *</Label>
               <Select
-                value={tenant.selectedOrganizationId || undefined}
+                value={selectedOrganizationId || undefined}
                 onValueChange={tenant.selectOrganization}
-                disabled={tenant.loading || tenant.organizationLocked}
+                disabled={tenant.loading || !tenant.canSwitchOrganization}
               >
                 <SelectTrigger id="csv-import-organization" aria-label="Organisation">
                   <SelectValue placeholder="Select Organisation" />
@@ -260,12 +314,12 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
             <div className="space-y-1.5">
               <Label htmlFor="csv-import-project">Project *</Label>
               <Select
-                value={tenant.selectedProjectId || undefined}
+                value={selectedProjectId || undefined}
                 onValueChange={tenant.selectProject}
                 disabled={
                   tenant.loading ||
-                  !tenant.selectedOrganizationId ||
-                  tenant.projectLocked
+                  !selectedOrganizationId ||
+                  !tenant.canSwitchProject
                 }
               >
                 <SelectTrigger id="csv-import-project" aria-label="Project">
@@ -282,7 +336,17 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
             </div>
           </div>
 
-          {tenant.error && <p className="text-sm text-destructive">{tenant.error}</p>}
+          {tenant.error ? (
+            <p className="text-sm text-destructive">{tenant.error}</p>
+          ) : (
+            scopeIssue &&
+            !tenant.loading && (
+              // Say which condition is unmet before the user clicks, not after.
+              <p className="text-sm text-amber-700" role="status">
+                {scopeIssue}
+              </p>
+            )
+          )}
 
           <div className="grid gap-3 md:grid-cols-[1fr_auto_auto] md:items-end">
             <div>
@@ -302,12 +366,12 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               {busy === "template" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
               Sample CSV
             </Button>
-            {/* Gated on work in flight only. Disabling this on mirrored state
-                is what turned an unseen change event into a dead end: the file
-                was visibly selected and the only way forward was greyed out
-                with no reason given. Missing scope or file is reported on
-                click instead. */}
-            <Button variant="outline" onClick={previewFile} disabled={busy !== null}>
+            <Button
+              variant="outline"
+              onClick={previewFile}
+              disabled={!file || !scopeReady || busy !== null}
+              title={scopeIssue || undefined}
+            >
               {busy === "preview" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
               Preview
             </Button>
