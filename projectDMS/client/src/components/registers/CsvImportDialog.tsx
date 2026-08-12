@@ -144,6 +144,11 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     project_id: tenant.selectedProjectId,
   };
 
+  const selectFile = (event: React.FormEvent<HTMLInputElement>) => {
+    setFile(event.currentTarget.files?.[0] || null);
+    setPreview(null);
+  };
+
   const status = useMemo(() => {
     if (!preview) return null;
     if (preview.invalid_rows > 0) return "invalid";
@@ -268,10 +273,8 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
                 id="csv-import-file"
                 type="file"
                 accept=".csv,text/csv"
-                onChange={(event) => {
-                  setFile(event.target.files?.[0] || null);
-                  setPreview(null);
-                }}
+                onChange={selectFile}
+                onInput={selectFile}
               />
             </div>
             <Button variant="outline" onClick={template} disabled={busy !== null}>

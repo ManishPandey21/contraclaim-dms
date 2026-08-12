@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CsvImportDialog, {
@@ -165,6 +165,51 @@ describe("CsvImportDialog tenant scope", () => {
       expect(onPreview).toHaveBeenCalledWith(file, {
         organization_id: "org-1",
         project_id: "project-2",
+      }),
+    );
+  });
+
+  it("activates Preview when a browser reports file selection through the input event", async () => {
+    const user = userEvent.setup();
+    const onPreview = vi.fn().mockResolvedValue(emptyPreview);
+
+    render(
+      <TenantProvider>
+        <CsvImportDialog
+          open
+          onOpenChange={vi.fn()}
+          title="Upload Key Dates CSV"
+          description="Preview imported milestones."
+          sampleFileName="key-date-import-template.csv"
+          onDownloadTemplate={vi.fn()}
+          onPreview={onPreview}
+          onImport={vi.fn()}
+          onImported={vi.fn()}
+          rowLabel={(row) => String(row.data.title)}
+        />
+      </TenantProvider>,
+    );
+
+    await screen.findByText("Acme Infrastructure");
+    await user.click(screen.getByRole("combobox", { name: "Project" }));
+    await user.click(await screen.findByRole("option", { name: "North Corridor" }));
+
+    const file = new File(
+      ["title,contractual_week_number\nFoundation complete,5"],
+      "key-dates.csv",
+      { type: "text/csv" },
+    );
+    const fileInput = screen.getByLabelText("CSV file");
+    fireEvent.input(fileInput, { target: { files: [file] } });
+
+    const previewButton = screen.getByRole("button", { name: "Preview" });
+    expect(previewButton).toBeEnabled();
+    await user.click(previewButton);
+
+    await waitFor(() =>
+      expect(onPreview).toHaveBeenCalledWith(file, {
+        organization_id: "org-1",
+        project_id: "project-1",
       }),
     );
   });
