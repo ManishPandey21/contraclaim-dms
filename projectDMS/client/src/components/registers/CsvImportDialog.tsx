@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Download, Loader2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -97,6 +97,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<CSVImportPreview | null>(null);
   const [busy, setBusy] = useState<"template" | "preview" | "import" | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const onlyProjectId =
     tenant.projects.length === 1 ? String(tenant.projects[0]._id) : "";
 
@@ -162,18 +163,27 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
     }
   };
 
+  // The file control owns the selection; `file` only mirrors it for display.
+  // A change event is not guaranteed to reach React (native picker quirks,
+  // extensions, programmatic sets), so every action reads the control itself
+  // and re-syncs the mirror rather than trusting it.
+  const resolveSelectedFile = (): File | null =>
+    fileInputRef.current?.files?.[0] || file;
+
   const previewFile = async () => {
     if (!scopeReady) {
       toast.error("Select an Organisation and Project first");
       return;
     }
-    if (!file) {
+    const selectedFile = resolveSelectedFile();
+    if (!selectedFile) {
       toast.error("Select a CSV file first");
       return;
     }
+    if (selectedFile !== file) setFile(selectedFile);
     setBusy("preview");
     try {
-      const result = await onPreview(file, selectedScope);
+      const result = await onPreview(selectedFile, selectedScope);
       setPreview(result);
       if (result.invalid_rows > 0) toast.error(`${result.invalid_rows} row(s) need correction`);
       else toast.success(`${result.valid_rows} row(s) ready to import`);
@@ -186,10 +196,23 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
   };
 
   const importFile = async () => {
-    if (!file || !preview?.can_import || !scopeReady) return;
+    if (!preview?.can_import || !scopeReady) return;
+    const selectedFile = resolveSelectedFile();
+    if (!selectedFile) {
+      toast.error("Select a CSV file first");
+      return;
+    }
+    // The preview is the validated artefact. Importing a file swapped in since
+    // would import rows nobody checked, so refuse and make them preview again.
+    if (file && selectedFile !== file) {
+      setFile(selectedFile);
+      setPreview(null);
+      toast.error("The selected file changed — preview it again");
+      return;
+    }
     setBusy("import");
     try {
-      const result = await onImport(file, selectedScope);
+      const result = await onImport(selectedFile, selectedScope);
       setPreview(result);
       if (!result.can_import || result.invalid_rows > 0) {
         toast.error(`${result.invalid_rows} row(s) need correction`);
@@ -266,6 +289,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               <Label htmlFor="csv-import-file">CSV file</Label>
               <Input
                 id="csv-import-file"
+                ref={fileInputRef}
                 type="file"
                 accept=".csv,text/csv"
                 onChange={(event) => {
@@ -278,7 +302,12 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
               {busy === "template" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
               Sample CSV
             </Button>
-            <Button variant="outline" onClick={previewFile} disabled={!file || !scopeReady || busy !== null}>
+            {/* Gated on work in flight only. Disabling this on mirrored state
+                is what turned an unseen change event into a dead end: the file
+                was visibly selected and the only way forward was greyed out
+                with no reason given. Missing scope or file is reported on
+                click instead. */}
+            <Button variant="outline" onClick={previewFile} disabled={busy !== null}>
               {busy === "preview" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
               Preview
             </Button>
@@ -349,7 +378,7 @@ export const CsvImportDialog: React.FC<CsvImportDialogProps> = ({
 
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy !== null}>Cancel</Button>
-          <Button onClick={importFile} disabled={!file || !preview?.can_import || !scopeReady || busy !== null}>
+          <Button onClick={importFile} disabled={!preview?.can_import || !scopeReady || busy !== null}>
             {busy === "import" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
             Import
           </Button>
