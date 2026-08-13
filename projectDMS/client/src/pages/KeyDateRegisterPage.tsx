@@ -67,14 +67,14 @@ import {
 } from "@/services/key-dates-api";
 import { enhancedApi } from "@/services/enhanced-api";
 import { statusColor, statusLabel, alertText, achievementText, maxRevisionCount, revisionAt } from "@/lib/key-date-helpers";
-import { formatDate } from "@/utils/formatDate";
+import { formatDate } from "@/utils/dateFormat";
 
 const STATUS_OPTIONS = [
   "not_started", "upcoming", "due_soon", "due_today", "overdue",
   "achieved", "eot_submitted", "eot_under_review", "extension_approved", "extension_rejected",
 ];
 
-const fmtDate = (d?: string | null) => formatDate(d);
+const fmtDate = (d?: string | null) => (d ? formatDate(d) : "—");
 
 interface MForm {
   title: string;

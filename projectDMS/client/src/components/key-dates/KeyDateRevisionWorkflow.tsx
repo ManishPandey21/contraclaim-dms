@@ -40,9 +40,9 @@ import {
   updateEOTSubmissionRevision,
   updateEOTDetermination,
 } from "@/services/key-dates-api";
-import { formatDate } from "@/utils/formatDate";
+import { formatDate } from "@/utils/dateFormat";
 
-const fmt = (value?: string | null) => formatDate(value);
+const fmt = (value?: string | null) => (value ? formatDate(value) : "—");
 const iso = (value: string) => value ? new Date(value).toISOString() : undefined;
 
 type SubmissionRow = {

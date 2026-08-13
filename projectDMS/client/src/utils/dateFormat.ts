@@ -2,18 +2,23 @@
  * Date formatting utilities with user preferences support
  */
 
-export type DateFormat = "dd/mm/yyyy" | "mm/dd/yyyy" | "yyyy-mm-dd";
+export type DateFormat = "dd-mm-yyyy" | "dd/mm/yyyy" | "mm/dd/yyyy" | "yyyy-mm-dd";
+
+/** The house format for contractual dates: day-first, hyphenated, unambiguous. */
+export const DEFAULT_DATE_FORMAT: DateFormat = "dd-mm-yyyy";
+
+const SUPPORTED_FORMATS: DateFormat[] = ["dd-mm-yyyy", "dd/mm/yyyy", "mm/dd/yyyy", "yyyy-mm-dd"];
 
 /**
  * Get the user's preferred date format from localStorage
- * Defaults to 'dd/mm/yyyy' if not set
+ * Defaults to DEFAULT_DATE_FORMAT if not set or unrecognised
  */
 export const getUserDateFormat = (): DateFormat => {
   const stored = localStorage.getItem("dateFormat");
-  if (stored && ["dd/mm/yyyy", "mm/dd/yyyy", "yyyy-mm-dd"].includes(stored)) {
+  if (stored && (SUPPORTED_FORMATS as string[]).includes(stored)) {
     return stored as DateFormat;
   }
-  return "dd/mm/yyyy"; // Default format
+  return DEFAULT_DATE_FORMAT;
 };
 
 /**
@@ -50,6 +55,8 @@ export const formatDate = (
     const year = dateObj.getFullYear();
 
     switch (selectedFormat) {
+      case "dd-mm-yyyy":
+        return `${day}-${month}-${year}`;
       case "dd/mm/yyyy":
         return `${day}/${month}/${year}`;
       case "mm/dd/yyyy":
@@ -57,7 +64,7 @@ export const formatDate = (
       case "yyyy-mm-dd":
         return `${year}-${month}-${day}`;
       default:
-        return `${day}/${month}/${year}`;
+        return `${day}-${month}-${year}`;
     }
   } catch (error) {
     console.error("Error formatting date:", error);
@@ -101,6 +108,8 @@ export const formatDateTime = (
  */
 export const getDateFormatLabel = (format: DateFormat): string => {
   switch (format) {
+    case "dd-mm-yyyy":
+      return "DD-MM-YYYY (Day-Month-Year)";
     case "dd/mm/yyyy":
       return "DD/MM/YYYY (Day/Month/Year)";
     case "mm/dd/yyyy":
@@ -116,5 +125,5 @@ export const getDateFormatLabel = (format: DateFormat): string => {
  * Get all available date formats
  */
 export const getAvailableDateFormats = (): DateFormat[] => {
-  return ["dd/mm/yyyy", "mm/dd/yyyy", "yyyy-mm-dd"];
+  return [...SUPPORTED_FORMATS];
 };

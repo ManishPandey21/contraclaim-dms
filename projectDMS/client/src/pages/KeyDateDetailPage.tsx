@@ -37,9 +37,9 @@ import {
   submitEOT,
 } from "@/services/key-dates-api";
 import { statusColor, statusLabel, achievementText } from "@/lib/key-date-helpers";
-import { formatDate } from "@/utils/formatDate";
+import { formatDate } from "@/utils/dateFormat";
 
-const fmt = (d?: string | null) => formatDate(d);
+const fmt = (d?: string | null) => (d ? formatDate(d) : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
 
 const Field: React.FC<{ label: string; value: React.ReactNode }> = ({ label, value }) => (
