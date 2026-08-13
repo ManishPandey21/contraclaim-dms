@@ -79,9 +79,14 @@ export const PERMISSION_CONTRACT = {
     "dms.ipc.export",
     "dms.ipc.view",
     "dms.keydate.achievement",
+    "dms.keydate.baseline.freeze",
     "dms.keydate.create",
     "dms.keydate.delete",
     "dms.keydate.edit",
+    "dms.keydate.eot.determine",
+    "dms.keydate.eot.freeze_determination",
+    "dms.keydate.eot.lock_submission",
+    "dms.keydate.eot.supersede",
     "dms.keydate.eot_approve",
     "dms.keydate.eot_submit",
     "dms.keydate.export",
@@ -217,6 +222,21 @@ export const PERMISSION_CONTRACT = {
       "projects:update"
     ],
     "dms.ipc.approve": [
+      "projects:update"
+    ],
+    "dms.keydate.baseline.freeze": [
+      "projects:update"
+    ],
+    "dms.keydate.eot.determine": [
+      "projects:update"
+    ],
+    "dms.keydate.eot.freeze_determination": [
+      "projects:update"
+    ],
+    "dms.keydate.eot.lock_submission": [
+      "projects:update"
+    ],
+    "dms.keydate.eot.supersede": [
       "projects:update"
     ],
     "dms.keydate.eot_approve": [
@@ -938,7 +958,7 @@ export const PERMISSION_CONTRACT = {
       ]
     }
   },
-  "version": "2026-08-06.1"
+  "version": "2026-08-11.1"
 } as const;
 
 export const PERMISSION_CONTRACT_VERSION = PERMISSION_CONTRACT.version;

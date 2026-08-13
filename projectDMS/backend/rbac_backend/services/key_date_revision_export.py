@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import csv
 import io
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from datetime import datetime
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def _cell(value: Any) -> str:
@@ -131,7 +132,8 @@ def submission_table(submission: Dict[str, Any]) -> Tuple[List[str], List[List[A
 
 def determination_table(determination: Dict[str, Any]) -> Tuple[List[str], List[List[Any]]]:
     headers = [
-        "Milestone Ref", "Description", "Submitted Date", "Determined / Granted Date",
+        "Milestone Ref", "Description", "Against Submission", "Other Claims Covered",
+        "Submitted Date", "Determined / Granted Date",
         "Claimed Extension Days", "Granted Extension Days", "Difference", "Result", "Remarks",
     ]
     rows: List[List[Any]] = []
@@ -139,24 +141,66 @@ def determination_table(determination: Dict[str, Any]) -> Tuple[List[str], List[
         claimed = item.get("claimed_extension_days")
         granted = item.get("granted_extension_days")
         difference = None if claimed is None or granted is None else int(claimed) - int(granted)
+        claims = item.get("covered_claims") or []
+        source_id = str(item.get("source_submission_id") or "")
+        against = next(
+            (
+                claim.get("revision_label")
+                for claim in claims
+                if str(claim.get("eot_submission_id")) == source_id
+            ),
+            "",
+        )
+        # A combined determination answers one claim per milestone but covers
+        # others; naming them keeps every submission independently traceable.
+        others = ", ".join(
+            str(claim.get("revision_label") or "")
+            for claim in claims
+            if str(claim.get("eot_submission_id")) != source_id
+        )
         rows.append([
-            item.get("milestone_ref"), item.get("description"), item.get("submitted_date"),
+            item.get("milestone_ref"), item.get("description"), against, others,
+            item.get("submitted_date"),
             item.get("eot_granted_date"), claimed, granted, difference,
             item.get("determination_result"), item.get("remarks"),
         ])
     return headers, rows
 
 
+def _employer_label(determination: Dict[str, Any]) -> str:
+    """Employer-initiated determinations have no EOT-N, so key them on reference."""
+    return str(
+        determination.get("determination_reference")
+        or determination.get("approval_grant_reference")
+        or f"Employer Determination {determination.get('_id')}"
+    )
+
+
 def history_table(
     milestones: Sequence[Dict[str, Any]],
     submissions: Sequence[Dict[str, Any]],
     determinations: Sequence[Dict[str, Any]],
+    outcomes: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[str], List[List[Any]]]:
     ordered = sorted(submissions, key=lambda row: int(row.get("revision_number") or 0))
+    # Determinations the Employer issued of its own motion answer no submission,
+    # so they get their own columns rather than disappearing from the history.
+    employer_initiated = sorted(
+        (row for row in determinations if not (row.get("eot_submission_ids") or [])),
+        key=lambda row: row.get("frozen_at") or row.get("created_at") or datetime.min,
+    )
     headers = ["Ref", "Description", "Original Date"]
+    outcomes = outcomes or {}
     for submission in ordered:
         label = submission.get("revision_label") or f"EOT-{submission.get('revision_number')}"
         headers += [f"{label} Submitted", f"{label} Granted", f"{label} Status"]
+        # Submission-level outcome only appears when it has been derived, so
+        # callers that do not supply it keep the original column layout.
+        if str(submission.get("_id")) in outcomes:
+            headers.append(f"{label} Outcome")
+    for determination in employer_initiated:
+        label = _employer_label(determination)
+        headers += [f"{label} Granted", f"{label} Status"]
     headers += ["Current Contractual Date", "Actual Achievement Date"]
 
     submission_items = {
@@ -191,6 +235,20 @@ def history_table(
                 "pending" if submitted else "not_affected"
             )
             row += [submitted.get("eot_submitted_date"), determined.get("eot_granted_date"), status]
+            if str(submission.get("_id")) in outcomes:
+                row.append(outcomes[str(submission.get("_id"))])
+        for determination in employer_initiated:
+            item = next(
+                (
+                    entry for entry in determination.get("items") or []
+                    if str(entry.get("milestone_ref")).casefold() == ref.casefold()
+                ),
+                None,
+            )
+            row += [
+                (item or {}).get("eot_granted_date"),
+                (item or {}).get("determination_result") or "not_affected",
+            ]
         row += [milestone.get("current_approved_key_date"), milestone.get("actual_achievement_date")]
         rows.append(row)
     return headers, rows

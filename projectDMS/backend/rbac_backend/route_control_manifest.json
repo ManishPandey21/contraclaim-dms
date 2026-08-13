@@ -11204,6 +11204,90 @@
       "methods": [
         "GET"
       ],
+      "name": "export_frozen_baseline",
+      "owner": "key_dates",
+      "path": "/api/key-dates/baseline/export",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.export",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "freeze_original_key_dates",
+      "owner": "key_dates",
+      "path": "/api/key-dates/baseline/freeze",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.baseline.freeze",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:freeze_original_key_dates"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
       "name": "key_date_dashboard",
       "owner": "key_dates",
       "path": "/api/key-dates/dashboard",
@@ -11212,6 +11296,561 @@
         "billing.plan.view",
         "dms.admin",
         "dms.keydate.view",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "create_eot_determination",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.eot.determine",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:create_eot_determination"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "PUT"
+      ],
+      "name": "update_eot_determination",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}",
+      "permissions": [
+        "dms.keydate.eot.determine"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:update_eot_determination"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "export_eot_determination",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}/export",
+      "permissions": [
+        "dms.keydate.export"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "freeze_eot_determination",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}/freeze",
+      "permissions": [
+        "dms.keydate.eot.freeze_determination"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:freeze_eot_determination"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "import_eot_determination_csv",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}/import",
+      "permissions": [
+        "dms.keydate.eot.determine"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:import_eot_determination_csv"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "preview_eot_determination_csv",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}/import/preview",
+      "permissions": [
+        "dms.keydate.eot.determine"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:preview_eot_determination_csv"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "eot_determination_template",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-determinations/{determination_id}/template",
+      "permissions": [
+        "dms.keydate.eot.determine"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "create_eot_submission_revision",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.eot_submit",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:create_eot_submission_revision"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "PUT"
+      ],
+      "name": "update_eot_submission_revision",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}",
+      "permissions": [
+        "dms.keydate.eot_submit"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:update_eot_submission_revision"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "export_eot_submission",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/export",
+      "permissions": [
+        "dms.keydate.export"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "import_eot_submission_csv",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/import",
+      "permissions": [
+        "dms.keydate.eot_submit"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:import_eot_submission_csv"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "preview_eot_submission_csv",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/import/preview",
+      "permissions": [
+        "dms.keydate.eot_submit"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:preview_eot_submission_csv"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "lock_eot_submission_revision",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/lock",
+      "permissions": [
+        "dms.keydate.eot.lock_submission"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:lock_eot_submission_revision"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": true,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "POST"
+      ],
+      "name": "supersede_eot_submission_revision",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/supersede",
+      "permissions": [
+        "dms.keydate.eot.supersede"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": true,
+      "unsafe": true,
+      "wrong_tenant_test": "policy_contract:supersede_eot_submission_revision"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "call_name",
+      "gate_exception_reason": "",
+      "gate_sink": "<call>.authorize_document()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "eot_submission_template",
+      "owner": "key_dates",
+      "path": "/api/key-dates/eot-submissions/{submission_id}/template",
+      "permissions": [
+        "dms.keydate.eot_submit"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": false,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "letter_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "export_key_dates",
+      "owner": "key_dates",
+      "path": "/api/key-dates/export",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.export",
         "drafting.admin",
         "permissions:read",
         "roles:read",
@@ -11246,9 +11885,9 @@
       "methods": [
         "GET"
       ],
-      "name": "export_key_dates",
+      "name": "export_complete_key_date_history",
       "owner": "key_dates",
-      "path": "/api/key-dates/export",
+      "path": "/api/key-dates/history/export",
       "permissions": [
         "billing.plan.manage",
         "billing.plan.view",
@@ -11442,6 +12081,90 @@
       "target_load_required": false,
       "unsafe": true,
       "wrong_tenant_test": "policy_contract:recalculate_key_dates"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "key_date_workflow",
+      "owner": "key_dates",
+      "path": "/api/key-dates/revisions",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.view",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
+    },
+    {
+      "active_user_required": true,
+      "audit_required": false,
+      "authentication_mode": "session",
+      "enforcement": "central_policy",
+      "entitlement_requirement": "required",
+      "gate_evidence": "resolved",
+      "gate_exception_reason": "",
+      "gate_sink": "PolicyService.authorize()",
+      "gate_via": "endpoint",
+      "methods": [
+        "GET"
+      ],
+      "name": "key_date_workflow",
+      "owner": "key_dates",
+      "path": "/api/key-dates/workflow",
+      "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "dms.keydate.view",
+        "drafting.admin",
+        "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage"
+      ],
+      "public_or_non_tenant_reason": "",
+      "quota_required": true,
+      "scope_sources": [
+        "organization_id",
+        "project_id",
+        "package_id",
+        "letter_id",
+        "drafting_request_id"
+      ],
+      "status": "complete",
+      "step_up_required": false,
+      "target_load_evidence": true,
+      "target_load_required": false,
+      "unsafe": false,
+      "wrong_tenant_test": "not_applicable:no_tenant_target"
     },
     {
       "active_user_required": true,
@@ -14120,7 +14843,7 @@
       "active_user_required": true,
       "audit_required": false,
       "authentication_mode": "session",
-      "enforcement": "authenticated_non_tenant",
+      "enforcement": "platform_admin_guard",
       "entitlement_requirement": "not_commercial",
       "gate_evidence": "call_name",
       "gate_exception_reason": "",
@@ -14132,7 +14855,9 @@
       "name": "list_notifications",
       "owner": "notifications",
       "path": "/api/notifications",
-      "permissions": [],
+      "permissions": [
+        "platform.admin"
+      ],
       "public_or_non_tenant_reason": "current-user notification inbox",
       "quota_required": false,
       "scope_sources": [
@@ -14144,7 +14869,7 @@
       "target_load_evidence": false,
       "target_load_required": false,
       "unsafe": false,
-      "wrong_tenant_test": "not_applicable:user_or_global_resource"
+      "wrong_tenant_test": "not_applicable:global_or_service_operation"
     },
     {
       "active_user_required": true,
@@ -15470,10 +16195,10 @@
       "audit_required": false,
       "authentication_mode": "session",
       "enforcement": "central_policy",
-      "entitlement_requirement": "not_commercial",
+      "entitlement_requirement": "required",
       "gate_evidence": "resolved",
       "gate_exception_reason": "",
-      "gate_sink": "rbac_backend.core.security:require_permission",
+      "gate_sink": "PolicyService.authorize()",
       "gate_via": "endpoint",
       "methods": [
         "GET"
@@ -15482,15 +16207,22 @@
       "owner": "permissions",
       "path": "/api/permissions",
       "permissions": [
+        "billing.plan.manage",
+        "billing.plan.view",
+        "dms.admin",
+        "drafting.admin",
         "permissions:read",
+        "roles:read",
+        "subscription.entitlement.manage",
         "users:create",
         "users:read"
       ],
       "public_or_non_tenant_reason": "",
-      "quota_required": false,
+      "quota_required": true,
       "scope_sources": [
         "organization_id",
         "project_id",
+        "package_id",
         "letter_id",
         "drafting_request_id"
       ],
@@ -19081,14 +19813,11 @@
       "quota_required": false,
       "scope_sources": [
         "organization_id",
-        "project_id",
-        "package_id",
-        "letter_id",
-        "drafting_request_id"
+        "project_id"
       ],
       "status": "complete",
       "step_up_required": false,
-      "target_load_evidence": true,
+      "target_load_evidence": false,
       "target_load_required": false,
       "unsafe": false,
       "wrong_tenant_test": "not_applicable:global_or_service_operation"
@@ -22147,13 +22876,13 @@
   "schema_version": 1,
   "summary": {
     "by_status": {
-      "complete": 579
+      "complete": 599
     },
-    "total_api_routes": 579,
-    "unsafe_api_routes": 333,
+    "total_api_routes": 599,
+    "unsafe_api_routes": 345,
     "unsafe_by_status": {
-      "complete": 333
+      "complete": 345
     },
-    "wrong_tenant_tests_required": 301
+    "wrong_tenant_tests_required": 313
   }
 }

@@ -51,6 +51,23 @@ class EOTSubmissionStatus(str, Enum):
     SUPERSEDED = "superseded"
 
 
+class SubmissionOutcome(str, Enum):
+    """Derived per submission at read time — never persisted.
+
+    ``NOT_SEPARATELY_DETERMINED`` is the case the contract cares about: EOT-1 and
+    EOT-2 are outstanding, the Employer answers only EOT-3, and the earlier claims
+    were never determined in their own right.
+    """
+    DRAFT = "draft"
+    PENDING = "pending"
+    WITHDRAWN = "withdrawn"
+    SUPERSEDED = "superseded"
+    ACCEPTED = "accepted"
+    PARTIALLY_ACCEPTED = "partially_accepted"
+    REJECTED = "rejected"
+    NOT_SEPARATELY_DETERMINED = "not_separately_determined"
+
+
 class EOTDeterminationStatus(str, Enum):
     NOT_STARTED = "not_started"
     UNDER_REVIEW = "under_review"
@@ -60,6 +77,12 @@ class EOTDeterminationStatus(str, Enum):
     REJECTED = "rejected"
     NO_EXTENSION = "no_extension"
     SUPERSEDED = "superseded"
+
+
+class EOTDeterminationOrigin(str, Enum):
+    """Whether the Employer answered a Contractor claim or acted of its own motion."""
+    CONTRACTOR_SUBMISSION = "contractor_submission"
+    EMPLOYER_INITIATED = "employer_initiated"
 
 
 class EOTDeterminationResult(str, Enum):
@@ -277,6 +300,11 @@ class BaselineFreezeRequest(KeyDateWorkflowScope):
     confirmation: bool = True
 
 
+class EOTSubmissionSupersedeRequest(BaseModel):
+    superseded_by_submission_id: str = Field(..., min_length=1)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+
 class KeyDateBaseline(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
     organization_id: Optional[str] = None
@@ -308,6 +336,9 @@ class EOTSubmissionCreate(KeyDateWorkflowScope):
     claim_cutoff_date: Optional[datetime] = None
     remarks: Optional[str] = None
     status: EOTSubmissionStatus = EOTSubmissionStatus.DRAFT
+    # The uploaded EOT application itself, linked to existing DMS records.
+    linked_document_ids: List[str] = Field(default_factory=list)
+    linked_letter_ids: List[str] = Field(default_factory=list)
     items: List[EOTSubmissionItemInput] = Field(default_factory=list)
 
 
@@ -318,6 +349,8 @@ class EOTSubmissionUpdate(BaseModel):
     claim_cutoff_date: Optional[datetime] = None
     remarks: Optional[str] = None
     status: Optional[EOTSubmissionStatus] = None
+    linked_document_ids: Optional[List[str]] = None
+    linked_letter_ids: Optional[List[str]] = None
     items: Optional[List[EOTSubmissionItemInput]] = None
 
 
@@ -345,13 +378,36 @@ class EOTSubmission(BaseModel):
     claim_cutoff_date: Optional[datetime] = None
     status: EOTSubmissionStatus
     remarks: Optional[str] = None
+    linked_document_ids: List[str] = Field(default_factory=list)
+    linked_letter_ids: List[str] = Field(default_factory=list)
     created_at: datetime
     created_by: Optional[str] = None
     locked_at: Optional[datetime] = None
     locked_by: Optional[str] = None
+    # Explicit supersession only — never inferred from a later submission.
+    superseded_by_submission_id: Optional[str] = None
+    superseded_reason: Optional[str] = None
+    superseded_at: Optional[datetime] = None
+    superseded_by: Optional[str] = None
+    # Derived on read; not stored.
+    determination_outcome: Optional[SubmissionOutcome] = None
+    determining_determination_ids: List[str] = Field(default_factory=list)
     items: List[EOTSubmissionItem] = Field(default_factory=list)
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+class EOTDeterminationCoveredClaim(BaseModel):
+    """One Contractor claim this determination item answers.
+
+    A determination may cover several submissions that each claimed the same
+    milestone. Every one of those claims is retained here; ``source_submission_id``
+    on the item names the one the granted date is measured against.
+    """
+    eot_submission_id: str
+    revision_label: Optional[str] = None
+    submitted_date: Optional[datetime] = None
+    claimed_extension_days: Optional[int] = None
 
 
 class EOTDeterminationItemInput(BaseModel):
@@ -359,11 +415,18 @@ class EOTDeterminationItemInput(BaseModel):
     eot_granted_date: Optional[datetime] = None
     granted_extension_days: Optional[int] = Field(None, ge=0)
     determination_result: EOTDeterminationResult = EOTDeterminationResult.PENDING
+    # Which covered submission this grant answers. Defaults to the earliest
+    # covered claim on the milestone that is not already determined.
+    source_submission_id: Optional[str] = None
     remarks: Optional[str] = None
 
 
 class EOTDeterminationCreate(KeyDateWorkflowScope):
-    eot_submission_ids: List[str] = Field(..., min_length=1)
+    # Not constrained here: an employer-initiated determination legitimately
+    # covers no submission. The origin rules are enforced in the service so the
+    # refusal is a 400 with a contractual message, not a schema 422.
+    eot_submission_ids: List[str] = Field(default_factory=list)
+    origin: EOTDeterminationOrigin = EOTDeterminationOrigin.CONTRACTOR_SUBMISSION
     determination_reference: Optional[str] = None
     determination_date: Optional[datetime] = None
     approval_grant_reference: Optional[str] = None
@@ -371,6 +434,9 @@ class EOTDeterminationCreate(KeyDateWorkflowScope):
     status: EOTDeterminationStatus = EOTDeterminationStatus.UNDER_REVIEW
     remarks: Optional[str] = None
     supersedes_determination_ids: List[str] = Field(default_factory=list)
+    # The Employer's determination letter, linked to existing DMS records.
+    linked_document_ids: List[str] = Field(default_factory=list)
+    linked_letter_ids: List[str] = Field(default_factory=list)
     items: List[EOTDeterminationItemInput] = Field(default_factory=list)
 
 
@@ -382,6 +448,8 @@ class EOTDeterminationUpdate(BaseModel):
     status: Optional[EOTDeterminationStatus] = None
     remarks: Optional[str] = None
     supersedes_determination_ids: Optional[List[str]] = None
+    linked_document_ids: Optional[List[str]] = None
+    linked_letter_ids: Optional[List[str]] = None
     items: Optional[List[EOTDeterminationItemInput]] = None
 
 
@@ -390,8 +458,10 @@ class EOTDeterminationItem(EOTDeterminationItemInput):
     determination_id: str
     key_date_id: str
     contractual_date_before_determination: Optional[datetime] = None
+    # The claim named by source_submission_id, denormalised for display/export.
     submitted_date: Optional[datetime] = None
     claimed_extension_days: Optional[int] = None
+    covered_claims: List[EOTDeterminationCoveredClaim] = Field(default_factory=list)
     description: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
@@ -402,7 +472,8 @@ class EOTDetermination(BaseModel):
     organization_id: Optional[str] = None
     project_id: str
     contract_id: str = "primary"
-    eot_submission_ids: List[str]
+    eot_submission_ids: List[str] = Field(default_factory=list)
+    origin: EOTDeterminationOrigin = EOTDeterminationOrigin.CONTRACTOR_SUBMISSION
     covered_revision_labels: List[str] = Field(default_factory=list)
     determination_reference: Optional[str] = None
     determination_date: Optional[datetime] = None
@@ -411,6 +482,8 @@ class EOTDetermination(BaseModel):
     status: EOTDeterminationStatus
     remarks: Optional[str] = None
     supersedes_determination_ids: List[str] = Field(default_factory=list)
+    linked_document_ids: List[str] = Field(default_factory=list)
+    linked_letter_ids: List[str] = Field(default_factory=list)
     created_at: datetime
     created_by: Optional[str] = None
     frozen_at: Optional[datetime] = None
@@ -430,6 +503,8 @@ class KeyDateWorkflowSummary(BaseModel):
     latest_eot_submission: Optional[str] = None
     pending_determinations: int = 0
     open_eot_submissions: int = 0
+    employer_initiated_determinations: int = 0
+    not_separately_determined: int = 0
     oldest_pending_submission: Optional[str] = None
     submissions: List[EOTSubmission] = Field(default_factory=list)
     determinations: List[EOTDetermination] = Field(default_factory=list)
