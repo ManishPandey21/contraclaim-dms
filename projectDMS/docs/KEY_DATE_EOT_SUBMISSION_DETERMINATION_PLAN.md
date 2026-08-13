@@ -950,11 +950,59 @@ cd backend && ../backend/.venv/Scripts/python.exe -m rbac_backend.scripts.migrat
 migrate — the code path executed, but its backfill and repair logic were **not** exercised against
 real data here. That still awaits a database that has frozen determinations.
 
-**The `--fail-on-warning` gate returns exit code 2 on clean HEAD.** Proven by running with
-`--target 20260811_0001` (excludes the new migration): exit 2 either way. The cause is
-`20260721_0001 arbitration_phase0_containment`, which emits two informational warnings by design.
-So the deploy gate as written in CLAUDE.md cannot currently be used as a pass/fail signal — the same
-trap as the `npx tsc -b` note. Nothing to do with this workstream, but it blocks the documented gate.
+**Locally, `--fail-on-warning` returns exit code 2** — proven with `--target 20260811_0001`, which
+excludes the new migration: exit 2 either way. The cause is `20260721_0001
+arbitration_phase0_containment`, which emits two informational warnings by design.
+
+That is a **local-only** artefact, and an earlier claim in this document that the gate "cannot be
+used as a pass/fail signal" was wrong. On a database where the migrations are already applied they
+are reported `skipped` and emit nothing, so the gate behaves correctly — confirmed on production
+below.
+
+### Production dry run — inside the backend container
+
+Run read-only on `contraclaim` per CLAUDE.md, using the compose pair read from the running
+container's own `com.docker.compose.project.config_files` label
+(`docker-compose.prod.yml` + `docker-compose.mongo-replicaset.yml`):
+
+```bash
+docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
+  exec -T backend python -m rbac_backend.scripts.migrate_database --fail-on-warning
+```
+
+**`EXIT=0`. 15 migrations, all `skipped`, no warnings, nothing pending.**
+
+This dry run did **not** exercise `20260813_0001`: production tracks `main` at `928c5ab`, and the
+migration file is absent there. It establishes the baseline, not the new migration's behaviour.
+
+Two findings from the same read-only session:
+
+**1. The migration's blast radius in production is nil.**
+
+| Collection | Production count |
+|---|---|
+| `key_date_milestones` | 33 |
+| `key_date_baselines` | **0** |
+| `key_date_eot_submissions` | **0** |
+| `key_date_eot_determinations` | **0** |
+| `key_date_eot_determination_items` | **0** |
+| `key_date_eot_applications` (legacy) | **0** |
+
+No project has ever frozen a baseline, so the whole 2026-08-11 revision workflow is unused in
+production. Consequences, all of which downgrade risks flagged earlier in this document:
+
+- `20260813_0001` has **nothing to backfill and no contractual date to repair**. The
+  `--fail-on-warning` stop described in §21 cannot trigger on today's data.
+- The G5 corruption this work fixes has **never occurred in production** — it needed a frozen
+  out-of-order determination, and there are none.
+- The D8 blocker ("projects with active legacy EOT applications cannot freeze a baseline") affects
+  **no tenant**: the legacy collection is empty.
+
+**2. The applied ledger holds 17 entries against a 15-migration catalogue in the container.**
+Production has run two migrations that are not in the code currently deployed there — consistent
+with the documented divergence between the two remotes' `main` branches, which carry the same work
+under different SHAs. Not a fault, but it means the container's catalogue is not a complete record
+of what has been applied.
 
 ### Section 13 acceptance scenario — real HTTP, real MongoDB
 
