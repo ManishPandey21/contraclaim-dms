@@ -10,6 +10,8 @@ import csv
 import io
 from typing import Any, Dict, List
 
+from .key_date_service import DATE_DISPLAY_FORMAT
+
 COLUMNS = [
     ("milestone_ref", "Ref"),
     ("title", "Title"),
@@ -32,7 +34,8 @@ def _cell(value: Any) -> str:
         return ""
     if hasattr(value, "date"):
         try:
-            return value.date().isoformat()
+            # Contractual documents read day-first; see DATE_DISPLAY_FORMAT.
+            return value.strftime(DATE_DISPLAY_FORMAT)
         except Exception:
             return str(value)
     return str(value)

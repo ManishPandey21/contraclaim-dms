@@ -143,6 +143,12 @@ describe("KeyDateRevisionWorkflow", () => {
     await waitFor(() => expect(api.supersedeEOTSubmissionRevision).not.toHaveBeenCalled());
   });
 
+  it("renders submitted dates day-first", async () => {
+    renderWorkflow();
+    // contractor_submission_date is 2026-02-01 on every seeded submission.
+    expect((await screen.findAllByText("01-02-2026")).length).toBeGreaterThan(0);
+  });
+
   it("offers the employer-initiated determination entry point", async () => {
     renderWorkflow();
     expect(await screen.findByRole("button", { name: /Employer Determination/i })).toBeInTheDocument();

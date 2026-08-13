@@ -1055,6 +1055,90 @@ async def test_baseline_label_names_the_determination_actually_in_force():
     assert summary["current_contractual_baseline"] == "EOT-1", summary["current_contractual_baseline"]
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ("15-04-2026", datetime(2026, 4, 15)),
+    ("15/04/2026", datetime(2026, 4, 15)),
+    ("01-02-2026", datetime(2026, 2, 1)),          # day-first, never month-first
+    ("2026-04-15", datetime(2026, 4, 15)),          # ISO still accepted
+    ("2026-04-15T00:00:00", datetime(2026, 4, 15)),
+])
+def test_dates_parse_day_first_as_well_as_iso(raw, expected):
+    from rbac_backend.services.key_date_service import _as_dt
+    assert _as_dt(raw) == expected
+
+
+def test_unparseable_dates_are_still_rejected():
+    from rbac_backend.services.key_date_service import _as_dt
+    assert _as_dt("not a date") is None
+    assert _as_dt("32-01-2026") is None
+
+
+def test_exports_render_dates_day_first():
+    from rbac_backend.services.key_date_revision_export import _cell
+    assert _cell(datetime(2026, 4, 15)) == "15-04-2026"
+    assert _cell(None) == ""
+
+
+def test_history_export_rows_are_day_first():
+    milestones = [{
+        "milestone_ref": "KD-01", "title": "M", "original_planned_key_date": datetime(2026, 1, 1),
+        "current_approved_key_date": datetime(2026, 4, 15),
+    }]
+    submissions = [{
+        "_id": "e1", "revision_number": 1, "revision_label": "EOT-1",
+        "items": [{"milestone_ref": "KD-01", "eot_submitted_date": datetime(2026, 3, 1)}],
+    }]
+    _headers, rows = history_table(milestones, submissions, [])
+    from rbac_backend.services.key_date_revision_export import _cell
+    rendered = [_cell(value) for value in rows[0]]
+    assert "01-01-2026" in rendered
+    assert "15-04-2026" in rendered
+    assert not any("2026-01-01" == value for value in rendered)
+
+
+@pytest.mark.asyncio
+async def test_determination_csv_accepts_day_first_dates():
+    """Exports are day-first, so the download -> edit -> re-upload round trip
+    must parse what the export produced."""
+    db = _DB()
+    await _seed(db)
+    svc = KeyDateRevisionService(db)
+    await svc.freeze_baseline("org-A", "proj-A", "primary", _user())
+    eot1 = await _locked_submission(svc, "CON/EOT-1", datetime(2026, 2, 1), datetime(2026, 3, 1), 60)
+    determination = await svc.create_determination(
+        _combined_determination([eot1["_id"]]), _user(),
+    )
+
+    preview, items = await svc.determination_csv_preview(
+        determination,
+        b"milestone_ref,eot_granted_date,granted_extension_days,determination_result\n"
+        b"KD-01,15-04-2026,45,partially_granted\n",
+    )
+
+    assert preview.can_import, [row.errors for row in preview.rows]
+    assert items[0].eot_granted_date == datetime(2026, 4, 15)
+
+
+@pytest.mark.asyncio
+async def test_submission_csv_accepts_day_first_dates():
+    db = _DB()
+    await _seed(db)
+    svc = KeyDateRevisionService(db)
+    await svc.freeze_baseline("org-A", "proj-A", "primary", _user())
+    submission = await svc.create_submission(EOTSubmissionCreate(
+        organization_id="org-A", project_id="proj-A", status="draft", items=[],
+    ), _user())
+
+    preview, items = await svc.submission_csv_preview(
+        submission,
+        b"milestone_ref,eot_submitted_date,claimed_extension_days\nKD-01,01-05-2026,120\n",
+    )
+
+    assert preview.can_import, [row.errors for row in preview.rows]
+    assert items[0].eot_submitted_date == datetime(2026, 5, 1)
+    assert preview.rows[0].data["eot_submitted_date"] == "01-05-2026"
+
+
 def test_only_one_frozen_baseline_guard_exists():
     """`KeyDateRevisionService.assert_baseline_editable` was never called; the
     live guard is `KeyDateService._assert_original_baseline_editable`. Two
