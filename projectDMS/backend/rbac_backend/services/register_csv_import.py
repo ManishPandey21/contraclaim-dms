@@ -12,7 +12,12 @@ from ..models.bank_guarantee import BGStatus, BGType, BankGuaranteeCreate
 from ..models.csv_import import CSVImportPreview, CSVImportResult, CSVImportRow
 from ..models.key_date import KeyDateMilestoneCreate
 from .bank_guarantee_service import BankGuaranteeService
-from .key_date_service import KeyDateError, KeyDateService, calculate_key_date
+from .key_date_service import (
+    DATE_DISPLAY_FORMAT,
+    KeyDateError,
+    KeyDateService,
+    calculate_key_date,
+)
 from .scope_service import ScopeService
 
 
@@ -259,6 +264,11 @@ def _csv_list(value: Any) -> List[str]:
     return [part.strip() for part in text.replace("|", ";").split(";") if part.strip()]
 
 
+def _key_date_preview_dates(value: Optional[datetime]) -> Optional[str]:
+    """Day-first rendering for Key Date CSV preview rows (see DATE_DISPLAY_FORMAT)."""
+    return value.strftime(DATE_DISPLAY_FORMAT) if isinstance(value, datetime) else None
+
+
 def _norm_text(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -389,9 +399,9 @@ async def preview_key_dates_csv(
         data = {
             "title": title,
             "contractual_week_number": week,
-            "project_start_date": start.isoformat() if start else None,
-            "calculated_key_date": calculated.isoformat() if calculated else None,
-            "original_planned_key_date": original.isoformat() if original else None,
+            "project_start_date": _key_date_preview_dates(start),
+            "calculated_key_date": _key_date_preview_dates(calculated),
+            "original_planned_key_date": _key_date_preview_dates(original),
             "milestone_ref": _blank_to_none(raw.get("milestone_ref")),
             "description": _blank_to_none(raw.get("description")),
             "responsible_party_id": _blank_to_none(raw.get("responsible_party_id")),

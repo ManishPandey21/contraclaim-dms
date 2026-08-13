@@ -7,13 +7,16 @@ import io
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from .key_date_service import DATE_DISPLAY_FORMAT
+
 
 def _cell(value: Any) -> str:
     if value is None:
         return ""
     if hasattr(value, "date"):
         try:
-            return value.date().isoformat()
+            # Contractual documents read day-first; see DATE_DISPLAY_FORMAT.
+            return value.strftime(DATE_DISPLAY_FORMAT)
         except Exception:
             pass
     return str(value)

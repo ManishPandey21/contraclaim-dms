@@ -505,6 +505,27 @@ async def test_scan_emits_and_dedupes():
     assert second["emitted"] == 0 and len(sent) == 1
 
 
+def test_register_export_renders_dates_day_first():
+    from rbac_backend.services.key_date_export import milestones_to_csv
+
+    rows = [{
+        "milestone_ref": "MS-1", "title": "Foundation", "status": "overdue",
+        "original_planned_key_date": datetime(2026, 1, 1),
+        "current_approved_key_date": datetime(2026, 4, 15),
+    }]
+    csv_text = milestones_to_csv(rows)
+    assert "01-01-2026" in csv_text
+    assert "15-04-2026" in csv_text
+    assert "2026-01-01" not in csv_text
+
+
+def test_key_date_csv_preview_renders_dates_day_first():
+    from rbac_backend.services.register_csv_import import _key_date_preview_dates
+
+    assert _key_date_preview_dates(datetime(2026, 4, 15)) == "15-04-2026"
+    assert _key_date_preview_dates(None) is None
+
+
 def test_csv_export_has_header_and_rows():
     from rbac_backend.services.key_date_export import milestones_to_csv
 

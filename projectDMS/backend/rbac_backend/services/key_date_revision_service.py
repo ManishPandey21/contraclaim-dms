@@ -32,7 +32,7 @@ from ..models.key_date import (
     SubmissionOutcome,
 )
 from .audit_event_service import AuditEventService
-from .key_date_service import KeyDateError, _as_dt, current_key_date
+from .key_date_service import KeyDateError, _as_dt, current_key_date, format_date
 
 
 FINAL_DETERMINATION_STATUSES = {
@@ -85,8 +85,8 @@ def _clean_ref(value: Any) -> str:
 
 
 def _iso(value: Any) -> str:
-    parsed = _as_dt(value)
-    return parsed.date().isoformat() if parsed else ""
+    """Day-first rendering for CSV previews and templates (see format_date)."""
+    return format_date(value)
 
 
 async def _cursor_list(cursor: Any) -> List[Dict[str, Any]]:

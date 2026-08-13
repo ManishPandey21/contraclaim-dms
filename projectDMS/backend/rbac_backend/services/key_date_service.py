@@ -56,15 +56,36 @@ def calculate_key_date(
     return project_start_date + timedelta(days=weeks * 7)
 
 
+#: Contractual dates are written and read day-first (DD-MM-YYYY). ISO stays
+#: accepted because it is what the API and older CSVs carry, and the two shapes
+#: cannot be confused: ISO leads with a four-digit year, day-first with a day.
+DATE_DISPLAY_FORMAT = "%d-%m-%Y"
+_DAY_FIRST_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%Y %H:%M:%S", "%d/%m/%Y %H:%M:%S")
+
+
 def _as_dt(value: Any) -> Optional[datetime]:
     if isinstance(value, datetime):
         return value
     if isinstance(value, str) and value:
-        try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
+        text = value.strip()
+        if not text:
             return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        for fmt in _DAY_FIRST_FORMATS:
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
     return None
+
+
+def format_date(value: Any) -> str:
+    """Render a contractual date day-first, or '' when absent."""
+    parsed = _as_dt(value)
+    return parsed.strftime(DATE_DISPLAY_FORMAT) if parsed else ""
 
 
 def current_key_date(milestone: Dict[str, Any]) -> Optional[datetime]:
