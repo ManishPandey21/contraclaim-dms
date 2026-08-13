@@ -91,6 +91,7 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.keydate.eot.lock_submission", "name": "Lock Key Date EOT Submission"},
     {"_id": "dms.keydate.eot.determine", "name": "Determine Key Date EOT"},
     {"_id": "dms.keydate.eot.freeze_determination", "name": "Freeze Key Date EOT Determination"},
+    {"_id": "dms.keydate.eot.supersede", "name": "Supersede Key Date EOT Submission"},
     {"_id": "dms.keydate.achievement", "name": "Record Key Date Achievement"},
     {"_id": "dms.variation.view", "name": "View Variations"},
     {"_id": "dms.variation.create", "name": "Create Variations"},

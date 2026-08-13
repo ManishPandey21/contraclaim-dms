@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Download, FileCheck2, History, Loader2, LockKeyhole, PlusCircle, Upload } from "lucide-react";
+import { Download, FileCheck2, Gavel, History, Loader2, LockKeyhole, PlusCircle, Upload } from "lucide-react";
 import { toast } from "sonner";
+import LinkedDocumentsPicker from "@/components/documents/LinkedDocumentsPicker";
 import CsvImportDialog from "@/components/registers/CsvImportDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ import {
   createEOTSubmissionRevision,
   downloadEOTDeterminationTemplate,
   downloadEOTSubmissionTemplate,
+  EOTDeterminationOrigin,
   EOTDeterminationResult,
   EOTDeterminationStatus,
   EOTDeterminationDTO,
@@ -34,6 +36,7 @@ import {
   MilestoneDTO,
   previewEOTDeterminationCsv,
   previewEOTSubmissionCsv,
+  supersedeEOTSubmissionRevision,
   updateEOTSubmissionRevision,
   updateEOTDetermination,
 } from "@/services/key-dates-api";
@@ -51,11 +54,37 @@ type DeterminationRow = {
   grantDate: string;
   grantedDays: string;
   result: EOTDeterminationResult;
+  sourceSubmissionId: string;
   remarks: string;
 };
 
 const blankSubmission = {
   eotReference: "", submissionDate: "", letterReference: "", cutoffDate: "", remarks: "", status: "submitted" as const,
+};
+
+const AUTO_SOURCE = "__auto__";
+
+const OUTCOME_LABELS: Record<string, string> = {
+  draft: "Draft",
+  pending: "Pending determination",
+  withdrawn: "Withdrawn",
+  superseded: "Superseded",
+  accepted: "Accepted",
+  partially_accepted: "Partially accepted",
+  rejected: "Rejected",
+  not_separately_determined: "Not separately determined",
+};
+
+const OutcomeBadge: React.FC<{ outcome?: string | null }> = ({ outcome }) => {
+  if (!outcome) return <span className="text-xs text-muted-foreground">—</span>;
+  // "Not separately determined" is a distinct contractual position from
+  // "pending", so it must not read as just another shade of waiting.
+  const variant =
+    outcome === "accepted" ? "default"
+      : outcome === "rejected" || outcome === "not_separately_determined" ? "destructive"
+        : outcome === "superseded" || outcome === "withdrawn" ? "secondary"
+          : "outline";
+  return <Badge variant={variant}>{OUTCOME_LABELS[outcome] || outcome.replaceAll("_", " ")}</Badge>;
 };
 
 function downloadBlob(blob: Blob, filename: string) {
@@ -88,9 +117,14 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
   const [editingSubmission, setEditingSubmission] = useState<EOTSubmissionRevisionDTO | null>(null);
   const [submissionForm, setSubmissionForm] = useState({ ...blankSubmission });
   const [submissionRows, setSubmissionRows] = useState<Record<string, SubmissionRow>>({});
+  const [submissionDocIds, setSubmissionDocIds] = useState<string[]>([]);
   const [determinationOpen, setDeterminationOpen] = useState(false);
   const [editingDetermination, setEditingDetermination] = useState<EOTDeterminationDTO | null>(null);
   const [selectedSubmissionIds, setSelectedSubmissionIds] = useState<string[]>([]);
+  const [determinationOrigin, setDeterminationOrigin] = useState<EOTDeterminationOrigin>("contractor_submission");
+  const [determinationDocIds, setDeterminationDocIds] = useState<string[]>([]);
+  const [supersedeTarget, setSupersedeTarget] = useState<EOTSubmissionRevisionDTO | null>(null);
+  const [supersedeForm, setSupersedeForm] = useState({ replacementId: "", reason: "" });
   const [determinationForm, setDeterminationForm] = useState({
     reference: "", date: "", grantReference: "", approvedBy: "",
     status: "under_review" as EOTDeterminationStatus, remarks: "",
@@ -125,6 +159,7 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
       remarks: submission.remarks || "",
       status: submission.status === "draft" ? "draft" : "submitted",
     } : { ...blankSubmission });
+    setSubmissionDocIds(submission?.linked_document_ids ?? []);
     const existing = new Map((submission?.items ?? []).map((item) => [item.milestone_ref.toLowerCase(), item]));
     setSubmissionRows(Object.fromEntries(milestones.map((milestone) => {
       const ref = milestone.milestone_ref || "";
@@ -165,6 +200,7 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
         claim_cutoff_date: iso(submissionForm.cutoffDate),
         remarks: submissionForm.remarks || undefined,
         status: submissionForm.status,
+        linked_document_ids: submissionDocIds,
         items,
       };
       if (editingSubmission) await updateEOTSubmissionRevision(editingSubmission.id, payload);
@@ -179,14 +215,44 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
     }
   };
 
-  const coveredItems = useMemo(() => {
-    const result = new Map<string, EOTSubmissionRevisionDTO["items"][number]>();
+  /**
+   * Every claim on each covered milestone, not just the latest — a determination
+   * covering EOT-1 and EOT-2 must let the user say which claim it answers.
+   */
+  const coveredClaims = useMemo(() => {
+    const byRef = new Map<string, {
+      milestone_ref: string;
+      claims: { submissionId: string; label: string; submittedDate?: string | null; claimedDays?: number | null }[];
+    }>();
     for (const submission of workflow?.submissions ?? []) {
       if (!selectedSubmissionIds.includes(submission.id)) continue;
-      for (const item of submission.items) result.set(item.milestone_ref.toLowerCase(), item);
+      for (const item of submission.items) {
+        const key = item.milestone_ref.toLowerCase();
+        const entry = byRef.get(key) || { milestone_ref: item.milestone_ref, claims: [] };
+        entry.claims.push({
+          submissionId: submission.id,
+          label: submission.revision_label,
+          submittedDate: item.eot_submitted_date,
+          claimedDays: item.claimed_extension_days,
+        });
+        byRef.set(key, entry);
+      }
     }
-    return [...result.values()];
+    return [...byRef.values()];
   }, [selectedSubmissionIds, workflow]);
+
+  /** Employer-initiated determinations may rule on any milestone in the register. */
+  const determinationTargets = useMemo(() => {
+    if (determinationOrigin === "employer_initiated") {
+      return milestones
+        .filter((milestone) => milestone.milestone_ref)
+        .map((milestone) => ({ milestone_ref: milestone.milestone_ref as string, claims: [] as typeof coveredClaims[number]["claims"] }));
+    }
+    return coveredClaims;
+  }, [coveredClaims, determinationOrigin, milestones]);
+
+  const blankDeterminationRow = (): DeterminationRow =>
+    ({ grantDate: "", grantedDays: "", result: "pending", sourceSubmissionId: AUTO_SOURCE, remarks: "" });
 
   const syncDeterminationRows = (ids: string[]) => {
     const rows: Record<string, DeterminationRow> = { ...determinationRows };
@@ -195,27 +261,31 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
       if (!ids.includes(submission.id)) continue;
       for (const item of submission.items) {
         refs.add(item.milestone_ref);
-        rows[item.milestone_ref] ||= { grantDate: "", grantedDays: "", result: "pending", remarks: "" };
+        rows[item.milestone_ref] ||= blankDeterminationRow();
       }
     }
     for (const ref of Object.keys(rows)) if (!refs.has(ref)) delete rows[ref];
     setDeterminationRows(rows);
   };
 
-  const openDetermination = (submission: EOTSubmissionRevisionDTO) => {
+  const openDetermination = (submission?: EOTSubmissionRevisionDTO) => {
     setEditingDetermination(null);
-    const ids = [submission.id];
+    const ids = submission ? [submission.id] : [];
     setSelectedSubmissionIds(ids);
+    setDeterminationOrigin(submission ? "contractor_submission" : "employer_initiated");
+    setDeterminationDocIds([]);
     setDeterminationForm({ reference: "", date: "", grantReference: "", approvedBy: "", status: "under_review", remarks: "" });
-    setDeterminationRows(Object.fromEntries(submission.items.map((item) => [item.milestone_ref, {
-      grantDate: "", grantedDays: "", result: "pending" as EOTDeterminationResult, remarks: "",
-    }])));
+    setDeterminationRows(Object.fromEntries(
+      (submission?.items ?? []).map((item) => [item.milestone_ref, blankDeterminationRow()]),
+    ));
     setDeterminationOpen(true);
   };
 
   const openExistingDetermination = (determination: EOTDeterminationDTO) => {
     setEditingDetermination(determination);
     setSelectedSubmissionIds(determination.eot_submission_ids);
+    setDeterminationOrigin(determination.origin);
+    setDeterminationDocIds(determination.linked_document_ids ?? []);
     setDeterminationForm({
       reference: determination.determination_reference || "",
       date: determination.determination_date?.slice(0, 10) || "",
@@ -228,35 +298,72 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
       grantDate: item.eot_granted_date?.slice(0, 10) || "",
       grantedDays: item.granted_extension_days == null ? "" : String(item.granted_extension_days),
       result: item.determination_result,
+      sourceSubmissionId: item.source_submission_id || AUTO_SOURCE,
       remarks: item.remarks || "",
     }])));
     setDeterminationOpen(true);
   };
 
+  const supersede = async () => {
+    if (!supersedeTarget) return;
+    if (!supersedeForm.replacementId || !supersedeForm.reason.trim()) {
+      toast.error("A superseding EOT revision and a reason are both required");
+      return;
+    }
+    setBusy(true);
+    try {
+      await supersedeEOTSubmissionRevision(supersedeTarget.id, {
+        superseded_by_submission_id: supersedeForm.replacementId,
+        reason: supersedeForm.reason.trim(),
+      });
+      toast.success(`${supersedeTarget.revision_label} superseded; its record is preserved`);
+      setSupersedeTarget(null);
+      await refresh();
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail || "Supersede failed");
+    } finally { setBusy(false); }
+  };
+
   const saveDetermination = async () => {
-    if (!selectedSubmissionIds.length) return;
-    const items = coveredItems.map((item) => {
-      const row = determinationRows[item.milestone_ref] || { grantDate: "", grantedDays: "", result: "pending", remarks: "" };
-      return {
-        milestone_ref: item.milestone_ref,
-        eot_granted_date: iso(row.grantDate),
-        granted_extension_days: row.grantedDays ? Number(row.grantedDays) : undefined,
-        determination_result: row.result,
-        remarks: row.remarks || undefined,
-      };
-    });
+    const employerInitiated = determinationOrigin === "employer_initiated";
+    if (!employerInitiated && !selectedSubmissionIds.length) return;
+    if (employerInitiated && !determinationForm.remarks.trim()) {
+      toast.error("An employer-initiated determination requires a reason in Remarks");
+      return;
+    }
+    const items = determinationTargets
+      .map((target) => {
+        const row = determinationRows[target.milestone_ref];
+        if (!row) return null;
+        if (employerInitiated && row.result === "pending" && !row.grantDate) return null;
+        return {
+          milestone_ref: target.milestone_ref,
+          eot_granted_date: iso(row.grantDate),
+          granted_extension_days: row.grantedDays ? Number(row.grantedDays) : undefined,
+          determination_result: row.result,
+          source_submission_id: row.sourceSubmissionId === AUTO_SOURCE ? undefined : row.sourceSubmissionId,
+          remarks: row.remarks || undefined,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+    if (!items.length) {
+      toast.error("Record a determination result for at least one milestone");
+      return;
+    }
     setBusy(true);
     try {
       const payload = {
         project_id: projectId,
         contract_id: "primary",
-        eot_submission_ids: selectedSubmissionIds,
+        eot_submission_ids: employerInitiated ? [] : selectedSubmissionIds,
+        origin: determinationOrigin,
         determination_reference: determinationForm.reference || undefined,
         determination_date: iso(determinationForm.date),
         approval_grant_reference: determinationForm.grantReference || undefined,
         approved_by: determinationForm.approvedBy || undefined,
         status: determinationForm.status,
         remarks: determinationForm.remarks || undefined,
+        linked_document_ids: determinationDocIds,
         items,
       };
       if (editingDetermination) {
@@ -349,16 +456,18 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
                       <Download className="mr-1 h-4 w-4" />Baseline {format.toUpperCase()}
                     </Button>
                   ))}
+                  <Button variant="outline" onClick={() => openDetermination()}><Gavel className="mr-2 h-4 w-4" />Employer Determination</Button>
                   <Button onClick={() => openSubmission()}><PlusCircle className="mr-2 h-4 w-4" />Create EOT Submission</Button>
                 </>
               )}
             </div>
           </div>
-          <div className="grid gap-2 pt-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-2 pt-3 sm:grid-cols-2 lg:grid-cols-5">
             <MiniStat label="Current Contractual Baseline" value={workflow.current_contractual_baseline} />
             <MiniStat label="Latest EOT Submission" value={workflow.latest_eot_submission || "None"} />
-            <MiniStat label="Pending Determinations" value={workflow.pending_determinations} />
+            <MiniStat label="Open EOT Submissions" value={workflow.open_eot_submissions} />
             <MiniStat label="Oldest Pending" value={workflow.oldest_pending_submission || "None"} />
+            <MiniStat label="Not Separately Determined" value={workflow.not_separately_determined} />
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -371,14 +480,15 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
             )}
           </div>
           <Table>
-            <TableHeader><TableRow><TableHead>Revision</TableHead><TableHead>Submission</TableHead><TableHead>Determination</TableHead><TableHead>Submitted On</TableHead><TableHead>Affected</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>Revision</TableHead><TableHead>Submission</TableHead><TableHead>Outcome</TableHead><TableHead>Determination</TableHead><TableHead>Submitted On</TableHead><TableHead>Affected</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
             <TableBody>
-              <TableRow><TableCell className="font-medium">Original</TableCell><TableCell><Badge variant="outline">{workflow.baseline_status}</Badge></TableCell><TableCell>—</TableCell><TableCell>—</TableCell><TableCell>{milestones.length}</TableCell><TableCell className="text-right">{workflow.baseline_status === "frozen" ? <Button size="sm" variant="ghost" onClick={() => void download("baseline", "csv", undefined, "key-dates-original-frozen")}>Download</Button> : "—"}</TableCell></TableRow>
+              <TableRow><TableCell className="font-medium">Original</TableCell><TableCell><Badge variant="outline">{workflow.baseline_status}</Badge></TableCell><TableCell>—</TableCell><TableCell>—</TableCell><TableCell>—</TableCell><TableCell>{milestones.length}</TableCell><TableCell className="text-right">{workflow.baseline_status === "frozen" ? <Button size="sm" variant="ghost" onClick={() => void download("baseline", "csv", undefined, "key-dates-original-frozen")}>Download</Button> : "—"}</TableCell></TableRow>
               {workflow.submissions.map((submission) => {
                 const determinations = workflow.determinations.filter((determination) => determination.eot_submission_ids.includes(submission.id));
                 return <TableRow key={submission.id}>
                   <TableCell className="font-medium">{submission.revision_label}</TableCell>
                   <TableCell><Badge variant="outline">{submission.status}</Badge></TableCell>
+                  <TableCell><OutcomeBadge outcome={submission.determination_outcome} /></TableCell>
                   <TableCell className="text-xs">{determinations.length ? determinations.map((d) => `${d.status}${d.frozen_at ? " / frozen" : ""}`).join(", ") : "Pending"}</TableCell>
                   <TableCell>{fmt(submission.contractor_submission_date)}</TableCell>
                   <TableCell>{submission.items.length}</TableCell>
@@ -387,13 +497,19 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
                     {!submission.locked_at && <Button size="sm" variant="outline" onClick={() => setCsvTarget({ kind: "submission", id: submission.id, label: submission.revision_label })}><Upload className="mr-1 h-3 w-3" />CSV</Button>}
                     {!submission.locked_at && <Button size="sm" onClick={() => void lockSubmission(submission)}>Lock</Button>}
                     {submission.locked_at && <Button size="sm" variant="outline" onClick={() => openDetermination(submission)}>Determine</Button>}
+                    {submission.status === "locked" && !submission.superseded_by_submission_id && (
+                      <Button size="sm" variant="ghost" onClick={() => { setSupersedeTarget(submission); setSupersedeForm({ replacementId: "", reason: "" }); }}>Supersede</Button>
+                    )}
                     {(["csv", "xlsx", "pdf"] as const).map((format) => <Button key={`${submission.id}-${format}`} size="sm" variant="ghost" onClick={() => void download("submission", format, submission.id, `${submission.revision_label.toLowerCase()}-submission`)}>{format.toUpperCase()}</Button>)}
                   </div></TableCell>
                 </TableRow>;
               })}
               {workflow.determinations.map((determination) => <TableRow key={`det-${determination.id}`} className="bg-muted/20">
-                <TableCell className="text-xs">↳ {determination.covered_revision_labels.join(" + ")}</TableCell>
-                <TableCell>Determination</TableCell>
+                <TableCell className="text-xs">↳ {determination.origin === "employer_initiated"
+                  ? (determination.determination_reference || "Employer initiated")
+                  : determination.covered_revision_labels.join(" + ")}</TableCell>
+                <TableCell>{determination.origin === "employer_initiated" ? "Employer determination" : "Determination"}</TableCell>
+                <TableCell>—</TableCell>
                 <TableCell><Badge variant="outline">{determination.status}{determination.frozen_at ? " / frozen" : ""}</Badge></TableCell>
                 <TableCell>{fmt(determination.determination_date)}</TableCell><TableCell>{determination.items.length}</TableCell>
                 <TableCell><div className="flex justify-end gap-1">
@@ -419,6 +535,13 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
             <div><Label>Status before lock</Label><Select value={submissionForm.status} onValueChange={(value: "draft" | "submitted") => setSubmissionForm({ ...submissionForm, status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="draft">Draft</SelectItem><SelectItem value="submitted">Submitted</SelectItem></SelectContent></Select></div>
             <div><Label>Remarks</Label><Input value={submissionForm.remarks} onChange={(e) => setSubmissionForm({ ...submissionForm, remarks: e.target.value })} /></div>
           </div>
+          <LinkedDocumentsPicker
+            projectId={projectId}
+            linkedIds={submissionDocIds}
+            onChange={setSubmissionDocIds}
+            title="Contractor's EOT application document"
+            disabled={!!editingSubmission?.locked_at}
+          />
           <Table><TableHeader><TableRow><TableHead className="w-10">Use</TableHead><TableHead>Ref / Description</TableHead><TableHead>Current Contractual</TableHead><TableHead>EOT Submitted</TableHead><TableHead>Claimed Days</TableHead><TableHead>Remarks</TableHead></TableRow></TableHeader><TableBody>
             {milestones.map((milestone) => {
               const ref = milestone.milestone_ref || "";
@@ -434,7 +557,34 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
       <Dialog open={determinationOpen} onOpenChange={setDeterminationOpen}>
         <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
           <DialogHeader><DialogTitle>{editingDetermination ? "Edit Client / Engineer Determination" : "Create Client / Engineer Determination"}</DialogTitle><DialogDescription>A determination can cover multiple locked EOT submissions. It remains non-contractual until separately frozen.</DialogDescription></DialogHeader>
-          <div><Label>Covers locked submissions</Label><div className="mt-2 flex flex-wrap gap-3">{lockedSubmissions.map((submission) => <label key={submission.id} className="flex items-center gap-2 rounded border px-3 py-2 text-sm"><Checkbox checked={selectedSubmissionIds.includes(submission.id)} disabled={!!editingDetermination} onCheckedChange={(checked) => { const ids = checked ? [...selectedSubmissionIds, submission.id] : selectedSubmissionIds.filter((id) => id !== submission.id); setSelectedSubmissionIds(ids); syncDeterminationRows(ids); }} />{submission.revision_label}</label>)}</div></div>
+          <div>
+            <Label>Origin</Label>
+            <Select
+              value={determinationOrigin}
+              onValueChange={(value: EOTDeterminationOrigin) => {
+                setDeterminationOrigin(value);
+                if (value === "employer_initiated") {
+                  setSelectedSubmissionIds([]);
+                  setDeterminationRows({});
+                }
+              }}
+              disabled={!!editingDetermination}
+            >
+              <SelectTrigger className="w-80"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="contractor_submission">Against Contractor EOT submission(s)</SelectItem>
+                <SelectItem value="employer_initiated">Employer initiated (no Contractor submission)</SelectItem>
+              </SelectContent>
+            </Select>
+            {determinationOrigin === "employer_initiated" && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Covers no Contractor submission. A reason in Remarks is required.
+              </p>
+            )}
+          </div>
+          {determinationOrigin === "contractor_submission" && (
+            <div><Label>Covers locked submissions</Label><div className="mt-2 flex flex-wrap gap-3">{lockedSubmissions.map((submission) => <label key={submission.id} className="flex items-center gap-2 rounded border px-3 py-2 text-sm"><Checkbox checked={selectedSubmissionIds.includes(submission.id)} disabled={!!editingDetermination} onCheckedChange={(checked) => { const ids = checked ? [...selectedSubmissionIds, submission.id] : selectedSubmissionIds.filter((id) => id !== submission.id); setSelectedSubmissionIds(ids); syncDeterminationRows(ids); }} />{submission.revision_label}</label>)}</div></div>
+          )}
           <div className="grid gap-3 md:grid-cols-3">
             <div><Label>Determination reference</Label><Input value={determinationForm.reference} onChange={(e) => setDeterminationForm({ ...determinationForm, reference: e.target.value })} /></div>
             <div><Label>Determination date</Label><Input type="date" value={determinationForm.date} onChange={(e) => setDeterminationForm({ ...determinationForm, date: e.target.value })} /></div>
@@ -443,12 +593,79 @@ const KeyDateRevisionWorkflow: React.FC<Props> = ({ projectId, milestones, onCha
             <div><Label>Determination status</Label><Select value={determinationForm.status} onValueChange={(value: EOTDeterminationStatus) => setDeterminationForm({ ...determinationForm, status: value })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{["under_review", "pending", "granted", "partially_granted", "rejected", "no_extension"] .map((value) => <SelectItem key={value} value={value}>{value.replaceAll("_", " ")}</SelectItem>)}</SelectContent></Select></div>
             <div><Label>Remarks</Label><Input value={determinationForm.remarks} onChange={(e) => setDeterminationForm({ ...determinationForm, remarks: e.target.value })} /></div>
           </div>
-          <Table><TableHeader><TableRow><TableHead>Milestone</TableHead><TableHead>Submitted</TableHead><TableHead>Result</TableHead><TableHead>Granted Date</TableHead><TableHead>Granted Days</TableHead><TableHead>Remarks</TableHead></TableRow></TableHeader><TableBody>{coveredItems.map((item) => {
-            const row = determinationRows[item.milestone_ref] || { grantDate: "", grantedDays: "", result: "pending", remarks: "" };
-            const change = (next: Partial<DeterminationRow>) => setDeterminationRows({ ...determinationRows, [item.milestone_ref]: { ...row, ...next } });
-            return <TableRow key={item.milestone_ref}><TableCell className="font-mono text-xs">{item.milestone_ref}</TableCell><TableCell>{fmt(item.eot_submitted_date)}</TableCell><TableCell><Select value={row.result} onValueChange={(value: EOTDeterminationResult) => change({ result: value })}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent>{["pending", "granted", "partially_granted", "rejected", "no_change"].map((value) => <SelectItem key={value} value={value}>{value.replaceAll("_", " ")}</SelectItem>)}</SelectContent></Select></TableCell><TableCell><Input type="date" value={row.grantDate} onChange={(e) => change({ grantDate: e.target.value })} /></TableCell><TableCell><Input type="number" min={0} value={row.grantedDays} onChange={(e) => change({ grantedDays: e.target.value })} /></TableCell><TableCell><Input value={row.remarks} onChange={(e) => change({ remarks: e.target.value })} /></TableCell></TableRow>;
+          <LinkedDocumentsPicker
+            projectId={projectId}
+            linkedIds={determinationDocIds}
+            onChange={setDeterminationDocIds}
+            title="Employer's determination letter"
+            disabled={!!editingDetermination?.frozen_at}
+          />
+          <Table><TableHeader><TableRow><TableHead>Milestone</TableHead><TableHead>Against Claim</TableHead><TableHead>Submitted</TableHead><TableHead>Result</TableHead><TableHead>Granted Date</TableHead><TableHead>Granted Days</TableHead><TableHead>Remarks</TableHead></TableRow></TableHeader><TableBody>{determinationTargets.map((target) => {
+            const row = determinationRows[target.milestone_ref] || blankDeterminationRow();
+            const change = (next: Partial<DeterminationRow>) => setDeterminationRows({ ...determinationRows, [target.milestone_ref]: { ...row, ...next } });
+            const selectedClaim = target.claims.find((claim) => claim.submissionId === row.sourceSubmissionId);
+            return <TableRow key={target.milestone_ref}>
+              <TableCell className="font-mono text-xs">{target.milestone_ref}</TableCell>
+              <TableCell>
+                {target.claims.length === 0 ? <span className="text-xs text-muted-foreground">—</span> : (
+                  <Select value={row.sourceSubmissionId} onValueChange={(value) => change({ sourceSubmissionId: value })}>
+                    <SelectTrigger className="w-44"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={AUTO_SOURCE}>Oldest outstanding</SelectItem>
+                      {target.claims.map((claim) => <SelectItem key={claim.submissionId} value={claim.submissionId}>{claim.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                )}
+              </TableCell>
+              <TableCell className="text-xs">
+                {target.claims.length === 0 ? "—" : selectedClaim
+                  ? `${fmt(selectedClaim.submittedDate)}${selectedClaim.claimedDays == null ? "" : ` · ${selectedClaim.claimedDays}d`}`
+                  : target.claims.map((claim) => `${claim.label}: ${fmt(claim.submittedDate)}`).join(" · ")}
+              </TableCell>
+              <TableCell><Select value={row.result} onValueChange={(value: EOTDeterminationResult) => change({ result: value })}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent>{["pending", "granted", "partially_granted", "rejected", "no_change"].map((value) => <SelectItem key={value} value={value}>{value.replaceAll("_", " ")}</SelectItem>)}</SelectContent></Select></TableCell>
+              <TableCell><Input type="date" value={row.grantDate} onChange={(e) => change({ grantDate: e.target.value })} /></TableCell>
+              <TableCell><Input type="number" min={0} value={row.grantedDays} onChange={(e) => change({ grantedDays: e.target.value })} /></TableCell>
+              <TableCell><Input value={row.remarks} onChange={(e) => change({ remarks: e.target.value })} /></TableCell>
+            </TableRow>;
           })}</TableBody></Table>
-          <DialogFooter><Button variant="outline" onClick={() => setDeterminationOpen(false)} disabled={busy}>Cancel</Button><Button onClick={() => void saveDetermination()} disabled={busy || selectedSubmissionIds.length === 0}>Save Determination</Button></DialogFooter>
+          <DialogFooter><Button variant="outline" onClick={() => setDeterminationOpen(false)} disabled={busy}>Cancel</Button><Button onClick={() => void saveDetermination()} disabled={busy || (determinationOrigin === "contractor_submission" && selectedSubmissionIds.length === 0)}>Save Determination</Button></DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={supersedeTarget !== null} onOpenChange={(open) => !open && setSupersedeTarget(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Supersede {supersedeTarget?.revision_label}</DialogTitle>
+            <DialogDescription>
+              The submission is preserved in full and marked superseded. This is never inferred from a
+              later EOT — a subsequent revision is normally an additional claim, not a replacement.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>Superseded by</Label>
+              <Select value={supersedeForm.replacementId} onValueChange={(value) => setSupersedeForm({ ...supersedeForm, replacementId: value })}>
+                <SelectTrigger><SelectValue placeholder="Select a later EOT revision" /></SelectTrigger>
+                <SelectContent>
+                  {workflow.submissions
+                    .filter((row) => supersedeTarget && row.revision_number > supersedeTarget.revision_number && !row.superseded_by_submission_id)
+                    .map((row) => <SelectItem key={row.id} value={row.id}>{row.revision_label}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>Reason (required)</Label>
+              <Textarea
+                value={supersedeForm.reason}
+                onChange={(e) => setSupersedeForm({ ...supersedeForm, reason: e.target.value })}
+                placeholder="Why this submission is replaced rather than determined"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSupersedeTarget(null)} disabled={busy}>Cancel</Button>
+            <Button onClick={() => void supersede()} disabled={busy}>Supersede</Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

@@ -27,6 +27,7 @@ from ..models.key_date import (
     EOTReview,
     EOTSubmission,
     EOTSubmissionCreate,
+    EOTSubmissionSupersedeRequest,
     EOTSubmissionUpdate,
     ExtensionHistory,
     KeyDateDashboard,
@@ -462,6 +463,25 @@ async def lock_eot_submission_revision(
         raise _bad_request(exc)
 
 
+@router.post("/key-dates/eot-submissions/{submission_id}/supersede", response_model=EOTSubmission)
+async def supersede_eot_submission_revision(
+    submission_id: str,
+    payload: EOTSubmissionSupersedeRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    submission = await _load_submission(
+        submission_id, Permissions.KEYDATE_EOT_SUPERSEDE, db, current_user, policy
+    )
+    try:
+        return EOTSubmission(**await KeyDateRevisionService(db).supersede_submission(
+            submission, payload.superseded_by_submission_id, payload.reason, current_user
+        ))
+    except KeyDateError as exc:
+        raise _bad_request(exc)
+
+
 @router.get("/key-dates/eot-submissions/{submission_id}/template")
 async def eot_submission_template(
     submission_id: str,
@@ -790,7 +810,11 @@ async def export_complete_key_date_history(
     from ..services import key_date_revision_export as kx
     resource = {"organization_id": org, "project_id": project_id, "contract_id": contract_id}
     metadata = await _export_metadata(db, resource, "Complete Key Date / EOT History")
-    headers, rows = kx.history_table(milestones, submissions, determinations)
+    outcomes = {
+        submission_id: str(values.get("determination_outcome") or "")
+        for submission_id, values in svc.submission_outcomes(submissions, determinations).items()
+    }
+    headers, rows = kx.history_table(milestones, submissions, determinations, outcomes)
     return _download_response(
         kx.render(format, metadata, headers, rows, "Complete Key Date EOT History"),
         format, "key-date-eot-history",
@@ -838,7 +862,8 @@ async def delete_milestone(
 # --- EOT ------------------------------------------------------------------
 
 
-@router.post("/key-dates/{milestone_id}/eot", response_model=EOTApplication, status_code=status.HTTP_201_CREATED)
+@router.post("/key-dates/{milestone_id}/eot", response_model=EOTApplication,
+             status_code=status.HTTP_201_CREATED, deprecated=True)
 async def submit_eot(
     milestone_id: str,
     payload: EOTApplicationCreate,
@@ -854,7 +879,7 @@ async def submit_eot(
     return EOTApplication(**eot)
 
 
-@router.get("/key-dates/{milestone_id}/eots", response_model=List[EOTApplication])
+@router.get("/key-dates/{milestone_id}/eots", response_model=List[EOTApplication], deprecated=True)
 async def list_eots(
     milestone_id: str,
     db=Depends(get_db),
@@ -865,7 +890,8 @@ async def list_eots(
     return [EOTApplication(**e) for e in await KeyDateService(db).list_eots(milestone_id)]
 
 
-@router.post("/key-dates/{milestone_id}/eot/{eot_id}/review", response_model=EOTApplication)
+@router.post("/key-dates/{milestone_id}/eot/{eot_id}/review", response_model=EOTApplication,
+             deprecated=True)
 async def review_eot(
     milestone_id: str,
     eot_id: str,
@@ -886,7 +912,7 @@ async def review_eot(
     return EOTApplication(**(updated or eot))
 
 
-@router.get("/key-dates/{milestone_id}/history", response_model=List[ExtensionHistory])
+@router.get("/key-dates/{milestone_id}/history", response_model=List[ExtensionHistory], deprecated=True)
 async def extension_history(
     milestone_id: str,
     db=Depends(get_db),

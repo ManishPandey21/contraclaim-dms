@@ -67,6 +67,10 @@ from .v20260811_0001_key_date_eot_revision_workflow import DESCRIPTION as KEY_DA
 from .v20260811_0001_key_date_eot_revision_workflow import NAME as KEY_DATE_EOT_NAME
 from .v20260811_0001_key_date_eot_revision_workflow import VERSION as KEY_DATE_EOT_VERSION
 from .v20260811_0001_key_date_eot_revision_workflow import upgrade as upgrade_key_date_eot_revision
+from .v20260813_0001_key_date_eot_attribution import DESCRIPTION as KEY_DATE_ATTRIBUTION_DESCRIPTION
+from .v20260813_0001_key_date_eot_attribution import NAME as KEY_DATE_ATTRIBUTION_NAME
+from .v20260813_0001_key_date_eot_attribution import VERSION as KEY_DATE_ATTRIBUTION_VERSION
+from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
 
 
 MIGRATIONS = [
@@ -159,5 +163,11 @@ MIGRATIONS = [
         name=KEY_DATE_EOT_NAME,
         description=KEY_DATE_EOT_DESCRIPTION,
         upgrade=upgrade_key_date_eot_revision,
+    ),
+    Migration(
+        version=KEY_DATE_ATTRIBUTION_VERSION,
+        name=KEY_DATE_ATTRIBUTION_NAME,
+        description=KEY_DATE_ATTRIBUTION_DESCRIPTION,
+        upgrade=upgrade_key_date_attribution,
     ),
 ]

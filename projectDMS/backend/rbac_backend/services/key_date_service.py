@@ -332,8 +332,13 @@ class KeyDateService:
         for milestone_id, pairs in grouped.items():
             pairs.sort(key=lambda pair: int(pair[0].get("revision_number") or 0))
             submission, item = pairs[-1]
-            linked = determinations_by_submission.get(str(submission.get("_id")), [])
-            linked.sort(key=lambda row: row.get("created_at") or datetime.min)
+            # Only a frozen determination is contractual. An unfrozen one is a
+            # proposal and must not surface as the milestone's EOT status.
+            linked = [
+                row for row in determinations_by_submission.get(str(submission.get("_id")), [])
+                if row.get("frozen_at")
+            ]
+            linked.sort(key=lambda row: row.get("frozen_at") or datetime.min)
             latest_status = linked[-1].get("status") if linked else (
                 "pending" if submission.get("status") in {"submitted", "locked"} else submission.get("status")
             )

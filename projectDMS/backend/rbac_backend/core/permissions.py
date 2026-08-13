@@ -48,6 +48,7 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.keydate.eot.lock_submission",
     "dms.keydate.eot.determine",
     "dms.keydate.eot.freeze_determination",
+    "dms.keydate.eot.supersede",
     "dms.keydate.achievement",
     "dms.keydate.export",
     "dms.keydate.manage",
@@ -212,6 +213,7 @@ class Permissions:
     KEYDATE_EOT_LOCK_SUBMISSION = "dms.keydate.eot.lock_submission"
     KEYDATE_EOT_DETERMINE = "dms.keydate.eot.determine"
     KEYDATE_EOT_FREEZE_DETERMINATION = "dms.keydate.eot.freeze_determination"
+    KEYDATE_EOT_SUPERSEDE = "dms.keydate.eot.supersede"
     KEYDATE_ACHIEVEMENT = "dms.keydate.achievement"
     KEYDATE_EXPORT = "dms.keydate.export"
     KEYDATE_MANAGE = "dms.keydate.manage"
@@ -323,6 +325,7 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "dms.keydate.eot.lock_submission": ["projects:update"],
     "dms.keydate.eot.determine": ["projects:update"],
     "dms.keydate.eot.freeze_determination": ["projects:update"],
+    "dms.keydate.eot.supersede": ["projects:update"],
     "dms.keydate.manage": ["projects:update"],
     "dms.variation.approve": ["projects:update"],
     "dms.bankguarantee.release": ["projects:update"],

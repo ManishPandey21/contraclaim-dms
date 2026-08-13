@@ -142,6 +142,10 @@ export type EOTDeterminationStatus =
   | "not_started" | "under_review" | "pending" | "granted"
   | "partially_granted" | "rejected" | "no_extension" | "superseded";
 export type EOTDeterminationResult = "granted" | "partially_granted" | "rejected" | "no_change" | "pending";
+export type EOTDeterminationOrigin = "contractor_submission" | "employer_initiated";
+export type SubmissionOutcome =
+  | "draft" | "pending" | "withdrawn" | "superseded"
+  | "accepted" | "partially_accepted" | "rejected" | "not_separately_determined";
 
 export interface EOTSubmissionItemDTO {
   id?: string;
@@ -169,11 +173,27 @@ export interface EOTSubmissionRevisionDTO {
   claim_cutoff_date?: string | null;
   status: EOTSubmissionStatus;
   remarks?: string | null;
+  linked_document_ids: string[];
+  linked_letter_ids: string[];
   created_at: string;
   created_by?: string | null;
   locked_at?: string | null;
   locked_by?: string | null;
+  superseded_by_submission_id?: string | null;
+  superseded_reason?: string | null;
+  superseded_at?: string | null;
+  superseded_by?: string | null;
+  /** Derived server-side from frozen determinations; never stored. */
+  determination_outcome?: SubmissionOutcome | null;
+  determining_determination_ids: string[];
   items: EOTSubmissionItemDTO[];
+}
+
+export interface EOTDeterminationCoveredClaimDTO {
+  eot_submission_id: string;
+  revision_label?: string | null;
+  submitted_date?: string | null;
+  claimed_extension_days?: number | null;
 }
 
 export interface EOTDeterminationItemDTO {
@@ -183,8 +203,11 @@ export interface EOTDeterminationItemDTO {
   milestone_ref: string;
   description?: string | null;
   contractual_date_before_determination?: string | null;
+  /** The covered submission this grant answers; null for employer-initiated. */
+  source_submission_id?: string | null;
   submitted_date?: string | null;
   claimed_extension_days?: number | null;
+  covered_claims: EOTDeterminationCoveredClaimDTO[];
   eot_granted_date?: string | null;
   granted_extension_days?: number | null;
   determination_result: EOTDeterminationResult;
@@ -197,6 +220,7 @@ export interface EOTDeterminationDTO {
   project_id: string;
   contract_id: string;
   eot_submission_ids: string[];
+  origin: EOTDeterminationOrigin;
   covered_revision_labels: string[];
   determination_reference?: string | null;
   determination_date?: string | null;
@@ -205,6 +229,8 @@ export interface EOTDeterminationDTO {
   status: EOTDeterminationStatus;
   remarks?: string | null;
   supersedes_determination_ids: string[];
+  linked_document_ids: string[];
+  linked_letter_ids: string[];
   created_at: string;
   created_by?: string | null;
   frozen_at?: string | null;
@@ -222,6 +248,8 @@ export interface KeyDateWorkflowSummaryDTO {
   latest_eot_submission?: string | null;
   pending_determinations: number;
   open_eot_submissions: number;
+  employer_initiated_determinations: number;
+  not_separately_determined: number;
   oldest_pending_submission?: string | null;
   submissions: EOTSubmissionRevisionDTO[];
   determinations: EOTDeterminationDTO[];
@@ -239,6 +267,7 @@ export interface EOTDeterminationItemPayload {
   eot_granted_date?: string;
   granted_extension_days?: number;
   determination_result: EOTDeterminationResult;
+  source_submission_id?: string;
   remarks?: string;
 }
 
@@ -280,12 +309,22 @@ const normHist = (raw: any): ExtensionHistoryDTO => ({ ...raw, id: raw?._id ?? r
 const normSubmission = (raw: any): EOTSubmissionRevisionDTO => ({
   ...raw,
   id: raw?._id ?? raw?.id,
+  linked_document_ids: raw?.linked_document_ids ?? [],
+  linked_letter_ids: raw?.linked_letter_ids ?? [],
+  determining_determination_ids: raw?.determining_determination_ids ?? [],
   items: (raw?.items ?? []).map((item: any) => ({ ...item, id: item?._id ?? item?.id })),
 });
 const normDetermination = (raw: any): EOTDeterminationDTO => ({
   ...raw,
   id: raw?._id ?? raw?.id,
-  items: (raw?.items ?? []).map((item: any) => ({ ...item, id: item?._id ?? item?.id })),
+  origin: raw?.origin ?? "contractor_submission",
+  linked_document_ids: raw?.linked_document_ids ?? [],
+  linked_letter_ids: raw?.linked_letter_ids ?? [],
+  items: (raw?.items ?? []).map((item: any) => ({
+    ...item,
+    id: item?._id ?? item?.id,
+    covered_claims: item?.covered_claims ?? [],
+  })),
 });
 
 export async function getMilestones(params?: {
@@ -421,6 +460,8 @@ export async function createEOTSubmissionRevision(payload: {
   claim_cutoff_date?: string;
   remarks?: string;
   status?: "draft" | "submitted";
+  linked_document_ids?: string[];
+  linked_letter_ids?: string[];
   items: EOTSubmissionItemPayload[];
 }): Promise<EOTSubmissionRevisionDTO> {
   const { data } = await api.post("/key-dates/eot-submissions", payload);
@@ -436,6 +477,8 @@ export async function updateEOTSubmissionRevision(
     claim_cutoff_date: string;
     remarks: string;
     status: "draft" | "submitted";
+    linked_document_ids: string[];
+    linked_letter_ids: string[];
     items: EOTSubmissionItemPayload[];
   }>,
 ): Promise<EOTSubmissionRevisionDTO> {
@@ -448,10 +491,19 @@ export async function lockEOTSubmissionRevision(id: string): Promise<EOTSubmissi
   return normSubmission(data);
 }
 
+export async function supersedeEOTSubmissionRevision(
+  id: string,
+  payload: { superseded_by_submission_id: string; reason: string },
+): Promise<EOTSubmissionRevisionDTO> {
+  const { data } = await api.post(`/key-dates/eot-submissions/${id}/supersede`, payload);
+  return normSubmission(data);
+}
+
 export async function createEOTDetermination(payload: {
   project_id: string;
   contract_id?: string;
   eot_submission_ids: string[];
+  origin?: EOTDeterminationOrigin;
   determination_reference?: string;
   determination_date?: string;
   approval_grant_reference?: string;
@@ -459,6 +511,8 @@ export async function createEOTDetermination(payload: {
   status: EOTDeterminationStatus;
   remarks?: string;
   supersedes_determination_ids?: string[];
+  linked_document_ids?: string[];
+  linked_letter_ids?: string[];
   items: EOTDeterminationItemPayload[];
 }): Promise<EOTDeterminationDTO> {
   const { data } = await api.post("/key-dates/eot-determinations", payload);
@@ -475,6 +529,8 @@ export async function updateEOTDetermination(
     status: EOTDeterminationStatus;
     remarks: string;
     supersedes_determination_ids: string[];
+    linked_document_ids: string[];
+    linked_letter_ids: string[];
     items: EOTDeterminationItemPayload[];
   }>,
 ): Promise<EOTDeterminationDTO> {

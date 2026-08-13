@@ -14,12 +14,14 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from bson import ObjectId
 from pymongo import ReturnDocument
 
 from ..models.csv_import import CSVImportPreview, CSVImportResult, CSVImportRow
 from ..models.key_date import (
     BaselineStatus,
     EOTDeterminationCreate,
+    EOTDeterminationOrigin,
     EOTDeterminationResult,
     EOTDeterminationStatus,
     EOTDeterminationUpdate,
@@ -27,6 +29,7 @@ from ..models.key_date import (
     EOTSubmissionItemInput,
     EOTSubmissionStatus,
     EOTSubmissionUpdate,
+    SubmissionOutcome,
 )
 from .audit_event_service import AuditEventService
 from .key_date_service import KeyDateError, _as_dt, current_key_date
@@ -59,6 +62,7 @@ SUBMISSION_TEMPLATE_HEADERS = [
 DETERMINATION_TEMPLATE_HEADERS = [
     "milestone_ref",
     "description",
+    "source_submission_ref",
     "submitted_date",
     "current_contractual_date",
     "eot_granted_date",
@@ -110,14 +114,10 @@ class KeyDateRevisionService:
     ) -> Optional[Dict[str, Any]]:
         return await self.db.key_date_baselines.find_one(self.scope(organization_id, project_id, contract_id))
 
-    async def assert_baseline_editable(
-        self, organization_id: Optional[str], project_id: str, contract_id: str = "primary"
-    ) -> None:
-        baseline = await self.baseline(organization_id, project_id, contract_id)
-        if baseline and baseline.get("status") == BaselineStatus.FROZEN.value:
-            raise KeyDateError(
-                "Original Key Dates are frozen. Record future changes through an EOT submission."
-            )
+    # NOTE: the frozen-baseline guard lives in
+    # KeyDateService._assert_original_baseline_editable, which every write path
+    # already calls. A duplicate here was dead code and is deliberately absent —
+    # see test_only_one_frozen_baseline_guard_exists.
 
     async def freeze_baseline(
         self,
@@ -217,6 +217,46 @@ class KeyDateRevisionService:
         )
         return doc
 
+    async def _assert_links_in_scope(
+        self,
+        organization_id: Optional[str],
+        project_id: str,
+        *,
+        document_ids: Optional[Sequence[str]] = None,
+        letter_ids: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Every linked document/letter must live in the same org and project.
+
+        An unvalidated link is a cross-tenant read primitive: the id is supplied
+        by the caller and later resolved on the reader's behalf. Anything that
+        does not resolve inside the EOT's own scope — wrong org, wrong project,
+        deleted, or not a valid id at all — is refused rather than stored.
+        """
+        for label, raw_ids, collection in (
+            ("document", document_ids, self.db.documents),
+            ("letter", letter_ids, self.db.letters),
+        ):
+            wanted = [_clean_ref(value) for value in (raw_ids or []) if _clean_ref(value)]
+            if not wanted:
+                continue
+            object_ids = []
+            for value in wanted:
+                try:
+                    object_ids.append(ObjectId(value))
+                except Exception:
+                    raise KeyDateError(
+                        f"Linked {label} '{value}' is outside the selected project"
+                    ) from None
+            query: Dict[str, Any] = {"_id": {"$in": object_ids}, "project_id": str(project_id)}
+            if organization_id:
+                query["organization_id"] = str(organization_id)
+            found = {str(row.get("_id")) for row in await _cursor_list(collection.find(query))}
+            missing = [value for value in wanted if value not in found]
+            if missing:
+                raise KeyDateError(
+                    f"Linked {label} '{missing[0]}' is outside the selected project"
+                )
+
     async def _milestones_by_ref(
         self, organization_id: Optional[str], project_id: str, contract_id: str = "primary"
     ) -> Dict[str, Dict[str, Any]]:
@@ -276,6 +316,10 @@ class KeyDateRevisionService:
         if not baseline:
             raise KeyDateError("Freeze the Original Key Date baseline before creating an EOT submission")
 
+        await self._assert_links_in_scope(
+            organization_id, payload.project_id,
+            document_ids=payload.linked_document_ids, letter_ids=payload.linked_letter_ids,
+        )
         submission_id = _id()
         item_docs = await self._submission_item_docs(
             organization_id, payload.project_id, payload.contract_id, submission_id, payload.items
@@ -306,6 +350,8 @@ class KeyDateRevisionService:
             "claim_cutoff_date": payload.claim_cutoff_date,
             "status": requested_status,
             "remarks": payload.remarks,
+            "linked_document_ids": list(payload.linked_document_ids or []),
+            "linked_letter_ids": list(payload.linked_letter_ids or []),
             "created_at": now,
             "created_by": getattr(current_user, "id", None),
             "locked_at": None,
@@ -373,6 +419,12 @@ class KeyDateRevisionService:
             if status not in {EOTSubmissionStatus.DRAFT.value, EOTSubmissionStatus.SUBMITTED.value}:
                 raise KeyDateError("Use the lock action to finalize an EOT submission")
             update["status"] = status
+        if "linked_document_ids" in update or "linked_letter_ids" in update:
+            await self._assert_links_in_scope(
+                submission.get("organization_id"), submission["project_id"],
+                document_ids=update.get("linked_document_ids"),
+                letter_ids=update.get("linked_letter_ids"),
+            )
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = getattr(current_user, "id", None)
 
@@ -441,17 +493,213 @@ class KeyDateRevisionService:
         )
         return await self.get_submission(str(submission["_id"]))
 
+    async def _determined_submission_ids(
+        self,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+        contract_id: str = "primary",
+        *,
+        exclude_determination_id: Optional[str] = None,
+    ) -> set[str]:
+        """Submissions already answered by a frozen determination."""
+        if not project_id:
+            return set()
+        rows = await _cursor_list(
+            self.db.key_date_eot_determinations.find(
+                self.scope(organization_id, project_id, contract_id)
+            )
+        )
+        return {
+            str(submission_id)
+            for row in rows
+            if row.get("frozen_at") and str(row.get("_id")) != str(exclude_determination_id or "")
+            for submission_id in row.get("eot_submission_ids") or []
+        }
+
+    @staticmethod
+    def submission_outcomes(
+        submissions: Sequence[Dict[str, Any]],
+        determinations: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Derive each submission's determination outcome. Never persisted.
+
+        A submission is answered only by a *frozen* determination that covers it
+        and actually rules on a milestone it claimed. When a later submission has
+        been answered and this one has not, the earlier claim was never determined
+        in its own right — which is a materially different contractual position
+        from simply awaiting a decision.
+        """
+        frozen = [
+            row for row in determinations
+            if row.get("frozen_at") and _enum_value(row.get("status")) in FINAL_DETERMINATION_STATUSES
+        ]
+        covering: Dict[str, List[Dict[str, Any]]] = {}
+        for determination in frozen:
+            for submission_id in determination.get("eot_submission_ids") or []:
+                covering.setdefault(str(submission_id), []).append(determination)
+
+        claimed_refs = {
+            str(row.get("_id")): {
+                _clean_ref(item.get("milestone_ref")).casefold()
+                for item in row.get("items") or []
+            }
+            for row in submissions
+        }
+        answered_refs_by_revision: List[Tuple[int, set]] = []
+        for row in submissions:
+            submission_id = str(row.get("_id"))
+            matched = {
+                _clean_ref(item.get("milestone_ref")).casefold()
+                for determination in covering.get(submission_id, [])
+                for item in determination.get("items") or []
+            } & claimed_refs.get(submission_id, set())
+            if matched:
+                answered_refs_by_revision.append((int(row.get("revision_number") or 0), matched))
+
+        out: Dict[str, Dict[str, Any]] = {}
+        for row in submissions:
+            submission_id = str(row.get("_id"))
+            status = _enum_value(row.get("status"))
+            refs = claimed_refs.get(submission_id, set())
+            determining: List[str] = []
+            results: List[str] = []
+            for determination in covering.get(submission_id, []):
+                hits = [
+                    item for item in determination.get("items") or []
+                    if _clean_ref(item.get("milestone_ref")).casefold() in refs
+                ]
+                if hits:
+                    determining.append(str(determination.get("_id")))
+                    results += [_enum_value(item.get("determination_result")) for item in hits]
+
+            if row.get("superseded_by_submission_id"):
+                outcome = SubmissionOutcome.SUPERSEDED.value
+            elif status == EOTSubmissionStatus.WITHDRAWN.value:
+                outcome = SubmissionOutcome.WITHDRAWN.value
+            elif status == EOTSubmissionStatus.DRAFT.value:
+                outcome = SubmissionOutcome.DRAFT.value
+            elif results:
+                if all(result == EOTDeterminationResult.GRANTED.value for result in results):
+                    outcome = SubmissionOutcome.ACCEPTED.value
+                elif not any(result in EFFECTIVE_RESULTS for result in results):
+                    outcome = SubmissionOutcome.REJECTED.value
+                else:
+                    outcome = SubmissionOutcome.PARTIALLY_ACCEPTED.value
+            elif any(
+                revision > int(row.get("revision_number") or 0) and (answered & refs)
+                for revision, answered in answered_refs_by_revision
+            ):
+                outcome = SubmissionOutcome.NOT_SEPARATELY_DETERMINED.value
+            else:
+                outcome = SubmissionOutcome.PENDING.value
+            out[submission_id] = {
+                "determination_outcome": outcome,
+                "determining_determination_ids": determining,
+            }
+        return out
+
+    async def supersede_submission(
+        self,
+        submission: Dict[str, Any],
+        superseded_by_submission_id: str,
+        reason: str,
+        current_user: Any,
+        *,
+        source: str = "API",
+    ) -> Dict[str, Any]:
+        """Explicitly replace a locked submission with a later one.
+
+        Never inferred: a later EOT on the same milestone is usually an additional
+        claim, not a replacement, so supersession is an audited act with a reason.
+        """
+        if not _clean_ref(reason):
+            raise KeyDateError("A supersession requires a reason")
+        if submission.get("superseded_by_submission_id"):
+            raise KeyDateError("This EOT submission has already been superseded")
+        if submission.get("status") != EOTSubmissionStatus.LOCKED.value:
+            raise KeyDateError("Only a locked EOT submission can be superseded")
+
+        scope = self.scope(
+            submission.get("organization_id"),
+            submission["project_id"],
+            submission.get("contract_id", "primary"),
+        )
+        replacement = await self.db.key_date_eot_submissions.find_one(
+            {"_id": str(superseded_by_submission_id), **scope}
+        )
+        if not replacement:
+            raise KeyDateError("The superseding submission must belong to the same project/contract")
+        if int(replacement.get("revision_number") or 0) <= int(submission.get("revision_number") or 0):
+            raise KeyDateError("A submission can only be superseded by a later EOT revision")
+        if replacement.get("superseded_by_submission_id"):
+            raise KeyDateError("The superseding submission has itself been superseded")
+
+        determined = await self._determined_submission_ids(
+            submission.get("organization_id"),
+            submission["project_id"],
+            submission.get("contract_id", "primary"),
+        )
+        if str(submission["_id"]) in determined:
+            raise KeyDateError(
+                "This EOT submission has already been determined and cannot be superseded"
+            )
+
+        now = datetime.utcnow()
+        updated = await self.db.key_date_eot_submissions.find_one_and_update(
+            {"_id": submission["_id"], "superseded_by_submission_id": None},
+            {"$set": {
+                "status": EOTSubmissionStatus.SUPERSEDED.value,
+                "superseded_by_submission_id": str(superseded_by_submission_id),
+                "superseded_reason": _clean_ref(reason),
+                "superseded_at": now,
+                "superseded_by": getattr(current_user, "id", None),
+            }},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not updated:
+            raise KeyDateError("The EOT submission was superseded by another user")
+        await self._emit(
+            "keydate.eot_submission.superseded", current_user, updated, source=source,
+            before={"status": submission.get("status")},
+            after={
+                "superseded_by": str(superseded_by_submission_id),
+                "reason": _clean_ref(reason),
+            },
+        )
+        return await self.get_submission(str(submission["_id"]))
+
     async def _determination_item_docs(
         self,
         determination_id: str,
         submissions: Sequence[Dict[str, Any]],
         items: Sequence[Any],
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        contract_id: str = "primary",
     ) -> List[Dict[str, Any]]:
-        covered_by_ref: Dict[str, Tuple[Dict[str, Any], Dict[str, Any]]] = {}
+        # Keyed on milestone ref, but keeping EVERY covered claim rather than the
+        # last one seen: a determination may answer EOT-1 and EOT-2 where both
+        # claimed the same milestone, and both claims must stay traceable.
+        covered_by_ref: Dict[str, List[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
         for submission in sorted(submissions, key=lambda row: int(row.get("revision_number") or 0)):
             full = await self.get_submission(str(submission["_id"]))
             for item in (full or {}).get("items", []):
-                covered_by_ref[_clean_ref(item.get("milestone_ref")).casefold()] = (submission, item)
+                covered_by_ref.setdefault(
+                    _clean_ref(item.get("milestone_ref")).casefold(), []
+                ).append((submission, item))
+
+        already_determined = await self._determined_submission_ids(
+            organization_id, project_id, contract_id, exclude_determination_id=determination_id
+        )
+
+        # An employer-initiated determination answers no claim, so its milestones
+        # are resolved against the project register rather than a submission.
+        milestones_by_ref: Optional[Dict[str, Dict[str, Any]]] = None
+        if not submissions:
+            milestones_by_ref = await self._milestones_by_ref(
+                organization_id, str(project_id), contract_id
+            )
 
         docs: List[Dict[str, Any]] = []
         seen: set[str] = set()
@@ -461,15 +709,52 @@ class KeyDateRevisionService:
             if key in seen:
                 raise KeyDateError(f"Duplicate determination item for Milestone Ref '{ref}'")
             seen.add(key)
-            covered = covered_by_ref.get(key)
-            if not covered:
+            covered = covered_by_ref.get(key) or []
+            covered_claims: List[Dict[str, Any]] = []
+            source_submission_id: Optional[str] = None
+            if covered:
+                covered_claims = [
+                    {
+                        "eot_submission_id": str(submission.get("_id")),
+                        "revision_label": submission.get("revision_label"),
+                        "submitted_date": claim.get("eot_submitted_date"),
+                        "claimed_extension_days": claim.get("claimed_extension_days"),
+                    }
+                    for submission, claim in covered
+                ]
+                requested = _clean_ref(getattr(item, "source_submission_id", None))
+                if requested:
+                    chosen = next(
+                        (pair for pair in covered if str(pair[0].get("_id")) == requested), None
+                    )
+                    if not chosen:
+                        raise KeyDateError(
+                            f"The source submission named for {ref} is not among this "
+                            f"determination's covered EOT submissions"
+                        )
+                else:
+                    # D6: answer the oldest claim still outstanding on this milestone.
+                    chosen = next(
+                        (pair for pair in covered if str(pair[0].get("_id")) not in already_determined),
+                        covered[0],
+                    )
+                submission, submitted_item = chosen
+                source_submission_id = str(submission.get("_id"))
+                milestone = await self.db.key_date_milestones.find_one(
+                    {"_id": str(submitted_item.get("key_date_id"))}
+                )
+                submitted_date = submitted_item.get("eot_submitted_date")
+                claimed_days = submitted_item.get("claimed_extension_days")
+            elif milestones_by_ref is not None:
+                milestone = milestones_by_ref.get(key)
+                if not milestone:
+                    raise KeyDateError(f"Milestone Ref '{ref}' does not belong to the selected project")
+                submitted_date = None
+                claimed_days = None
+            else:
                 raise KeyDateError(
                     f"Milestone Ref '{ref}' is not included in any covered EOT submission"
                 )
-            _submission, submitted_item = covered
-            milestone = await self.db.key_date_milestones.find_one(
-                {"_id": str(submitted_item.get("key_date_id"))}
-            )
             if not milestone:
                 raise KeyDateError(f"Milestone Ref '{ref}' no longer exists")
             result = _enum_value(item.determination_result)
@@ -482,8 +767,10 @@ class KeyDateRevisionService:
                 "milestone_ref": ref,
                 "description": milestone.get("description") or milestone.get("title"),
                 "contractual_date_before_determination": current_key_date(milestone),
-                "submitted_date": submitted_item.get("eot_submitted_date"),
-                "claimed_extension_days": submitted_item.get("claimed_extension_days"),
+                "source_submission_id": source_submission_id,
+                "submitted_date": submitted_date,
+                "claimed_extension_days": claimed_days,
+                "covered_claims": covered_claims,
                 "eot_granted_date": item.eot_granted_date,
                 "granted_extension_days": item.granted_extension_days,
                 "determination_result": result,
@@ -497,6 +784,16 @@ class KeyDateRevisionService:
         organization_id = payload.organization_id or getattr(current_user, "organization_id", None)
         scope = self.scope(organization_id, payload.project_id, payload.contract_id)
         unique_ids = list(dict.fromkeys(str(value) for value in payload.eot_submission_ids))
+        origin = _enum_value(payload.origin)
+        if origin == EOTDeterminationOrigin.EMPLOYER_INITIATED.value:
+            if unique_ids:
+                raise KeyDateError(
+                    "An employer-initiated determination cannot also cover Contractor EOT submissions"
+                )
+            if not _clean_ref(payload.remarks):
+                raise KeyDateError(
+                    "An employer-initiated determination requires a reason recording why it was issued"
+                )
         submissions: List[Dict[str, Any]] = []
         for submission_id in unique_ids:
             submission = await self.db.key_date_eot_submissions.find_one({"_id": submission_id, **scope})
@@ -505,7 +802,7 @@ class KeyDateRevisionService:
             if submission.get("status") != EOTSubmissionStatus.LOCKED.value:
                 raise KeyDateError(f"{submission.get('revision_label')} must be locked before determination")
             submissions.append(submission)
-        if not submissions:
+        if not submissions and origin != EOTDeterminationOrigin.EMPLOYER_INITIATED.value:
             raise KeyDateError("Select at least one EOT submission for determination")
 
         for superseded_id in payload.supersedes_determination_ids:
@@ -513,8 +810,16 @@ class KeyDateRevisionService:
             if not linked:
                 raise KeyDateError("A superseded determination is outside the selected project/contract")
 
+        await self._assert_links_in_scope(
+            organization_id, payload.project_id,
+            document_ids=payload.linked_document_ids, letter_ids=payload.linked_letter_ids,
+        )
         determination_id = _id()
-        item_docs = await self._determination_item_docs(determination_id, submissions, payload.items)
+        item_docs = await self._determination_item_docs(
+            determination_id, submissions, payload.items,
+            organization_id=organization_id, project_id=payload.project_id,
+            contract_id=payload.contract_id,
+        )
         status = _enum_value(payload.status)
         if status == EOTDeterminationStatus.SUPERSEDED.value:
             if not payload.supersedes_determination_ids or not _clean_ref(payload.remarks):
@@ -526,6 +831,7 @@ class KeyDateRevisionService:
             "_id": determination_id,
             **scope,
             "eot_submission_ids": unique_ids,
+            "origin": origin,
             "covered_revision_labels": [row.get("revision_label") for row in submissions],
             "determination_reference": payload.determination_reference,
             "determination_date": payload.determination_date,
@@ -534,6 +840,8 @@ class KeyDateRevisionService:
             "status": status,
             "remarks": payload.remarks,
             "supersedes_determination_ids": [str(value) for value in payload.supersedes_determination_ids],
+            "linked_document_ids": list(payload.linked_document_ids or []),
+            "linked_letter_ids": list(payload.linked_letter_ids or []),
             "created_at": now,
             "created_by": getattr(current_user, "id", None),
             "frozen_at": None,
@@ -601,6 +909,12 @@ class KeyDateRevisionService:
             update["status"] = _enum_value(update["status"])
         if "supersedes_determination_ids" in update:
             update["supersedes_determination_ids"] = [str(value) for value in update["supersedes_determination_ids"]]
+        if "linked_document_ids" in update or "linked_letter_ids" in update:
+            await self._assert_links_in_scope(
+                determination.get("organization_id"), determination["project_id"],
+                document_ids=update.get("linked_document_ids"),
+                letter_ids=update.get("linked_letter_ids"),
+            )
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = getattr(current_user, "id", None)
         resulting_status = update.get("status", determination.get("status"))
@@ -634,7 +948,10 @@ class KeyDateRevisionService:
                 if submission:
                     submissions.append(submission)
             new_items = await self._determination_item_docs(
-                str(determination["_id"]), submissions, payload.items
+                str(determination["_id"]), submissions, payload.items,
+                organization_id=determination.get("organization_id"),
+                project_id=determination.get("project_id"),
+                contract_id=determination.get("contract_id", "primary"),
             )
             update["items_count"] = len(new_items)
 
@@ -686,26 +1003,22 @@ class KeyDateRevisionService:
                     f"Granted Date is required for {item.get('milestone_ref')} when result is {result}"
                 )
 
-        now = datetime.utcnow()
-        # Apply only effective milestone-level grants. Rejected/no-change/pending
-        # items deliberately carry forward the existing contractual date.
+        scope = self.scope(
+            determination.get("organization_id"),
+            determination.get("project_id"),
+            determination.get("contract_id", "primary"),
+        )
+        baseline = await self.db.key_date_baselines.find_one(
+            {**scope, "status": BaselineStatus.FROZEN.value}
+        )
+        baseline_ids = {str(row.get("key_date_id")) for row in (baseline or {}).get("items") or []}
         for item in items:
-            result = _enum_value(item.get("determination_result"))
-            grant_date = _as_dt(item.get("eot_granted_date"))
-            if result not in EFFECTIVE_RESULTS or not grant_date:
-                continue
-            await self.db.key_date_milestones.update_one(
-                {"_id": str(item.get("key_date_id"))},
-                {"$set": {
-                    "current_approved_key_date": grant_date,
-                    "current_determination_id": str(determination["_id"]),
-                    "current_determination_frozen_at": now,
-                    "eot_status": "approved",
-                    "updated_at": now,
-                    "updated_by": getattr(current_user, "id", None),
-                }},
-            )
+            if str(item.get("key_date_id")) not in baseline_ids:
+                raise KeyDateError(
+                    f"Milestone {item.get('milestone_ref')} is not part of the frozen Original baseline"
+                )
 
+        now = datetime.utcnow()
         updated = await self.db.key_date_eot_determinations.find_one_and_update(
             {"_id": determination["_id"], "frozen_at": None},
             {"$set": {"frozen_at": now, "frozen_by": getattr(current_user, "id", None)}},
@@ -713,14 +1026,138 @@ class KeyDateRevisionService:
         )
         if not updated:
             raced = await self.db.key_date_eot_determinations.find_one({"_id": determination["_id"]})
-            if raced and raced.get("frozen_at"):
-                return await self.get_determination(str(determination["_id"]))
-            raise KeyDateError("The determination could not be frozen")
+            if not (raced and raced.get("frozen_at")):
+                raise KeyDateError("The determination could not be frozen")
+            # Another writer won the freeze. Recomputing is idempotent, so
+            # converging again here is harmless and self-healing.
+            await self.recompute_effective_dates(
+                scope.get("organization_id"), scope["project_id"], scope["contract_id"],
+                current_user=current_user,
+            )
+            return await self.get_determination(str(determination["_id"]))
+
+        # Never write a grant date straight onto the milestone: a determination
+        # frozen out of revision order would otherwise pull the contractual date
+        # backwards. Re-derive the whole picture from the frozen record instead.
+        await self.recompute_effective_dates(
+            scope.get("organization_id"), scope["project_id"], scope["contract_id"],
+            current_user=current_user,
+        )
         await self._emit(
             "keydate.eot_determination.frozen", current_user, updated, source=source,
             after={"status": status, "covers": updated.get("covered_revision_labels"), "frozen_at": str(now)},
         )
         return await self.get_determination(str(determination["_id"]))
+
+    @staticmethod
+    def _replay_determinations(
+        determinations: Sequence[Dict[str, Any]],
+        effective: Dict[str, Optional[datetime]],
+        governing: Dict[str, Optional[Dict[str, Any]]],
+    ) -> None:
+        """Apply every frozen, non-superseded determination in contractual order.
+
+        Shared by the date recomputation and the summary label so the header can
+        never name a determination that governs no milestone.
+        """
+        superseded_ids = {
+            str(value)
+            for row in determinations
+            if row.get("frozen_at")
+            for value in row.get("supersedes_determination_ids") or []
+        }
+        applicable = [
+            row for row in determinations
+            if row.get("frozen_at")
+            and _enum_value(row.get("status")) in FINAL_DETERMINATION_STATUSES
+            and str(row.get("_id")) not in superseded_ids
+        ]
+        applicable.sort(key=lambda row: (
+            _as_dt(row.get("determination_date")) or _as_dt(row.get("frozen_at")) or datetime.min,
+            _as_dt(row.get("frozen_at")) or datetime.min,
+            str(row.get("_id")),
+        ))
+        for determination in applicable:
+            for item in determination.get("items") or []:
+                if _enum_value(item.get("determination_result")) not in EFFECTIVE_RESULTS:
+                    continue  # rejected / no-change / pending carry the date forward
+                granted = _as_dt(item.get("eot_granted_date"))
+                if not granted:
+                    continue
+                key_date_id = str(item.get("key_date_id"))
+                if key_date_id not in effective:
+                    raise KeyDateError(
+                        f"Determination {determination.get('determination_reference') or determination.get('_id')} "
+                        f"grants milestone {item.get('milestone_ref')}, which is absent from the frozen baseline"
+                    )
+                effective[key_date_id] = granted
+                governing[key_date_id] = determination
+
+    async def recompute_effective_dates(
+        self,
+        organization_id: Optional[str],
+        project_id: str,
+        contract_id: str = "primary",
+        *,
+        current_user: Any = None,
+    ) -> List[Dict[str, Any]]:
+        """Re-derive every milestone's in-force contractual date from the frozen record.
+
+        Seeded from the frozen Original baseline snapshot and replayed over every
+        frozen, non-superseded determination in contractual order (the Employer's
+        ``determination_date``, not the order rows happened to be frozen in), so
+        determining EOT-1 after EOT-2 cannot regress a milestone. Writes only where
+        the value actually changes and returns the changes it made, which makes it
+        both idempotent and safe to expose as a repair action.
+        """
+        scope = self.scope(organization_id, project_id, contract_id)
+        baseline = await self.db.key_date_baselines.find_one(
+            {**scope, "status": BaselineStatus.FROZEN.value}
+        )
+        if not baseline:
+            return []
+
+        effective: Dict[str, Optional[datetime]] = {}
+        governing: Dict[str, Optional[Dict[str, Any]]] = {}
+        for row in baseline.get("items") or []:
+            key_date_id = str(row.get("key_date_id"))
+            effective[key_date_id] = _as_dt(row.get("original_contractual_date"))
+            governing[key_date_id] = None
+
+        determinations = await self.list_determinations(organization_id, project_id, contract_id)
+        self._replay_determinations(determinations, effective, governing)
+
+        now = datetime.utcnow()
+        changes: List[Dict[str, Any]] = []
+        for key_date_id, target in effective.items():
+            milestone = await self.db.key_date_milestones.find_one({"_id": key_date_id})
+            if not milestone:
+                continue
+            previous = _as_dt(milestone.get("current_approved_key_date"))
+            if previous == target:
+                continue
+            determination = governing[key_date_id]
+            await self.db.key_date_milestones.update_one(
+                {"_id": key_date_id},
+                {"$set": {
+                    "current_approved_key_date": target,
+                    "current_determination_id": str(determination["_id"]) if determination else None,
+                    "current_determination_frozen_at": (
+                        _as_dt(determination.get("frozen_at")) if determination else None
+                    ),
+                    "eot_status": "approved" if determination else None,
+                    "updated_at": now,
+                    "updated_by": getattr(current_user, "id", None),
+                }},
+            )
+            changes.append({
+                "key_date_id": key_date_id,
+                "milestone_ref": milestone.get("milestone_ref"),
+                "previous_contractual_date": previous,
+                "effective_contractual_date": target,
+                "determination_id": str(determination["_id"]) if determination else None,
+            })
+        return changes
 
     async def workflow_summary(
         self, organization_id: Optional[str], project_id: str, contract_id: str = "primary"
@@ -734,23 +1171,38 @@ class KeyDateRevisionService:
             if determination.get("frozen_at") and determination.get("status") in FINAL_DETERMINATION_STATUSES
             for submission_id in determination.get("eot_submission_ids") or []
         }
+        outcomes = self.submission_outcomes(submissions, determinations)
+        for row in submissions:
+            row.update(outcomes.get(str(row.get("_id")), {}))
         pending = [
             row for row in submissions
             if row.get("status") in OPEN_SUBMISSION_STATUSES and str(row.get("_id")) not in covered_by_frozen
         ]
-        effective = [
-            row for row in determinations
-            if row.get("frozen_at")
-            and any(
-                item.get("determination_result") in EFFECTIVE_RESULTS and item.get("eot_granted_date")
-                for item in row.get("items") or []
-            )
-        ]
-        effective.sort(key=lambda row: row.get("frozen_at") or datetime.min)
+        # Name only a determination that actually governs a milestone's in-force
+        # date. One frozen last but superseded by contractual ordering governs
+        # nothing and must not be announced as the current baseline.
+        seed_dates: Dict[str, Optional[datetime]] = {}
+        governing: Dict[str, Optional[Dict[str, Any]]] = {}
+        for row in (baseline or {}).get("items") or []:
+            key_date_id = str(row.get("key_date_id"))
+            seed_dates[key_date_id] = _as_dt(row.get("original_contractual_date"))
+            governing[key_date_id] = None
+        self._replay_determinations(determinations, seed_dates, governing)
+        in_force = [row for row in governing.values() if row]
+        in_force.sort(key=lambda row: (
+            _as_dt(row.get("determination_date")) or _as_dt(row.get("frozen_at")) or datetime.min,
+            _as_dt(row.get("frozen_at")) or datetime.min,
+            str(row.get("_id")),
+        ))
         current_baseline = "Original"
-        if effective:
-            labels = effective[-1].get("covered_revision_labels") or []
-            current_baseline = " + ".join(labels) if labels else "Frozen determination"
+        if in_force:
+            labels = in_force[-1].get("covered_revision_labels") or []
+            if labels:
+                current_baseline = " + ".join(labels)
+            elif _enum_value(in_force[-1].get("origin")) == EOTDeterminationOrigin.EMPLOYER_INITIATED.value:
+                current_baseline = "Employer Determination"
+            else:
+                current_baseline = "Frozen determination"
         elif baseline and baseline.get("status") == BaselineStatus.FROZEN.value:
             milestone_query: Dict[str, Any] = {"project_id": str(project_id)}
             if organization_id:
@@ -776,6 +1228,15 @@ class KeyDateRevisionService:
             "latest_eot_submission": submissions[-1].get("revision_label") if submissions else None,
             "pending_determinations": len(pending),
             "open_eot_submissions": len(pending),
+            "employer_initiated_determinations": sum(
+                1 for row in determinations
+                if _enum_value(row.get("origin")) == EOTDeterminationOrigin.EMPLOYER_INITIATED.value
+            ),
+            "not_separately_determined": sum(
+                1 for row in submissions
+                if row.get("determination_outcome")
+                == SubmissionOutcome.NOT_SEPARATELY_DETERMINED.value
+            ),
             "oldest_pending_submission": pending[0].get("revision_label") if pending else None,
             "submissions": submissions,
             "determinations": determinations,
@@ -823,6 +1284,8 @@ class KeyDateRevisionService:
         protected = {
             "project_id", "organization_id", "contract_id", "revision_number",
             "original_planned_key_date", "previous_eot_submitted_date", "previous_eot_granted_date",
+            "origin", "determination_id", "source_submission_id", "superseded_by_submission_id",
+            "linked_document_ids", "linked_letter_ids",
         }
         blocked = sorted(set(headers) & protected)
         if blocked:
@@ -834,9 +1297,15 @@ class KeyDateRevisionService:
             (submission or determination or {}).get("contract_id", "primary"),
         )
         submitted_by_ref: Dict[str, Dict[str, Any]] = {}
+        submission_id_by_label: Dict[str, str] = {}
+        covered_required = bool((determination or {}).get("eot_submission_ids"))
         if determination:
             for submission_id in determination.get("eot_submission_ids") or []:
                 full = await self.get_submission(str(submission_id))
+                if full:
+                    submission_id_by_label[
+                        _clean_ref(full.get("revision_label")).casefold()
+                    ] = str(full.get("_id"))
                 for item in (full or {}).get("items", []):
                     submitted_by_ref[_clean_ref(item.get("milestone_ref")).casefold()] = item
 
@@ -886,7 +1355,9 @@ class KeyDateRevisionService:
                     })
                 else:
                     submitted_item = submitted_by_ref.get(key)
-                    if ref and not submitted_item:
+                    # Employer-initiated determinations cover no submission, so the
+                    # milestone is validated against the project register instead.
+                    if ref and covered_required and not submitted_item:
                         errors.append("milestone_ref is not in a covered EOT submission")
                     result = _clean_ref(raw.get("determination_result") or "pending").lower()
                     if result not in {value.value for value in EOTDeterminationResult}:
@@ -898,16 +1369,26 @@ class KeyDateRevisionService:
                     granted_days = int(days_raw) if days_raw else None
                     if granted_days is not None and granted_days < 0:
                         errors.append("granted_extension_days cannot be negative")
+                    source_label = _clean_ref(raw.get("source_submission_ref"))
+                    source_id: Optional[str] = None
+                    if source_label:
+                        source_id = submission_id_by_label.get(source_label.casefold())
+                        if not source_id:
+                            errors.append(
+                                "source_submission_ref is not one of this determination's covered submissions"
+                            )
                     if not errors:
                         parsed.append(EOTDeterminationItemInput(
                             milestone_ref=ref,
                             eot_granted_date=granted_date,
                             granted_extension_days=granted_days,
                             determination_result=result,
+                            source_submission_id=source_id,
                             remarks=_clean_ref(raw.get("remarks")) or None,
                         ))
                     data.update({
                         "description": (milestone or {}).get("description") or (milestone or {}).get("title"),
+                        "source_submission_ref": source_label or None,
                         "submitted_date": _iso((submitted_item or {}).get("eot_submitted_date")),
                         "current_contractual_date": _iso(current_key_date(milestone or {})),
                         "eot_granted_date": _iso(granted_date),
