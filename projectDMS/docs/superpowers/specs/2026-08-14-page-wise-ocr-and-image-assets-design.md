@@ -16,7 +16,11 @@ One page-aware extraction engine serves every intake surface — general single 
 general bulk upload, enclosures, and contracts — running in a dedicated worker process
 rather than the FastAPI request-serving container. Every PDF page is classified and routed
 individually, so a scanned page inside an otherwise-textual document is OCR'd instead of
-silently indexed as empty. Substantive site/progress photographs are extracted from PDFs as
+silently indexed as empty. Every page is then assessed by a deterministic quality gate, and
+pages that fail, come back incomplete, or fall below threshold are routed to a bounded
+LLM/Vision fallback ladder whose output is re-checked by that same gate — terminating in
+`HUMAN_REVIEW_REQUIRED` rather than in a fabricated or silently-accepted result. Substantive
+site/progress photographs are extracted from PDFs as
 independent, page-anchored image assets. Enclosures become first-class child documents with
 their own extraction results. Archives are stored intact and never processed.
 
@@ -35,6 +39,9 @@ is the reference implementation being generalised, not a target for modification
 | `.zip` / `.rar` upload | `415` — the MIME sniffer has no archive branch | Stored intact after AV + SHA-256 + duplicate checks; no job, no extraction; letter number not required |
 | PDF containing site photographs | Nothing extracted | Photographs become independent assets, page- and region-anchored, viewable with a deep link to the source page |
 | OCR page budget exceeded | n/a (no budget today) | Resumable batching; document enters `PARTIALLY_PROCESSED`, never silently truncated |
+| A page's OCR fails or returns garbage | Silently accepted as that page's text, or the whole job fails | Page routed to the LLM/Vision fallback ladder; the document does not fail because of one page |
+| Extracted text fails an integrity check (split digits, broken reading order, mangled table) | Not detected — no quality gate exists | Page escalated through the ladder; unresolved pages end at `HUMAN_REVIEW_REQUIRED`, never `completed` |
+| An LLM reconstructs a page | n/a | Output re-run through the **same** deterministic checks; model confidence alone never accepts it; every intervention retains page/region provenance |
 
 ### Ambiguities resolved by the requester
 
@@ -160,6 +167,10 @@ scan indicator, and "extract every image" would produce roughly 30 junk assets f
 | `DocumentPageStore` | `PageStore` | `document_ocr_pages`, `document_ocr_batches`, document job stage | Mongo |
 | `SourceKindRouter` | `route(mime, filename) -> SourceKind` | Archive / PDF / image / text / unsupported classification | Called by both intake and extraction |
 | `PageClassifier` | `classify(page) -> PageClassification` | Char density, image coverage, table count, vector-drawing count, dimensions, rotation, blankness | Internal to the engine |
+| `ExtractionQualityGate` | `assess(page, extraction) -> QualityVerdict` | Column-role mapping, in-table declared formulas, arithmetic identities, split-digit detection, date-convention checking, reading-order coherence, tolerance handling | Runs unconditionally on every page from every source |
+| `ExtractionFallbackLadder` | `resolve(page, verdict, evidence) -> ResolvedPage` | Tier selection, minimal-evidence assembly, model invocation, re-verification, escalation, terminal `HUMAN_REVIEW_REQUIRED` | `ReconstructionModel` adapter per tier |
+| `PageRasterizer` | `render(page, dpi)`, `crop(page, bbox, dpi)` | pypdfium2 rendering via pdfplumber, Pillow cropping, resolution policy | Shared by the ladder and the asset extractor |
+| `InterventionLedger` | `record(intervention)` | Immutable per-intervention provenance rows | Mongo `page_extraction_interventions` |
 | `ImageAssetExtractor` | `extract_photographs(pdf, pages) -> list[AssetCandidate]` | XObject enumeration, boilerplate deduplication, hard rejects, deterministic scoring, uncertainty banding | `VisionAdjudicator` adapter |
 | `VisionAdjudicator` | `adjudicate(candidates) -> list[Verdict]` | Strict LLM vision call, prompt version, budget cap, deterministic fallback | Model provider |
 | `ArchiveIntakePolicy` | `is_archive(mime)`, `requires_letter_number(kind)` | Archive MIME set and the intake exemptions it implies | Called by document + enclosure routers |
@@ -314,10 +325,10 @@ user-space, pixel dimensions, source XObject SHA-256, classification decision, d
 reason, confidence, and adjudication method (`deterministic` | `vision` | `human`). The UI
 renders it with a deep link that opens the source PDF at that page.
 
-**Scope boundary.** Phase 1 covers **embedded PDF image XObjects only**. Photographs inside a
+**Scope boundary.** Phase 9 covers **embedded PDF image XObjects only**. Photographs inside a
 *flattened or fully scanned* page are not separate XObjects — the whole page is one raster,
 and there is nothing to enumerate. Recovering those requires page-region detection over the
-rendered raster and is recorded here as **P2**, explicitly out of Phase 1 scope. It must not
+rendered raster and is recorded here as **P2**, explicitly out of Phase 9 scope. It must not
 be claimed as covered.
 
 ### 4.7 Enclosures as child documents
@@ -366,7 +377,146 @@ Python dependency** — `rarfile`/`unrar` are not required because we never read
 ClamAV's RAR handling depends on how the deployed image was built; Phase 0 verifies it in
 the running container rather than assuming it.
 
-### 4.9 Canonical upload policy
+### 4.9 Extraction quality gate and the LLM/Vision fallback ladder
+
+Where OCR, native text extraction, or layout extraction fails, returns incomplete or
+low-confidence output, or misses a configured quality threshold, the affected **page or
+region** is routed to an LLM/Vision fallback rather than being silently accepted, silently
+skipped, or failing the whole document.
+
+#### 4.9.1 The gate is deterministic, unconditional, and must ship first
+
+**This is the load-bearing constraint, and it is the one the evidence is emphatic about.**
+
+Companion document §3.1 measured **9 split-digit corruptions in the *native* text layer** of a
+correct PDF — `1 ,900,000` for `1,900,000`. Parsed naively that reads as `1`, and the claim
+subtotal lands ₹2.5 crore light. So "native text ⇒ trustworthy" is false, and the gate must
+run on **every** page from every source: native, OCR, and LLM-reconstructed alike.
+
+Companion §3.3 measured the opposite failure just as sharply: a naive quality rule
+("last three numeric columns must satisfy qty × rate = amount") produced **12 false
+mismatches on a document that was correct**, because a separate `Nos` column applied, because
+two tables declared their own formulas in their headers (`Area A=[h*l]`), and because an `S/N`
+serial was read as a quantity.
+
+Those twelve false positives are twelve paid escalations per document, on a document that
+needed none. Therefore:
+
+> **The ladder must not be enabled until the quality gate is column-role aware, honours
+> in-table declared formulas, applies a rounding tolerance, and treats "roles not confidently
+> identified" as _not checkable_ rather than _failed_.** Shipping the ladder on a naive gate
+> converts a cost-control feature into an unbounded spend.
+
+The gate emits one of four verdicts, and only the third escalates:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| `PASS` | Checks ran and agreed | Accept |
+| `NOT_CHECKABLE` | Roles/structure not confidently identified; nothing to verify against | Accept, mark unverified — **do not escalate** |
+| `FAIL` | A check ran and disagreed, or extraction failed/returned implausible output | Escalate to the ladder |
+| `INDETERMINATE` | Checks conflict | Escalate to the ladder |
+
+Escalation triggers include: OCR returned empty or failed for a page; text density
+implausible against the page's classification (`MIXED_CONTENT` page yielding near-zero
+characters); reading order incoherent (companion §3.5 — narrative shredded by an adjacent
+table's header cells); a table detected structurally but unparsed; arithmetic identity
+violated beyond tolerance; split-digit pattern detected; mixed date conventions in one column
+(companion §3.4).
+
+#### 4.9.2 Minimum necessary evidence
+
+The model receives the least material that can answer the question, assembled by
+`PageRasterizer`:
+
+- the **cropped region** when the failure is localised to one table or block; the **full page
+  image** only when the failure is page-wide;
+- the existing native text, OCR text, and detected table structures for that same region;
+- the specific reason for escalation and the checks that failed.
+
+It does **not** receive the whole document, neighbouring pages, or unrelated metadata. This is
+a cost control, a data-minimisation control, and a precision control at once — a narrower
+prompt reconstructs a table better than a wider one.
+
+*Verified 2026-08-14:* `pdfplumber.Page.to_image(resolution=150)` renders via **pypdfium2
+5.0.0**, already installed transitively, and Pillow crops the result — measured in
+`backend/.venv` in this session. **No new dependency, and no AGPL exposure**, so the companion
+document's rejection of PyMuPDF stands unchallenged.
+
+#### 4.9.3 Value preservation and the anti-fabrication rule
+
+The model reconstructs missing or unreliable text, tables, reading order, and related content,
+and must preserve contractual values — dates, amounts, clause numbers, reference numbers,
+quantities, percentages — **exactly as evidenced by the source**.
+
+Enforcement is not a prompt instruction; prompts are not a control. It is three mechanisms:
+
+1. **Re-verification.** The reconstruction is fed back through `ExtractionQualityGate` — the
+   same checks, not a lighter set. A reconstructed cost table must satisfy the same column
+   sums and qty × rate identities as a natively extracted one.
+2. **Corroboration classing.** Every contractual value in the output is classed
+   `corroborated` (matches a token in the native/OCR evidence, or satisfies an independent
+   arithmetic identity) or `uncorroborated` (read from the image alone, nothing to check it
+   against). Uncorroborated values are persisted as **unverified**, are never promoted to an
+   authoritative chronology or claim figure, and render as uncertain — consistent with the
+   companion's rule for ambiguous dates.
+3. **Confidence is never sufficient.** A model's own confidence score may *route*, but may
+   never *accept*. An output that no check corroborates and no check contradicts is
+   `NOT_CHECKABLE`, not `PASS`.
+
+Repair of a detected corruption follows the companion's dual-confirmation rule unchanged:
+accept a numeric repair only when **two independent structural checks agree**; record
+before / after / reason / method / confidence / page; never repair on a single check.
+
+#### 4.9.4 The ladder
+
+```
+Tier 0  deterministic extraction (native text-layer / OCR)
+          │ gate: FAIL or INDETERMINATE
+Tier 1  configured vision-capable model, page or region
+          │ re-gate: still FAIL or INDETERMINATE
+Tier 2  configured higher-capability model
+          │ re-gate: still unresolved, or budget/availability exhausted
+        HUMAN_REVIEW_REQUIRED   (terminal — never `completed`)
+```
+
+Per `CLAUDE.md`, every tier is a `strict=True` call with a pinned prompt-version constant.
+The deterministic fallback for a *drafting* call is degraded prose; here there is no
+deterministic way to read a page that OCR could not, so **the fallback is to stop and mark the
+page `HUMAN_REVIEW_REQUIRED`** — never to emit invented content, and never to silently retain
+the failed Tier-0 output as though it had passed. Same principle, correct application.
+
+Failure is contained at the page: an unresolved page yields `PARTIALLY_PROCESSED` at the
+document level (§4.4), not a failed document. A document fails only when **no** page produced
+usable content and the ladder resolved none of them.
+
+Budgets are enforced per page, per document, and per organisation, and every tier invocation
+is metered. Tier 2 is off by default and enabled per deployment.
+
+#### 4.9.5 Intervention provenance
+
+Every LLM intervention writes an immutable `page_extraction_interventions` row:
+
+```
+document_id, page_number, region_bbox | null
+trigger          : the gate verdict and the specific checks that failed
+tier             : 1 | 2
+model, model_version, prompt_version
+evidence_sent    : region|page, dpi, which text sources were included
+confidence       : model-reported, recorded but never sufficient alone
+corrections      : [{before, after, reason, method, corroboration}]
+post_check       : the re-gate verdict on the reconstruction
+status           : resolved | escalated | human_review_required
+tokens, cost, latency, actor (system), timestamp
+```
+
+The ledger is append-only and scoped to the document, so it inherits document RBAC. It is the
+audit answer to "why does this page read differently from the PDF?" — a question this system
+must be able to answer in an arbitration context.
+
+Under no circumstances does the system fabricate missing content, or mark an unresolved
+extraction as successfully completed.
+
+### 4.10 Canonical upload policy
 
 The backend becomes the single source of truth. `UploadPolicyService` derives, from settings,
 the allowed MIME set, the corresponding extension list, and the size cap **per surface**
@@ -387,7 +537,11 @@ configuration.
 
 | Risk | Severity | Safeguard |
 |---|---|---|
-| OCR volume rises sharply once the 5-page heuristic stops suppressing it | High | Dedicated `document-worker`; Phase 0 samples production to size the increase; Phase 9 benchmarks CPU, memory, wall time, and OCR pages before rollout |
+| OCR volume rises sharply once the 5-page heuristic stops suppressing it | High | Dedicated `document-worker`; Phase 0 samples production to size the increase; Phase 11 benchmarks CPU, memory, wall time, and OCR pages before rollout |
+| **A naive quality gate escalates good pages, turning cost control into unbounded LLM spend** | **High** | Companion §3.3 measured 12 false positives on a correct document. Phase 6 is a hard prerequisite for Phase 7, with both the 12-false-positive and 9-corruption counts as numeric gates |
+| An LLM reconstruction fabricates a contractual value | High | Re-verification through the same deterministic gate; corroborated/uncorroborated classing; uncorroborated values persist as unverified and never become authoritative; confidence may route but never accept |
+| Tier-2 escalation loops or runs away on a pathological document | Medium | Bounded tiers (no retry beyond Tier 2), per-page/document/org budgets, Tier 2 off by default, terminal `HUMAN_REVIEW_REQUIRED` |
+| Page images sent to a model leak more than needed | Medium | Region-preferred evidence assembly; full page only when the failure is page-wide; ledger records exactly what was sent |
 | Two processes claiming the same Mongo job | High | Verify atomic `findOneAndUpdate` claim in Phase 0; it is a prerequisite fix if absent |
 | Page-index mapping bug propagates to four callers | High | §3.3 hardened and covered by fixtures **before** the engine is shared (Phase 1) |
 | Enclosure child rows leak into document listings | Medium | Default `parent_document_id: null` filter; explicit tests on listing, count, and export paths |
@@ -468,7 +622,40 @@ document reaches `completed` with unextracted pages.
 job created; an EICAR-in-zip fixture is rejected; a `.gif` is refused consistently by both
 picker and backend.
 
-### Phase 6 — Enclosures as child documents
+### Phase 6 — Deterministic extraction quality gate
+**Outcome:** every page from every source is assessed, and escalation becomes affordable.
+**This phase gates Phase 7 and must not be skipped or thinned.**
+- Column-role mapping (`S/N`, `Nos`, `Qty`, `Unit`, `Rate`, `Amount`) before any numeric
+  check; in-table declared-formula support; rounding tolerance; split-digit detection with
+  dual-confirmation repair; a dedicated date-convention checker with an `uncertain` state;
+  reading-order coherence checks.
+- Four verdicts (§4.9.1). `NOT_CHECKABLE` must never escalate.
+- Runs unconditionally, native pages included.
+**Verification:** on fixture #1, the gate produces **zero** `FAIL` verdicts from the
+12 known false-positive patterns (companion §3.3), and detects **all 9** known split-digit
+corruptions (companion §3.1) with correct repaired values. Both numbers are hard gates: the
+ladder is not enabled until they are met.
+
+### Phase 7 — LLM/Vision extraction fallback ladder
+**Outcome:** failed and low-confidence extraction is recovered or explicitly escalated, never
+silently accepted and never fatal to the document.
+- `PageRasterizer` (pypdfium2 via pdfplumber + Pillow, verified available); minimal-evidence
+  assembly (region-preferred, page only when page-wide).
+- Tier 1 and Tier 2 `strict=True` calls with pinned prompt versions; re-verification through
+  the Phase 6 gate; corroborated/uncorroborated value classing; per-page, per-document, and
+  per-org budgets with metering.
+- `InterventionLedger` with the full provenance record (§4.9.5).
+- Page-level failure containment: an unresolved page yields `PARTIALLY_PROCESSED`, not a
+  failed document.
+**Verification:** a scanned-page fixture whose OCR is forced to fail is recovered at Tier 1
+and its reconstruction passes the same checks; a deliberately unrecoverable page reaches
+`HUMAN_REVIEW_REQUIRED` and the document is `PARTIALLY_PROCESSED`, never `completed`; model
+confidence alone never accepts an output; **spend on fixture #1 is zero**; every intervention
+has a ledger row with page, trigger, model, version, corrections, and post-check verdict.
+
+### Phase 8 — Enclosures as child documents
+*No dependency on Phases 6–7; may be resequenced earlier if enclosure delivery is more urgent
+than extraction quality.*
 **Outcome:** enclosures gain full extraction with preserved provenance.
 - Child `documents` rows with `parent_document_id`, `relationship_type`,
   `source_page_range`, `parent_provenance`; own version and job.
@@ -478,26 +665,31 @@ picker and backend.
 absent from library listings and present in search results with parent attribution;
 cross-tenant isolation tests pass on the new rows.
 
-### Phase 7 — Progress-photo extraction, deterministic stages
+### Phase 9 — Progress-photo extraction, deterministic stages
 **Outcome:** embedded photographs become independent assets; junk does not.
 - Stage 1 filtering and Stage 2 scoring; asset `FileObject`s with page and bbox; deep link to
   the source page.
 **Verification:** fixture #1 yields **zero** accepted assets; the site-photo fixture yields
 its expected set; every decision carries a recorded reason.
 
-### Phase 8 — Selective Vision adjudication
+### Phase 10 — Selective Vision adjudication for photo candidates
+*Distinct from Phase 7: a different question, prompt, and budget. Shares only `PageRasterizer`
+and the metering infrastructure.*
 **Outcome:** the uncertainty band is resolved without paying for the confident majority.
 - `VisionAdjudicator` with `strict=True`, pinned prompt version, per-document and per-org
   budget caps, metering, and a decline-not-accept fallback.
 **Verification:** only `REVIEW_REQUIRED` candidates trigger calls; disabled/over-budget/failed
 adjudication leaves them `REVIEW_REQUIRED` and unindexed; spend on fixture #1 is zero.
 
-### Phase 9 — Asset review UI, benchmark, and rollout gate
+### Phase 11 — Review UI, benchmark, and rollout gate
 **Outcome:** the feature is operable and its cost is known before production.
-- Asset viewer with page deep link; a review queue for `REVIEW_REQUIRED`.
-- Benchmark CPU, memory, processing time, and OCR-page volume against the Phase 0 baseline.
+- Asset viewer with page deep link; a review queue serving **both** `REVIEW_REQUIRED` photo
+  candidates and `HUMAN_REVIEW_REQUIRED` pages, with the intervention ledger visible on the
+  page-review path so a reviewer can see what the model changed and why.
+- Benchmark CPU, memory, processing time, OCR-page volume, **and LLM tier-1/tier-2 call
+  volume and spend** against the Phase 0 baseline.
 **Verification:** measured deltas recorded; rollout proceeds only if within an agreed budget,
-otherwise the batching and concurrency parameters are retuned first.
+otherwise the gate thresholds, batching, and concurrency parameters are retuned first.
 
 ### P2 — Flattened and scanned-page photo extraction
 Out of scope here. Page-region detection over rendered page rasters, for photographs that are
@@ -519,7 +711,16 @@ and test coverage.
 - listing and scope behaviour with child document rows present;
 - ClamAV RAR support in the deployed image;
 - current production OCR volume and the size of the increase;
-- whether any consumer other than `ShareDocumentPage` reads `documents.enclosures[]`.
+- whether any consumer other than `ShareDocumentPage` reads `documents.enclosures[]`;
+- which concrete models fill Tier 1 and Tier 2, and whether the deployment's configured
+  provider exposes a vision-capable endpoint at both tiers;
+- the real-world escalation rate once the Phase 6 gate exists — it determines whether the
+  ladder's cost is a rounding error or a line item, and it cannot be estimated from the single
+  fixture measured so far.
+
+**Verified in this session, by execution:** page rasterization at 150 DPI and region cropping
+via `pdfplumber` → `pypdfium2 5.0.0` → Pillow, run in `backend/.venv`. This is the only claim
+here established by running code rather than reading it.
 
 **Inference, flagged as such:** that pages 1–2 of the sample claim are the covering letter.
 They contain no text layer, so this is inferred from position and document structure and can
@@ -531,13 +732,18 @@ only be confirmed by OCR-ing them inside the backend container.
 
 Resolved by the requester and recorded here: Approach A+ with a dedicated worker;
 adapter-preserved persistence; deterministic filtering plus selective Vision; `ACCEPTED`-only
-visibility; embedded photos in Phase 1 with flattened pages as P2; enclosures as first-class
+visibility; embedded photos in Phase 9 with flattened pages as P2; enclosures as first-class
 child records excluded from top-level listings but present in retrieval; archives stored
 unchanged with AV and duplicate checks; letter number optional for archives; page mapping
 hardened before sharing; resumable batching with fail-visible states; backend-canonical file
 policy; classification beyond the character threshold; benchmarking before rollout.
 
-Open, and needed before Phase 7 completes rather than before Phase 1 starts:
+Also recorded: LLM/Vision fallback for failed, incomplete, or below-threshold extraction, with
+minimal-evidence prompting, mandatory re-verification through the same deterministic checks,
+confidence-never-accepts, a bounded two-tier ladder terminating in `HUMAN_REVIEW_REQUIRED`,
+full intervention provenance, page-level failure containment, and no fabrication.
+
+Open, and needed before Phase 9 completes rather than before Phase 1 starts:
 
 1. **`REVIEW_REQUIRED` retention.** Do we retain candidate bytes for human review, or only
    metadata and a page reference? Retention costs storage; metadata-only means the reviewer
@@ -546,3 +752,14 @@ Open, and needed before Phase 7 completes rather than before Phase 1 starts:
    This determines the permission the queue is gated on.
 3. **Photograph privacy.** Site photographs may contain identifiable people. Assets inherit
    document scope, which is the safe default, but confirm no export path widens it.
+4. **Tier 1 and Tier 2 model selection**, and whether Tier 2 is enabled in production at all.
+   The design treats Tier 2 as off by default; turning it on is a cost decision.
+5. **Where the quality thresholds sit.** The gate's tolerances (rounding tolerance, text-density
+   implausibility, reading-order coherence) set the escalation rate directly. They should be
+   tuned against the Phase 0 fixture corpus and then held as pinned constants, not left as
+   free-floating configuration that drifts spend without review.
+6. **Uncorroborated-value rendering.** A value the ladder read from an image that no check can
+   corroborate is persisted as unverified — but the UI, search, drafting context, and
+   arbitration bundles each need to decide whether to show it, hide it, or show it marked. The
+   companion document argues for "marked, never silently smoothed"; confirm that holds across
+   all four consumers.
