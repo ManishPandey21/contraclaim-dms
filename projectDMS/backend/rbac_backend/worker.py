@@ -8,7 +8,12 @@ import signal
 
 from .core.config import settings
 from .core.database import connect as connect_database, disconnect as disconnect_database
-from .services.background_jobs import start_background_services, stop_background_services
+from .services.background_jobs import (
+    start_background_services,
+    start_document_extraction_workers,
+    stop_background_services,
+    stop_document_extraction_workers,
+)
 from .services.contract_ingest_queue import start_contract_ingest_queue, stop_contract_ingest_queue
 from .services.letter_drafting.drafting_queue import start_drafting_queue, stop_drafting_queue
 from .services.arbitration_drafting.filing_export_queue import (
@@ -37,6 +42,8 @@ async def _run() -> None:
 
     if settings.START_BACKGROUND_SERVICES:
         await start_background_services()
+    if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+        await start_document_extraction_workers()
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await start_contract_ingest_queue()
     if settings.START_DRAFTING_QUEUE_WORKERS:
@@ -58,6 +65,8 @@ async def _run() -> None:
             await stop_drafting_queue()
         if settings.START_FILING_EXPORT_QUEUE_WORKERS:
             await stop_filing_export_queue()
+        if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+            await stop_document_extraction_workers()
         if settings.START_BACKGROUND_SERVICES:
             await stop_background_services()
         await disconnect_database()

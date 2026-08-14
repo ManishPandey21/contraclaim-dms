@@ -68,7 +68,12 @@ from .routers import (
     retrieval_engine,
 )
 from .routers.ws import router as ws_router
-from .services.background_jobs import start_background_services, stop_background_services
+from .services.background_jobs import (
+    start_background_services,
+    start_document_extraction_workers,
+    stop_background_services,
+    stop_document_extraction_workers,
+)
 from .services.contract_ingest_queue import (
     start_contract_ingest_queue,
     stop_contract_ingest_queue,
@@ -320,6 +325,8 @@ async def startup_event() -> None:
 
     if settings.START_BACKGROUND_SERVICES:
         await start_background_services()
+    if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+        await start_document_extraction_workers()
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await start_contract_ingest_queue()
 
@@ -332,6 +339,8 @@ async def startup_event() -> None:
 async def shutdown_event() -> None:
     if settings.START_CONTRACT_QUEUE_WORKERS:
         await stop_contract_ingest_queue()
+    if settings.START_DOCUMENT_EXTRACTION_WORKERS:
+        await stop_document_extraction_workers()
     if settings.START_BACKGROUND_SERVICES:
         await stop_background_services()
     await get_runtime_state().close()

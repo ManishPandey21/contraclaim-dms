@@ -397,30 +397,16 @@ async def start_background_services():
                 except Exception as e:
                     logger.error(f"Error in periodic subscription lifecycle: {e}")
 
-        async def periodic_document_processing_jobs():
-            """Poll durable Mongo-backed document processing jobs."""
-            from .document_service import DocumentService
-
-            service = DocumentService()
-            while processor.running:
-                try:
-                    processed = await service.process_next_processing_jobs(limit=3)
-                    await asyncio.sleep(1 if processed else 3)
-                except asyncio.CancelledError:
-                    break
-                except Exception as e:
-                    logger.error(f"Error in durable document processing loop: {e}")
-                    await asyncio.sleep(5)
-
         # Start cleanup task
         asyncio.create_task(periodic_cleanup())
         # Start assignment alerts task
         asyncio.create_task(periodic_assignment_alerts())
         # Start subscription lifecycle task
         asyncio.create_task(periodic_subscription_lifecycle())
-        # Start durable document processing queue task
-        asyncio.create_task(periodic_document_processing_jobs())
-        
+        # The durable document processing loop is NOT started here: it lives
+        # behind START_DOCUMENT_EXTRACTION_WORKERS so heavy OCR can run in a
+        # dedicated worker container. See start_document_extraction_workers.
+
         logger.info("Background services started successfully")
         
     except Exception as e:
@@ -441,6 +427,77 @@ async def stop_background_services():
     except Exception as e:
         logger.error(f"Failed to stop background services: {e}")
         raise
+
+
+# --- Document extraction workers -------------------------------------------
+#
+# Kept separate from start/stop_background_services so the durable document
+# extraction loop can run in a dedicated worker container while the web tier
+# keeps cleanup, assignment alerts, and subscription lifecycle running.
+#
+# The loop owns its own stop event rather than reading the background job
+# processor's `running` flag: on the dedicated worker START_BACKGROUND_SERVICES
+# is false, so that processor is never started and a `while processor.running`
+# condition would exit immediately - a loop that looks started and silently
+# processes nothing.
+
+_document_extraction_task: Optional[asyncio.Task] = None
+_document_extraction_stop: Optional[asyncio.Event] = None
+
+
+async def periodic_document_processing_jobs(stop_event: asyncio.Event) -> None:
+    """Poll durable Mongo-backed document processing jobs until stopped."""
+    from .document_service import DocumentService
+
+    service = DocumentService()
+    while not stop_event.is_set():
+        try:
+            processed = await service.process_next_processing_jobs(limit=3)
+            await asyncio.sleep(1 if processed else 3)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error in durable document processing loop: {e}")
+            await asyncio.sleep(5)
+
+
+async def start_document_extraction_workers() -> None:
+    """Start the durable document extraction loop."""
+    global _document_extraction_task, _document_extraction_stop
+
+    if _document_extraction_task is not None and not _document_extraction_task.done():
+        logger.info("Document extraction workers already running")
+        return
+
+    logger.info("Starting document extraction workers...")
+    _document_extraction_stop = asyncio.Event()
+    _document_extraction_task = asyncio.create_task(
+        periodic_document_processing_jobs(_document_extraction_stop)
+    )
+    logger.info("Document extraction workers started")
+
+
+async def stop_document_extraction_workers() -> None:
+    """Stop the durable document extraction loop."""
+    global _document_extraction_task, _document_extraction_stop
+
+    task = _document_extraction_task
+    stop_event = _document_extraction_stop
+    _document_extraction_task = None
+    _document_extraction_stop = None
+
+    if stop_event is not None:
+        stop_event.set()
+    if task is None or task.done():
+        return
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Document extraction workers stopped")
+
 
 # Additional utility functions for job management
 

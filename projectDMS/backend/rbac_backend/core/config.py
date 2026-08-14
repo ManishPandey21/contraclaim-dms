@@ -391,6 +391,14 @@ class Settings(BaseSettings):
     CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS: int = Field(default=1800, ge=60, validation_alias="CONTRACT_QUEUE_VISIBILITY_TIMEOUT_SECONDS")
     CONTRACT_QUEUE_HEARTBEAT_SECONDS: int = Field(default=30, ge=5, validation_alias="CONTRACT_QUEUE_HEARTBEAT_SECONDS")
     START_BACKGROUND_SERVICES: bool = Field(default=True, validation_alias="START_BACKGROUND_SERVICES")
+    # The durable document extraction loop runs in a dedicated worker process,
+    # not the request-serving web tier. Deliberately separate from
+    # START_BACKGROUND_SERVICES: that flag also gates cleanup, assignment
+    # alerts, and subscription lifecycle, so flipping it off on the web tier to
+    # move OCR would silently stop billing-relevant work.
+    START_DOCUMENT_EXTRACTION_WORKERS: bool = Field(
+        default=False, validation_alias="START_DOCUMENT_EXTRACTION_WORKERS"
+    )
     START_CONTRACT_QUEUE_WORKERS: bool = Field(default=True, validation_alias="START_CONTRACT_QUEUE_WORKERS")
     START_DRAFTING_QUEUE_WORKERS: bool = Field(default=False, validation_alias="START_DRAFTING_QUEUE_WORKERS")
     DRAFTING_QUEUE_ENABLED: bool = Field(default=False, validation_alias="DRAFTING_QUEUE_ENABLED")
