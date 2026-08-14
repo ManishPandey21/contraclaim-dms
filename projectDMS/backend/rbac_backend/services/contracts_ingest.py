@@ -7,7 +7,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -1329,261 +1328,72 @@ class ContractIngestor:
         project_id: Optional[str],
         retry_ocr_pages: Optional[List[int]] = None,
     ) -> Tuple[ParsedDocument, List[Dict[str, Any]]]:
-        raw_doc = await self.parser._extract_pdf_text(file_path)
-        page_count = max(len(raw_doc.pages), await self._get_pdf_page_count(file_path))
-        pages_by_number = {page.number: page for page in raw_doc.pages}
-        raw_pages: List[ParsedPage] = [
-            pages_by_number.get(page_number)
-            or ParsedPage(number=page_number, text="", start=0, end=0)
-            for page_number in range(1, page_count + 1)
-        ]
+        """Delegate page-level extraction to the shared engine.
 
-        min_chars = max(0, int(self.processing_config.contract_ocr_min_text_chars_per_page))
-        retry_set = {int(page) for page in (retry_ocr_pages or []) if int(page) > 0}
-        pages_needing_ocr = [
-            page.number
-            for page in raw_pages
-            if (retry_set and page.number in retry_set)
-            or (not retry_set and len((page.text or "").strip()) < min_chars)
-        ]
+        Behaviour is unchanged: the same per-page threshold, the same
+        contiguous batching, the same OCRmyPDF invocation, the same
+        contract_ocr_pages/contract_ocr_batches records. What moved is where
+        that logic lives - the engine is now shared with the general document
+        path, and everything contract-specific (upload_id, the collections,
+        usage metering) stays here behind the PageStore seam.
+        """
+        from .extraction.engine import PageExtractionEngine
+        from .extraction.models import PageExtractionPolicy
+        from .extraction.ocrmypdf_runner import OcrMyPdfRunner
+        from .extraction_adapters.contract_page_store import ContractPageStore
 
-        page_text_overrides: Dict[int, str] = {}
-        page_status: Dict[int, Dict[str, Any]] = {}
-        for page in raw_pages:
-            page_status[page.number] = {
-                "status": "text_layer" if len((page.text or "").strip()) >= min_chars else "ocr_pending",
-                "batch_id": None,
-                "error": None,
-            }
-
-        if self.processing_config.ocr_enabled and pages_needing_ocr:
+        async def _meter(
+            *, page_count: int, page_numbers: Sequence[int], retry: bool
+        ) -> None:
             await self.usage_metering_service.check_and_record(
                 event_type=UsageEventType.OCR_PAGE,
                 organization_id=organization_id,
                 project_id=project_id,
-                quantity=len(pages_needing_ocr),
+                quantity=page_count,
                 metadata={
                     "operation": "contract_ocr",
                     "document_id": document_id,
                     "upload_id": upload_id,
-                    "page_numbers": pages_needing_ocr,
-                    "retry": bool(retry_set),
+                    "page_numbers": list(page_numbers),
+                    "retry": retry,
                 },
             )
-            batches = self._group_page_numbers(
-                pages_needing_ocr,
-                max(1, int(self.processing_config.contract_ocr_batch_size)),
-            )
-            for batch_index, batch_pages in enumerate(batches, start=1):
-                page_start, page_end = batch_pages[0], batch_pages[-1]
-                batch_id = await self.db_service.upsert_ocr_batch(
-                    document_id=document_id,
-                    upload_id=upload_id,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    page_start=page_start,
-                    page_end=page_end,
-                    status="running",
-                    retry_count=1 if retry_set else 0,
-                )
-                try:
-                    extracted = await self._run_ocr_page_batch(file_path, upload_id, batch_pages)
-                    page_text_overrides.update(extracted)
-                    for page_number in batch_pages:
-                        page_status[page_number] = {
-                            "status": "ocr_completed" if extracted.get(page_number, "").strip() else "ocr_empty",
-                            "batch_id": batch_id,
-                            "error": None if extracted.get(page_number, "").strip() else "OCR completed but no text was extracted",
-                        }
-                    await self.db_service.upsert_ocr_batch(
-                        document_id=document_id,
-                        upload_id=upload_id,
-                        organization_id=organization_id,
-                        project_id=project_id,
-                        page_start=page_start,
-                        page_end=page_end,
-                        status="completed",
-                        retry_count=1 if retry_set else 0,
-                    )
-                except Exception as exc:
-                    error = str(exc)
-                    logger.warning(
-                        "OCR batch failed for %s pages %s-%s: %s",
-                        file_path.name,
-                        page_start,
-                        page_end,
-                        error,
-                    )
-                    for page_number in batch_pages:
-                        page_status[page_number] = {
-                            "status": "ocr_failed",
-                            "batch_id": batch_id,
-                            "error": error[:500],
-                        }
-                    await self.db_service.upsert_ocr_batch(
-                        document_id=document_id,
-                        upload_id=upload_id,
-                        organization_id=organization_id,
-                        project_id=project_id,
-                        page_start=page_start,
-                        page_end=page_end,
-                        status="failed",
-                        error=error[:500],
-                        retry_count=1 if retry_set else 0,
-                    )
-        elif pages_needing_ocr:
-            for page_number in pages_needing_ocr:
-                page_status[page_number] = {
-                    "status": "ocr_disabled",
-                    "batch_id": None,
-                    "error": "OCR is disabled",
-                }
 
-        merged_pages: List[ParsedPage] = []
-        page_records: List[Dict[str, Any]] = []
-        for page in raw_pages:
-            page_text = page_text_overrides.get(page.number, page.text or "")
-            merged_pages.append(ParsedPage(number=page.number, text=page_text, start=0, end=0))
-            state = page_status.get(page.number) or {}
-            page_records.append(
-                {
-                    "document_id": document_id,
-                    "upload_id": upload_id,
-                    "organization_id": str(organization_id),
-                    "project_id": str(project_id) if project_id else None,
-                    "page_number": page.number,
-                    "batch_id": state.get("batch_id"),
-                    "status": state.get("status") or "text_layer",
-                    "error": state.get("error"),
-                    "raw_text": page_text,
-                    "raw_text_length": len(page_text),
-                    "cleaned_text": "",
-                    "cleaned_text_length": 0,
-                    "source_pdf_page_link": self._source_pdf_page_link(document_id, page.number),
-                }
-            )
-
-        return self._combine_pages(merged_pages, file_path), page_records
-
-    async def _get_pdf_page_count(self, file_path: Path) -> int:
-        def count_pages() -> int:
-            try:
-                import PyPDF2
-
-                with open(file_path, "rb") as handle:
-                    return len(PyPDF2.PdfReader(handle).pages)
-            except Exception:
-                return 0
-
-        return await asyncio.to_thread(count_pages)
-
-    @staticmethod
-    def _group_page_numbers(page_numbers: Sequence[int], batch_size: int) -> List[List[int]]:
-        groups: List[List[int]] = []
-        current: List[int] = []
-        previous: Optional[int] = None
-        for page_number in sorted({int(page) for page in page_numbers if int(page) > 0}):
-            if current and (previous is None or page_number != previous + 1 or len(current) >= batch_size):
-                groups.append(current)
-                current = []
-            current.append(page_number)
-            previous = page_number
-        if current:
-            groups.append(current)
-        return groups
-
-    async def _run_ocr_page_batch(self, file_path: Path, upload_id: str, page_numbers: Sequence[int]) -> Dict[int, str]:
-        if not page_numbers:
-            return {}
-        page_range = self._format_page_range(page_numbers)
-        batch_dir = BASE_UPLOAD_PATH / "ocr_batches" / upload_id
-        batch_dir.mkdir(parents=True, exist_ok=True)
-        output_path = batch_dir / f"{file_path.stem}_pages_{page_range.replace('-', '_')}.pdf"
-        sidecar_path = output_path.with_suffix(".txt")
-
-        executable = shutil.which("ocrmypdf")
-        if executable:
-            cmd = [
-                executable,
-                "--pages",
-                page_range,
-                "--language",
-                self.processing_config.ocr_language,
-                "--rotate-pages",
-                "--deskew",
-                "--optimize",
-                "1",
-                "--jobs",
-                str(min(2, os.cpu_count() or 2)),
-                "--sidecar",
-                str(sidecar_path),
-                str(file_path),
-                str(output_path),
-            ]
-        else:
-            cmd = [
-                sys.executable,
-                "-m",
-                "ocrmypdf",
-                "--pages",
-                page_range,
-                "--language",
-                self.processing_config.ocr_language,
-                "--rotate-pages",
-                "--deskew",
-                "--optimize",
-                "1",
-                "--jobs",
-                str(min(2, os.cpu_count() or 2)),
-                "--sidecar",
-                str(sidecar_path),
-                str(file_path),
-                str(output_path),
-            ]
-
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=900,
+        store = ContractPageStore(
+            db_service=self.db_service,
+            document_id=document_id,
+            upload_id=upload_id,
+            organization_id=organization_id,
+            project_id=project_id,
         )
-        if result.returncode != 0:
-            raise IngestionError((result.stderr or result.stdout or "OCRmyPDF batch failed").strip())
+        engine = PageExtractionEngine(
+            policy=PageExtractionPolicy(
+                ocr_enabled=self.processing_config.ocr_enabled,
+                min_text_chars_per_page=max(
+                    0, int(self.processing_config.contract_ocr_min_text_chars_per_page)
+                ),
+                batch_size=max(1, int(self.processing_config.contract_ocr_batch_size)),
+                # Contracts have no attempt boundary today; preserved as-is so
+                # this refactor changes no behaviour.
+                max_ocr_pages_per_attempt=0,
+                ocr_language=self.processing_config.ocr_language,
+            ),
+            ocr_runner=OcrMyPdfRunner(
+                work_dir=BASE_UPLOAD_PATH / "ocr_batches" / upload_id
+            ),
+            store=store,
+            meter=_meter,
+        )
 
-        return await self._extract_selected_pages_from_pdf(output_path, page_numbers)
-
-    @staticmethod
-    def _format_page_range(page_numbers: Sequence[int]) -> str:
-        ordered = sorted({int(page) for page in page_numbers if int(page) > 0})
-        if not ordered:
-            return ""
-        if len(ordered) == 1:
-            return str(ordered[0])
-        return f"{ordered[0]}-{ordered[-1]}"
-
-    async def _extract_selected_pages_from_pdf(self, pdf_path: Path, page_numbers: Sequence[int]) -> Dict[int, str]:
-        ordered = list(sorted(page_numbers))
-
-        def extract() -> Dict[int, str]:
-            try:
-                import pdfplumber
-
-                out: Dict[int, str] = {}
-                with pdfplumber.open(pdf_path) as pdf:
-                    output_count = len(pdf.pages)
-                    for index, page_number in enumerate(ordered):
-                        if output_count >= max(ordered):
-                            source_index = page_number - 1
-                        else:
-                            source_index = index
-                        if 0 <= source_index < output_count:
-                            out[page_number] = pdf.pages[source_index].extract_text() or ""
-                return out
-            except Exception as exc:
-                raise IngestionError(f"Failed to extract OCR batch text: {exc}") from exc
-
-        return await asyncio.to_thread(extract)
+        result = await engine.extract(file_path, retry_pages=retry_ocr_pages)
+        parsed = self._combine_pages(
+            [
+                ParsedPage(number=page.number, text=page.text, start=0, end=0)
+                for page in result.pages
+            ],
+            file_path,
+        )
+        return parsed, store.records
 
     @staticmethod
     def _combine_pages(pages: Sequence[ParsedPage], file_path: Path) -> ParsedDocument:
