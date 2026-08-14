@@ -163,6 +163,10 @@ services:
       <<: *backend-env
       START_BACKGROUND_SERVICES: "true"
       START_CONTRACT_QUEUE_WORKERS: "false"
+      # Heavy OCR/extraction belongs on document-worker, not on the request
+      # tier. START_BACKGROUND_SERVICES stays true here: it also gates cleanup,
+      # assignment alerts, and subscription lifecycle.
+      START_DOCUMENT_EXTRACTION_WORKERS: "false"
       # H2: the web tier must not run cron jobs (it may be scaled to >1 replica).
       # The contract-worker is the single scheduler owner; the leader lock is the
       # safety net if this is ever flipped on by mistake.
@@ -223,6 +227,7 @@ services:
       <<: *backend-env
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      START_DOCUMENT_EXTRACTION_WORKERS: "false"
       START_DRAFTING_QUEUE_WORKERS: "${START_DRAFTING_QUEUE_WORKERS:-false}"
       START_FILING_EXPORT_QUEUE_WORKERS: "${START_FILING_EXPORT_QUEUE_WORKERS:-true}"
       # H2: single owner of the leader-locked cron jobs (keep this at 1 replica).
@@ -242,6 +247,39 @@ services:
       - backend_uploads:/app/uploads
       - backend_logs:/app/logs
       - ${BACKUP_ROOT:-/var/backups/contractdms}:${BACKUP_ROOT:-/var/backups/contractdms}:ro
+    logging: *default-logging
+
+  # Dedicated document extraction worker. Heavy OCR runs here so it does not
+  # add sustained CPU to the request-serving backend container.
+  document-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "rbac_backend.worker"]
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "false"
+      START_CONTRACT_QUEUE_WORKERS: "false"
+      START_DOCUMENT_EXTRACTION_WORKERS: "true"
+      # contract-worker is the single scheduler owner. Never flip this to true:
+      # two schedulers double-fire cron jobs and the leader lock is a safety
+      # net, not a licence.
+      RUN_SCHEDULER: "false"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+      - egress-net
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
     logging: *default-logging
 
   qdrant:
