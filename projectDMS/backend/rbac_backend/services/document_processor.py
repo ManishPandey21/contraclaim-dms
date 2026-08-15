@@ -5,6 +5,7 @@ import logging
 import time
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Any, Dict, Sequence
 from uuid import uuid4
@@ -16,8 +17,14 @@ from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
 
+from .extraction.image_extractor import extract_image, extract_text_file
+from .extraction.image_ocr_runner import TesseractImageOcrRunner
+from .extraction.models import SourceKind
+from .extraction.source_kind import SourceKindRouter
+
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import ParsedDocumentMetadata, ProcessingResult
+from ..models.processing_state import ProcessingState
 
 from ..utils.exceptions import DocumentProcessingError
 from ..utils.pipeline_logging import configure_pipeline_logger
@@ -29,10 +36,36 @@ class DocumentProcessorError(DocumentProcessingError):
     """Alias for document processor errors"""
     pass
 
+
+class UnsupportedSourceKindError(DocumentProcessingError):
+    """Raised when an upload's detected MIME has no extractor.
+
+    Deliberately fail-visible: the previous behaviour fed every admitted MIME
+    into the PDF reader, which produced nothing and still reported success.
+    """
+
+
+@dataclass(frozen=True)
+class SourceDispatchResult:
+    """Which extractor ran, and what it produced."""
+
+    kind: SourceKind
+    extraction: Optional[Any] = None
+    processing_state: Optional[ProcessingState] = None
+
+
 class DocumentProcessor:
     """Main document processor service"""
-    
-    def __init__(self, config: Optional[DocumentProcessingConfig] = None):
+
+    def __init__(
+        self,
+        config: Optional[DocumentProcessingConfig] = None,
+        *,
+        source_kind_router: Any = None,
+        image_ocr_runner: Any = None,
+        image_extractor: Any = None,
+        text_extractor: Any = None,
+    ):
         self.config = config or DocumentProcessingConfig()
         self.ocr_service = OCRService(self.config)
         self.openai_service = OpenAIService(self.config)
@@ -41,6 +74,66 @@ class DocumentProcessor:
         self.file_service = FileService(self.config)
 
         self.pydantic_ai_service = PydanticAIService(self.config)
+
+        # Explicit seams: production defaults, injectable for tests so dispatch
+        # can be exercised without monkeypatching module globals.
+        self.source_kind_router = source_kind_router or SourceKindRouter
+        self.image_ocr_runner = image_ocr_runner or TesseractImageOcrRunner()
+        self._image_extractor = image_extractor or extract_image
+        self._text_extractor = text_extractor or extract_text_file
+
+    async def _extract_source(
+        self,
+        input_path: Path,
+        *,
+        source_mime: Optional[str],
+        page_store: Any,
+        retry_pages: Optional[Sequence[int]] = None,
+    ) -> SourceDispatchResult:
+        """Route one upload to the single extractor that can read it.
+
+        There is deliberately no fall-through default. An unrecognised MIME
+        raises rather than quietly entering the PDF reader.
+        """
+        kind = self.source_kind_router.route(source_mime, input_path.name)
+
+        if kind is SourceKind.PDF:
+            extraction = await self.ocr_service.process_pdf_pagewise(
+                input_path,
+                store=page_store,
+                document_id=input_path.stem,
+                retry_pages=retry_pages,
+            )
+            return SourceDispatchResult(kind=kind, extraction=extraction)
+
+        if kind is SourceKind.IMAGE:
+            extraction = await self._image_extractor(
+                input_path,
+                store=page_store,
+                image_ocr_runner=self.image_ocr_runner,
+                language=self.config.ocr_language,
+            )
+            return SourceDispatchResult(kind=kind, extraction=extraction)
+
+        if kind is SourceKind.TEXT:
+            extraction = await self._text_extractor(input_path, store=page_store)
+            return SourceDispatchResult(kind=kind, extraction=extraction)
+
+        if kind is SourceKind.ARCHIVE:
+            # Stored deliberately without extraction. Never `completed`:
+            # nothing was extracted to complete.
+            logger.info(
+                "[document_pipeline] %s is an archive; stored without extraction",
+                input_path.name,
+            )
+            return SourceDispatchResult(
+                kind=kind, processing_state=ProcessingState.STORED_ONLY
+            )
+
+        raise UnsupportedSourceKindError(
+            f"No extractor for detected content type {source_mime!r} "
+            f"({input_path.name})"
+        )
 
     
     async def process_document(
@@ -54,6 +147,7 @@ class DocumentProcessor:
         project_id: Optional[str] = None,
         extraction_run_id: Optional[str] = None,
         retry_pages: Optional[Sequence[int]] = None,
+        source_mime: Optional[str] = None,
     ) -> ProcessingResult:
         """
         Main entry point for document processing.
@@ -111,12 +205,24 @@ class DocumentProcessor:
                 project_id=project_id,
                 extraction_run_id=run_id,
             )
-            extraction = await self.ocr_service.process_pdf_pagewise(
+            dispatch = await self._extract_source(
                 input_path,
-                store=page_store,
-                document_id=resolved_document_id,
+                source_mime=source_mime or "application/pdf",
+                page_store=page_store,
                 retry_pages=retry_pages,
             )
+            if dispatch.processing_state is ProcessingState.STORED_ONLY:
+                # Archives are stored, never extracted. Reported explicitly so
+                # nothing downstream can read this as a completed extraction.
+                return ProcessingResult(
+                    success=False,
+                    document_id=document_id,
+                    processed_path=str(input_path),
+                    processing_time=time.time() - start_time,
+                    source_kind=dispatch.kind.value,
+                    processing_state=ProcessingState.STORED_ONLY.value,
+                )
+            extraction = dispatch.extraction
             processed_path = input_path
             raw_ocr_text = extraction.combined_text or None
             ocr_text_len = len(raw_ocr_text) if raw_ocr_text else 0

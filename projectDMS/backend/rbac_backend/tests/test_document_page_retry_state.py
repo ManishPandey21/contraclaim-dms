@@ -324,3 +324,27 @@ async def test_fully_resolved_extraction_still_completes(monkeypatch) -> None:
     assert ok is True
     assert job["status"] == "completed"
     assert stored["processing_status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_archive_job_is_stored_only_never_completed(monkeypatch) -> None:
+    db = FakeDB()
+    service, job_id, document_id = await _queued_job(db)
+
+    async def fake_process(*args, **kwargs):
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"processing_state": ProcessingState.STORED_ONLY.value}},
+        )
+        return True
+
+    monkeypatch.setattr(service, "process_document_async", fake_process)
+
+    ok = await service.process_document_job(job_id)
+    job = await db.document_processing_jobs.find_one({"_id": job_id})
+    stored = await db.documents.find_one({"_id": document_id})
+
+    assert ok is False
+    assert job["status"] == "stored_only"
+    assert stored["processing_status"] == "stored_only"
+    assert stored["processing_status"] != "completed"

@@ -230,6 +230,11 @@ class ProcessingResult(BaseModel):
     #: re-deriving them from text. Not a Pydantic model - allow arbitrary types.
     extraction_result: Optional[Any] = None
     extraction_completeness: Optional[str] = None
+    #: Which extractor handled this upload (pdf/image/text/archive).
+    source_kind: Optional[str] = None
+    #: Set when the processor reached an explicit terminal state of its own,
+    #: such as an archive stored without extraction.
+    processing_state: Optional[str] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

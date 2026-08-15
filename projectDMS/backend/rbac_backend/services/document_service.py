@@ -799,6 +799,10 @@ class DocumentService:
             "organization_id": document.organization_id,
             "project_id": document.project_id,
             "upload_type": document.uploadType,
+            # The validated MIME from intake, carried so the worker dispatches
+            # on what the bytes actually are rather than re-sniffing them
+            # without the filename context intake had.
+            "source_mime": getattr(document, "filetype", None),
             "status": "queued",
             "stage": "queued",
             "attempts": 0,
@@ -1069,6 +1073,9 @@ class DocumentService:
             if checkpoint_state == ProcessingState.HUMAN_REVIEW_REQUIRED.value:
                 await self._mark_human_review(job_id, document_id, checkpoint)
                 return False
+            if checkpoint_state == ProcessingState.STORED_ONLY.value:
+                await self._mark_stored_only(job_id, document_id)
+                return False
 
             completed_at = datetime.utcnow()
             await db.document_processing_jobs.update_one(
@@ -1213,6 +1220,37 @@ class DocumentService:
             remaining,
         )
 
+    async def _mark_stored_only(self, job_id: str, document_id: str) -> None:
+        """Terminal, non-success: stored deliberately, never extracted."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.STORED_ONLY.value,
+                    "stage": ProcessingState.STORED_ONLY.value,
+                    "completed_at": now,
+                    "updated_at": now,
+                    "error": None,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.STORED_ONLY.value,
+                    "processing_job_id": job_id,
+                    "processing_error": None,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.info(
+            "[document_pipeline] Document %s stored without extraction", document_id
+        )
+
     async def _checkpoint_extraction_attempt(
         self,
         db: Any,
@@ -1228,6 +1266,25 @@ class DocumentService:
         extraction run.
         """
         if not job_id or db is None:
+            return
+
+        # An archive is stored deliberately without extraction. Record that as
+        # its own terminal state so nothing later reads it as a completion.
+        if getattr(result, "processing_state", None) == ProcessingState.STORED_ONLY.value:
+            try:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {
+                        "$set": {
+                            "processing_state": ProcessingState.STORED_ONLY.value,
+                            "updated_at": datetime.utcnow(),
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist stored-only state for job %s", job_id
+                )
             return
 
         extraction = getattr(result, "extraction_result", None)
@@ -1460,6 +1517,10 @@ class DocumentService:
                     # starting a fresh one and orphaning the earlier pages.
                     extraction_run_id=str(job_id) if job_id else None,
                     retry_pages=remaining_pages or None,
+                    source_mime=(
+                        job_record.get("source_mime")
+                        or getattr(document, "filetype", None)
+                    ),
                 )
                 await self._checkpoint_extraction_attempt(
                     db, job_id, job_record, result

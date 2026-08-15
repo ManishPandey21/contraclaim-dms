@@ -99,8 +99,17 @@ def make_processor(ocr_text: str, openai_service: FakeOpenAIService):
 
         return _Db()
 
+    from rbac_backend.services.extraction.source_kind import SourceKindRouter
+
     processor = DocumentProcessor.__new__(DocumentProcessor)
-    processor.config = SimpleNamespace(max_file_size_mb=100, chunk_size=3000, chunk_overlap=200)
+    processor.config = SimpleNamespace(
+        max_file_size_mb=100, chunk_size=3000, chunk_overlap=200, ocr_language="eng"
+    )
+    # __new__ skips __init__, so the dispatch seams must be supplied here.
+    processor.source_kind_router = SourceKindRouter
+    processor.image_ocr_runner = object()
+    processor._image_extractor = None
+    processor._text_extractor = None
     processor.ocr_service = FakeOCRService(ocr_text)
     processor.openai_service = openai_service
     processor.text_service = TextProcessingService(processor.config)
