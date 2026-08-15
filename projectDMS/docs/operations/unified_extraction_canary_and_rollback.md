@@ -1,8 +1,57 @@
 # Unified extraction — canary and rollback runbook
 
-**Status:** controls implemented and committed. **The canary has not been run.**
-No production deployment, canary window, or rollback drill described here has been
-executed. Section 6 is the evidence template and is deliberately empty.
+> ## STATUS: NOT PRODUCTION-ACCEPTED
+>
+> The system is **not** production-accepted. Controls and this runbook existing
+> is not acceptance. No deployment, canary window, or rollback drill has been
+> executed, and the canary routing control is **not yet functional** (§0).
+>
+> - Phase 7 **implementation** (7.1–7.5): complete.
+> - Task 7.6 **Step 6** (controls/runbook): **INCOMPLETE** — see §0.
+> - Task 7.6 **Steps 1–5** (operational acceptance): **PENDING AUTHORISATION**.
+> - Phase 7 **operational acceptance**: **NOT COMPLETE**.
+>
+> Full matrix in §8. Section 6 is the evidence template and is deliberately empty.
+
+---
+
+## 0. Correction — the canary control does not yet route
+
+Recorded because an earlier report of this work claimed otherwise.
+
+`pipeline_version` is decided at job creation and persisted (that part works and
+is tested). **Nothing reads it.** Specifically:
+
+- `uses_unified_pipeline()` has **no production callers**;
+- `_claim_next_processing_job` does **not** filter on `pipeline_version`, so a
+  document worker claims every job regardless of version;
+- there is **no legacy branch to route to**. Phase 3.3 replaced the general
+  path's `process_pdf` call with `process_pdf_pagewise` wholesale, so
+  `legacy_v0` and `unified_v1` jobs execute identical code today.
+
+**Consequence:** the claim "a canary worker cannot sweep up other tenants' jobs"
+is **not currently enforced**. Every tenant is already on the unified path in
+this build. Labelling a job `legacy_v0` changes nothing about how it is
+processed.
+
+**Before any canary window, Task 7.6 requires either:**
+
+1. a genuine legacy path retained behind the flag, with the claim predicate and
+   processor dispatch honouring the persisted `pipeline_version`; or
+2. an explicit, recorded decision that no legacy path exists — in which case
+   this is a **staged rollout of a single pipeline**, not a canary, and the
+   runbook's isolation claims must be rewritten to match. Rollback then means
+   redeploying the previous image, not clearing an allowlist.
+
+Until one of those is done, §4's isolation assertions cannot be satisfied.
+
+Two further Step 6 omissions against the task's own Files list:
+
+- `scripts/post_deploy_verify.sh` was **not** modified; it does not check the
+  document-worker flag matrix, the single-scheduler-owner invariant, or canary
+  contamination.
+- The repository-root `.env.example` was **not** updated. Only
+  `backend/rbac_backend/.env.example` carries the new variables.
 
 **Scope:** enabling the unified page-extraction pipeline (Phases 1–7) for one
 organisation at a time, and proving rollback before any global enablement.
@@ -20,16 +69,17 @@ organisation at a time, and proving rollback before any global enablement.
 | `EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT` | `5` | Hard per-document ceiling on model calls. |
 | `RAR_UPLOAD_ENABLED` | `false` | Blocked until EICAR-in-RAR detection is proven on the deployed clamd. |
 
-**The property that makes this safe:** `pipeline_version` is decided **once, at job
-creation**, and persisted on the job. Every reader honours the stored value rather
-than re-deriving it. Consequences:
+**The intended property:** `pipeline_version` is decided **once, at job creation**,
+and persisted on the job, so that:
 
 - emptying the allowlist cannot reclassify work already queued;
 - a canary worker cannot sweep up other tenants' jobs;
 - a job queued before this change has no `pipeline_version` and is treated as legacy.
 
-Everything fails closed onto the legacy path: unknown scope, missing organisation,
-or absent version all stay legacy.
+**What is actually implemented today:** only the first bullet. The decision is
+pinned and tested, but no reader consumes it and no legacy path exists — see §0.
+The second and third bullets are **design intent, not current behaviour**, and
+must not be relied on during a canary window.
 
 ---
 
@@ -170,22 +220,65 @@ change** and is blocked until both the canary and the rollback drill pass.
 
 ---
 
+## 8. Task 7.6 acceptance matrix
+
+| Step | Status | Required evidence | Currently held |
+|---|---|---|---|
+| **1.** Prove pre-canary safety | **PENDING AUTHORISATION** | Verified backup age; server-read branch + commit; label-read compose file set; baseline status JSON; `docker stats`; job counts by status/version; migration dry-run output; RAR decision | None. No production command run. RAR decision *is* held: negative → stays disabled. |
+| **2.** Deploy with routing globally off | **PENDING AUTHORISATION** | Readiness output; one `START_DOCUMENT_EXTRACTION_WORKERS=true` owner; one `RUN_SCHEDULER=true` owner; web tier still runs the other three background tasks; stable restart counts; unchanged throughput; zero `unified_v1` jobs | None. Flag matrix is asserted in `test_document_worker_compose.py` against the compose file only — not against a running stack. |
+| **3.** Enable one canary scope | **BLOCKED** | Only canary-org jobs are `unified_v1`; clean doc → `completed`, one head, **zero** interventions; mixed doc checkpoints/reclaims; no non-canary contamination; resource + cost within Phase 0 bounds | None — and **blocked on §0**: without a routing reader or a legacy path, "only canary-org jobs are unified" is unachievable. Every job already runs the unified path. |
+| **4.** Execute and validate rollback | **BLOCKED** | New demo jobs are `legacy_v0`; in-flight run id/remaining pages/attempts/head survive; readiness; no restart loop; no evidence loss | None — **blocked on §0**. Clearing the allowlist changes no behaviour today, so it cannot demonstrate rollback. Rollback currently means redeploying the prior image. |
+| **5.** Record go/no-go evidence | **BLOCKED** | §6 table fully populated from real output; explicit go/no-go | None. §6 is empty by design; an empty row is a no-go. Blocked by Steps 1–4. |
+| **6.** Commit canary controls/runbook | **FAIL (incomplete)** | All six files in the task's Files list changed and committed, with the Interfaces contract satisfied | Partial — see below. |
+
+### Step 6 detail
+
+| Item | Status | Evidence |
+|---|---|---|
+| `core/config.py` — `UNIFIED_EXTRACTION_ENABLED`, `UNIFIED_EXTRACTION_CANARY_ORG_IDS` | PASS | commit `e038fa7` |
+| `docker-compose.prod.yml` — canary env on `document-worker` | PASS | commit `e038fa7`; `test_document_worker_compose.py` 11 passed |
+| `scripts/unified_extraction_canary_status.py` | PASS | commit `e038fa7`; read-only, syntax-checked |
+| `docs/operations/...canary_and_rollback.md` | PASS | commit `e038fa7`, this file |
+| Job records `pipeline_version` at creation | PASS | `test_unified_extraction_canary.py`, 15 passed |
+| **Interfaces: claim predicate + dispatch honour persisted version** | **FAIL** | No production reader; no legacy branch. §0 |
+| **`scripts/post_deploy_verify.sh` updated** | **FAIL** | Never modified |
+| **Repository-root `.env.example` updated** | **FAIL** | Only `backend/rbac_backend/.env.example` was changed |
+
+### Exact condition permitting "Phase 7 fully complete"
+
+Phase 7 may be declared fully complete **only when all of the following hold**:
+
+1. Task 7.6 Step 6 reaches PASS — the routing contract is genuinely implemented
+   (legacy path + reader), **or** the no-legacy-path decision in §0 is recorded
+   and this runbook is rewritten as a staged rollout with image-level rollback;
+2. `scripts/post_deploy_verify.sh` and the root `.env.example` are updated;
+3. Steps 1–5 are executed inside an explicitly authorised production change
+   window, and §6 is fully populated from real output;
+4. The rollback drill (Step 4) passes without loss of page evidence;
+5. Every unresolved gap in §7 is either closed or explicitly accepted in writing
+   by the change authoriser;
+6. The go/no-go in §6 records **go**.
+
+Until then: **Phase 7 implementation = complete (7.1–7.5); Phase 7 operational
+acceptance = NOT COMPLETE.** Global enablement remains a separate authorised
+change.
+
+---
+
 ## 7. Known gaps carried into this window
 
-Honest list; none are blockers for a canary but all affect interpretation.
+**These are unresolved acceptance gaps, not footnotes.** Each must be closed or
+explicitly accepted in writing before Phase 7 can be declared fully complete.
 
-- The **Mongo-backed end-to-end acceptance test** is unimplemented. It fails
-  loudly under `RUN_UNIFIED_EXTRACTION_E2E=1` rather than skipping green, so the
-  canary is currently the *first* real-infrastructure exercise of this pipeline.
-- The **fallback ladder has no production model adapters**. With
-  `EXTRACTION_FALLBACK_ENABLED=false` it is inert, so the canary measures the
-  deterministic path only. Cost figures in the ledger are untested against a real
-  provider.
-- **No fixture carries a real page raster**, so the `SCANNED_IMAGE`-with-empty-text
-  escalation path has never run end to end.
-- `contract_ocr_pages` and `document_processing_jobs` remain **unindexed**.
-- Production `.env` must add `application/zip` to `ALLOWED_DOCUMENT_MIMES` and
-  `ALLOWED_ENCLOSURE_MIMES` before archive upload works; the code default alone
-  does not apply where an explicit env value is set.
-- Intake still sniffs `filetype` without filename context; the durable job carries
-  the validated MIME, but the original sniff is unchanged.
+| # | Gap | Effect on acceptance |
+|---|---|---|
+| G1 | **Canary routing is non-functional** (§0) | Steps 3 and 4 are unachievable as written. Highest priority. |
+| G2 | **Mongo-backed end-to-end pipeline never exercised.** The acceptance test fails loudly under `RUN_UNIFIED_EXTRACTION_E2E=1` rather than skipping green. | A canary would be the *first* real-infrastructure run of this pipeline. Elevated risk for Step 3. |
+| G3 | **Migration `20260814_0001` not verified against the production database.** Dry run never executed. | Step 1 cannot be signed off. |
+| G4 | **Unique `(document_id, extraction_run_id, page_number)` index must exist before concurrent worker writes.** Created only by G3's migration. | Without it, two workers can write contradictory evidence for the same page while `publish_run`'s count check still passes. Hard prerequisite for running more than one document worker. |
+| G5 | **No production reconstruction/model adapters.** `EXTRACTION_FALLBACK_ENABLED=false`; the ladder is inert. | A canary **cannot validate the fallback ladder at all** — only the deterministic path. Ledger cost/token fields are untested against a real provider. |
+| G6 | **Real scanned-page raster escalation never exercised end to end.** No fixture carries a page raster; `SCANNED_IMAGE`-with-empty-text is unit-tested only. | The most common real-world escalation trigger is unproven. |
+| G7 | **Production archive MIME configuration unverified.** An explicit `ALLOWED_DOCUMENT_MIMES` / `ALLOWED_ENCLOSURE_MIMES` in production `.env` overrides the code default entirely, so `application/zip` must be added there. | Archive upload silently returns 415 until done. |
+| G8 | **RAR unverified and disabled.** Phase 0 proved ZIP recursion in ClamAV; RAR was never functionally proven. | `RAR_UPLOAD_ENABLED` stays `false`. Enabling requires EICAR-in-RAR evidence in the same reviewed change. |
+| G9 | `contract_ocr_pages` and `document_processing_jobs` remain **unindexed** (pre-existing). | Performance/consistency risk outside this phase's scope. |
+| G10 | Intake still sniffs `filetype` without filename context. | The durable job carries the validated MIME; the original sniff is unchanged. |
