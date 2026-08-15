@@ -423,13 +423,44 @@ would fail the canary the moment it did any work. This package therefore does
 
 **Minimum decision the authoriser must make before the window** (one of):
 
-| Option | What it means |
-|---|---|
-| **D-1 (recommended)** | Declare the canary **observational** for resources: record CPU/memory/queue age/latency/error rate before and during, with **no pass/fail threshold**, and treat only *service-affecting* symptoms as abort triggers (readiness failure, restart loop, queue not draining, error-rate rise on the request tier). This is honest about what is known and still catches real harm. |
-| **D-2** | Define explicit thresholds now, in writing, and accept they are judgement rather than measurement. |
-| **D-3** | Generate a load baseline first by running the fixture corpus through the legacy pipeline on comparable hardware, then set thresholds from it. Highest confidence, requires its own window. |
+### G15 authoriser decision memo
 
-Until one is chosen, GO/NO-GO row 18 is **undecidable** and is marked as such.
+Three terms are kept strictly separate throughout, because conflating them is
+how a fabricated threshold gets born:
+
+| Term | Definition | Status here |
+|---|---|---|
+| **Measured baseline** | A number observed from the real system at a known time and state | Exists, **idle only** (backend 0.47% CPU / 505.4 MiB; contract-worker 0.14% / 208.1 MiB) |
+| **Canary observation** | A number recorded during the window, for comparison and record | Will exist after Stage C |
+| **Acceptance threshold** | A pre-agreed limit whose breach means abort | **Does not exist and never has** |
+
+| | **D-1 — observational** *(recommended)* | **D-2 — declared thresholds** | **D-3 — generate a baseline first** |
+|---|---|---|---|
+| **What is measured** | CPU, memory, queue age, latency, error rate, restart counts — recorded before and during, plus the two hard zero-cost gates | Same metrics, compared against limits written down in advance | Legacy-pipeline load run over the fixture corpus on comparable hardware, then the same metrics |
+| **When the threshold is established** | Never — no numeric threshold is set | Before the window, by judgement | After the pre-window baseline run, derived from data |
+| **Who accepts it** | Authoriser accepts *the absence* of numeric limits | Authoriser owns the numbers and that they are judgement, not measurement | Authoriser accepts thresholds derived from a real load run |
+| **Abort behaviour** | Abort on *service-affecting symptoms only*: readiness failure, restart loop, queue not draining, request-tier error-rate rise, or either zero-cost gate breached | Abort on any threshold breach, plus the symptom list | Same as D-2, with better-founded numbers |
+| **Advantages** | Honest about what is known; cannot produce a false abort from an invented limit; still catches every failure that actually harms the service; no extra window | Crisp, unambiguous pass/fail; easy to audit | Highest confidence; the only option producing a defensible numeric limit |
+| **Risks** | A slow degradation inside "no symptom" territory could pass unflagged; relies on operator judgement during the window | Numbers are guesses. A too-tight limit aborts a healthy canary; a too-loose one certifies nothing. Both are recorded as if measured, which is the worst failure mode | Costs an additional change window and its own authorisation; delays the canary; the baseline still will not include `document-worker`, which has never run under load |
+
+**Recommendation: D-1.**
+
+The canary's purpose is to prove *tenant and version isolation*, and every
+isolation assertion is already a hard binary gate (Gates B and C) that owes
+nothing to resource numbers. The only resource figures with a genuine threshold —
+model calls and cost on the clean fixture — are hard-gated at **zero**, taken
+from Task 7.6's own words. For everything else there is one idle sample, taken
+when the pipeline had been dormant for 30 days, from a stack in which
+`document-worker` does not even appear. Promoting that into a limit would invent
+a measurement, and D-2 would record the invention as though it were evidence.
+D-3 is defensible but buys precision the isolation proof does not need, at the
+cost of a second authorised window.
+
+**The decision is the authoriser's.** If they prefer a numeric gate, D-2 is
+acceptable provided the sign-off records the numbers as *judgement, not
+measurement*.
+
+Until an option is chosen, Gate C row C13 is **undecidable** and is marked as such.
 
 | Metric | Baseline (idle, above) | During canary | Threshold | PASS? |
 |---|---|---|---|---|
@@ -886,7 +917,7 @@ Each gap is classified as exactly one of `CLOSED`, `ACCEPTED LIMITATION`,
 | **G13** rollback drill never executed | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | No | **Yes** (C8) | §9 executed in full, all 7 rows PASS. Owner: operator |
 | **G14** no worker identity on jobs | `ACCEPTED LIMITATION` | **No** — adjudicated §11.1 | No | No | No | Task 7.6 requires pipeline-execution proof, not container identity. Claim path unmodified. Deferred to a later observability task. Owner: engineering |
 | **G15** resource acceptance thresholds do not exist | `AUTHORISER DECISION REQUIRED` | No | **Yes** (A10) | No | **Yes** (C13) | Only an *idle* baseline exists and the plan never converts it to a threshold. Authoriser must choose D-1, D-2 or D-3 (Table D). Owner: authoriser |
-| **G16** Task 7.6 specification is not committed | `AUTHORISER DECISION REQUIRED` | No | **Yes** | No | No | Tasks 3.4, 4.3, 7.5 and 7.6 exist **only in the uncommitted working tree**; the committed plan ends at Task 7.4. The release candidate implements a spec absent from version control. Authoriser must either commit the reviewed plan or accept an unversioned specification. Owner: authoriser |
+| **G16** governing specification not version-controlled | `CLOSED` | No | No | No | No | Committed as `4ef134d` after review: purely additive at task level (3.4, 4.3, 7.5, 7.6 added, none removed), deletions are in-place refinements matching what was built, no conflict markers/secrets/unrelated content, every named file exists. Included in the release candidate. |
 
 **Nothing above is closed by a unit test.** G2, G3, G4, G7, G12 and G13 require
 production execution. G5 and G6 are **not** closed merely because a deterministic
@@ -1005,7 +1036,8 @@ Execution order: **§6 Stage A → §2 → §3 → §4 → §5 (before) → §6 
 | Commits after the code freeze | `c4104b2`, `81b1fea` — **documentation only** (this package) |
 | Branch holding the candidate | `integrate/key-date-eot` |
 | Production baseline SHA | **UNKNOWN — must be read from the server** (`git rev-parse HEAD` on `contraclaim:/opt/contraclaim-dms/projectDMS`). The runbook default is not trustworthy; production has sat on `codex/*` branches for long stretches. |
-| Task reference | Task 7.6 Steps 1–5, plan `2026-08-14-unified-page-extraction-phases-0-7.md` |
+| Task reference | Task 7.6 Steps 1–5 |
+| **Governing specification** | `docs/superpowers/plans/2026-08-14-unified-page-extraction-phases-0-7.md`, committed at **`4ef134d`** and contained in the candidate. Read Task 7.6 from git, not from a working tree. |
 | Approved canary organisation | `<ORG_ID>` — one only, demo data |
 | Window duration | `<HH:MM>` to `<HH:MM>` UTC on `<DATE>` |
 | Execution package | this document |
