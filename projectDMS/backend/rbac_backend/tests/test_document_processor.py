@@ -12,6 +12,7 @@ from rbac_backend.services.extraction.models import (
     PageSource,
     PageStatus,
 )
+from rbac_backend.services.extraction.quality.gate import ExtractionQualityGate
 from rbac_backend.services.text_processing_service import TextProcessingService
 from rbac_backend.utils.exceptions import DocumentProcessingError
 
@@ -110,6 +111,8 @@ def make_processor(ocr_text: str, openai_service: FakeOpenAIService):
     processor.image_ocr_runner = object()
     processor._image_extractor = None
     processor._text_extractor = None
+    processor.quality_gate = ExtractionQualityGate()
+    processor.fallback_ladder = None  # off by default; this test spends nothing
     processor.ocr_service = FakeOCRService(ocr_text)
     processor.openai_service = openai_service
     processor.text_service = TextProcessingService(processor.config)

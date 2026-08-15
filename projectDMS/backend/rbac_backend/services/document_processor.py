@@ -17,9 +17,11 @@ from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
 
+from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
-from .extraction.models import SourceKind
+from .extraction.models import Completeness, SourceKind
+from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 
 from ..config.document_processing_config import DocumentProcessingConfig
@@ -65,6 +67,8 @@ class DocumentProcessor:
         image_ocr_runner: Any = None,
         image_extractor: Any = None,
         text_extractor: Any = None,
+        quality_gate: Any = None,
+        fallback_ladder: Any = None,
     ):
         self.config = config or DocumentProcessingConfig()
         self.ocr_service = OCRService(self.config)
@@ -81,6 +85,64 @@ class DocumentProcessor:
         self.image_ocr_runner = image_ocr_runner or TesseractImageOcrRunner()
         self._image_extractor = image_extractor or extract_image
         self._text_extractor = text_extractor or extract_text_file
+
+        # The gate runs unconditionally; the ladder is opt-in and off by
+        # default, because it is the only part of this pipeline that spends
+        # money at runtime.
+        self.quality_gate = quality_gate or ExtractionQualityGate()
+        self.fallback_ladder = fallback_ladder
+
+    async def _apply_quality_gate(
+        self,
+        source: Path,
+        extraction: Any,
+        *,
+        document_id: str,
+    ) -> list:
+        """Assess every page, escalating only what the gate says is wrong.
+
+        Returns the page numbers that still need a human. A page the gate could
+        not check is accepted and marked unverified - not escalated - because
+        "nothing was verified" is not "something is wrong", and treating it as
+        such is what produced 12 paid calls on a correct document.
+        """
+        needs_review: list = []
+
+        for page in getattr(extraction, "pages", []) or []:
+            verdict = self.quality_gate.assess(page, tables=page.tables or None)
+            page.quality_verdict = verdict.verdict.value
+            page.quality_checks = [check.to_record() for check in verdict.checks]
+
+            if not verdict.escalates:
+                continue
+
+            outcome = None
+            if self.fallback_ladder is not None:
+                resolved = await self.fallback_ladder.resolve(
+                    source, page, verdict, document_id=document_id
+                )
+                outcome = resolved.outcome
+                if outcome is FallbackOutcome.RESOLVED:
+                    # Adopt the reconstruction the ladder already re-verified.
+                    page.text = resolved.page.text
+                    page.source = resolved.page.source
+                    continue
+
+            page.needs_review = True
+            needs_review.append(page.number)
+            logger.warning(
+                "[document_pipeline] Page %s of %s needs human review "
+                "(verdict=%s, fallback=%s)",
+                page.number,
+                document_id,
+                verdict.verdict.value,
+                outcome.value if outcome else "disabled",
+            )
+
+        if needs_review:
+            extraction.completeness = Completeness.PARTIAL
+
+        return needs_review
 
     async def _extract_source(
         self,
@@ -223,6 +285,14 @@ class DocumentProcessor:
                     processing_state=ProcessingState.STORED_ONLY.value,
                 )
             extraction = dispatch.extraction
+
+            # Step 1b: assess every page. Runs unconditionally - companion
+            # evidence measured 9 corruptions in a PDF's own text layer, so
+            # there is no page this may skip.
+            pages_human_review = await self._apply_quality_gate(
+                input_path, extraction, document_id=resolved_document_id
+            )
+
             processed_path = input_path
             raw_ocr_text = extraction.combined_text or None
             ocr_text_len = len(raw_ocr_text) if raw_ocr_text else 0
@@ -344,6 +414,7 @@ class DocumentProcessor:
                 partial_failures=partial_failures,
                 extraction_result=extraction,
                 extraction_completeness=extraction.completeness.value,
+                pages_human_review=pages_human_review,
             )
 
         except Exception as e:

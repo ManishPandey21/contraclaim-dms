@@ -235,6 +235,9 @@ class ProcessingResult(BaseModel):
     #: Set when the processor reached an explicit terminal state of its own,
     #: such as an archive stored without extraction.
     processing_state: Optional[str] = None
+    #: Pages the quality gate and fallback ladder could not resolve. A
+    #: non-empty list means this document cannot be reported as completed.
+    pages_human_review: List[int] = Field(default_factory=list)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
