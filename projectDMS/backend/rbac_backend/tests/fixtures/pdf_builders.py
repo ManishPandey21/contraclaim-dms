@@ -104,3 +104,49 @@ def build_mixed_pdf(path: Path) -> Path:
         )
 
     return _save(pdf, path)
+
+
+CLEAN_NATIVE_PAGE_COUNT = 2
+#: The table the clean fixture prints, and its exact arithmetic. Kept beside
+#: the builder so the acceptance test asserts against declared values rather
+#: than re-deriving them.
+CLEAN_NATIVE_TABLE = {
+    "headers": ["S/N", "Description", "Qty", "Rate", "Amount"],
+    "rows": [
+        ["1", "Excavation in ordinary soil", "120", "450", "54,000"],
+        ["2", "Reinforced concrete in foundation", "80", "6,500", "520,000"],
+    ],
+    "stated_total": "574,000",
+}
+
+
+def build_clean_native_pdf(path: Path) -> Path:
+    """Two pages of coherent native text with one exact, checkable table.
+
+    No page needs OCR and every applicable deterministic check passes, so this
+    fixture is the zero-fallback-cost baseline: any model call while processing
+    it is a defect.
+    """
+    pdf = pikepdf.new()
+
+    narrative = [
+        "The Contractor hereby submits its monthly interim payment application",
+        "in respect of the permanent works executed at the Nayaganj Station",
+        "site during the period under review, prepared in accordance with the",
+        "measurement provisions of the Contract and supported by the joint",
+        "records signed by the Engineer's representative on site.",
+    ]
+    _add_page(pdf, media_box=A4_PORTRAIT, lines=narrative)
+
+    table = CLEAN_NATIVE_TABLE
+    lines = [
+        "Summary of measured work for the current valuation period follows",
+        "below, with quantities agreed jointly and rates taken from the",
+        "priced bill of quantities forming part of the Contract documents.",
+        "  ".join(table["headers"]),
+    ]
+    lines.extend("  ".join(row) for row in table["rows"])
+    lines.append(f"        Total        {table['stated_total']}")
+    _add_page(pdf, media_box=A4_PORTRAIT, lines=lines)
+
+    return _save(pdf, path)
