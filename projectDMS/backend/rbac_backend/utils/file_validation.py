@@ -21,6 +21,15 @@ def sniff_mime_from_bytes(data: bytes, filename: Optional[str] = None) -> str:
     if filename and str(filename).lower().endswith(".docx") and data.startswith(b"PK"):
         return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+    # RAR: v4 signature is "Rar!\x1a\x07\x00", v5 is "Rar!\x1a\x07\x01\x00".
+    if data.startswith(b"Rar!\x1a\x07"):
+        return "application/vnd.rar"
+
+    # ZIP container. Checked after the DOCX branch above, which is also a zip
+    # and is disambiguated by its filename.
+    if data.startswith(b"PK\x03\x04"):
+        return "application/zip"
+
     # PNG
     if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"

@@ -161,12 +161,19 @@ class Settings(BaseSettings):
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
     
     # Allowed MIME types for documents and enclosures
+    # Set true only when the deployed clamd has been shown to scan *inside* a
+    # RAR - an EICAR-in-RAR detection, not a config line or a linked library.
+    # Phase 0 proved archive recursion with a ZIP; RAR itself is unproven.
+    RAR_UPLOAD_ENABLED: bool = Field(default=False, validation_alias="RAR_UPLOAD_ENABLED")
+
     ALLOWED_DOCUMENT_MIMES: set[str] = Field(
         default={
             "application/pdf",
             "image/png",
             "image/jpeg",
             "text/plain",
+            # Archives are stored intact and never unpacked or processed.
+            "application/zip",
         }
     )
     
@@ -183,6 +190,7 @@ class Settings(BaseSettings):
             "image/png",
             "image/jpeg",
             "text/plain",
+            "application/zip",
         }
     )
     
@@ -541,8 +549,31 @@ class Settings(BaseSettings):
                     parsed = [p.strip().strip('"').strip("'") for p in parts if p.strip()]
             if parsed:
                 object.__setattr__(self, "CORS_ORIGINS", parsed)
-        
+
+        self._apply_rar_upload_gate()
         self._log_default_usage()
+
+    def _apply_rar_upload_gate(self) -> None:
+        """RAR is admitted only behind an explicit, proof-backed flag.
+
+        Configuring the MIME directly in an allowlist must not bypass the gate:
+        Phase 0 proved ClamAV recurses into a ZIP but never proved it scans
+        inside a RAR, so admitting one is a deliberate, reviewed decision.
+        """
+        rar_mime = "application/vnd.rar"
+        explicit_rar = (
+            rar_mime in self.ALLOWED_DOCUMENT_MIMES
+            or rar_mime in self.ALLOWED_ENCLOSURE_MIMES
+        )
+        if explicit_rar and not self.RAR_UPLOAD_ENABLED:
+            raise ValueError(
+                "RAR MIME configured while RAR_UPLOAD_ENABLED=false. Enable the "
+                "flag in the same reviewed change that attaches EICAR-in-RAR "
+                "detection evidence for the deployed clamd."
+            )
+        if self.RAR_UPLOAD_ENABLED:
+            self.ALLOWED_DOCUMENT_MIMES.add(rar_mime)
+            self.ALLOWED_ENCLOSURE_MIMES.add(rar_mime)
     
     def _log_default_usage(self) -> None:
         missing = [field for field in self.CRITICAL_FIELDS if field not in self.model_fields_set]
