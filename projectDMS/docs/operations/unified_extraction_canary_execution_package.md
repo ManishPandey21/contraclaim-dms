@@ -948,6 +948,71 @@ canary can proceed — they bound what the canary may be said to prove.
 **No gap in this table is closed by a unit test.** G3, G4, G11, G12 and G13 all
 require production execution inside the authorised window.
 
+## 11.0 G17 investigation — the cited source document
+
+Full read of `docs/architecture/mixed_pdf_ingestion_and_summary_plan_2026-08-13.md`
+(453 lines), not just the cited snippets.
+
+**Purpose.** Evidence for the companion architecture document, proving mixed-page
+handling against one real 9-page contractor claim PDF, plus a two-tier summary
+proposal. **Provenance:** measured with `backend/.venv` using `pdfplumber`/`pypdf`,
+replicating two production decision points verbatim.
+
+### Classification of every material statement Task 7.6's lineage relies on
+
+| Statement | Classification | Independently checked here? |
+|---|---|---|
+| The ~20 arithmetic identities (§3.2) | **MEASURED FACT** | **Yes — every one re-derived and confirmed**, including the 1-unit rounding discrepancies the document itself flags |
+| The 9 split-digit corruptions and their true values (§3.1) | **MEASURED FACT** | Partially — 4 of 9 confirmed by independent arithmetic (`2350×30`, `162×830`, `286×1548`, `24×2040`); the rest corroborated by column sums |
+| The 12 false-positive patterns (§3.3) | **MEASURED FACT** | Yes — e.g. `3 × 32.61 × 3,200 = 313,056` confirms the `Nos` multiplier case |
+| "Native text layer ⇒ high confidence is false" (§3.1) | **DERIVED RULE** | Follows from the measured corruptions |
+| Gate runs unconditionally; only escalation is conditional | **DESIGN DECISION** | Implemented; 48 Phase 6 tests |
+| 1% rounding tolerance (§3.3) | **DESIGN DECISION** | Anchored to a measured case (58 displayed vs 57.5 true = 0.86%), but the 1% value itself is a choice |
+| Dual-confirmation repair rule (§3.2) | **DESIGN DECISION** — and §8 open question 1 explicitly defers it as "a product/legal call, not an engineering one" | Not settled by the document |
+| Pages 1–2 are the covering letter | **ASSUMPTION** — the document flags this itself in §9 as inference from position and page size | Not checkable without OCR |
+| Date disambiguation by chronological monotonicity | **ASSUMPTION**, flagged in §8 open question 2 | Not settled |
+| `is_pdf_textual(max_pages=5)` silently loses pages 1–2 | **MEASURED FACT** | Not re-checkable from the repo (see limitation below) |
+| Per-page char/image/table counts, orientation (§1) | **MEASURED FACT** | **Not reproducible from the repo** |
+
+**Nothing in the document was found OBSOLETE or contradicted by the implementation.**
+
+### The one real limitation
+
+§9 states: *"Probe scripts are in the session scratchpad, not the repo."* The
+source PDF is likewise absent. So §1/§2 per-page measurements **cannot be
+re-derived from the repository** — committing the document versions its
+conclusions, not the means to reproduce them.
+
+**This does not weaken the acceptance argument, because the gates do not depend
+on that PDF at runtime.** `golden_page_routing.json` names fixture
+`build_mixed_pdf`, a **synthetic** 9-page PDF built with `pikepdf`
+(`tests/fixtures/pdf_builders.py:81`) that mirrors the measured structure — two
+text-free pages, seven text pages, one landscape. The acceptance argument is
+fully reproducible from committed artefacts alone.
+
+### Does Task 7.6 depend on this document?
+
+**No.** Task 7.6's committed text cites it **zero** times. The two citations in
+the committed specification belong to **Task 0.2** (golden page-routing fixture)
+and **Task 6.5** (Phase 6 hard gates). The canary executes the deterministic path
+that includes those gates; it does not re-derive them.
+
+### Confidentiality
+
+The document names five real commercial parties and a real ₹22,140,168 claim.
+That data is **already committed** in seven or more files — including
+`tests/fixtures/pdf_builders.py`, `test_quality_numeric_checks.py`, and the plan
+committed at `4ef134d`. Committing the source therefore adds **no new exposure**.
+
+### Circularity assessment
+
+| Assertion | Type |
+|---|---|
+| `len(cases) == …["false_positive_patterns_that_must_not_fail"] == 12` | **Circular** — fixture self-consistency. Guards against truncation; proves nothing empirical. |
+| `detect_split_digits(corrupted) == expected` | **Implementation-conformance**, with expected values **arithmetically corroborated** independently |
+| Gate does not FAIL / does not escalate on the 12 cases | **Genuine behavioural validation** — the inputs are arithmetically correct, so a FAIL would be a real defect |
+| "12 and 9 are the complete set of patterns" | **UNVERIFIED CLAIM** — a generalisation from one document. See G18. |
+
 ## 11.1 G14 adjudication — worker identity
 
 **Question.** Does Task 7.6 require (A) proof of the worker/container identity
