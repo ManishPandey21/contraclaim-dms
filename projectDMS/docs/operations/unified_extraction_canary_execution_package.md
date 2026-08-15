@@ -387,17 +387,65 @@ Fill **before** and **after**. `<unfilled>` anywhere = Step 5 incomplete = NO-GO
 | Redis health | `<unfilled>` | `<unfilled>` | C1.5 |
 | Worker health / readiness | `<unfilled>` | `<unfilled>` | C1.8 |
 
-### Table D — resources (Phase 0.5 bounds)
+### Table D — resources
 
-| Metric | Baseline | During canary | Bound | PASS? |
+> **Resolved: there are no recorded acceptance thresholds.** Task 7.6 Step 3
+> requires metrics to "remain within the recorded acceptance bounds". The
+> repository was searched exhaustively (Task 0.5 spec, the Phase 0 measurements
+> document, git history, all architecture/findings docs). **No acceptance
+> threshold exists anywhere.** What exists is an *idle* baseline, recorded for a
+> different purpose. Classification below; sources are exact.
+
+| Metric | Value | Classification | Source |
+|---|---|---|---|
+| backend CPU | 0.47% | **MEASURED BASELINE (idle)** | `phase0_extraction_measurements_2026-08-14.md` §4 |
+| backend memory | 505.4 MiB | **MEASURED BASELINE (idle)** | ibid §4 |
+| contract-worker CPU | 0.14% | **MEASURED BASELINE (idle)** | ibid §4 |
+| contract-worker memory | 208.1 MiB | **MEASURED BASELINE (idle)** | ibid §4 |
+| Host capacity | 8 cores, 23 GB RAM, 16.9 GB available | **MEASURED BASELINE** | ibid §4 |
+| clamav memory | 950.2 MiB / 2 GiB (46%) | **OBSERVATIONAL VALUE ONLY** — flagged as the tightest resource in the stack | ibid §4 |
+| **document-worker CPU/memory** | — | **MISSING** — the service does not appear in the baseline at all | ibid §4 |
+| OCR wall time | — | **MISSING** — "recent document_pipeline OCR timings: 0" | ibid §4 |
+| OCR pages/document | — | **MISSING** — page counts not persisted before Phase 3 | ibid §3 caveat |
+| Queue age | — | **MISSING** — never measured | — |
+| Request latency p95 | — | **MISSING** — never measured | — |
+| Error rate | — | **MISSING** — never measured | — |
+| Cost bound | — | **MISSING** — never measured | — |
+| **Any acceptance threshold** | — | **MISSING** | The plan never converts the baseline into a threshold |
+
+**Why the idle baseline cannot be promoted to a threshold.** The Phase 0 document
+states it directly: a `docker logs` search over 720 hours returned **zero**
+`document_pipeline` lines, so *"there is no production load baseline to compare
+against, and none can be harvested from history."* An idle-state figure is not an
+upper bound for a working extraction pipeline; treating 0.47% CPU as a limit
+would fail the canary the moment it did any work. This package therefore does
+**not** convert it, and no number here is invented.
+
+**Minimum decision the authoriser must make before the window** (one of):
+
+| Option | What it means |
+|---|---|
+| **D-1 (recommended)** | Declare the canary **observational** for resources: record CPU/memory/queue age/latency/error rate before and during, with **no pass/fail threshold**, and treat only *service-affecting* symptoms as abort triggers (readiness failure, restart loop, queue not draining, error-rate rise on the request tier). This is honest about what is known and still catches real harm. |
+| **D-2** | Define explicit thresholds now, in writing, and accept they are judgement rather than measurement. |
+| **D-3** | Generate a load baseline first by running the fixture corpus through the legacy pipeline on comparable hardware, then set thresholds from it. Highest confidence, requires its own window. |
+
+Until one is chosen, GO/NO-GO row 18 is **undecidable** and is marked as such.
+
+| Metric | Baseline (idle, above) | During canary | Threshold | PASS? |
 |---|---|---|---|---|
-| CPU % (worker) | `<unfilled>` | `<unfilled>` | Phase 0.5 | `<unfilled>` |
-| Memory (worker) | `<unfilled>` | `<unfilled>` | Phase 0.5 | `<unfilled>` |
-| Queue age (max) | `<unfilled>` | `<unfilled>` | Phase 0.5 | `<unfilled>` |
-| Request latency p95 | `<unfilled>` | `<unfilled>` | Phase 0.5 | `<unfilled>` |
-| Error rate | `<unfilled>` | `<unfilled>` | Phase 0.5 | `<unfilled>` |
-| Model calls | `<unfilled>` | `<unfilled>` | **0 for clean fixture** | `<unfilled>` |
-| Cost | `<unfilled>` | `<unfilled>` | **0 for clean fixture** | `<unfilled>` |
+| backend CPU % | 0.47% | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| backend memory | 505.4 MiB | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| document-worker CPU % | **no baseline** | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| document-worker memory | **no baseline** | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| clamav memory | 950.2 MiB / 2 GiB | `<unfilled>` | watch: already 46% idle | `<unfilled>` |
+| Queue age (max) | **no baseline** | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| Request latency p95 | **no baseline** | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| Error rate | **no baseline** | `<unfilled>` | per D-1/D-2/D-3 | `<unfilled>` |
+| **Model calls (F1 clean)** | 0 | `<unfilled>` | **0 — hard gate, from the plan text itself** | `<unfilled>` |
+| **Cost (F1 clean)** | 0 | `<unfilled>` | **0 — hard gate, from the plan text itself** | `<unfilled>` |
+
+The last two rows are the only resource figures with a genuine threshold, and it
+comes from Task 7.6's own words: *"zero intervention/model rows"*.
 
 ### Table E — capacity (§2)
 
@@ -708,29 +756,89 @@ deployed, routing globally off, canary at 0 replicas, all evidence intact.
 
 ---
 
-# 10. GO / NO-GO decision table
+# 10. GO / NO-GO — three separate decisions
 
-| # | Condition | Gate | Verdict if violated |
-|---|---|---|---|
-| 1 | Insufficient production disk/headroom (§2) | Stage A | **NO-GO** |
-| 2 | Backup unavailable or unverifiable | Stage A | **NO-GO** |
-| 3 | Migration/index preflight failure (§3, incl. blocking duplicates) | Stage A | **NO-GO** |
-| 4 | Wrong commit or branch | Stage A | **NO-GO** |
-| 5 | Unexpected compose topology (file set / services) | Stage A | **NO-GO** |
-| 6 | Unrestricted extraction worker | Stage A/B/C | **NO-GO / ABORT** |
-| 7 | More than one scheduler owner | Stage A/B/C | **NO-GO / ABORT** |
-| 8 | Non-canary tenant receives `unified_v1` | Stage C | **ABORT → §9** |
-| 9 | Canary worker claims legacy work | Stage C | **ABORT → §9** |
-| 10 | Duplicate page evidence | Stage C | **ABORT → §9** |
-| 11 | Evidence/run identity changes during rollback | §9 | **NO-GO** (and incident) |
-| 12 | Unexplained processing failures | any | **ABORT → §9** |
-| 13 | Required health check failure (Mongo/Redis/readiness) | any | **NO-GO / ABORT** |
-| 14 | Working tree dirty on the production checkout | Stage A | **NO-GO** |
-| 15 | RAR enabled without positive EICAR-in-RAR proof | Stage A | **NO-GO** |
-| 16 | Any Step 5 evidence field left `<unfilled>` | Step 5 | **NO-GO** |
-| 17 | Restart loop on any worker | Stage B/C | **ABORT → §9** |
-| 18 | Resource metrics outside Phase 0.5 bounds | Stage C | **ABORT → §9** |
-| 19 | F1 clean fixture produced any intervention row | Stage C | **ABORT → §9** (zero-cost claim is false) |
+These are **three distinct acceptance decisions taken at three different times**.
+They must not be collapsed into one. Passing Gate A does not authorise the
+canary; passing Gate B does not declare Task 7.6 accepted.
+
+## Gate A — authorise **starting** the production window
+
+*What must be known before connecting to or changing production at all.*
+Evaluated in Stage A, before any deployment.
+
+| # | Condition | Verdict if violated |
+|---|---|---|
+| A1 | Insufficient production disk/headroom (§2 formula unsatisfied) | **NO-GO** — no deployment |
+| A2 | Backup unavailable or unverifiable | **NO-GO** |
+| A3 | Wrong commit or branch on the production checkout | **NO-GO** |
+| A4 | Working tree dirty on the production checkout | **NO-GO** |
+| A5 | Unexpected compose file set / service topology | **NO-GO** |
+| A6 | Migration **preflight** failure — blocking duplicate rows, dry-run error/warning (§3 P1–P5) | **NO-GO** |
+| A7 | Mongo replica-set, Redis, or readiness check failing | **NO-GO** |
+| A8 | RAR enabled without positive EICAR-in-RAR proof | **NO-GO** |
+| A9 | More than one scheduler owner, or an unrestricted extraction worker, already present | **NO-GO** |
+| A10 | Resource-threshold decision (D-1/D-2/D-3, Table D) not made by the authoriser | **NO-GO** — row 18 is otherwise undecidable |
+
+**Gate A failure leaves production entirely unchanged.**
+
+## Gate B — authorise **enabling** the one-org canary
+
+*What must pass after deployment and migration, before any `unified_v1` job is
+permitted to exist.* Evaluated at the end of Stage B.
+
+| # | Condition | Verdict if violated |
+|---|---|---|
+| B1 | Migration `20260814_0001` not applied, or applied without the expected indexes | **NO CANARY** |
+| B2 | Unique `(document_id, extraction_run_id, page_number)` index absent | **NO CANARY** — two workers could write contradictory page evidence |
+| B3 | Unique `document_id` index on `document_extraction_heads` absent | **NO CANARY** |
+| B4 | `post_deploy_verify.sh` **live run** reports any FAIL (closes G12) | **NO CANARY** |
+| B5 | Default worker not restricted to `legacy_v0`, or unrestricted | **NO CANARY** |
+| B6 | Canary worker not pinned to `unified_v1`, or not at 0 replicas pre-enable | **NO CANARY** |
+| B7 | More than one scheduler owner | **NO CANARY** |
+| B8 | Web tier acting as an extraction worker | **NO CANARY** |
+| B9 | Any `unified_v1` job already exists | **NO CANARY** |
+| B10 | Legacy processing regressed (C2.13/C2.14) | **NO CANARY** → §9 |
+| B11 | Restart loop on any worker | **NO CANARY** → §9 |
+| B12 | Archive config unverified where archive fixtures are in scope (§4) | **NO CANARY** for archive fixtures |
+
+**Gate B failure returns production to the Stage B resting state** (code deployed,
+routing globally off) or rolls back per §9. It does **not** require undoing the
+migration — index creation is additive and the legacy path does not use them.
+
+## Gate C — final Task 7.6 **GO**
+
+*What must pass before Phase 7 operational acceptance can be declared.*
+Evaluated after Stage C and the rollback drill.
+
+| # | Condition | Verdict if violated |
+|---|---|---|
+| C1 | Non-canary tenant received `unified_v1` | **NO-GO** + ABORT → §9 |
+| C2 | Cross-version execution detected (§8 signals 2/3/4) | **NO-GO** + ABORT → §9 |
+| C3 | Page evidence or intervention rows outside the canary org | **NO-GO** + ABORT → §9 |
+| C4 | Duplicate page evidence or duplicate heads | **NO-GO** + ABORT → §9 |
+| C5 | F1 clean fixture produced **any** intervention/model row | **NO-GO** — the zero-cost claim is false |
+| C6 | F1 did not reach `completed` with PASS verdicts and a published head | **NO-GO** |
+| C7 | Mixed fixture did not checkpoint/reclaim to its expected state | **NO-GO** |
+| C8 | **Rollback drill (§9) not executed, or any of its 7 rows failed** (closes G13) | **NO-GO** |
+| C9 | Evidence/run identity changed during rollback | **NO-GO** + incident |
+| C10 | Any page evidence deleted or any `pipeline_version` silently rewritten | **NO-GO** + incident |
+| C11 | Unexplained processing failures | **NO-GO** + ABORT → §9 |
+| C12 | Any Step 5 evidence field left `<unfilled>` | **NO-GO** |
+| C13 | Resource metrics breach the threshold chosen under D-2/D-3; **or**, under D-1, a service-affecting symptom occurred (readiness failure, restart loop, queue not draining, request-tier error-rate rise) | **NO-GO** + ABORT → §9 |
+| C14 | Sign-off text claims validation of the LLM/Vision fallback ladder | **NO-GO** — factually false while G5/G6 are open |
+
+### Gate mapping for the key gaps
+
+```text
+G11 capacity          -> measured during Stage A      -> failure blocks ANY deployment      (Gate A)
+G3/G4 migration+index -> applied/verified in window   -> failure blocks CANARY ENABLE       (Gate B)
+G12 live verify run   -> executed in Stage B          -> must pass before CANARY ENABLE     (Gate B)
+G13 rollback drill    -> executed after Stage C       -> required before FINAL GO           (Gate C)
+G5/G6 model/Vision    -> ACCEPTED LIMITATION          -> deterministic-only canary; may NOT
+                                                         be claimed as ladder validation    (Gate C, C14)
+G14 worker identity   -> ACCEPTED LIMITATION          -> behavioural evidence is authoritative
+```
 
 **No hard gate may be downgraded to a warning in order to continue the rollout.**
 A gate that is inconvenient is still a gate. Changing any row above requires the
@@ -755,7 +863,38 @@ authorised change and is blocked regardless of this window's outcome.**
 
 ---
 
-# 11. Gap register — window impact
+# 11. Final pre-authorisation gap matrix (G1–G14)
+
+Each gap is classified as exactly one of `CLOSED`, `ACCEPTED LIMITATION`,
+`PRODUCTION-WINDOW EVIDENCE REQUIRED`, `AUTHORISER DECISION REQUIRED`, `BLOCKER`.
+
+| Gap | Status | Code blocker | Blocks window start (Gate A) | Blocks canary enable (Gate B) | Blocks final GO (Gate C) | Acceptance / owner |
+|---|---|---|---|---|---|---|
+| **G1** canary routing non-functional | `CLOSED` | No | No | No | No | Routing + claim boundary implemented and tested (`a1dc25a`, `1da6276`) |
+| **G1a** temporary legacy path | `ACCEPTED LIMITATION` | No | No | No | No | Equivalence-tested vs `ffa844b`. Delete `_extract_legacy`, `legacy_v0` and the claim restriction after global acceptance. Owner: engineering, post-Phase-7 |
+| **G2** real Mongo E2E never run | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | No | **Yes** | F1–F4 complete against production Mongo with §8 clean. First real-infrastructure run; elevated risk accepted in writing before Stage C. Owner: authoriser + operator |
+| **G3** migration not applied | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | Preflight only (A6) | **Yes** (B1) | **Yes** | §3 P1–P5 pass, then `--apply`, then index verification. Owner: operator |
+| **G4** unique page-evidence index | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | **Yes** (B2) | **Yes** | Hard prerequisite for two concurrent workers. Owner: operator |
+| **G5** no real reconstruction/model adapters | `ACCEPTED LIMITATION` | No | No | No | No — **but bounds the claim (C14)** | `EXTRACTION_FALLBACK_ENABLED=false`; ladder inert. **Not closed by this canary and cannot be.** Sign-off must state the limitation. Owner: authoriser |
+| **G6** scanned-raster/model escalation | `ACCEPTED LIMITATION` | No | No | No | No — **but bounds the claim (C14)** | Unit-tested only; F2 exercises OCR, not raster escalation into the ladder. **Not closed by this canary.** Owner: authoriser |
+| **G7** production archive MIME config | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | Only if archive fixtures in scope (B12) | No | §4 A1–A3. If `application/zip` absent: fix under authorisation or drop archive fixtures and record why. Owner: operator |
+| **G8** RAR disabled/unverified | `ACCEPTED LIMITATION` | No | Only if found enabled (A8) | No | No | Stays `false` throughout, verified by §4. Enabling requires EICAR-in-RAR evidence in a separate reviewed change. Owner: authoriser |
+| **G9** `contract_ocr_pages` / jobs unindexed | `ACCEPTED LIMITATION` | No | No | No | No | Pre-existing, out of Phase 7 scope. Monitor queue age. Owner: engineering |
+| **G10** intake MIME sniff without filename | `ACCEPTED LIMITATION` | No | No | No | No | Durable job carries the validated MIME. No action. Owner: engineering |
+| **G11** production disk capacity | `PRODUCTION-WINDOW EVIDENCE REQUIRED` + `AUTHORISER DECISION REQUIRED` | No | **Yes** (A1) | **Yes** | **Yes** | §2 M1–M8 measured, formula evaluated, threshold accepted by authoriser. Owner: operator measures, authoriser accepts |
+| **G12** verify script never run live | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | **Yes** (B4) | **Yes** | C2.5 live run, output pasted into §5. Owner: operator |
+| **G13** rollback drill never executed | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | No | **Yes** (C8) | §9 executed in full, all 7 rows PASS. Owner: operator |
+| **G14** no worker identity on jobs | `ACCEPTED LIMITATION` | **No** — adjudicated §11.1 | No | No | No | Task 7.6 requires pipeline-execution proof, not container identity. Claim path unmodified. Deferred to a later observability task. Owner: engineering |
+| **G15** resource acceptance thresholds do not exist | `AUTHORISER DECISION REQUIRED` | No | **Yes** (A10) | No | **Yes** (C13) | Only an *idle* baseline exists and the plan never converts it to a threshold. Authoriser must choose D-1, D-2 or D-3 (Table D). Owner: authoriser |
+| **G16** Task 7.6 specification is not committed | `AUTHORISER DECISION REQUIRED` | No | **Yes** | No | No | Tasks 3.4, 4.3, 7.5 and 7.6 exist **only in the uncommitted working tree**; the committed plan ends at Task 7.4. The release candidate implements a spec absent from version control. Authoriser must either commit the reviewed plan or accept an unversioned specification. Owner: authoriser |
+
+**Nothing above is closed by a unit test.** G2, G3, G4, G7, G12 and G13 require
+production execution. G5 and G6 are **not** closed merely because a deterministic
+canary can proceed — they bound what the canary may be said to prove.
+
+---
+
+# 11-bis. Gap register — narrative window impact
 
 | Gap | Current status | Blocks starting window? | Blocks enabling canary? | Blocks final GO? | Required evidence / acceptance |
 |---|---|---|---|---|---|
@@ -772,10 +911,67 @@ authorised change and is blocked regardless of this window's outcome.**
 | **G11** production disk capacity never measured | **Open — blocking.** No figure exists anywhere. | **Yes** | **Yes** | **Yes** | §2 M1–M8 measured, formula evaluated, `free_after_backup ≥ required_headroom`, authoriser accepts the derived threshold. |
 | **G12** `post_deploy_verify.sh` never run live | Open. Statically verified only (parses, read-only, 15 checks present). | No | No | **Yes** | C2.5 executes it against the running stack; output pasted into §5. A check that misreads a live container surfaces only here. |
 | **G13** rollback never drilled | Open. Implemented and unit-tested; no process ever stopped/scaled. | No | No | **Yes** | §9 executed in full with all seven rows PASS. |
-| **G14** no worker identity on jobs | **Newly discovered.** `_claim_next_processing_job` records `status`, `stage`, `started_at`, `heartbeat_at`, `updated_at`, `attempts` — and no claiming-worker field. Step 3's "which worker claimed it" cannot be answered from Mongo. | No | No | No — **but** it weakens the evidence | §8 substitutes code-path detection (page-evidence presence), which is strictly stronger than container attribution, plus log correlation. **Recommended pre-window change:** add a `claimed_by` field to the claim update so attribution is first-class. Small, additive, and it would make Step 3's assertion directly queryable. Not done here: it changes the claim path, which is outside this preparation task's scope. |
+| **G14** no worker identity on jobs | **ADJUDICATED → ACCEPTED LIMITATION.** See §11.1. Task 7.6 requires proof that the correct *pipeline version executed*, not proof of *container identity*. The claim path is left unmodified. | No | No | No | Behavioural evidence (§8) is authoritative; container logs corroborate. Persistent worker-instance attribution deferred to a later observability task. |
 
 **No gap in this table is closed by a unit test.** G3, G4, G11, G12 and G13 all
 require production execution inside the authorised window.
+
+## 11.1 G14 adjudication — worker identity
+
+**Question.** Does Task 7.6 require (A) proof of the worker/container identity
+that claimed the job, or (B) proof that the correct pipeline version actually
+executed?
+
+**Answer: (B).** Every acceptance assertion in Task 7.6 is stated in terms of
+job/page/evidence state. Quoting the specification:
+
+- *"only those jobs have `pipeline_version=unified_v1`"* — job state.
+- *"clean fixture ends `completed`, has PASS page verdicts, a published
+  extraction head, and zero intervention/model rows"* — page/head/ledger state.
+- *"mixed fixture checkpoints/reclaims remaining pages and reaches the expected
+  completed/review state"* — job/page state.
+- *"no non-canary organisation acquires unified page rows or intervention
+  rows"* — page/ledger state.
+
+And the Interfaces clause: *"The worker claim predicate and processor dispatch
+honour the persisted job version, so a canary worker cannot accidentally
+claim/upgrade every tenant."* The property named is **claim-predicate
+correctness**, evidenced by what did or did not get processed — not by a
+recorded container name.
+
+**The word "worker" appears in Task 7.6 only as the subject of a behaviour, never
+as a value to be persisted or asserted.** No sub-step asks for worker identity.
+
+**Evidence chain actually available, and why it is sufficient:**
+
+```text
+unified_v1 executed  =>  document_ocr_pages rows exist  AND  head published
+legacy_v0  executed  =>  no page rows            AND  no head
+```
+
+This is a **stronger** guarantee than `claimed_by` would provide. A persisted
+worker name records *who picked the job up*; the page-evidence signature records
+*which code actually ran*. A mislabelled or spoofed worker name could not change
+the second. Combined with:
+
+- the disjoint claim predicates (proven in `test_pipeline_routing_boundary.py`),
+- `post_deploy_verify.sh` asserting disjointness against the live containers,
+- per-container log correlation (§8 supplementary),
+
+Task 7.6's assertions are fully satisfiable without schema change.
+
+**Decision: classify G14 as an observability enhancement / accepted limitation.**
+
+- `_claim_next_processing_job()` is **not modified**. It is concurrency-sensitive,
+  currently verified, and adding a Mongo write immediately before a production
+  canary would introduce risk that closes no acceptance criterion.
+- Persisted execution artifacts (page rows, heads, ledger) are the **authoritative**
+  evidence of pipeline execution.
+- Container logs are retained as **corroboration only**.
+- Persistent worker-instance attribution is **deferred to a later observability
+  task**, outside Phase 7.
+
+This is not a code-level blocker.
 
 ---
 
@@ -795,3 +991,99 @@ require production execution inside the authorised window.
 
 Execution order: **§6 Stage A → §2 → §3 → §4 → §5 (before) → §6 Stage B →
 §6 Stage C → §7 → §8 → §9 → §5 (after) → §10 decision.**
+
+---
+
+# 13. Production change request (for authorisation)
+
+## Release
+
+| Field | Value |
+|---|---|
+| **Candidate commit SHA** | `<FROZEN_SHA>` — see §13.1 |
+| Branch holding the candidate | `integrate/key-date-eot` |
+| Production baseline SHA | **UNKNOWN — must be read from the server** (`git rev-parse HEAD` on `contraclaim:/opt/contraclaim-dms/projectDMS`). The runbook default is not trustworthy; production has sat on `codex/*` branches for long stretches. |
+| Task reference | Task 7.6 Steps 1–5, plan `2026-08-14-unified-page-extraction-phases-0-7.md` |
+| Approved canary organisation | `<ORG_ID>` — one only, demo data |
+| Window duration | `<HH:MM>` to `<HH:MM>` UTC on `<DATE>` |
+| Execution package | this document |
+
+## Authorised mutations — exhaustive
+
+1. Create a verified backup of production `.env`, uploads volume, and Mongo.
+2. `git fetch` + `git pull --ff-only` to `<FROZEN_SHA>` on the branch production tracks.
+3. Rebuild images for **`backend`, `document-worker`, `document-worker-canary` only**.
+4. Recreate those three services (`up -d --no-deps`).
+5. Apply migration `20260814_0001` (creates 5 indexes; additive, no data rewrite).
+6. Edit `.env`: set `UNIFIED_EXTRACTION_CANARY_ORG_IDS=<ORG_ID>`,
+   `DOCUMENT_WORKER_CANARY_REPLICAS=1`, keeping
+   `DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0`.
+7. Recreate `document-worker` and `document-worker-canary` to pick that up.
+8. Upload and process **demo-organisation fixtures F1–F6 only**.
+9. Execute the §9 rollback: clear the allowlist, set canary replicas to 0,
+   recreate both workers.
+10. Write evidence into this document.
+
+**Nothing else.** Any action not on this list is outside the authorisation.
+
+## Explicitly prohibited
+
+- Setting `UNIFIED_EXTRACTION_ENABLED=true` — global enablement is a **separate**
+  authorised change, blocked regardless of this window's outcome.
+- Enabling `RAR_UPLOAD_ENABLED` under any circumstance.
+- Adding any organisation to the allowlist beyond the single approved `<ORG_ID>`.
+- Processing any non-demo or real-tenant document.
+- Downgrading any hard gate in §10 to a warning in order to proceed.
+- Rewriting `pipeline_version` on any existing job.
+- Deleting page evidence, extraction heads, intervention rows, or running
+  `docker prune`.
+- Rebuilding or recreating services other than the three named above.
+
+## Automatic abort authority
+
+**The operator may immediately execute the §9 rollback on any hard-gate failure
+without obtaining a second approval.** Rollback is pre-authorised. Stopping is
+never the action that requires permission; continuing past a failed gate is.
+
+## Acceptance limitation — must be reproduced verbatim in the sign-off
+
+> This canary validates the deterministic unified extraction path and
+> tenant/version isolation. It does not constitute validation of the production
+> LLM/Vision reconstruction ladder while G5/G6 remain open/accepted limitations.
+
+## 13.1 Authorisation text
+
+> I authorise a production change window on **`<DATE>` from `<START>` to `<END>`
+> UTC** to execute Task 7.6 Steps 1–5 exactly as written in
+> `docs/operations/unified_extraction_canary_execution_package.md`, deploying
+> commit **`<FROZEN_SHA>`**.
+>
+> **Authorised mutations:** the ten items enumerated in §13, and no others.
+>
+> **Prohibited:** global enablement (`UNIFIED_EXTRACTION_ENABLED=true`); RAR
+> enablement; any organisation beyond **`<ORG_ID>`**; processing any non-demo
+> document; downgrading any hard gate; rewriting `pipeline_version`; deleting
+> any evidence.
+>
+> **Resource threshold decision (G15):** I select option **`<D-1 | D-2 | D-3>`**
+> from §5 Table D. Where D-2 or D-3 is chosen, the thresholds are: `<values>`.
+>
+> **Capacity (G11):** I accept the disk threshold derived in-window by the §2
+> formula and recorded in §5 Table E. If `free_after_backup < required_headroom`,
+> the window ends with NO-GO and no deployment occurs.
+>
+> **Specification versioning (G16):** I `<have committed the reviewed plan / accept
+> that Task 7.6's specification is currently uncommitted>`.
+>
+> **Accepted limitations:** G1a, G5, G6, G8, G9, G10, G14. I acknowledge that this
+> canary validates the deterministic unified extraction path and tenant/version
+> isolation, and **does not** constitute validation of the production LLM/Vision
+> reconstruction ladder while G5/G6 remain open.
+>
+> **Abort authority:** the operator may execute the §9 rollback immediately on any
+> hard-gate failure without seeking further approval.
+>
+> Global enablement remains a separate authorised change.
+>
+> Authoriser: `<name>`  ·  Role: `<role>`  ·  Date: `<date>`
+> Operator: `<name>`  ·  Date: `<date>`
