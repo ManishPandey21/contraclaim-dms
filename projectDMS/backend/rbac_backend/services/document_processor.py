@@ -91,6 +91,9 @@ class DocumentProcessor:
         # money at runtime.
         self.quality_gate = quality_gate or ExtractionQualityGate()
         self.fallback_ladder = fallback_ladder
+        self.fallback_max_pages_per_document = int(
+            getattr(settings, "EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT", 0)
+        )
 
     async def _apply_quality_gate(
         self,
@@ -107,6 +110,10 @@ class DocumentProcessor:
         such is what produced 12 paid calls on a correct document.
         """
         needs_review: list = []
+        # The cap lives here, not in the ladder: the ladder sees one page at a
+        # time and cannot know how many siblings have already spent.
+        budget = max(0, int(getattr(self, "fallback_max_pages_per_document", 0)))
+        spent = 0
 
         for page in getattr(extraction, "pages", []) or []:
             verdict = self.quality_gate.assess(page, tables=page.tables or None)
@@ -117,7 +124,8 @@ class DocumentProcessor:
                 continue
 
             outcome = None
-            if self.fallback_ladder is not None:
+            if self.fallback_ladder is not None and spent < budget:
+                spent += 1
                 resolved = await self.fallback_ladder.resolve(
                     source, page, verdict, document_id=document_id
                 )
@@ -127,6 +135,14 @@ class DocumentProcessor:
                     page.text = resolved.page.text
                     page.source = resolved.page.source
                     continue
+            elif self.fallback_ladder is not None:
+                logger.warning(
+                    "[document_pipeline] Fallback budget of %s page(s) exhausted "
+                    "for %s; page %s goes to human review unattempted",
+                    budget,
+                    document_id,
+                    page.number,
+                )
 
             page.needs_review = True
             needs_review.append(page.number)

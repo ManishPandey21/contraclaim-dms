@@ -90,6 +90,9 @@ class PageExtractionEngine:
         self.classifier = PageClassifier(
             min_text_chars_per_page=policy.min_text_chars_per_page
         )
+        #: Set when the source could not be opened at all, so the resulting
+        #: unrenderable page can carry a reason a human can act on.
+        self._open_error: Optional[str] = None
 
     async def extract(
         self, source: Path, *, retry_pages: Optional[Sequence[int]] = None
@@ -102,8 +105,11 @@ class PageExtractionEngine:
         else:
             candidates = [
                 number
-                for number, (text, _, _) in sorted(native.items())
-                if len(text.strip()) < self.policy.min_text_chars_per_page
+                for number, (text, classification, _) in sorted(native.items())
+                # A page that could not be rendered cannot be OCR'd either;
+                # sending it would burn a metered OCR call to learn nothing.
+                if classification.page_class is not PageClass.UNRENDERABLE
+                and len(text.strip()) < self.policy.min_text_chars_per_page
             ]
 
         attempted, deferred = self._split_at_attempt_boundary(candidates)
@@ -225,7 +231,11 @@ class PageExtractionEngine:
                 and status is not PageStatus.OCR_COMPLETED
             ):
                 status = PageStatus.UNRENDERABLE
-                error = error or "Page could not be rendered or extracted"
+                error = (
+                    error
+                    or getattr(self, "_open_error", None)
+                    or "Page could not be rendered or extracted"
+                )
 
             if number in overrides:
                 text = overrides[number]
@@ -254,18 +264,25 @@ class PageExtractionEngine:
         import pdfplumber
 
         pages: Dict[int, _NativePage] = {}
-        with pdfplumber.open(source) as pdf:
-            for index, page in enumerate(pdf.pages, start=1):
-                classification = self.classifier.classify(page)
-                try:
-                    text = page.extract_text() or ""
-                except Exception:
-                    text = ""
-                try:
-                    tables = page.extract_tables() or []
-                except Exception:
-                    tables = []
-                pages[index] = (text, classification, tables)
+        try:
+            with pdfplumber.open(source) as pdf:
+                for index, page in enumerate(pdf.pages, start=1):
+                    classification = self.classifier.classify(page)
+                    try:
+                        text = page.extract_text() or ""
+                    except Exception:
+                        text = ""
+                    try:
+                        tables = page.extract_tables() or []
+                    except Exception:
+                        tables = []
+                    pages[index] = (text, classification, tables)
+        except Exception as exc:
+            # A document that will not open is a visible unrenderable page, not
+            # an opaque crash. It then flows through the normal review path
+            # instead of surfacing as a generic job failure with no evidence.
+            logger.warning("Could not open %s for extraction: %s", source.name, exc)
+            self._open_error = str(exc)[:500]
 
         if not pages:
             pages[1] = (

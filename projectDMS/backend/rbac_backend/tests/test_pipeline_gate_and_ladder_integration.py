@@ -78,10 +78,12 @@ class _RecordingLadder:
         return ResolvedPage(page=page, outcome=self.outcome)
 
 
-def _processor(gate: Any, ladder: Any = None) -> DocumentProcessor:
+def _processor(gate: Any, ladder: Any = None, budget: int = 10) -> DocumentProcessor:
     processor = DocumentProcessor.__new__(DocumentProcessor)
     processor.quality_gate = gate
     processor.fallback_ladder = ladder
+    # __new__ skips __init__; the per-document ladder budget must be supplied.
+    processor.fallback_max_pages_per_document = budget
     return processor
 
 

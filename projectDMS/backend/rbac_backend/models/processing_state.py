@@ -96,6 +96,7 @@ _UNRESOLVED_PAGE_STATUSES: FrozenSet[PageStatus] = frozenset(
         PageStatus.OCR_DEFERRED,
         PageStatus.OCR_DISABLED,
         PageStatus.OCR_PENDING,
+        PageStatus.OCR_EMPTY,
         PageStatus.UNRENDERABLE,
     }
 )
@@ -103,8 +104,12 @@ _UNRESOLVED_PAGE_STATUSES: FrozenSet[PageStatus] = frozenset(
 #: Only pages actually submitted to OCR consume a retry allowance. A DEFERRED
 #: page never ran, so charging it an attempt would burn the budget for work
 #: that has not been tried even once.
+#:
+#: OCR_EMPTY *does* consume one: the OCR ran and produced nothing, and if it
+#: were remaining-but-free the job would resume forever without ever exhausting
+#: its attempts and reaching human review.
 _ATTEMPT_CONSUMING_STATUSES: FrozenSet[PageStatus] = frozenset(
-    {PageStatus.OCR_FAILED}
+    {PageStatus.OCR_FAILED, PageStatus.OCR_EMPTY}
 )
 
 

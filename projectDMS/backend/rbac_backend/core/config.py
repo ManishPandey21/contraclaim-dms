@@ -157,6 +157,22 @@ class Settings(BaseSettings):
     DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT: int = Field(
         default=0, validation_alias="DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT"
     )
+
+    # The LLM/Vision extraction fallback. Off by default: it is the only part
+    # of the ingestion pipeline that spends money at runtime, and the
+    # deterministic quality gate must be measured on real traffic before it is
+    # trusted to decide what escalates.
+    EXTRACTION_FALLBACK_ENABLED: bool = Field(
+        default=False, validation_alias="EXTRACTION_FALLBACK_ENABLED"
+    )
+    # A finite default on purpose. An unbounded cap would let one pathological
+    # upload escalate every page with no ceiling on what it costs.
+    EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: int = Field(
+        default=5, validation_alias="EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT"
+    )
+    EXTRACTION_FALLBACK_DPI: int = Field(
+        default=150, validation_alias="EXTRACTION_FALLBACK_DPI"
+    )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
     

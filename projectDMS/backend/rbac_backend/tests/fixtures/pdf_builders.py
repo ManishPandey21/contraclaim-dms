@@ -150,3 +150,14 @@ def build_clean_native_pdf(path: Path) -> Path:
     _add_page(pdf, media_box=A4_PORTRAIT, lines=lines)
 
     return _save(pdf, path)
+
+
+def build_corrupt_pdf(path: Path) -> Path:
+    """A file with a PDF header whose body is unusable.
+
+    Stands in for the truncated or damaged upload that must reach human review
+    rather than being reported as an empty but successfully processed document.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" + b"\x00" * 512)
+    return path
