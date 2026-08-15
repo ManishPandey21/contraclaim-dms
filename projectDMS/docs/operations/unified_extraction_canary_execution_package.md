@@ -602,7 +602,7 @@ no real tenant document may be used.**
 | Page evidence rows | `document_ocr_pages` documents |
 | Head / current run identity | `document_extraction_heads.{extraction_run_id, expected_page_numbers, published_at}` |
 | Attempts | `document_processing_jobs.attempts` |
-| Gate verdicts | page `status` + `needs_review`; verdicts `pass` / `not_checkable` / `fail` / conflicting |
+| Gate verdicts | page `quality_verdict` + `quality_checks` + `needs_review`; verdicts `pass` / `not_checkable` / `fail` / conflicting. **Record the full per-page verdict distribution, not just failures** — see the NOT_CHECKABLE note below. |
 | Interventions | `page_extraction_interventions` rows for the document |
 | Processing state | `queued`/`processing`/`completed`/`stored_only`/`partially_processed`/`human_review_required`/`failed` |
 | Downstream persisted document | `documents` row: `file_path`, extracted text, metadata |
@@ -617,6 +617,40 @@ F1 clean document MUST produce:
   - exactly one published head, expected_page_numbers complete
   - page_extraction_interventions count UNCHANGED  (zero model calls, zero cost)
 ```
+
+### Required: per-page verdict distribution
+
+```bash
+$DC exec -T backend python -c '
+import os, json, collections
+from pymongo import MongoClient
+db = MongoClient(os.environ["DATABASE_URL"]).get_default_database()
+ORG = os.environ["CANARY_ORG"]
+dist = collections.Counter()
+review = 0
+for p in db.document_ocr_pages.find({"organization_id": ORG},
+                                    {"quality_verdict":1,"needs_review":1}):
+    dist[p.get("quality_verdict") or "unset"] += 1
+    review += 1 if p.get("needs_review") else 0
+print(json.dumps({"verdicts": dict(dist), "pages_needing_review": review}, indent=2))'
+```
+
+**Why this is required evidence, not a nicety.** `NOT_CHECKABLE` is accepted and
+**never escalates** — by design, and correctly so: *"nothing was verified" is not
+"something is wrong"*, and treating it as such is what produced 12 paid calls on
+a correct document (`document_processor.py:122-136`). The verdict is persisted
+per page, so an unverifiable value is *recorded* as unverified rather than
+hidden — but it is **not** flagged for review.
+
+Consequence to watch during the canary: a corrupted amount in a form the repair
+pattern does not recognise (G18) parses as unverifiable and lands in
+`NOT_CHECKABLE`, not `FAIL`. It is therefore visible only in this distribution.
+
+- **F1 (clean fixture) must be all `pass`.** Any `not_checkable` on F1 is a Gate C
+  failure under C6, not a curiosity.
+- A high `not_checkable` share on F2–F4 is not an abort trigger by itself, but it
+  **must be recorded** and it bounds what the canary may claim: those pages were
+  extracted, not verified.
 
 ### ⚠ What a passing canary does **not** prove
 
@@ -917,6 +951,8 @@ Each gap is classified as exactly one of `CLOSED`, `ACCEPTED LIMITATION`,
 | **G13** rollback drill never executed | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | No | **Yes** (C8) | §9 executed in full, all 7 rows PASS. Owner: operator |
 | **G14** no worker identity on jobs | `ACCEPTED LIMITATION` | **No** — adjudicated §11.1 | No | No | No | Task 7.6 requires pipeline-execution proof, not container identity. Claim path unmodified. Deferred to a later observability task. Owner: engineering |
 | **G15** resource acceptance thresholds do not exist | `AUTHORISER DECISION REQUIRED` | No | **Yes** (A10) | No | **Yes** (C13) | Only an *idle* baseline exists and the plan never converts it to a threshold. Authoriser must choose D-1, D-2 or D-3 (Table D). Owner: authoriser |
+| **G18** split-digit repair coverage is narrower than the corruption space | `ACCEPTED LIMITATION` | No | No | No | No | `detect_split_digits` repairs all 9 measured patterns but returns `None` for currency-prefixed (`Rs 1 34,460`), bracketed negatives (`(1 34,460)`), signed (`-1 34,460`), suffixed (`1 34,460/-`), space-grouped (`1 900 000`), Indian lakh grouping (`9,50,000`) and two-leading-digit (`12 3,456`) forms. **Verified to fail CLOSED, not open:** no repair proposed → the corrupted value fails `check_row`/`check_subtotal` → FAIL verdict → `needs_review=True` → the document cannot report `completed` (`gate.py:132-134`, `document_processor.py:164-176`). So an unrecognised corruption becomes a flagged page, never a silent wrong value. Widening the pattern is a later task; doing it now would change gate behaviour immediately before a canary. Owner: engineering |
+| **G19** "12 and 9 are the complete pattern set" is a generalisation from one document | `ACCEPTED LIMITATION` | No | No | No | **Yes — for global rollout** | The counts are measured facts about **one** 9-page claim PDF, not a proven taxonomy of the corpus. The canary tests one approved organisation's demo fixtures, so the narrow basis is proportionate. Before global rollout the gate should be run over a broader corpus and the pattern set re-derived. Owner: engineering + authoriser |
 | **G17** spec cites an untracked source document | `AUTHORISER DECISION REQUIRED` | No | No | No | No | The now-committed plan cites `docs/architecture/mixed_pdf_ingestion_and_summary_plan_2026-08-13.md` twice as authoritative — for the golden page-routing fixture ("Do not edit without re-measuring") and for the Phase 6 hard gates. That 453-line measurement document is **untracked**, so the specification's cited evidence is not in version control. Does **not** block the Task 7.6 canary: the Phase 6 gates it grounds are already implemented and test-covered, and the canary does not re-derive them. Not committed here — vouching for 453 lines this session did not author and has not reviewed is the authoriser's call. Owner: authoriser |
 | **G16** governing specification not version-controlled | `CLOSED` | No | No | No | No | Committed as `4ef134d` after review: purely additive at task level (3.4, 4.3, 7.5, 7.6 added, none removed), deletions are in-place refinements matching what was built, no conflict markers/secrets/unrelated content, every named file exists. Included in the release candidate. |
 
