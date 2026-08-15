@@ -1,5 +1,27 @@
 # Unified extraction canary — production execution package (Task 7.6 Steps 1–5)
 
+> # ⛔ RELEASE FREEZE STOPPED — DO NOT REQUEST AUTHORISATION
+>
+> An adversarial review of the Phase 6 quality gate, **independently confirmed by
+> direct probe**, found defects that invalidate the premise this canary would be
+> authorised on. The deterministic gate does not do the thing being certified.
+>
+> | | Confirmed defect |
+> |---|---|
+> | **G18** | Unrecognised corruption reports **`pass`**, not FAIL. One clean peer row promotes the whole page (`gate.py:212-216`). **Fails OPEN.** |
+> | **G20** | Recognised repairs are computed then **discarded**; `combined_text` is frozen before the gate runs. Hard gate (b) is vacuous in the pipeline. |
+> | **G21** | Gate verdicts are **never persisted** — `record_pages` runs before the gate. The canary's own abort criteria are unmeasurable. |
+>
+> **A previous revision of this document claimed G18 "fails closed". That claim
+> was wrong, was mine, and is retracted** — it was tested only against a
+> single-row table. §11.0 and the G18 row now carry the correction.
+>
+> No production command has been run. The candidate is **not** a release
+> candidate until these are fixed and re-verified. Everything below remains
+> structurally valid as a *procedure*, but must not be executed.
+>
+> ---
+>
 > ## STATUS: PREPARED — NOT AUTHORISED, NOT EXECUTED
 >
 > This package contains no executed production commands. It is written to be run
@@ -648,6 +670,12 @@ pattern does not recognise (G18) parses as unverifiable and lands in
 
 - **F1 (clean fixture) must be all `pass`.** Any `not_checkable` on F1 is a Gate C
   failure under C6, not a curiosity.
+- **F1 fixture design constraint — verified by direct probe.** An amount cell
+  carrying a currency prefix (`Rs 134,460`) is `NOT_CHECKABLE` even when the
+  arithmetic is entirely correct, because the cell does not parse as a number.
+  Select F1 so its amount columns are bare numerics; otherwise C6 fails for a
+  benign formatting reason and the window aborts on a false signal. Confirm the
+  chosen F1 produces all-`pass` **before** the window, not during it.
 - A high `not_checkable` share on F2–F4 is not an abort trigger by itself, but it
   **must be recorded** and it bounds what the canary may claim: those pages were
   extracted, not verified.
@@ -951,7 +979,9 @@ Each gap is classified as exactly one of `CLOSED`, `ACCEPTED LIMITATION`,
 | **G13** rollback drill never executed | `PRODUCTION-WINDOW EVIDENCE REQUIRED` | No | No | No | **Yes** (C8) | §9 executed in full, all 7 rows PASS. Owner: operator |
 | **G14** no worker identity on jobs | `ACCEPTED LIMITATION` | **No** — adjudicated §11.1 | No | No | No | Task 7.6 requires pipeline-execution proof, not container identity. Claim path unmodified. Deferred to a later observability task. Owner: engineering |
 | **G15** resource acceptance thresholds do not exist | `AUTHORISER DECISION REQUIRED` | No | **Yes** (A10) | No | **Yes** (C13) | Only an *idle* baseline exists and the plan never converts it to a threshold. Authoriser must choose D-1, D-2 or D-3 (Table D). Owner: authoriser |
-| **G18** split-digit repair coverage is narrower than the corruption space | `ACCEPTED LIMITATION` | No | No | No | No | `detect_split_digits` repairs all 9 measured patterns but returns `None` for currency-prefixed (`Rs 1 34,460`), bracketed negatives (`(1 34,460)`), signed (`-1 34,460`), suffixed (`1 34,460/-`), space-grouped (`1 900 000`), Indian lakh grouping (`9,50,000`) and two-leading-digit (`12 3,456`) forms. **Verified to fail CLOSED, not open:** no repair proposed → the corrupted value fails `check_row`/`check_subtotal` → FAIL verdict → `needs_review=True` → the document cannot report `completed` (`gate.py:132-134`, `document_processor.py:164-176`). So an unrecognised corruption becomes a flagged page, never a silent wrong value. Widening the pattern is a later task; doing it now would change gate behaviour immediately before a canary. Owner: engineering |
+| **G18** unrecognised corruption reports PASS — **fails OPEN** | **`BLOCKER`** | **YES** | **YES** | **YES** | **YES** | **A previous revision of this row claimed "verified to fail CLOSED". That claim was WRONG and is retracted.** It was tested only against a single-row table. With a clean peer row — the normal shape of any BOQ page — an unparseable amount yields `NOT_CHECKABLE` for that row, and `_aggregate`'s `any(...)` (`gate.py:212-216`) promotes the page to **`pass`, `escalates=False`**. Confirmed by direct probe for `Rs 1 34,460`, `(1 34,460)`, `-1 34,460`, `1 900 000`, `12 3,456`, **and for the measured corruption `1 ,900,000` itself**. Owner: engineering — must be fixed before any canary |
+| **G20** recognised repairs are computed and discarded | **`BLOCKER`** | **YES** | **YES** | **YES** | **YES** | `verdict.repairs` is never read outside the quality package (`grep '\.repairs'` → only `quality/gate.py`, `quality/models.py`). `extraction.combined_text` is frozen at `engine.py:156`, *before* the gate runs at `document_processor.py:375`, and becomes `raw_ocr_text` at `:380`. So hard gate (b) — "all 9 detected with correct repairs" — is true at unit level and **vacuous in the pipeline**: the indexed text still carries `1 ,900,000`, which parses downstream as `1`. This is the ₹2.5-crore failure mode the evidence document was written to prevent, still live. Also violates the plan's own invariant (plan line 34: must not suppress "repairs"). Owner: engineering |
+| **G21** gate verdicts are never persisted — canary is unobservable | **`BLOCKER`** | **YES** | **YES** | **YES** | **YES** | `record_pages` is called only inside `engine.extract()` (`engine.py:142`), *before* the gate mutates the pages (`document_processor.py:136-138`). No second write exists. `quality_verdict` is therefore always `None` in `document_ocr_pages`. **The per-page verdict-distribution query added to §7 of this package would bucket 100% of pages as `unset`**, and Gate C6 cannot be evaluated. Owner: engineering |
 | **G19** "12 and 9 are the complete pattern set" is a generalisation from one document | `ACCEPTED LIMITATION` | No | No | No | **Yes — for global rollout** | The counts are measured facts about **one** 9-page claim PDF, not a proven taxonomy of the corpus. The canary tests one approved organisation's demo fixtures, so the narrow basis is proportionate. Before global rollout the gate should be run over a broader corpus and the pattern set re-derived. Owner: engineering + authoriser |
 | **G17** spec cited an untracked source document | `CLOSED — SOURCE VERSIONED` | No | No | No | No | Committed unedited at **`26b7343`** after a full 453-line review (§11.0). Arithmetic independently re-derived and confirmed; fixtures match entry for entry; nothing contradicted or obsolete; no secrets; the real party data it contains was already committed in seven other files, so no new exposure. Content deliberately **not** edited to agree with current code. Inherited limitations recorded as G18/G19. |
 | **G16** governing specification not version-controlled | `CLOSED` | No | No | No | No | Committed as `4ef134d` after review: purely additive at task level (3.4, 4.3, 7.5, 7.6 added, none removed), deletions are in-place refinements matching what was built, no conflict markers/secrets/unrelated content, every named file exists. Included in the release candidate. |
