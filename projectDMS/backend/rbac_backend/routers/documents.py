@@ -25,6 +25,7 @@ from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..services.archive_policy import ArchiveIntakePolicy
 from ..services.document_service import (
     DocumentConflictError,
     DocumentService,
@@ -578,8 +579,11 @@ class DocumentController:
                 project_id=project_id,
             )
 
-            # Validate required fields
-            if not file.filename or not letter_no:
+            # A filename is always required. The letter-number requirement is
+            # deferred until after MIME detection below, because archives are
+            # exempt and we cannot know it is an archive until the bytes are
+            # sniffed.
+            if not file.filename:
                 raise DocumentError("Missing required fields", status.HTTP_400_BAD_REQUEST)
 
             max_size = max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
@@ -600,6 +604,22 @@ class DocumentController:
                         raise DocumentError(
                             f"Invalid file: {validation_result.error}",
                             status.HTTP_415_UNSUPPORTED_MEDIA_TYPE
+                        )
+
+                    # Letter numbers identify correspondence. An archive is a
+                    # container, not a letter, so it is exempt - but the
+                    # exemption can only be decided once the MIME is known.
+                    detected_mime = validation_result.mime_type
+                    archive_policy = ArchiveIntakePolicy(
+                        rar_enabled=settings.RAR_UPLOAD_ENABLED
+                    )
+                    if (
+                        archive_policy.requires_letter_number(detected_mime)
+                        and not letter_no
+                    ):
+                        raise DocumentError(
+                            "Letter number is required",
+                            status.HTTP_400_BAD_REQUEST,
                         )
 
                     # --- ANTIVIRUS STREAM SCAN ---
@@ -754,11 +774,22 @@ class DocumentController:
                 },
             )
 
-            # Schedule background processing if needed
-            if kwargs.get('ocr_enabled', False):
+            # Schedule background processing if needed. Archives are stored
+            # intact and never queued for extraction, whatever the OCR flag says.
+            if kwargs.get('ocr_enabled', False) and archive_policy.creates_processing_job(
+                detected_mime
+            ):
                 await self.document_service.queue_document_processing(
                     document,
                     store_result.get("filepath_local") or store_result.get("filepath_s3"),
+                )
+            else:
+                logger.info(
+                    "[document_pipeline] No extraction job created for %s "
+                    "(mime=%s, ocr_enabled=%s)",
+                    spooled.filename,
+                    detected_mime,
+                    kwargs.get('ocr_enabled', False),
                 )
 
             return document
