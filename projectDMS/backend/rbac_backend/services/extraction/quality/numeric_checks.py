@@ -39,6 +39,34 @@ _NUMERIC = re.compile(r"^-?[\d,]*\.?\d+$")
 _SPLIT_DIGIT = re.compile(r"^(\d)\s+([,\d][\d,]*(?:\.\d+)?)$")
 
 
+def is_unreadable_amount(raw: Optional[str]) -> bool:
+    """True when a cell carries a number we cannot safely interpret.
+
+    This is the line between "the check did not apply" and "the check applied
+    and we could not read the value". Getting it wrong in either direction is
+    expensive:
+
+      * treating an unreadable amount as NOT_CHECKABLE let a corrupted monetary
+        value ride through to page PASS whenever a clean sibling row existed
+        (G18) - the gate reported success over a number it never read;
+      * treating every unparseable cell as corruption would escalate a repeated
+        header row ("Amount") or an empty provisional cell, which is precisely
+        the false escalation the gate was built to avoid.
+
+    The discriminator is whether the cell contains digits. A cell with digits
+    that will not parse is a damaged number. A cell with no digits is
+    structural noise - a header, a label, a blank.
+    """
+    if raw is None:
+        return False
+    text = str(raw).strip()
+    if not text:
+        return False
+    if parse_amount(text) is not None:
+        return False
+    return any(character.isdigit() for character in text)
+
+
 def parse_amount(raw: Optional[str]) -> Optional[Decimal]:
     """Parse a grouped numeric literal, or None when it is not a number."""
     if raw is None:
@@ -95,7 +123,24 @@ def check_row(values: Sequence[str], roles: Sequence[ColumnRole]) -> CheckResult
             detail="column roles not established",
         )
 
-    amount = parse_amount(_column(values, roles, ColumnRole.AMOUNT))
+    raw_amount = _column(values, roles, ColumnRole.AMOUNT)
+
+    # An AMOUNT column was established and this row put a damaged number in it.
+    # The check applies; we simply cannot read the value. That is a blocking
+    # condition, not "nothing to verify" - see is_unreadable_amount.
+    if is_unreadable_amount(raw_amount):
+        return CheckResult(
+            name=name,
+            verdict=Verdict.FAIL,
+            detail=(
+                f"amount {str(raw_amount).strip()!r} could not be interpreted; "
+                "the amount column is established, so this value is unverifiable "
+                "rather than uncheckable"
+            ),
+            evidence_refs=[_CANDIDATE_REF],
+        )
+
+    amount = parse_amount(raw_amount)
     rate = parse_amount(_column(values, roles, ColumnRole.RATE))
     quantity = parse_amount(_column(values, roles, ColumnRole.QUANTITY))
     nos = parse_amount(_column(values, roles, ColumnRole.NOS))
@@ -175,9 +220,25 @@ def check_subtotal(
             detail="no stated total or no amount column",
         )
 
-    amounts: List[Optional[Decimal]] = [
-        parse_amount(_column(row, roles, ColumnRole.AMOUNT)) for row in rows
-    ]
+    raw_amounts = [_column(row, roles, ColumnRole.AMOUNT) for row in rows]
+
+    # Without this the corruption disables its own corroborating check: a
+    # damaged amount made the subtotal NOT_CHECKABLE, so the one check able to
+    # contradict the row went silent exactly when it was needed.
+    unreadable = [raw for raw in raw_amounts if is_unreadable_amount(raw)]
+    if unreadable:
+        return CheckResult(
+            name=name,
+            verdict=Verdict.FAIL,
+            detail=(
+                f"{len(unreadable)} row amount(s) could not be interpreted, "
+                f"e.g. {str(unreadable[0]).strip()!r}; the subtotal cannot be "
+                "verified over an unreadable operand"
+            ),
+            evidence_refs=[_CANDIDATE_REF, "printed.subtotal"],
+        )
+
+    amounts: List[Optional[Decimal]] = [parse_amount(raw) for raw in raw_amounts]
     if any(amount is None for amount in amounts):
         return CheckResult(
             name=name,
