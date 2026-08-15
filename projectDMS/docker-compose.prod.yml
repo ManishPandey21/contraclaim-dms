@@ -262,6 +262,13 @@ services:
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "false"
       START_DOCUMENT_EXTRACTION_WORKERS: "true"
+      # Unified extraction rollout. Global switch off; organisations are opted
+      # in one at a time through the allowlist. See
+      # docs/operations/unified_extraction_canary_and_rollback.md
+      UNIFIED_EXTRACTION_ENABLED: "${UNIFIED_EXTRACTION_ENABLED:-false}"
+      UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
+      EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
+      EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
       # contract-worker is the single scheduler owner. Never flip this to true:
       # two schedulers double-fire cron jobs and the leader lock is a safety
       # net, not a licence.

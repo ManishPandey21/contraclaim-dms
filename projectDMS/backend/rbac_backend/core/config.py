@@ -173,6 +173,17 @@ class Settings(BaseSettings):
     EXTRACTION_FALLBACK_DPI: int = Field(
         default=150, validation_alias="EXTRACTION_FALLBACK_DPI"
     )
+
+    # Unified extraction rollout. Off globally; organisations are opted in one
+    # at a time through the canary allowlist. The decision is recorded on each
+    # job at creation, so changing these values never reclassifies work that is
+    # already queued.
+    UNIFIED_EXTRACTION_ENABLED: bool = Field(
+        default=False, validation_alias="UNIFIED_EXTRACTION_ENABLED"
+    )
+    UNIFIED_EXTRACTION_CANARY_ORG_IDS: str = Field(
+        default="", validation_alias="UNIFIED_EXTRACTION_CANARY_ORG_IDS"
+    )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
     
@@ -568,6 +579,11 @@ class Settings(BaseSettings):
 
         self._apply_rar_upload_gate()
         self._log_default_usage()
+
+    def canary_org_id_set(self) -> set[str]:
+        """Parse the canary allowlist into exact organisation ids."""
+        raw = self.UNIFIED_EXTRACTION_CANARY_ORG_IDS or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
 
     def _apply_rar_upload_gate(self) -> None:
         """RAR is admitted only behind an explicit, proof-backed flag.

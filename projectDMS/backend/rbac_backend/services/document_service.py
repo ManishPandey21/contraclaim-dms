@@ -23,6 +23,7 @@ from ..models.document import (
 )
 from ..models.document_metadata import extracted_metadata_updates
 from ..models.processing_state import ProcessingState, build_attempt_outcome
+from .pipeline_routing import resolve_pipeline_version
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
@@ -803,6 +804,13 @@ class DocumentService:
             # on what the bytes actually are rather than re-sniffing them
             # without the filename context intake had.
             "source_mime": getattr(document, "filetype", None),
+            # Decided once, here, and honoured by every reader. Changing the
+            # flag or allowlist later affects only new work, never this job.
+            "pipeline_version": resolve_pipeline_version(
+                organization_id=document.organization_id,
+                enabled=bool(settings.UNIFIED_EXTRACTION_ENABLED),
+                canary_org_ids=settings.canary_org_id_set(),
+            ),
             "status": "queued",
             "stage": "queued",
             "attempts": 0,
