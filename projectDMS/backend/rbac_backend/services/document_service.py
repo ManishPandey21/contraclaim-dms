@@ -22,6 +22,7 @@ from ..models.document import (
     ReferenceCreate,
 )
 from ..models.document_metadata import extracted_metadata_updates
+from ..models.processing_state import ProcessingState, build_attempt_outcome
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
@@ -806,6 +807,15 @@ class DocumentService:
             "created_at": now,
             "queued_at": now,
             "updated_at": now,
+            # Page-level resumability checkpoint. Populated after each
+            # extraction attempt so a resumed job knows exactly which pages it
+            # still owes instead of re-running the whole document.
+            "processing_state": ProcessingState.QUEUED.value,
+            "expected_page_numbers": [],
+            "resolved_page_numbers": [],
+            "remaining_page_numbers": [],
+            "page_attempts": {},
+            "resume_count": 0,
         }
         await db.document_processing_jobs.insert_one(job)
         await db.documents.update_one(
@@ -1047,6 +1057,19 @@ class DocumentService:
                 await heartbeat_task
 
         if ok:
+            # A successful processor return may still carry deferred, failed,
+            # or unrenderable pages. Trust the durable checkpoint over the
+            # boolean: marking such a document `completed` is exactly the
+            # silent-success failure this pipeline must not repeat.
+            checkpoint = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
+            checkpoint_state = checkpoint.get("processing_state")
+            if checkpoint_state == ProcessingState.PARTIALLY_PROCESSED.value:
+                await self._schedule_page_resume(job_id, document_id, checkpoint)
+                return False
+            if checkpoint_state == ProcessingState.HUMAN_REVIEW_REQUIRED.value:
+                await self._mark_human_review(job_id, document_id, checkpoint)
+                return False
+
             completed_at = datetime.utcnow()
             await db.document_processing_jobs.update_one(
                 {"_id": job_id},
@@ -1109,6 +1132,126 @@ class DocumentService:
                     failure_message = str(document_error["message"])
             await self._mark_processing_failure(latest, failure_message)
         return False
+
+    async def _schedule_page_resume(
+        self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
+    ) -> None:
+        """Requeue a job that resolved some pages but still owes others."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        remaining = list(checkpoint.get("remaining_page_numbers") or [])
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": "retrying",
+                    "stage": "awaiting_page_resume",
+                    "run_after": now + timedelta(seconds=5),
+                    "updated_at": now,
+                    "error": None,
+                },
+                "$inc": {"resume_count": 1},
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PARTIALLY_PROCESSED.value,
+                    "processing_job_id": job_id,
+                    "updatedAt": now,
+                }
+            },
+        )
+        logger.info(
+            "[document_pipeline] Document %s partially processed; %s page(s) remaining %s",
+            document_id,
+            len(remaining),
+            remaining,
+        )
+
+    async def _mark_human_review(
+        self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
+    ) -> None:
+        """Terminal, non-success state: automated recovery cannot finish this."""
+        db = await self._get_db()
+        now = datetime.utcnow()
+        remaining = list(checkpoint.get("remaining_page_numbers") or [])
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "updated_at": now,
+                    "completed_at": now,
+                }
+            },
+        )
+        await db.documents.update_one(
+            {"_id": self._validate_document_id(document_id)},
+            {
+                "$set": {
+                    "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "processing_job_id": job_id,
+                    "updatedAt": now,
+                    "processing_error": {
+                        "message": (
+                            f"{len(remaining)} page(s) could not be extracted "
+                            "automatically and need review"
+                        ),
+                        "pages": remaining,
+                        "timestamp": now,
+                        "terminal": True,
+                    },
+                }
+            },
+        )
+        logger.warning(
+            "[document_pipeline] Document %s needs human review; pages %s unresolved",
+            document_id,
+            remaining,
+        )
+
+    async def _checkpoint_extraction_attempt(
+        self,
+        db: Any,
+        job_id: Optional[str],
+        job_record: Dict[str, Any],
+        result: Any,
+    ) -> None:
+        """Persist what this extraction attempt resolved and what it still owes.
+
+        Written before the job's terminal status is decided, so a crash between
+        the two leaves the checkpoint authoritative and the job reclaimable -
+        the resumed attempt re-runs only the remaining pages into the same
+        extraction run.
+        """
+        if not job_id or db is None:
+            return
+
+        extraction = getattr(result, "extraction_result", None)
+        if extraction is None:
+            return
+
+        attempts = int(job_record.get("attempts") or 0)
+        max_attempts = int(job_record.get("max_attempts") or 3)
+        outcome = build_attempt_outcome(
+            extraction,
+            prior_page_attempts=job_record.get("page_attempts") or {},
+            attempts_exhausted=attempts >= max_attempts,
+        )
+
+        checkpoint = outcome.to_checkpoint()
+        checkpoint["updated_at"] = datetime.utcnow()
+        try:
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id}, {"$set": checkpoint}
+            )
+        except Exception:
+            logger.exception(
+                "Unable to persist extraction checkpoint for job %s", job_id
+            )
 
     async def _mark_processing_failure(self, job: Dict[str, Any], message: str) -> None:
         db = await self._get_db()
@@ -1295,6 +1438,15 @@ class DocumentService:
                     document_id,
                     f"{org_id}/{proj_id}",
                 )
+                job_record = (
+                    await db.document_processing_jobs.find_one({"_id": job_id})
+                    if job_id
+                    else None
+                ) or {}
+                # Only re-run the pages this job still owes. On the first
+                # attempt this is empty, meaning "decide per page as usual".
+                remaining_pages = list(job_record.get("remaining_page_numbers") or [])
+
                 result = await processor.process_document(
                     pdf_path=file_path,
                     path_structure=f"{org_id}/{proj_id}",
@@ -1307,6 +1459,10 @@ class DocumentService:
                     # attempt upserts into the same extraction run rather than
                     # starting a fresh one and orphaning the earlier pages.
                     extraction_run_id=str(job_id) if job_id else None,
+                    retry_pages=remaining_pages or None,
+                )
+                await self._checkpoint_extraction_attempt(
+                    db, job_id, job_record, result
                 )
             except DocumentProcessorError as exc:
                 logger.error("Document processor failed for %s: %s", document_id, exc)

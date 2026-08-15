@@ -12,10 +12,15 @@ are preserved verbatim; changing any value is a data migration.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import FrozenSet
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional
 
-from ..services.extraction.models import Completeness, PageExtractionResult
+from ..services.extraction.models import (
+    Completeness,
+    PageExtractionResult,
+    PageStatus,
+)
 
 
 class ProcessingState(str, Enum):
@@ -82,3 +87,87 @@ def derive_processing_state(
         )
 
     return ProcessingState.COMPLETED
+
+
+#: Page statuses that mean the page still owes work.
+_UNRESOLVED_PAGE_STATUSES: FrozenSet[PageStatus] = frozenset(
+    {
+        PageStatus.OCR_FAILED,
+        PageStatus.OCR_DEFERRED,
+        PageStatus.OCR_DISABLED,
+        PageStatus.OCR_PENDING,
+        PageStatus.UNRENDERABLE,
+    }
+)
+
+#: Only pages actually submitted to OCR consume a retry allowance. A DEFERRED
+#: page never ran, so charging it an attempt would burn the budget for work
+#: that has not been tried even once.
+_ATTEMPT_CONSUMING_STATUSES: FrozenSet[PageStatus] = frozenset(
+    {PageStatus.OCR_FAILED}
+)
+
+
+@dataclass(frozen=True)
+class ProcessingAttemptOutcome:
+    """What one extraction attempt produced, as a durable checkpoint.
+
+    Persisted onto the job so a resumed attempt knows exactly which pages it
+    still owes, rather than re-deriving them from text or re-running pages that
+    already succeeded.
+    """
+
+    state: ProcessingState
+    expected_page_numbers: List[int] = field(default_factory=list)
+    resolved_page_numbers: List[int] = field(default_factory=list)
+    remaining_page_numbers: List[int] = field(default_factory=list)
+    page_attempts: Dict[str, int] = field(default_factory=dict)
+    attempts_exhausted: bool = False
+
+    def to_checkpoint(self) -> Dict[str, Any]:
+        """Render the fields the durable job record stores."""
+        return {
+            "processing_state": self.state.value,
+            "expected_page_numbers": list(self.expected_page_numbers),
+            "resolved_page_numbers": list(self.resolved_page_numbers),
+            "remaining_page_numbers": list(self.remaining_page_numbers),
+            "page_attempts": dict(self.page_attempts),
+        }
+
+
+def build_attempt_outcome(
+    result: Optional[PageExtractionResult],
+    *,
+    prior_page_attempts: Mapping[str, int],
+    attempts_exhausted: bool,
+) -> ProcessingAttemptOutcome:
+    """Derive the durable checkpoint for one extraction attempt.
+
+    A missing result is a failure, never a completion - the absence of
+    evidence must not read as evidence of success.
+    """
+    if result is None:
+        return ProcessingAttemptOutcome(state=ProcessingState.FAILED)
+
+    expected = sorted(page.number for page in result.pages)
+    remaining = sorted(
+        page.number
+        for page in result.pages
+        if page.status in _UNRESOLVED_PAGE_STATUSES
+    )
+    resolved = [number for number in expected if number not in set(remaining)]
+
+    page_attempts = {str(key): int(value) for key, value in prior_page_attempts.items()}
+    for page in result.pages:
+        if page.status in _ATTEMPT_CONSUMING_STATUSES:
+            key = str(page.number)
+            page_attempts[key] = page_attempts.get(key, 0) + 1
+
+    return ProcessingAttemptOutcome(
+        state=derive_processing_state(result, attempts_exhausted=attempts_exhausted),
+        expected_page_numbers=expected,
+        resolved_page_numbers=resolved,
+        remaining_page_numbers=remaining,
+        page_attempts=page_attempts,
+        attempts_exhausted=attempts_exhausted,
+    )
