@@ -1000,7 +1000,9 @@ Execution order: **§6 Stage A → §2 → §3 → §4 → §5 (before) → §6 
 
 | Field | Value |
 |---|---|
-| **Candidate commit SHA** | `<FROZEN_SHA>` — see §13.1 |
+| **Commit to deploy** | the tip of `integrate/key-date-eot` at authorisation time — record it here: `<SHA_AT_AUTHORISATION>` |
+| **Deployable code/config frozen at** | **`1da6276`**. No code, compose, or `.env.example` change has been made since. Verify: `git diff --stat 1da6276 <SHA> -- backend scripts docker-compose.prod.yml .env.example` must be **empty**. |
+| Commits after the code freeze | `c4104b2`, `81b1fea` — **documentation only** (this package) |
 | Branch holding the candidate | `integrate/key-date-eot` |
 | Production baseline SHA | **UNKNOWN — must be read from the server** (`git rev-parse HEAD` on `contraclaim:/opt/contraclaim-dms/projectDMS`). The runbook default is not trustworthy; production has sat on `codex/*` branches for long stretches. |
 | Task reference | Task 7.6 Steps 1–5, plan `2026-08-14-unified-page-extraction-phases-0-7.md` |
