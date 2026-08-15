@@ -4,9 +4,9 @@
 
 **Goal:** Give every upload surface page-level extraction through one shared engine running in a dedicated worker, with a deterministic quality gate and a bounded LLM/Vision fallback that never fabricates and never marks unresolved work complete.
 
-**Architecture:** Extract the contract path's proven page-aware OCR into a `PageExtractionEngine` behind a `PageStore` seam, with the contract path as the first adapter (behaviour-preserving). Move the durable document-job loop behind its own flag into a new `document-worker` container. Route the general path through the engine. Add `ExtractionQualityGate` — column-role aware, running unconditionally on native and OCR text alike — then gate an LLM/Vision fallback ladder behind it.
+**Architecture:** Extract the contract path's proven page-aware PDF OCR into a `PageExtractionEngine` behind a `PageStore` seam, with the contract path as the first adapter (behaviour-preserving). Move the durable document-job loop behind its own flag into a new `document-worker` container. Make `DocumentProcessor` route the validated/stored MIME through one explicit PDF/image/text/archive/unsupported dispatch; standalone images use a dedicated Tesseract image runner rather than the PDF-only OCRmyPDF runner. Persist versioned page evidence and durable remaining-page checkpoints before adding the always-on `ExtractionQualityGate`. Only the optional LLM/Vision ladder is feature-flagged.
 
-**Tech Stack:** Python 3 / FastAPI / Motor (MongoDB), `pdfplumber` 0.11.7, `pypdfium2` 5.0.0, `pikepdf` 9.10.2, `pillow` 12.3.0, `numpy` 1.26.4, OCRmyPDF CLI, pytest (no pytest-asyncio), Docker Compose.
+**Tech Stack:** Python 3 / FastAPI / Motor (MongoDB), `pdfplumber` 0.11.7, `pypdfium2` 5.0.0, `pikepdf` 9.10.2, `pillow` 12.3.0, `numpy` 1.26.4, OCRmyPDF CLI for PDFs, Tesseract CLI for standalone images, pytest (no pytest-asyncio), Docker Compose.
 
 **Source spec:** [2026-08-14-page-wise-ocr-and-image-assets-design.md](../specs/2026-08-14-page-wise-ocr-and-image-assets-design.md). Phases 8–11 are a separate plan.
 
@@ -31,6 +31,8 @@ Copied verbatim from `CLAUDE.md` and the spec. **Every task's requirements impli
 - **Contract path behaviour must not change** in Phases 1–2. It is the reference implementation being generalised.
 - **`NOT_CHECKABLE` must never escalate** to a paid model call.
 - **Model confidence may route but never accept.** An output no check corroborates and no check contradicts is `NOT_CHECKABLE`, not `PASS`.
+- **The deterministic quality gate is unconditional.** `EXTRACTION_FALLBACK_ENABLED` controls model calls only; it must not suppress gate execution, verdict persistence, repairs, or final-state derivation.
+- **`UNRENDERABLE` is unresolved, never blank and never `PASS`.** It must remain human-review eligible even when fallback is disabled or rasterization fails again.
 - `cd client && npx tsc -b` reports **146 pre-existing errors** — not a pass/fail gate. Check your files are absent from the output instead. `npm run build` is unaffected.
 
 ---
@@ -47,6 +49,7 @@ Copied verbatim from `CLAUDE.md` and the spec. **Every task's requirements impli
 | `page_classifier.py` | `PageClassifier.classify` — char density, images, tables, dims, blankness |
 | `engine.py` | `PageExtractionEngine.extract` — the deep module |
 | `page_store.py` | `PageStore` protocol; `NullPageStore` |
+| `image_ocr_runner.py` | `ImageOcrRunner`; `TesseractImageOcrRunner` — direct PNG/JPEG OCR, no PDF page mapping |
 | `source_kind.py` | `SourceKindRouter.route` |
 | `rasterizer.py` | `PageRasterizer.render_page` / `crop_region` |
 | `quality/column_roles.py` | `map_column_roles` — header → role |
@@ -66,7 +69,7 @@ Copied verbatim from `CLAUDE.md` and the spec. **Every task's requirements impli
 | File | Responsibility |
 |---|---|
 | `services/extraction_adapters/contract_page_store.py` | `ContractPageStore` — existing `contract_ocr_*` writes |
-| `services/extraction_adapters/document_page_store.py` | `DocumentPageStore` — new `document_ocr_*` collections |
+| `services/extraction_adapters/document_page_store.py` | `DocumentPageStore` — BSON-safe batch IDs and versioned `document_ocr_*` evidence |
 | `services/archive_policy.py` | `ArchiveIntakePolicy` |
 | `services/upload_policy.py` | `UploadPolicyService` |
 | `routers/upload_policy.py` | `GET /api/config/upload-policy` |
@@ -79,9 +82,11 @@ Copied verbatim from `CLAUDE.md` and the spec. **Every task's requirements impli
 | `core/config.py` | Archive MIMEs, `START_DOCUMENT_EXTRACTION_WORKERS`, gate/ladder settings |
 | `services/background_jobs.py:416-422` | Document loop behind its own flag |
 | `main.py:321-336` | Honour the new flag |
+| `worker.py` | Start/stop the document loop in the dedicated worker entrypoint |
 | `services/contracts_ingest.py:1322-1586` | Delegate to the engine |
-| `services/ocr_service.py` | Page-wise path for general documents |
-| `services/document_processor.py:88-97` | Source-kind routing |
+| `services/ocr_service.py` | Page-wise PDF path for general documents |
+| `services/document_processor.py:45-180` | Source-kind dispatch, always-on quality gate, optional fallback |
+| `services/document_service.py:757-1545` | Persist source MIME and durable page checkpoints/final states on jobs |
 | `routers/documents.py:557-764` | Archive gate, letter-number exemption |
 | `docker-compose.prod.yml` | `document-worker` service |
 | `client/src/pages/UploadPage.tsx:809` | Picker driven by served policy |
@@ -402,7 +407,7 @@ The spec flags this as a **prerequisite fix if absent** — two processes will c
 - Create: `backend/rbac_backend/tests/test_document_job_claim_atomicity.py`
 
 **Interfaces:**
-- Consumes: `DocumentService.claim_next_document_job` (read the real name from source in Step 1 and use it verbatim)
+- Consumes: the existing `DocumentService._claim_next_processing_job` atomic Mongo claim
 - Produces: a regression test that fails if the claim stops being a single atomic operation
 
 - [ ] **Step 1: Read the claim implementation and record the exact method name**
@@ -431,7 +436,7 @@ def test_claim_uses_find_one_and_update_not_find_then_update() -> None:
     import inspect
 
     source = inspect.getsource(document_service_module)
-    claim_start = source.index("async def claim_next_document_job")
+    claim_start = source.index("async def _claim_next_processing_job")
     claim_end = source.index("async def", claim_start + 10)
     claim_body = source[claim_start:claim_end]
 
@@ -499,12 +504,12 @@ git commit -m "test: assert the durable document-job claim is atomic"
 Spec §3.3 records that Phase 1's correct page mapping **depends on this measurement**, and it cannot be taken on the Windows host (no tesseract).
 
 **Files:**
-- Create: `scripts/phase0_container_measurements.sh`
+- Create: `backend/scripts/phase0_container_measurements.sh`
 - Create: `docs/architecture/phase0_extraction_measurements_2026-08-14.md`
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: a findings document recording, as measured output, the page count of `ocrmypdf --pages 1-2` on a 9-page input, and whether ClamAV in the deployed image scans RAR. Task 1.1 reads these numbers.
+- Produces: a findings document recording, as measured output, the page count of `ocrmypdf --pages 1-2` on a 9-page input, and whether the deployed clamd detects the EICAR test signature **inside a valid, passwordless RAR**. A RAR header or configuration line is not proof of inner-member inspection. Task 1.1 reads the page count; Task 5.1 may enable RAR only when `RAR_INNER_SCAN_PROVEN=yes`.
 
 - [ ] **Step 1: Write the measurement script**
 
@@ -552,15 +557,31 @@ with pikepdf.open(sys.argv[1]) as pdf:
     print("MEASURED_OUTPUT_PAGE_COUNT:", len(pdf.pages))
 PY
 
-echo "=== 2. ClamAV RAR support ==="
+echo "=== 2. ClamAV RAR inner-member inspection ==="
 clamscan --version || true
-python - <<'PY'
-# A tiny RAR v4 header is enough to see whether clamd recognises the format.
-open("/tmp/phase0_probe.rar", "wb").write(b"Rar!\x1a\x07\x00" + b"\x00" * 64)
-print("wrote /tmp/phase0_probe.rar")
-PY
-clamdscan --stream /tmp/phase0_probe.rar || true
-echo "Check clamd.conf for ScanRAR:"
+
+# PHASE0_RAR_EICAR must point to an operator-supplied, valid, passwordless RAR
+# containing exactly one EICAR test file. Do not commit the archive. A truncated
+# RAR header is invalid and cannot prove archive-member inspection.
+if [[ -z "${PHASE0_RAR_EICAR:-}" || ! -f "${PHASE0_RAR_EICAR}" ]]; then
+  echo "RAR_INNER_SCAN_PROVEN=no"
+  echo "reason=valid EICAR-in-RAR fixture was not mounted"
+else
+  set +e
+  rar_output="$(clamdscan --stream "${PHASE0_RAR_EICAR}" 2>&1)"
+  rar_status=$?
+  set -e
+  printf '%s\n' "$rar_output"
+  # clamdscan returns 1 when malware is found. Require both the expected result
+  # and an EICAR FOUND line; ERROR, OK, or an unreadable archive is not proof.
+  if [[ $rar_status -eq 1 ]] && grep -qiE 'Eicar.*FOUND|EICAR.*FOUND' <<<"$rar_output"; then
+    echo "RAR_INNER_SCAN_PROVEN=yes"
+  else
+    echo "RAR_INNER_SCAN_PROVEN=no"
+  fi
+fi
+
+echo "Configuration evidence (diagnostic only, not the acceptance test):"
 grep -iE "^\s*ScanRAR|^\s*ScanArchive|^\s*MaxRecursion" /etc/clamav/clamd.conf 2>/dev/null || echo "clamd.conf not readable from this container"
 ```
 
@@ -570,7 +591,7 @@ grep -iE "^\s*ScanRAR|^\s*ScanArchive|^\s*MaxRecursion" /etc/clamav/clamd.conf 2
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml exec -T backend bash /app/scripts/phase0_container_measurements.sh
 ```
 
-Expected: a line reading `MEASURED_OUTPUT_PAGE_COUNT: <n>`. Record whether `n` is `2` (output trimmed to the batch) or `9` (output retains all pages).
+Expected: a line reading `MEASURED_OUTPUT_PAGE_COUNT: <n>` and exactly one `RAR_INNER_SCAN_PROVEN=<yes|no>` line. Record whether `n` is `2` (output trimmed to the batch) or `9` (output retains all pages). If the valid RAR fixture was unavailable, the result is `no`; absence of evidence must keep RAR disabled.
 
 - [ ] **Step 3: Record the findings verbatim**
 
@@ -580,7 +601,7 @@ Create `docs/architecture/phase0_extraction_measurements_2026-08-14.md` containi
 # Phase 0 extraction measurements
 
 **Date:** 2026-08-14 · **Host:** backend container on contraclaim.com
-**Method:** `scripts/phase0_container_measurements.sh`, output pasted verbatim below.
+**Method:** `backend/scripts/phase0_container_measurements.sh` (`/app/scripts/...` in the backend image), output pasted verbatim below.
 
 ## 1. `ocrmypdf --pages` output shape
 
@@ -592,19 +613,22 @@ and the other branch is unreachable and must be removed rather than kept as a fa
 
 ## 2. ClamAV RAR support
 
-<paste clamscan --version, clamdscan result, and the ScanRAR config line>
+<paste clamscan version, clamdscan result for the valid EICAR-in-RAR fixture, the RAR_INNER_SCAN_PROVEN line, and diagnostic config lines>
 
-Conclusion: RAR archives <are | are not> scanned by the deployed ClamAV.
+**RAR_INNER_SCAN_PROVEN = <yes | no>**
+
+Conclusion: RAR upload admission <may be enabled | must remain disabled>. `yes` is
+valid only when clamd reported EICAR `FOUND` from inside the valid passwordless RAR.
 ```
 
 - [ ] **Step 4: Verify the findings document names a definite conclusion**
 
-Re-read it. Every `<...>` placeholder must be replaced with a measured value. If `ocrmypdf` exited non-zero and produced no output PDF, the measurement is **not** complete — do not guess; fix the invocation and re-run.
+Re-read it. Every `<...>` placeholder must be replaced with a measured value. If `ocrmypdf` exited non-zero and produced no output PDF, the page-mapping measurement is **not** complete — do not guess; fix the invocation and re-run. If the RAR fixture or positive inner-member detection is absent, record `RAR_INNER_SCAN_PROVEN=no`; do not infer support from `ScanArchive`, an image label, or a RAR magic header.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add projectDMS/scripts/phase0_container_measurements.sh projectDMS/docs/architecture/phase0_extraction_measurements_2026-08-14.md
+git add projectDMS/backend/scripts/phase0_container_measurements.sh projectDMS/docs/architecture/phase0_extraction_measurements_2026-08-14.md
 git commit -m "docs: record Phase 0 container measurements for OCR page mapping and ClamAV RAR"
 ```
 
@@ -915,13 +939,13 @@ git commit -m "feat: explicit source-to-output OCR page mapping that fails visib
 - Produces — every later task uses these exact names:
   - `SourceKind` (`PDF`, `IMAGE`, `TEXT`, `ARCHIVE`, `UNSUPPORTED`)
   - `PageSource` (`TEXT_LAYER`, `OCR`, `RECONSTRUCTED`, `EMPTY`)
-  - `PageStatus` (`TEXT_LAYER`, `OCR_COMPLETED`, `OCR_EMPTY`, `OCR_FAILED`, `OCR_DISABLED`, `OCR_PENDING`, `OCR_DEFERRED`)
+  - `PageStatus` (`TEXT_LAYER`, `OCR_COMPLETED`, `OCR_EMPTY`, `OCR_FAILED`, `OCR_DISABLED`, `OCR_PENDING`, `OCR_DEFERRED`, `UNRENDERABLE`)
   - `PageClass` (`TEXT_NATIVE`, `SCANNED_IMAGE`, `MIXED_CONTENT`, `TABLE_HEAVY`, `BLANK`, `UNRENDERABLE`)
   - `Completeness` (`COMPLETE`, `PARTIAL`)
   - `PageClassification(page_class, char_count, image_count, image_coverage, table_count, width, height, rotation)`
-  - `ExtractedPage(number, text, source, status, classification, batch_id, error)` with property `char_count`
+  - `ExtractedPage(number, text, source, status, classification, tables, batch_id, error, quality_verdict, quality_checks, needs_review)` with property `char_count`; native PDF tables are retained per page and quality fields use persisted strings/dicts to avoid a Phase 1 → Phase 6 import cycle
   - `PageExtractionPolicy(ocr_enabled, min_text_chars_per_page, batch_size, max_ocr_pages_per_attempt, ocr_language)`
-  - `PageExtractionResult(pages, combined_text, ocr_pages_total, ocr_failed_pages, ocr_deferred_pages, completeness, engine_version)`
+  - `PageExtractionResult(pages, combined_text, ocr_pages_total, ocr_failed_pages, ocr_deferred_pages, unrenderable_pages, completeness, engine_version)`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -965,6 +989,7 @@ def test_enum_values_are_stable_strings() -> None:
     assert PageSource.TEXT_LAYER.value == "text_layer"
     assert PageSource.RECONSTRUCTED.value == "reconstructed"
     assert PageStatus.OCR_DEFERRED.value == "ocr_deferred"
+    assert PageStatus.UNRENDERABLE.value == "unrenderable"
     assert PageClass.SCANNED_IMAGE.value == "scanned_image"
     assert Completeness.PARTIAL.value == "partial"
 
@@ -999,6 +1024,10 @@ def test_extracted_page_defaults_have_no_batch_or_error() -> None:
 
     assert page.batch_id is None
     assert page.error is None
+    assert page.quality_verdict is None
+    assert page.quality_checks == []
+    assert page.needs_review is False
+    assert page.tables == []
 
 
 def test_result_is_partial_when_pages_are_deferred() -> None:
@@ -1008,6 +1037,7 @@ def test_result_is_partial_when_pages_are_deferred() -> None:
         ocr_pages_total=2,
         ocr_failed_pages=[],
         ocr_deferred_pages=[7, 8],
+        unrenderable_pages=[],
         completeness=Completeness.PARTIAL,
         engine_version="1",
     )
@@ -1077,6 +1107,7 @@ class PageStatus(str, Enum):
     OCR_DISABLED = "ocr_disabled"
     OCR_PENDING = "ocr_pending"
     OCR_DEFERRED = "ocr_deferred"
+    UNRENDERABLE = "unrenderable"
 
 
 class PageClass(str, Enum):
@@ -1116,8 +1147,12 @@ class ExtractedPage:
     source: PageSource
     status: PageStatus
     classification: PageClassification
+    tables: List[List[List[str]]] = field(default_factory=list)
     batch_id: Optional[str] = None
     error: Optional[str] = None
+    quality_verdict: Optional[str] = None
+    quality_checks: List[dict] = field(default_factory=list)
+    needs_review: bool = False
 
     @property
     def char_count(self) -> int:
@@ -1140,6 +1175,7 @@ class PageExtractionResult:
     ocr_pages_total: int
     ocr_failed_pages: List[int] = field(default_factory=list)
     ocr_deferred_pages: List[int] = field(default_factory=list)
+    unrenderable_pages: List[int] = field(default_factory=list)
     completeness: Completeness = Completeness.COMPLETE
     engine_version: str = "1"
 ```
@@ -1461,7 +1497,8 @@ Two adapters exist from day one (contract in Task 1.6, document in Phase 3), so 
 - Produces:
   - `class PageStore(Protocol)` with `async def begin_batch(page_start, page_end, retry) -> str`, `async def finish_batch(batch_id, status, error=None) -> None`, `async def record_pages(pages: Sequence[ExtractedPage]) -> None`
   - `class NullPageStore` — records calls in `self.batches` / `self.recorded_pages`, used by the engine's own tests and by any caller that does not persist
-  - `class OcrRunner(Protocol)` with `async def run(source: Path, page_numbers: Sequence[int], language: str) -> dict[int, str]`
+  - `class OcrRunner(Protocol)` with `async def run(source_pdf: Path, page_numbers: Sequence[int], language: str) -> dict[int, str]`; this protocol is PDF-only and its implementations may count/map PDF pages
+  - `class ImageOcrRunner(Protocol)` with `async def run(source_image: Path, language: str) -> str`; it has no page-number or PDF-mapping contract
   - `class MeterCallback(Protocol)` with `async def __call__(page_count: int, page_numbers: Sequence[int], retry: bool) -> None`
 
 - [ ] **Step 1: Write the failing test**
@@ -1597,11 +1634,19 @@ class PageStore(Protocol):
 
 @runtime_checkable
 class OcrRunner(Protocol):
-    """Runs OCR over a specific set of pages and returns their text."""
+    """Runs OCR over selected pages of a PDF and returns source-page text."""
 
     async def run(
         self, source: Path, page_numbers: Sequence[int], language: str
     ) -> Dict[int, str]:
+        ...
+
+
+@runtime_checkable
+class ImageOcrRunner(Protocol):
+    """Runs OCR directly over one standalone image; no PDF mapping is involved."""
+
+    async def run(self, source_image: Path, language: str) -> str:
         ...
 
 
@@ -2023,7 +2068,7 @@ class PageExtractionEngine:
         else:
             candidates = [
                 number
-                for number, (text, _) in sorted(native.items())
+                for number, (text, _, _) in sorted(native.items())
                 if len(text.strip()) < self.policy.min_text_chars_per_page
             ]
 
@@ -2059,6 +2104,12 @@ class PageExtractionEngine:
         failed = sorted(
             page.number for page in pages if page.status is PageStatus.OCR_FAILED
         )
+        unrenderable = sorted(
+            page.number
+            for page in pages
+            if page.classification.page_class is PageClass.UNRENDERABLE
+            and page.status is not PageStatus.OCR_COMPLETED
+        )
         unresolved = [
             page
             for page in pages
@@ -2068,7 +2119,9 @@ class PageExtractionEngine:
                 PageStatus.OCR_DEFERRED,
                 PageStatus.OCR_DISABLED,
                 PageStatus.OCR_EMPTY,
+                PageStatus.UNRENDERABLE,
             }
+            or page.number in unrenderable
         ]
 
         return PageExtractionResult(
@@ -2077,6 +2130,7 @@ class PageExtractionEngine:
             ocr_pages_total=len(attempted) if self.policy.ocr_enabled else 0,
             ocr_failed_pages=failed,
             ocr_deferred_pages=sorted(deferred),
+            unrenderable_pages=unrenderable,
             completeness=Completeness.PARTIAL if unresolved else Completeness.COMPLETE,
             engine_version=ENGINE_VERSION,
         )
@@ -2136,16 +2190,22 @@ class PageExtractionEngine:
 
     def _merge(
         self,
-        native: Dict[int, tuple[str, PageClassification]],
+        native: Dict[int, tuple[str, PageClassification, List[List[List[str]]]]],
         overrides: Dict[int, str],
         statuses: Dict[int, tuple[PageStatus, Optional[str], Optional[str]]],
     ) -> List[ExtractedPage]:
         pages: List[ExtractedPage] = []
         for number in sorted(native):
-            native_text, classification = native[number]
+            native_text, classification, tables = native[number]
             status, batch_id, error = statuses.get(
                 number, (PageStatus.TEXT_LAYER, None, None)
             )
+            if (
+                classification.page_class is PageClass.UNRENDERABLE
+                and status is not PageStatus.OCR_COMPLETED
+            ):
+                status = PageStatus.UNRENDERABLE
+                error = error or "Page could not be rendered or extracted"
             if number in overrides:
                 text = overrides[number]
                 page_source = PageSource.OCR
@@ -2161,6 +2221,7 @@ class PageExtractionEngine:
                     source=page_source,
                     status=status,
                     classification=classification,
+                    tables=tables,
                     batch_id=batch_id,
                     error=error,
                 )
@@ -2169,10 +2230,10 @@ class PageExtractionEngine:
 
     def _read_native_pages(
         self, source: Path
-    ) -> Dict[int, tuple[str, PageClassification]]:
+    ) -> Dict[int, tuple[str, PageClassification, List[List[List[str]]]]]:
         import pdfplumber
 
-        pages: Dict[int, tuple[str, PageClassification]] = {}
+        pages: Dict[int, tuple[str, PageClassification, List[List[List[str]]]]] = {}
         with pdfplumber.open(source) as pdf:
             for index, page in enumerate(pdf.pages, start=1):
                 classification = self.classifier.classify(page)
@@ -2180,7 +2241,11 @@ class PageExtractionEngine:
                     text = page.extract_text() or ""
                 except Exception:
                     text = ""
-                pages[index] = (text, classification)
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
+                pages[index] = (text, classification, tables)
         if not pages:
             pages[1] = (
                 "",
@@ -2194,6 +2259,7 @@ class PageExtractionEngine:
                     height=0.0,
                     rotation=0,
                 ),
+                [],
             )
         return pages
 ```
@@ -2871,6 +2937,7 @@ git commit -m "refactor: route contract ingestion through the shared PageExtract
 - Modify: `backend/rbac_backend/core/config.py` (add setting)
 - Modify: `backend/rbac_backend/services/background_jobs.py:337-428`
 - Modify: `backend/rbac_backend/main.py:321-336`
+- Modify: `backend/rbac_backend/worker.py`
 - Test: `backend/rbac_backend/tests/test_document_extraction_worker_flag.py`
 
 **Interfaces:**
@@ -2936,6 +3003,15 @@ def test_main_honours_the_new_flag() -> None:
 
     source = inspect.getsource(main)
 
+    assert "START_DOCUMENT_EXTRACTION_WORKERS" in source
+    assert "start_document_extraction_workers" in source
+    assert "stop_document_extraction_workers" in source
+
+
+def test_worker_entrypoint_honours_the_new_flag() -> None:
+    from rbac_backend import worker
+
+    source = inspect.getsource(worker._run)
     assert "START_DOCUMENT_EXTRACTION_WORKERS" in source
     assert "start_document_extraction_workers" in source
     assert "stop_document_extraction_workers" in source
@@ -3028,12 +3104,14 @@ Replace lines 321–324 and 333–336:
         await stop_background_services()
 ```
 
-Add the two names to the existing `from .services.background_jobs import ...` statement.
+Add the two names to the existing `from .services.background_jobs import ...` statement in `main.py`.
+
+Make the same lifecycle change in `backend/rbac_backend/worker.py`: import both document-extraction functions, start after `connect_database()` when `START_DOCUMENT_EXTRACTION_WORKERS` is true, and stop it in `finally` before disconnecting Mongo. This is mandatory because Task 2.2 launches `python -m rbac_backend.worker`; changing FastAPI `main.py` alone would leave the dedicated container idle.
 
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_document_extraction_worker_flag.py -q`
-Expected: PASS — 6 passed
+Expected: PASS — 7 passed
 
 - [ ] **Step 7: Run the deployment-config and startup suites**
 
@@ -3043,7 +3121,7 @@ Expected: PASS
 - [ ] **Step 8: Commit**
 
 ```bash
-git add projectDMS/backend/rbac_backend/core/config.py projectDMS/backend/rbac_backend/services/background_jobs.py projectDMS/backend/rbac_backend/main.py projectDMS/backend/rbac_backend/tests/test_document_extraction_worker_flag.py
+git add projectDMS/backend/rbac_backend/core/config.py projectDMS/backend/rbac_backend/services/background_jobs.py projectDMS/backend/rbac_backend/main.py projectDMS/backend/rbac_backend/worker.py projectDMS/backend/rbac_backend/tests/test_document_extraction_worker_flag.py
 git commit -m "feat: run the document extraction loop behind its own worker flag"
 ```
 
@@ -3198,7 +3276,7 @@ This is where the measured defect is fixed: pages 1–2 of fixture #1 stop being
 **Interfaces:**
 - Consumes: `Completeness`, `PageStatus` (1.2)
 - Produces:
-  - `class ProcessingState(str, Enum)` — `QUEUED`, `PROCESSING`, `COMPLETED`, `PARTIALLY_PROCESSED`, `HUMAN_REVIEW_REQUIRED`, `FAILED`
+  - `class ProcessingState(str, Enum)` — `QUEUED`, `PROCESSING`, `COMPLETED`, `STORED_ONLY`, `PARTIALLY_PROCESSED`, `HUMAN_REVIEW_REQUIRED`, `FAILED`
   - `TERMINAL_STATES`, `SUCCESS_STATES`, `RESUMABLE_STATES` frozensets
   - `derive_processing_state(result: PageExtractionResult, *, attempts_exhausted: bool) -> ProcessingState`
 
@@ -3234,6 +3312,7 @@ def _result(**overrides: object) -> PageExtractionResult:
         ocr_pages_total=0,
         ocr_failed_pages=[],
         ocr_deferred_pages=[],
+        unrenderable_pages=[],
         completeness=Completeness.COMPLETE,
         engine_version="1",
     )
@@ -3255,6 +3334,12 @@ def test_human_review_required_is_terminal_but_not_success() -> None:
     assert ProcessingState.HUMAN_REVIEW_REQUIRED in TERMINAL_STATES
     assert ProcessingState.HUMAN_REVIEW_REQUIRED not in SUCCESS_STATES
     assert ProcessingState.HUMAN_REVIEW_REQUIRED not in RESUMABLE_STATES
+
+
+def test_archive_stored_only_is_explicit_and_never_completed() -> None:
+    assert ProcessingState.STORED_ONLY in TERMINAL_STATES
+    assert ProcessingState.STORED_ONLY not in SUCCESS_STATES
+    assert ProcessingState.STORED_ONLY is not ProcessingState.COMPLETED
 
 
 def test_complete_extraction_yields_completed() -> None:
@@ -3287,6 +3372,16 @@ def test_failed_pages_with_attempts_exhausted_need_a_human() -> None:
         attempts_exhausted=True,
     )
 
+    assert state is ProcessingState.HUMAN_REVIEW_REQUIRED
+
+
+def test_unrenderable_page_is_never_completed() -> None:
+    for exhausted in (False, True):
+        state = derive_processing_state(
+            _result(completeness=Completeness.PARTIAL, unrenderable_pages=[2]),
+            attempts_exhausted=exhausted,
+        )
+        assert state is not ProcessingState.COMPLETED
     assert state is ProcessingState.HUMAN_REVIEW_REQUIRED
 
 
@@ -3332,6 +3427,7 @@ class ProcessingState(str, Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
     COMPLETED = "completed"
+    STORED_ONLY = "stored_only"
     PARTIALLY_PROCESSED = "partially_processed"
     HUMAN_REVIEW_REQUIRED = "human_review_required"
     FAILED = "failed"
@@ -3342,6 +3438,7 @@ SUCCESS_STATES = frozenset({ProcessingState.COMPLETED})
 TERMINAL_STATES = frozenset(
     {
         ProcessingState.COMPLETED,
+        ProcessingState.STORED_ONLY,
         ProcessingState.HUMAN_REVIEW_REQUIRED,
         ProcessingState.FAILED,
     }
@@ -3358,12 +3455,16 @@ def derive_processing_state(
     COMPLETED is reachable only from a COMPLETE result with nothing failed and
     nothing deferred.
     """
-    unresolved = bool(result.ocr_failed_pages) or bool(result.ocr_deferred_pages)
+    unresolved = (
+        bool(result.ocr_failed_pages)
+        or bool(result.ocr_deferred_pages)
+        or bool(result.unrenderable_pages)
+    )
 
     if result.completeness is Completeness.COMPLETE and not unresolved:
         return ProcessingState.COMPLETED
 
-    if attempts_exhausted:
+    if result.unrenderable_pages or attempts_exhausted:
         return ProcessingState.HUMAN_REVIEW_REQUIRED
 
     return ProcessingState.PARTIALLY_PROCESSED
@@ -3372,7 +3473,7 @@ def derive_processing_state(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_processing_state.py -q`
-Expected: PASS — 8 passed
+Expected: PASS — 10 passed
 
 - [ ] **Step 5: Commit**
 
@@ -3391,9 +3492,9 @@ git commit -m "feat: add fail-visible processing states for partial extraction"
 
 **Interfaces:**
 - Consumes: `PageStore` (1.4), `ExtractedPage` (1.2)
-- Produces: `DOCUMENT_OCR_PAGES = "document_ocr_pages"`, `DOCUMENT_OCR_BATCHES = "document_ocr_batches"`, `to_document_page_record(...) -> dict`, `class DocumentPageStore(db, document_id, organization_id, project_id)` satisfying `PageStore`.
+- Produces: `DOCUMENT_OCR_PAGES = "document_ocr_pages"`, `DOCUMENT_OCR_BATCHES = "document_ocr_batches"`, `DOCUMENT_EXTRACTION_HEADS = "document_extraction_heads"`, `to_document_page_record(...) -> dict`, and `class DocumentPageStore(db, document_id, organization_id, project_id, extraction_run_id)` satisfying `PageStore`. `publish_run(expected_page_numbers, session=None)` advances the document's visible-run pointer only after every expected page record exists and can join Task 3.4's Mongo transaction.
 
-**Note:** unlike the contract record, this one persists `page_class`, `width`, `height`, and `rotation` — Phase 7's fallback ladder and the companion plan's photo extractor both need per-page geometry.
+**Safety invariants:** unlike the contract record, this one persists `page_class`, `width`, `height`, and `rotation`. It also (1) preserves Motor's actual BSON `inserted_id` for the finishing query, even though the public `batch_id` stored on a page is a string; and (2) never runs `delete_many()` before replacement. Page rows are versioned by `(document_id, extraction_run_id, page_number)`. A crash can leave an unpublished run to reclaim/clean later, but cannot erase or partially replace the previously visible evidence.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3403,6 +3504,9 @@ git commit -m "feat: add fail-visible processing states for partial extraction"
 from __future__ import annotations
 
 from typing import Any
+
+import pytest
+from bson import ObjectId
 
 from rbac_backend.services.extraction.models import (
     ExtractedPage,
@@ -3423,13 +3527,14 @@ class _FakeCollection:
     def __init__(self) -> None:
         self.operations: list[tuple[str, Any, Any]] = []
         self.inserted_id_counter = 0
+        self.count_result = 0
 
     async def insert_one(self, document: dict[str, Any]) -> Any:
         self.inserted_id_counter += 1
         self.operations.append(("insert_one", document, None))
 
         class _Result:
-            inserted_id = f"oid-{self.inserted_id_counter}"
+            inserted_id = ObjectId()
 
         return _Result()
 
@@ -3439,9 +3544,9 @@ class _FakeCollection:
     async def bulk_write(self, requests: list[Any]) -> None:
         self.operations.append(("bulk_write", requests, None))
 
-    async def delete_many(self, query: dict) -> None:
-        self.operations.append(("delete_many", query, None))
-
+    async def count_documents(self, query: dict, **kwargs: Any) -> int:
+        self.operations.append(("count_documents", query, kwargs))
+        return self.count_result
 
 class _FakeDb:
     def __init__(self) -> None:
@@ -3476,6 +3581,7 @@ def test_record_carries_page_geometry_and_class() -> None:
         document_id="doc-1",
         organization_id="org-1",
         project_id="proj-1",
+        extraction_run_id="run-1",
     )
 
     assert record["page_number"] == 4
@@ -3496,6 +3602,7 @@ def test_record_scopes_to_org_and_project() -> None:
         document_id="doc-1",
         organization_id="org-1",
         project_id=None,
+        extraction_run_id="run-1",
     )
 
     assert record["organization_id"] == "org-1"
@@ -3505,7 +3612,8 @@ def test_record_scopes_to_org_and_project() -> None:
 async def test_store_writes_batches_to_the_batches_collection() -> None:
     db = _FakeDb()
     store = DocumentPageStore(
-        db=db, document_id="doc-1", organization_id="org-1", project_id=None
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-1",
     )
 
     batch_id = await store.begin_batch(page_start=1, page_end=2, retry=False)
@@ -3515,31 +3623,68 @@ async def test_store_writes_batches_to_the_batches_collection() -> None:
     assert operations[0][0] == "insert_one"
     assert operations[0][1]["status"] == "running"
     assert operations[1][0] == "update_one"
+    assert isinstance(operations[1][1]["_id"], ObjectId)
 
 
-async def test_record_pages_replaces_the_previous_pass() -> None:
+async def test_record_pages_upserts_the_version_without_deleting_visible_evidence() -> None:
     db = _FakeDb()
     store = DocumentPageStore(
-        db=db, document_id="doc-1", organization_id="org-1", project_id=None
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-2",
     )
 
     await store.record_pages([_page(1), _page(2)])
 
     operations = db[DOCUMENT_OCR_PAGES].operations
-    assert operations[0][0] == "delete_many"
-    assert operations[0][1] == {"document_id": "doc-1"}
-    assert operations[1][0] == "bulk_write"
+    assert [operation[0] for operation in operations] == ["bulk_write"]
+    requests = operations[0][1]
+    assert all(request._filter["extraction_run_id"] == "run-2" for request in requests)
 
 
 async def test_record_pages_with_no_pages_writes_nothing() -> None:
     db = _FakeDb()
     store = DocumentPageStore(
-        db=db, document_id="doc-1", organization_id="org-1", project_id=None
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-1",
     )
 
     await store.record_pages([])
 
     assert db[DOCUMENT_OCR_PAGES].operations == []
+
+
+async def test_new_run_never_deletes_the_previous_run_before_publish() -> None:
+    db = _FakeDb()
+    first = DocumentPageStore(
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-old",
+    )
+    second = DocumentPageStore(
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-new",
+    )
+
+    await first.record_pages([_page(1), _page(2)])
+    await second.record_pages([_page(1)])  # simulate a crash before page 2/publish
+
+    assert all(op[0] != "delete_many" for op in db[DOCUMENT_OCR_PAGES].operations)
+
+
+async def test_publish_requires_the_complete_page_set_before_advancing_head() -> None:
+    db = _FakeDb()
+    store = DocumentPageStore(
+        db=db, document_id="doc-1", organization_id="org-1", project_id=None,
+        extraction_run_id="run-new",
+    )
+    db[DOCUMENT_OCR_PAGES].count_result = 1
+
+    with pytest.raises(RuntimeError, match="1/2 pages"):
+        await store.publish_run(expected_page_numbers=[1, 2])
+    assert db[DOCUMENT_EXTRACTION_HEADS].operations == []
+
+    db[DOCUMENT_OCR_PAGES].count_result = 2
+    await store.publish_run(expected_page_numbers=[1, 2])
+    assert db[DOCUMENT_EXTRACTION_HEADS].operations[-1][0] == "update_one"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -3556,8 +3701,9 @@ Mirrors ContractPageStore but writes to its own collections and keeps per-page
 geometry, which the fallback ladder and the photo extractor both need and the
 contract record does not carry.
 
-record_pages replaces the previous pass wholesale rather than merging, so a
-resumed extraction cannot leave a stale record from an earlier attempt.
+Each extraction run has a stable id. `record_pages` upserts into that version
+without touching the current version. Readers follow `document_extraction_heads`;
+`publish_run` advances that pointer only after the expected page set exists.
 """
 
 from __future__ import annotations
@@ -3571,6 +3717,7 @@ from ..extraction.models import ExtractedPage
 
 DOCUMENT_OCR_PAGES = "document_ocr_pages"
 DOCUMENT_OCR_BATCHES = "document_ocr_batches"
+DOCUMENT_EXTRACTION_HEADS = "document_extraction_heads"
 
 
 def to_document_page_record(
@@ -3579,6 +3726,7 @@ def to_document_page_record(
     document_id: str,
     organization_id: str,
     project_id: Optional[str],
+    extraction_run_id: str,
 ) -> Dict[str, Any]:
     text = page.text or ""
     classification = page.classification
@@ -3587,10 +3735,14 @@ def to_document_page_record(
         "organization_id": str(organization_id),
         "project_id": str(project_id) if project_id else None,
         "page_number": page.number,
+        "extraction_run_id": extraction_run_id,
         "batch_id": page.batch_id,
         "source": page.source.value,
         "status": page.status.value,
         "error": page.error,
+        "quality_verdict": page.quality_verdict,
+        "quality_checks": list(page.quality_checks),
+        "needs_review": page.needs_review,
         "raw_text": text,
         "raw_text_length": len(text),
         "page_class": classification.page_class.value,
@@ -3598,6 +3750,7 @@ def to_document_page_record(
         "image_count": classification.image_count,
         "image_coverage": classification.image_coverage,
         "table_count": classification.table_count,
+        "tables": page.tables,
         "width": classification.width,
         "height": classification.height,
         "rotation": classification.rotation,
@@ -3613,11 +3766,14 @@ class DocumentPageStore:
         document_id: str,
         organization_id: str,
         project_id: Optional[str],
+        extraction_run_id: str,
     ) -> None:
         self.db = db
         self.document_id = document_id
         self.organization_id = organization_id
         self.project_id = project_id
+        self.extraction_run_id = extraction_run_id
+        self._batch_storage_ids: Dict[str, Any] = {}
 
     async def begin_batch(self, *, page_start: int, page_end: int, retry: bool) -> str:
         result = await self.db[DOCUMENT_OCR_BATCHES].insert_one(
@@ -3633,13 +3789,27 @@ class DocumentPageStore:
                 "started_at": datetime.now(timezone.utc),
             }
         )
-        return str(result.inserted_id)
+        public_id = str(result.inserted_id)
+        self._batch_storage_ids[public_id] = result.inserted_id
+        return public_id
 
     async def finish_batch(
         self, batch_id: str, *, status: str, error: Optional[str] = None
     ) -> None:
+        storage_id = self._batch_storage_ids.get(batch_id)
+        if storage_id is None:
+            # Reclaimed workers may finish a batch created by an earlier process.
+            # Convert only strings that are valid ObjectIds; otherwise retain the
+            # original persisted type supplied by the caller/test.
+            from bson import ObjectId
+            from bson.errors import InvalidId
+
+            try:
+                storage_id = ObjectId(batch_id)
+            except (InvalidId, TypeError):
+                storage_id = batch_id
         await self.db[DOCUMENT_OCR_BATCHES].update_one(
-            {"document_id": self.document_id, "_id": batch_id},
+            {"document_id": self.document_id, "_id": storage_id},
             {
                 "$set": {
                     "status": status,
@@ -3654,33 +3824,66 @@ class DocumentPageStore:
             return
 
         collection = self.db[DOCUMENT_OCR_PAGES]
-        await collection.delete_many({"document_id": self.document_id})
-
         records: List[Dict[str, Any]] = [
             to_document_page_record(
                 page,
                 document_id=self.document_id,
                 organization_id=self.organization_id,
                 project_id=self.project_id,
+                extraction_run_id=self.extraction_run_id,
             )
             for page in pages
         ]
         await collection.bulk_write(
             [
                 ReplaceOne(
-                    {"document_id": self.document_id, "page_number": record["page_number"]},
+                    {
+                        "document_id": self.document_id,
+                        "extraction_run_id": self.extraction_run_id,
+                        "page_number": record["page_number"],
+                    },
                     record,
                     upsert=True,
                 )
                 for record in records
             ]
         )
+
+    async def publish_run(
+        self, *, expected_page_numbers: Sequence[int], session: Any = None
+    ) -> None:
+        """Make a complete page-record version visible with one atomic pointer write."""
+        expected = sorted({int(number) for number in expected_page_numbers})
+        count = await self.db[DOCUMENT_OCR_PAGES].count_documents(
+            {
+                "document_id": self.document_id,
+                "extraction_run_id": self.extraction_run_id,
+                "page_number": {"$in": expected},
+            },
+            session=session,
+        )
+        if count != len(expected):
+            raise RuntimeError(
+                f"Extraction run {self.extraction_run_id} has {count}/{len(expected)} pages"
+            )
+        await self.db[DOCUMENT_EXTRACTION_HEADS].update_one(
+            {"document_id": self.document_id},
+            {
+                "$set": {
+                    "extraction_run_id": self.extraction_run_id,
+                    "expected_page_numbers": expected,
+                    "published_at": datetime.now(timezone.utc),
+                }
+            },
+            upsert=True,
+            session=session,
+        )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_document_page_store.py -q`
-Expected: PASS — 5 passed
+Expected: PASS — 7 passed, including a real `bson.ObjectId` batch finish, incomplete-run rejection, and crash-before-publish preservation
 
 - [ ] **Step 5: Commit**
 
@@ -3891,11 +4094,14 @@ In `backend/rbac_backend/services/document_processor.py`, replace the Step 1 blo
             logger.info("[document_pipeline] Starting page-wise extraction for %s", input_path.name)
             from .extraction_adapters.document_page_store import DocumentPageStore
 
+            extraction_run_id = extraction_run_id or str(uuid4())
+            db = await self.database_service.get_database()
             page_store = DocumentPageStore(
-                db=self.database_service.db,
+                db=db,
                 document_id=document_id or input_path.stem,
                 organization_id=organization_id or "",
                 project_id=project_id,
+                extraction_run_id=extraction_run_id,
             )
             extraction = await self.ocr_service.process_pdf_pagewise(
                 input_path,
@@ -3916,7 +4122,7 @@ In `backend/rbac_backend/services/document_processor.py`, replace the Step 1 blo
             )
 ```
 
-Add `organization_id: Optional[str] = None` and `project_id: Optional[str] = None` to `process_document`'s signature, and return `extraction` on the `ProcessingResult` by adding a `extraction_completeness=extraction.completeness.value` field to `ProcessingResult` in `models/document_metadata.py`.
+Add `organization_id: Optional[str] = None`, `project_id: Optional[str] = None`, `extraction_run_id: Optional[str] = None`, and `retry_pages: Optional[Sequence[int]] = None` to `process_document`'s signature; import `uuid4`, and pass `retry_pages` into `process_pdf_pagewise`. In `DocumentService.process_document_async`, pass the already-resolved `org_id`, `proj_id`, and job's stable `extraction_run_id` into `processor.process_document`; do not rely on the processor discovering tenant scope or a nonexistent `DatabaseService.db` attribute. Return `extraction` on the `ProcessingResult` by adding `extraction_result: Optional[PageExtractionResult] = None` and `extraction_completeness=extraction.completeness.value` in `models/document_metadata.py`. Task 3.4 consumes the typed result to checkpoint and requeue pages.
 
 - [ ] **Step 7: Run the document-pipeline suites**
 
@@ -3937,6 +4143,137 @@ git commit -m "feat: route the general document path through page-wise extractio
 
 ---
 
+### Task 3.4: Durable retry/state persistence
+
+The existing Mongo job loop already claims atomically, heartbeats, reclaims stale jobs, and retries whole-job exceptions. It does **not** know that a successful processor return may still contain `OCR_DEFERRED`/failed pages. This task makes partial extraction a durable checkpoint rather than an in-memory enum.
+
+**Files:**
+- Modify: `backend/rbac_backend/services/document_service.py:757-1545`
+- Modify: `backend/rbac_backend/services/document_processor.py`
+- Modify: `backend/rbac_backend/models/processing_state.py`
+- Test: `backend/rbac_backend/tests/test_document_page_retry_state.py`
+- Test: `backend/rbac_backend/tests/test_document_processing_jobs.py`
+
+**Interfaces:**
+- Consumes: `PageExtractionResult` (1.2), versioned `DocumentPageStore` (3.2), routed PDF processing (3.3), existing `_claim_next_processing_job`, heartbeat, stale recovery, and `_mark_processing_failure`.
+- Adds durable job fields: `extraction_run_id`, `expected_page_numbers`, `remaining_page_numbers`, `resolved_page_numbers`, `page_attempts` (string page number to count), `last_attempted_page_numbers`, `resume_count`, and `processing_state`.
+- Produces `ProcessingAttemptOutcome(result, state, remaining_page_numbers, attempts_exhausted)` and `_checkpoint_extraction_attempt(job, outcome, session)`.
+- `process_document_job` returns/uses the typed outcome. A processor call returning partial evidence must not flow through the existing `if ok: status=completed` branch.
+
+- [ ] **Step 1: Write the failing durable-state tests**
+
+The tests must assert all of these behaviours through `DocumentService.process_document_job`, not only `derive_processing_state`:
+
+```python
+async def test_deferred_pages_checkpoint_and_requeue_instead_of_complete() -> None:
+    # The all-scanned fixture submits pages 1-6 to OCR and resolves them; the
+    # attempt boundary defers 7-8 without consuming their retry allowance.
+    await service.process_document_job(job_id)
+    job = await db.document_processing_jobs.find_one({"_id": job_id})
+    document = await db.documents.find_one({"_id": ObjectId(document_id)})
+    assert job["status"] == "retrying"
+    assert job["processing_state"] == "partially_processed"
+    assert job["remaining_page_numbers"] == [7, 8]
+    assert job["resolved_page_numbers"] == [1, 2, 3, 4, 5, 6]
+    assert job["page_attempts"] == {"1": 1, "2": 1, "3": 1, "4": 1, "5": 1, "6": 1}
+    assert document["processing_status"] == "partially_processed"
+    assert document["processing_status"] != "completed"
+
+
+async def test_reclaimed_job_passes_only_remaining_pages_to_processor() -> None:
+    await service.process_document_job(job_id)
+    await service.process_document_job(job_id)
+    assert processor.retry_page_calls == [None, [7, 8]]
+
+
+async def test_stale_recovery_preserves_page_checkpoint() -> None:
+    # Simulate death after the partial checkpoint and stale processing reclaim.
+    before = await db.document_processing_jobs.find_one({"_id": job_id})
+    await service.recover_stale_processing_jobs()
+    after = await db.document_processing_jobs.find_one({"_id": job_id})
+    assert after["remaining_page_numbers"] == before["remaining_page_numbers"]
+    assert after["extraction_run_id"] == before["extraction_run_id"]
+
+
+async def test_last_remaining_pages_transition_job_and_document_to_completed() -> None:
+    await service.process_document_job(job_id)
+    await service.process_document_job(job_id)
+    job = await db.document_processing_jobs.find_one({"_id": job_id})
+    document = await db.documents.find_one({"_id": ObjectId(document_id)})
+    assert job["remaining_page_numbers"] == []
+    assert job["status"] == "completed"
+    assert document["processing_status"] == "completed"
+
+
+async def test_exhausted_page_attempts_end_in_human_review_not_dead_letter_success() -> None:
+    await exhaust_page_attempts(service, job_id, page_number=2)
+    job = await db.document_processing_jobs.find_one({"_id": job_id})
+    document = await db.documents.find_one({"_id": ObjectId(document_id)})
+    assert job["status"] == "human_review_required"
+    assert job["processing_state"] == "human_review_required"
+    assert document["processing_status"] == "human_review_required"
+    assert document["processing_status"] != "completed"
+```
+
+Also cover: unrenderable pages go directly to `human_review_required`; resolved pages are never re-OCR'd; a retry exception retains the prior checkpoint; and a worker restart can reconstruct the full result by loading current-run pages from `DocumentPageStore`.
+
+- [ ] **Step 2: Initialise resumability fields when the job is queued**
+
+`queue_document_processing` creates one stable `extraction_run_id` and empty checkpoint fields. Preserve the existing string job `_id` convention; this task does not change job IDs to BSON IDs.
+
+```python
+"extraction_run_id": str(uuid4()),
+"expected_page_numbers": [],
+"remaining_page_numbers": [],
+"resolved_page_numbers": [],
+"page_attempts": {},
+"last_attempted_page_numbers": [],
+"resume_count": 0,
+"processing_state": ProcessingState.QUEUED.value,
+```
+
+- [ ] **Step 3: Persist a page checkpoint before scheduling the next claim**
+
+After `DocumentProcessor` returns, idempotently upsert its versioned current-run rows and merge them with prior current-run rows. Then use the already-deployed Mongo replica set for one transaction that (a) calls `DocumentPageStore.publish_run(expected_page_numbers=..., session=session)` and (b) updates the durable job/document checkpoint with remaining/resolved sets, page-attempt counters, result summary, processing state, and the corresponding queue/terminal status. Only pages actually submitted to OCR increment `page_attempts`; `OCR_DEFERRED` pages do not consume an attempt.
+
+Do not advance the visible head in one committed operation and mark the job retryable/completed in another. If the process dies before the transaction commits, the previous head and checkpoint remain authoritative; the idempotent run rows can be reclaimed. If it dies after commit, both the visible evidence and exact remaining-page list are durable. Stale recovery derives missing legacy checkpoint fields from current-run page statuses but never clears an existing checkpoint.
+
+- [ ] **Step 4: Make the existing job loop branch on the derived state**
+
+```python
+if outcome.state is ProcessingState.COMPLETED:
+    await self._mark_processing_completed(job, outcome)
+elif outcome.state is ProcessingState.PARTIALLY_PROCESSED:
+    await self._schedule_page_resume(job, outcome)  # status=retrying, bounded run_after
+elif outcome.state is ProcessingState.HUMAN_REVIEW_REQUIRED:
+    await self._mark_human_review(job, outcome)     # terminal, non-success
+else:
+    await self._mark_processing_failure(job, outcome.error or "processing failed")
+```
+
+Remove the unconditional boolean-success completion branch for unified extraction. Keep `_mark_processing_failure` for exceptions and non-extraction failures. Stale recovery may change only claim metadata/status; it must not clear `extraction_run_id`, page sets, page attempts, quality verdicts, or the visible-run pointer.
+
+- [ ] **Step 5: Add indexes and retention rules**
+
+Create unique index `(document_id, extraction_run_id, page_number)` for page rows; index `(document_id, extraction_run_id)` for batches; and unique `document_id` for extraction heads. Unpublished abandoned runs are retained for the audit window and removed only by a separate age-based cleanup after verifying they are not referenced by a head or active job.
+
+- [ ] **Step 6: Run focused and full tests**
+
+Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_document_page_retry_state.py backend/rbac_backend/tests/test_document_processing_jobs.py backend/rbac_backend/tests/test_document_page_store.py -q`
+Expected: PASS
+
+Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests -q`
+Expected: PASS
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add projectDMS/backend/rbac_backend/services/document_service.py projectDMS/backend/rbac_backend/services/document_processor.py projectDMS/backend/rbac_backend/models/processing_state.py projectDMS/backend/rbac_backend/tests/test_document_page_retry_state.py projectDMS/backend/rbac_backend/tests/test_document_processing_jobs.py
+git commit -m "feat: persist and resume page-level document extraction"
+```
+
+---
+
 ## Phase 4 — Source-kind routing
 
 Fixes documented gap #2: the route admits PNG, JPEG, and plain text, but `DocumentProcessor` sends everything into a PDF path.
@@ -3949,7 +4286,7 @@ Fixes documented gap #2: the route admits PNG, JPEG, and plain text, but `Docume
 
 **Interfaces:**
 - Consumes: `SourceKind` (1.2)
-- Produces: `ARCHIVE_MIMES`, `IMAGE_MIMES`, `TEXT_MIMES`, `PDF_MIMES` frozensets and `route(mime: str | None, filename: str | None = None) -> SourceKind`
+- Produces: `ARCHIVE_MIMES`, `IMAGE_MIMES`, `TEXT_MIMES`, `PDF_MIMES` frozensets; `class SourceKindRouter` with `route(mime: str | None, filename: str | None = None) -> SourceKind`; and a module-level `route` compatibility alias.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4027,28 +4364,31 @@ TEXT_MIMES = frozenset({"text/plain"})
 ARCHIVE_MIMES = frozenset({"application/zip", "application/vnd.rar"})
 
 
-def route(mime: Optional[str], filename: Optional[str] = None) -> SourceKind:
-    """Map a detected MIME type onto a SourceKind."""
-    if not mime:
+class SourceKindRouter:
+    @staticmethod
+    def route(mime: Optional[str], filename: Optional[str] = None) -> SourceKind:
+        """Map a detected MIME type onto a SourceKind."""
+        if not mime:
+            return SourceKind.UNSUPPORTED
+        normalized = mime.split(";", 1)[0].strip().lower()
+        if normalized in PDF_MIMES:
+            return SourceKind.PDF
+        if normalized in IMAGE_MIMES:
+            return SourceKind.IMAGE
+        if normalized in TEXT_MIMES:
+            return SourceKind.TEXT
+        if normalized in ARCHIVE_MIMES:
+            return SourceKind.ARCHIVE
         return SourceKind.UNSUPPORTED
 
-    normalized = mime.split(";", 1)[0].strip().lower()
 
-    if normalized in PDF_MIMES:
-        return SourceKind.PDF
-    if normalized in IMAGE_MIMES:
-        return SourceKind.IMAGE
-    if normalized in TEXT_MIMES:
-        return SourceKind.TEXT
-    if normalized in ARCHIVE_MIMES:
-        return SourceKind.ARCHIVE
-    return SourceKind.UNSUPPORTED
+route = SourceKindRouter.route
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_extraction_source_kind.py -q`
-Expected: PASS — 13 passed
+Expected: PASS — 12 passed
 
 - [ ] **Step 5: Commit**
 
@@ -4063,15 +4403,17 @@ git commit -m "feat: add source-kind routing for uploads"
 
 **Files:**
 - Create: `backend/rbac_backend/services/extraction/image_extractor.py`
+- Create: `backend/rbac_backend/services/extraction/image_ocr_runner.py`
 - Test: `backend/rbac_backend/tests/test_extraction_image_and_text.py`
 
 **Interfaces:**
-- Consumes: `models` (1.2), `page_store` (1.4)
+- Consumes: `models` (1.2), `PageStore` and `ImageOcrRunner` (1.4)
 - Produces:
-  - `async def extract_image(source, *, store, ocr_runner, language) -> PageExtractionResult` — single logical page, image stored as-is
+  - `class TesseractImageOcrRunner(timeout=300)` satisfying `ImageOcrRunner`; it validates PNG/JPEG with Pillow and invokes Tesseract directly
+  - `async def extract_image(source, *, store, image_ocr_runner, language) -> PageExtractionResult` — single logical page, image stored as-is
   - `async def extract_text_file(source, *, store) -> PageExtractionResult`
 
-**Design note:** the image is **never wrapped into a PDF**. OCRmyPDF accepts image input directly and the original `FileObject` is untouched.
+**Design note:** the image is **never wrapped into a PDF** and is never passed to `OcrMyPdfRunner`. `OcrMyPdfRunner.run` calls `_input_page_count` and `_extract_mapped_pages`, so using it for PNG/JPEG violates its PDF contract even if the underlying OCRmyPDF CLI happens to accept an image. Standalone images use Tesseract directly; the immutable original `FileObject` is untouched.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4089,25 +4431,24 @@ from rbac_backend.services.extraction.image_extractor import (
     extract_image,
     extract_text_file,
 )
+from rbac_backend.services.extraction.image_ocr_runner import TesseractImageOcrRunner
 from rbac_backend.services.extraction.models import (
     Completeness,
     PageClass,
     PageSource,
     PageStatus,
 )
-from rbac_backend.services.extraction.page_store import NullPageStore
+from rbac_backend.services.extraction.page_store import ImageOcrRunner, NullPageStore
 
 
-class _StubOcrRunner:
+class _StubImageOcrRunner:
     def __init__(self, text: str = "SCANNED SITE INSTRUCTION") -> None:
         self.text = text
         self.calls: list[Path] = []
 
-    async def run(
-        self, source: Path, page_numbers: Sequence[int], language: str
-    ) -> Dict[int, str]:
+    async def run(self, source: Path, language: str) -> str:
         self.calls.append(source)
-        return {1: self.text}
+        return self.text
 
 
 def _png(path: Path, size: tuple[int, int] = (800, 600)) -> Path:
@@ -4115,12 +4456,16 @@ def _png(path: Path, size: tuple[int, int] = (800, 600)) -> Path:
     return path
 
 
+def test_standalone_image_runner_has_the_non_pdf_protocol() -> None:
+    assert isinstance(TesseractImageOcrRunner(), ImageOcrRunner)
+
+
 async def test_image_yields_one_page_of_ocr_text(tmp_path: Path) -> None:
     source = _png(tmp_path / "photo.png")
     store = NullPageStore()
 
     result = await extract_image(
-        source, store=store, ocr_runner=_StubOcrRunner(), language="eng"
+        source, store=store, image_ocr_runner=_StubImageOcrRunner(), language="eng"
     )
 
     assert len(result.pages) == 1
@@ -4135,7 +4480,7 @@ async def test_image_dimensions_are_recorded(tmp_path: Path) -> None:
     source = _png(tmp_path / "photo.png", size=(1024, 768))
 
     result = await extract_image(
-        source, store=NullPageStore(), ocr_runner=_StubOcrRunner(), language="eng"
+        source, store=NullPageStore(), image_ocr_runner=_StubImageOcrRunner(), language="eng"
     )
     classification = result.pages[0].classification
 
@@ -4147,9 +4492,9 @@ async def test_image_dimensions_are_recorded(tmp_path: Path) -> None:
 async def test_image_is_passed_to_ocr_unchanged(tmp_path: Path) -> None:
     source = _png(tmp_path / "photo.png")
     before = source.read_bytes()
-    runner = _StubOcrRunner()
+    runner = _StubImageOcrRunner()
 
-    await extract_image(source, store=NullPageStore(), ocr_runner=runner, language="eng")
+    await extract_image(source, store=NullPageStore(), image_ocr_runner=runner, language="eng")
 
     assert runner.calls == [source]
     assert source.read_bytes() == before
@@ -4159,7 +4504,7 @@ async def test_empty_ocr_on_an_image_is_marked_not_pretended(tmp_path: Path) -> 
     source = _png(tmp_path / "blank.png")
 
     result = await extract_image(
-        source, store=NullPageStore(), ocr_runner=_StubOcrRunner(text=""), language="eng"
+        source, store=NullPageStore(), image_ocr_runner=_StubImageOcrRunner(text=""), language="eng"
     )
 
     assert result.pages[0].status is PageStatus.OCR_EMPTY
@@ -4184,6 +4529,53 @@ Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test
 Expected: FAIL — `ModuleNotFoundError` for `image_extractor`
 
 - [ ] **Step 3: Write the implementation**
+
+`image_ocr_runner.py`:
+
+```python
+"""Direct OCR for standalone PNG/JPEG inputs; no PDF page mapping."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from PIL import Image
+
+
+class ImageOcrRunnerError(RuntimeError):
+    pass
+
+
+class TesseractImageOcrRunner:
+    def __init__(self, *, timeout: int = 300) -> None:
+        self.timeout = timeout
+
+    async def run(self, source_image: Path, language: str) -> str:
+        def _verify() -> None:
+            with Image.open(source_image) as image:
+                image.verify()
+
+        await asyncio.to_thread(_verify)
+        process = await asyncio.create_subprocess_exec(
+            "tesseract", str(source_image), "stdout", "-l", language,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self.timeout
+            )
+        except TimeoutError as exc:
+            process.kill()
+            await process.wait()
+            raise ImageOcrRunnerError("Standalone image OCR timed out") from exc
+        if process.returncode != 0:
+            raise ImageOcrRunnerError(stderr.decode("utf-8", errors="replace")[:500])
+        return stdout.decode("utf-8", errors="replace").strip()
+```
+
+`image_extractor.py`:
 
 ```python
 """Extractors for standalone images and plain-text uploads.
@@ -4210,7 +4602,7 @@ from .models import (
     PageSource,
     PageStatus,
 )
-from .page_store import OcrRunner, PageStore
+from .page_store import ImageOcrRunner, PageStore
 
 logger = logging.getLogger(__name__)
 ENGINE_VERSION = "1"
@@ -4231,7 +4623,7 @@ async def extract_image(
     source: Path,
     *,
     store: PageStore,
-    ocr_runner: OcrRunner,
+    image_ocr_runner: ImageOcrRunner,
     language: str,
 ) -> PageExtractionResult:
     """OCR a standalone image as a single page."""
@@ -4243,8 +4635,7 @@ async def extract_image(
     error: Optional[str] = None
 
     try:
-        extracted = await ocr_runner.run(source, [1], language)
-        text = (extracted.get(1) or "").strip()
+        text = (await image_ocr_runner.run(source, language) or "").strip()
         if not text:
             status = PageStatus.OCR_EMPTY
             error = "OCR completed but no text was extracted"
@@ -4324,13 +4715,132 @@ async def extract_text_file(source: Path, *, store: PageStore) -> PageExtraction
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_extraction_image_and_text.py -q`
-Expected: PASS — 5 passed
+Expected: PASS — 6 passed
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add projectDMS/backend/rbac_backend/services/extraction/image_extractor.py projectDMS/backend/rbac_backend/tests/test_extraction_image_and_text.py
+git add projectDMS/backend/rbac_backend/services/extraction/image_extractor.py projectDMS/backend/rbac_backend/services/extraction/image_ocr_runner.py projectDMS/backend/rbac_backend/tests/test_extraction_image_and_text.py
 git commit -m "feat: add image and text extractors so non-PDFs stop entering the PDF path"
+```
+
+---
+
+### Task 4.3: Source-kind integration into `DocumentProcessor`
+
+Tasks 4.1–4.2 are not complete until the active upload/job/processor call chain dispatches through them. Current source proves the gap: `DocumentProcessor.process_document` calls `OCRService.process_pdf` at its first processing step, while `OCRService.process_document` explicitly skips non-PDF inputs and the durable job currently stores no validated MIME.
+
+**Files:**
+- Modify: `backend/rbac_backend/routers/documents.py`
+- Modify: `backend/rbac_backend/services/document_service.py`
+- Modify: `backend/rbac_backend/services/document_processor.py`
+- Modify: `backend/rbac_backend/models/document.py` only if a migration-safe alias for the existing `filetype` field is needed
+- Test: `backend/rbac_backend/tests/test_document_processor_source_dispatch.py`
+- Test: `backend/rbac_backend/tests/test_document_processing_jobs.py`
+
+**Interfaces:**
+- Consumes: `SourceKindRouter` (4.1), PDF extraction (3.3), and `extract_image` / `TesseractImageOcrRunner` / `extract_text_file` (4.2). The defensive archive branch uses `SourceKind.ARCHIVE`; Phase 5 later prevents new archive jobs.
+- Durable MIME invariant: `validate_spooled_upload(...).mime_type` is written to `Document.filetype`, copied to `document_processing_jobs.source_mime`, and passed through `process_document_job` → `process_document_async` → `DocumentProcessor.process_document(source_mime=...)`.
+- Produces one private `_extract_source(...) -> SourceDispatchResult(kind, extraction, processing_state)`. PDF/image/text return an extraction result. Archive returns `STORED_ONLY` with no extraction or metadata/model call. Unsupported raises `UnsupportedSourceKindError` and is fail-visible.
+
+- [ ] **Step 1: Write the failing dispatch tests**
+
+Use injected counting fakes for each extractor and assert the complete matrix:
+
+```python
+@pytest.mark.parametrize(
+    ("mime", "expected_kind", "called"),
+    [
+        ("application/pdf", SourceKind.PDF, "pdf"),
+        ("image/png", SourceKind.IMAGE, "image"),
+        ("image/jpeg", SourceKind.IMAGE, "image"),
+        ("text/plain", SourceKind.TEXT, "text"),
+        ("application/zip", SourceKind.ARCHIVE, "none"),
+        ("application/vnd.rar", SourceKind.ARCHIVE, "none"),
+    ],
+)
+async def test_document_processor_dispatches_exactly_one_source_extractor(
+    mime, expected_kind, called
+) -> None:
+    result = await processor.process_document(..., source_mime=mime)
+    assert result.source_kind == expected_kind.value
+    assert counters == expected_counter_map(called)
+
+
+async def test_archive_is_stored_only_not_completed_or_model_processed() -> None:
+    result = await processor.process_document(..., source_mime="application/zip")
+    assert result.processing_state == "stored_only"
+    assert result.extraction_result is None
+    assert model.calls == 0
+    assert pdf_runner.calls == image_runner.calls == 0
+
+
+async def test_unsupported_mime_fails_before_any_extractor_or_model_call() -> None:
+    with pytest.raises(UnsupportedSourceKindError):
+        await processor.process_document(..., source_mime="application/msword")
+    assert total_extractor_calls() == 0
+    assert model.calls == 0
+
+
+async def test_validated_mime_survives_upload_job_and_processor_chain() -> None:
+    # Upload a PNG named invoice.pdf. Detected MIME, not extension, must win.
+    document = await upload_png_named_pdf()
+    job = await db.document_processing_jobs.find_one({"document_id": document.id})
+    assert document.filetype == "image/png"
+    assert job["source_mime"] == "image/png"
+    await service.process_document_job(job["_id"])
+    assert image_runner.calls == 1
+    assert pdf_runner.calls == 0
+```
+
+Also assert TXT preserves UTF-8 replacement semantics, empty image OCR remains partial, and a legacy job missing `source_mime` uses the stored document `filetype`; only if both are absent may it re-sniff the materialized bytes and persist the result before dispatch.
+
+- [ ] **Step 2: Preserve the validated MIME instead of re-sniffing without filename context**
+
+Pass `filetype=validation_result.mime_type` into `DocumentService.create_document` and make `create_document` prefer that validated value. This avoids the current second sniff over raw bytes with no filename hint. `queue_document_processing` copies `document.filetype` to `source_mime`.
+
+- [ ] **Step 3: Add the single dispatch point before PDF-specific work**
+
+At the start of `DocumentProcessor.process_document`, after existence/size checks and before any `process_pdf`, PDF upload, rasterization, metadata-model, or extraction call:
+
+```python
+source_kind = self.source_kind_router.route(source_mime, input_path.name)
+dispatch = await self._extract_source(
+    input_path,
+    source_kind=source_kind,
+    page_store=page_store,
+    retry_pages=retry_pages,
+)
+if dispatch.processing_state is ProcessingState.STORED_ONLY:
+    return ProcessingResult(
+        success=False,
+        source_kind=source_kind.value,
+        processing_state=ProcessingState.STORED_ONLY.value,
+    )
+extraction = dispatch.extraction
+```
+
+`_extract_source` calls `process_pdf_pagewise` only for PDF, `extract_image(..., image_ocr_runner=TesseractImageOcrRunner())` only for PNG/JPEG, and `extract_text_file` only for text. It contains explicit archive and unsupported branches; no fall-through defaults to PDF.
+
+Add explicit constructor seams for `source_kind_router`, `pdf_ocr_runner`, `image_ocr_runner`, and `database_service`; production defaults remain `SourceKindRouter`, `OcrMyPdfRunner`, `TesseractImageOcrRunner`, and the existing `DatabaseService`. The dispatch tests inject counting/fail-on-call implementations through those seams instead of monkeypatching module globals.
+
+- [ ] **Step 4: Update the durable call chain and final-state handling**
+
+Pass `source_mime` and tenant scope at every service boundary. `process_document_job` maps `STORED_ONLY` to the explicit terminal non-success state and must never overwrite it with `completed`. Task 5.2 prevents new archive jobs; this defensive branch handles legacy/requeued archive jobs safely.
+
+- [ ] **Step 5: Run tests**
+
+Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_document_processor_source_dispatch.py backend/rbac_backend/tests/test_document_processing_jobs.py backend/rbac_backend/tests/test_extraction_image_and_text.py -q`
+Expected: PASS
+
+Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests -q -k "document or extraction or upload"`
+Expected: PASS
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add projectDMS/backend/rbac_backend/routers/documents.py projectDMS/backend/rbac_backend/services/document_service.py projectDMS/backend/rbac_backend/services/document_processor.py projectDMS/backend/rbac_backend/tests/test_document_processor_source_dispatch.py projectDMS/backend/rbac_backend/tests/test_document_processing_jobs.py
+git commit -m "feat: route every admitted source kind through DocumentProcessor"
 ```
 
 ---
@@ -4342,12 +4852,13 @@ git commit -m "feat: add image and text extractors so non-PDFs stop entering the
 **Files:**
 - Modify: `backend/rbac_backend/utils/file_validation.py`
 - Create: `backend/rbac_backend/services/archive_policy.py`
-- Modify: `backend/rbac_backend/core/config.py` (add archive MIMEs to both allowlists)
+- Modify: `backend/rbac_backend/core/config.py` (ZIP admitted; RAR remains off unless the Phase 0 proof explicitly enables it)
 - Test: `backend/rbac_backend/tests/test_archive_intake.py`
 
 **Interfaces:**
 - Consumes: `ARCHIVE_MIMES` (4.1)
-- Produces: `ArchiveIntakePolicy.is_archive(mime) -> bool`, `.requires_letter_number(mime) -> bool`, `.creates_processing_job(mime) -> bool`
+- Consumes: `RAR_INNER_SCAN_PROVEN` from Task 0.4 as a deployment decision, not a hard-coded assumption.
+- Produces: `RAR_UPLOAD_ENABLED` (default `False`), `ArchiveIntakePolicy.is_archive(mime) -> bool`, `.is_admitted(mime) -> bool`, `.requires_letter_number(mime) -> bool`, `.creates_processing_job(mime) -> bool`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4356,7 +4867,7 @@ git commit -m "feat: add image and text extractors so non-PDFs stop entering the
 
 from __future__ import annotations
 
-from rbac_backend.core.config import settings
+from rbac_backend.core.config import Settings, settings
 from rbac_backend.services.archive_policy import ArchiveIntakePolicy
 from rbac_backend.utils.file_validation import sniff_mime_from_bytes
 
@@ -4385,28 +4896,44 @@ def test_zip_without_a_zip_extension_is_still_a_zip() -> None:
     assert sniff_mime_from_bytes(ZIP_MAGIC, "bundle") == "application/zip"
 
 
-def test_archive_mimes_are_admitted_by_both_allowlists() -> None:
-    for mime in ("application/zip", "application/vnd.rar"):
-        assert mime in settings.ALLOWED_DOCUMENT_MIMES
-        assert mime in settings.ALLOWED_ENCLOSURE_MIMES
+def test_zip_is_admitted_by_both_allowlists() -> None:
+    assert "application/zip" in settings.ALLOWED_DOCUMENT_MIMES
+    assert "application/zip" in settings.ALLOWED_ENCLOSURE_MIMES
+
+
+def test_rar_is_disabled_by_default() -> None:
+    disabled = Settings(RAR_UPLOAD_ENABLED=False)
+    assert "application/vnd.rar" not in disabled.ALLOWED_DOCUMENT_MIMES
+    assert "application/vnd.rar" not in disabled.ALLOWED_ENCLOSURE_MIMES
+    assert ArchiveIntakePolicy(rar_enabled=False).is_admitted("application/vnd.rar") is False
+
+
+def test_rar_can_be_admitted_only_with_the_explicit_enablement() -> None:
+    enabled = Settings(RAR_UPLOAD_ENABLED=True)
+    assert "application/vnd.rar" in enabled.ALLOWED_DOCUMENT_MIMES
+    assert "application/vnd.rar" in enabled.ALLOWED_ENCLOSURE_MIMES
+    assert ArchiveIntakePolicy(rar_enabled=True).is_admitted("application/vnd.rar") is True
 
 
 def test_policy_identifies_archives() -> None:
-    assert ArchiveIntakePolicy.is_archive("application/zip") is True
-    assert ArchiveIntakePolicy.is_archive("application/vnd.rar") is True
-    assert ArchiveIntakePolicy.is_archive("application/pdf") is False
-    assert ArchiveIntakePolicy.is_archive(None) is False
+    policy = ArchiveIntakePolicy(rar_enabled=False)
+    assert policy.is_archive("application/zip") is True
+    assert policy.is_archive("application/vnd.rar") is True
+    assert policy.is_archive("application/pdf") is False
+    assert policy.is_archive(None) is False
 
 
 def test_archives_do_not_require_a_letter_number() -> None:
-    assert ArchiveIntakePolicy.requires_letter_number("application/zip") is False
-    assert ArchiveIntakePolicy.requires_letter_number("application/pdf") is True
+    policy = ArchiveIntakePolicy(rar_enabled=False)
+    assert policy.requires_letter_number("application/zip") is False
+    assert policy.requires_letter_number("application/pdf") is True
 
 
 def test_archives_never_create_a_processing_job() -> None:
-    assert ArchiveIntakePolicy.creates_processing_job("application/zip") is False
-    assert ArchiveIntakePolicy.creates_processing_job("application/vnd.rar") is False
-    assert ArchiveIntakePolicy.creates_processing_job("application/pdf") is True
+    policy = ArchiveIntakePolicy(rar_enabled=True)
+    assert policy.creates_processing_job("application/zip") is False
+    assert policy.creates_processing_job("application/vnd.rar") is False
+    assert policy.creates_processing_job("application/pdf") is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -4429,9 +4956,15 @@ In `backend/rbac_backend/utils/file_validation.py`, insert **after** the existin
         return "application/zip"
 ```
 
-- [ ] **Step 4: Add the archive MIMEs to both allowlists**
+- [ ] **Step 4: Admit ZIP and make RAR enablement fail-closed**
 
-In `backend/rbac_backend/core/config.py`, extend the two default sets:
+In `backend/rbac_backend/core/config.py`, add the flag and extend the two default sets with ZIP only:
+
+```python
+    # Set true only when Task 0.4 recorded RAR_INNER_SCAN_PROVEN=yes for the
+    # deployed clamd. A config line or image capability claim is insufficient.
+    RAR_UPLOAD_ENABLED: bool = Field(default=False, validation_alias="RAR_UPLOAD_ENABLED")
+```
 
 ```python
     ALLOWED_DOCUMENT_MIMES: set[str] = Field(
@@ -4442,7 +4975,6 @@ In `backend/rbac_backend/core/config.py`, extend the two default sets:
             "text/plain",
             # Archives are stored intact and never unpacked or processed.
             "application/zip",
-            "application/vnd.rar",
         }
     )
 ```
@@ -4455,12 +4987,23 @@ In `backend/rbac_backend/core/config.py`, extend the two default sets:
             "image/jpeg",
             "text/plain",
             "application/zip",
-            "application/vnd.rar",
         }
     )
 ```
 
-Also update `backend/rbac_backend/.env.example:68-69` to match.
+In the settings post-validator, reject an explicit RAR MIME while `RAR_UPLOAD_ENABLED` is false, and add RAR to both effective sets only when the flag is true. This prevents an environment allowlist from accidentally bypassing the proof gate:
+
+```python
+rar_mime = "application/vnd.rar"
+explicit_rar = rar_mime in self.ALLOWED_DOCUMENT_MIMES or rar_mime in self.ALLOWED_ENCLOSURE_MIMES
+if explicit_rar and not self.RAR_UPLOAD_ENABLED:
+    raise ValueError("RAR MIME configured while RAR_UPLOAD_ENABLED=false")
+if self.RAR_UPLOAD_ENABLED:
+    self.ALLOWED_DOCUMENT_MIMES.add(rar_mime)
+    self.ALLOWED_ENCLOSURE_MIMES.add(rar_mime)
+```
+
+Update `.env.example` with `RAR_UPLOAD_ENABLED=false`. The production `.env` may be changed to true only in the same reviewed change that attaches Task 0.4's positive EICAR-in-RAR evidence. If the proof is `no`, RAR remains absent from the upload-policy response and client picker.
 
 - [ ] **Step 5: Write `ArchiveIntakePolicy`**
 
@@ -4483,11 +5026,20 @@ from .extraction.source_kind import ARCHIVE_MIMES
 class ArchiveIntakePolicy:
     """Decides what an archive upload is exempt from."""
 
+    def __init__(self, *, rar_enabled: bool) -> None:
+        self.rar_enabled = bool(rar_enabled)
+
     @staticmethod
     def is_archive(mime: Optional[str]) -> bool:
         if not mime:
             return False
         return mime.split(";", 1)[0].strip().lower() in ARCHIVE_MIMES
+
+    def is_admitted(self, mime: Optional[str]) -> bool:
+        normalized = (mime or "").split(";", 1)[0].strip().lower()
+        return normalized == "application/zip" or (
+            normalized == "application/vnd.rar" and self.rar_enabled
+        )
 
     @classmethod
     def requires_letter_number(cls, mime: Optional[str]) -> bool:
@@ -4503,7 +5055,7 @@ class ArchiveIntakePolicy:
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_archive_intake.py -q`
-Expected: PASS — 8 passed
+Expected: PASS — 10 passed
 
 - [ ] **Step 7: Run the upload-security suites**
 
@@ -4540,6 +5092,7 @@ from __future__ import annotations
 
 import inspect
 
+from rbac_backend.core.config import Settings
 from rbac_backend.routers import documents as documents_module
 from rbac_backend.services.archive_policy import ArchiveIntakePolicy
 
@@ -4569,10 +5122,17 @@ def test_job_creation_is_gated_on_the_archive_policy() -> None:
 
 
 def test_policy_exempts_archives_end_to_end() -> None:
-    assert ArchiveIntakePolicy.requires_letter_number("application/zip") is False
-    assert ArchiveIntakePolicy.creates_processing_job("application/zip") is False
-    assert ArchiveIntakePolicy.requires_letter_number("application/pdf") is True
-    assert ArchiveIntakePolicy.creates_processing_job("application/pdf") is True
+    policy = ArchiveIntakePolicy(rar_enabled=False)
+    assert policy.requires_letter_number("application/zip") is False
+    assert policy.creates_processing_job("application/zip") is False
+    assert policy.requires_letter_number("application/pdf") is True
+    assert policy.creates_processing_job("application/pdf") is True
+
+
+def test_disabled_rar_is_rejected_by_validation_before_archive_exemption() -> None:
+    assert "application/vnd.rar" not in Settings(
+        RAR_UPLOAD_ENABLED=False
+    ).ALLOWED_DOCUMENT_MIMES
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -4595,7 +5155,10 @@ In `DocumentController.create_document`, **remove** the unconditional letter-num
                 # container, not a letter, so it is exempt - but the exemption
                 # can only be decided once the MIME type is known.
                 detected_mime = validation_result.mime_type
-                if ArchiveIntakePolicy.requires_letter_number(detected_mime) and not letter_no:
+                archive_policy = ArchiveIntakePolicy(
+                    rar_enabled=settings.RAR_UPLOAD_ENABLED
+                )
+                if archive_policy.requires_letter_number(detected_mime) and not letter_no:
                     raise DocumentError(
                         "Letter number is required", status.HTTP_400_BAD_REQUEST
                     )
@@ -4604,8 +5167,8 @@ In `DocumentController.create_document`, **remove** the unconditional letter-num
 Then change the job-creation branch at the end of the method:
 
 ```python
-            if ocr_enabled and ArchiveIntakePolicy.creates_processing_job(detected_mime):
-                await self.document_service.create_processing_job(...)
+            if ocr_enabled and archive_policy.creates_processing_job(detected_mime):
+                await self.document_service.queue_document_processing(...)
             else:
                 logger.info(
                     "[document_pipeline] No extraction job created for %s (mime=%s, ocr_enabled=%s)",
@@ -4615,12 +5178,12 @@ Then change the job-creation branch at the end of the method:
                 )
 ```
 
-Keep the existing `create_processing_job` call arguments exactly as they are — only the condition changes.
+Keep the existing `queue_document_processing` call arguments exactly as they are — only the condition changes.
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_archive_upload_route.py -q`
-Expected: PASS — 4 passed
+Expected: PASS — 5 passed
 
 - [ ] **Step 5: Regenerate the route contract**
 
@@ -4698,11 +5261,11 @@ def test_extensions_are_dot_prefixed_and_lowercase() -> None:
         assert extension == extension.lower()
 
 
-def test_archive_extensions_are_served() -> None:
+def test_archive_extensions_follow_the_fail_closed_config() -> None:
     extensions = UploadPolicyService.get_policy()["document"]["extensions"]
 
     assert ".zip" in extensions
-    assert ".rar" in extensions
+    assert (".rar" in extensions) is settings.RAR_UPLOAD_ENABLED
 
 
 def test_unsupported_types_are_absent() -> None:
@@ -4838,7 +5401,7 @@ export interface UploadPolicy {
 
 // Offline fallback only. A backend test asserts this is a subset of the served
 // policy, so the two cannot drift the way the old hard-coded accept list did.
-export const FALLBACK_UPLOAD_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.txt', '.zip', '.rar'];
+export const FALLBACK_UPLOAD_EXTENSIONS = ['.pdf', '.png', '.jpg', '.jpeg', '.txt', '.zip'];
 
 export async function fetchUploadPolicy(): Promise<UploadPolicy | null> {
   try {
@@ -5110,12 +5673,13 @@ git commit -m "feat: map table column roles before any numeric check runs"
 **Interfaces:**
 - Consumes: `ColumnRole`, `is_checkable` (6.1)
 - Produces:
-  - `ROUNDING_TOLERANCE = 0.01`
+  - `QUANTITY_DISPLAY_REL_TOLERANCE = Decimal("0.01")` — applies only to a displayed quantity versus the quantity implied by amount/rate
+  - `MONETARY_ABS_TOLERANCE = Decimal("1")` — applies only to monetary arithmetic at the source's displayed currency precision; there is no blanket monetary relative tolerance
   - `parse_amount(raw: str) -> Decimal | None`
   - `detect_split_digits(raw: str) -> str | None` — returns the repaired literal or `None`
   - `check_row(values, roles) -> CheckResult`
-  - `check_column_sum(rows, stated_total, roles) -> CheckResult`
-  - `propose_repair(raw, row_check, column_check) -> NumericRepair | None` — **returns `None` unless both checks agree**
+  - `check_subtotal(rows, stated_total, roles, *, candidate_row_index) -> CheckResult`
+  - `propose_repair(raw, *, row_check, subtotal_check) -> NumericRepair | None` — returns `None` unless two genuinely independent check families validate the same repaired value
 
 **The rule from the companion document, verbatim:** accept a numeric repair only when **two independent structural checks agree**; record before / after / reason / method / confidence / page; never repair on a single check.
 
@@ -5135,10 +5699,11 @@ from __future__ import annotations
 from decimal import Decimal
 
 from rbac_backend.services.extraction.quality.column_roles import ColumnRole
-from rbac_backend.services.extraction.quality.models import Verdict
+from rbac_backend.services.extraction.quality.models import CheckResult, Verdict
 from rbac_backend.services.extraction.quality.numeric_checks import (
-    ROUNDING_TOLERANCE,
-    check_column_sum,
+    MONETARY_ABS_TOLERANCE,
+    QUANTITY_DISPLAY_REL_TOLERANCE,
+    check_subtotal,
     check_row,
     detect_split_digits,
     parse_amount,
@@ -5225,32 +5790,42 @@ def test_missing_values_are_not_checkable() -> None:
     assert result.verdict is Verdict.NOT_CHECKABLE
 
 
-def test_column_sum_matches_stated_total() -> None:
+def test_subtotal_matches_stated_total() -> None:
     rows = [
         ["1", "a", "1", "1", "9,600,000"],
         ["2", "b", "1", "1", "5,684,775"],
         ["3", "c", "1", "1", "185,441"],
     ]
-    result = check_column_sum(rows, "15,470,216", ROLES)
+    result = check_subtotal(rows, "15,470,216", ROLES, candidate_row_index=1)
 
     assert result.verdict is Verdict.PASS
 
 
-def test_column_sum_absorbs_one_unit_of_rounding() -> None:
+def test_monetary_subtotal_absorbs_only_one_display_unit() -> None:
     # Companion 3.2: p3 line items sum to 18,450,139 against a stated 18,450,140.
-    rows = [["1", "a", "1", "1", "18,450,139"]]
-    result = check_column_sum(rows, "18,450,140", ROLES)
+    rows = [
+        ["1", "a", "1", "1", "18,000,000"],
+        ["2", "b", "1", "1", "450,139"],
+    ]
+    result = check_subtotal(rows, "18,450,140", ROLES, candidate_row_index=0)
 
     assert result.verdict is Verdict.PASS
 
 
-def test_repair_requires_two_agreeing_checks() -> None:
-    row_check = check_row(["1", "Mobilization", "1", "1,900,000", "1 ,900,000"], ROLES)
-    column_check = check_column_sum(
-        [["1", "Mobilization", "1", "1,900,000", "1 ,900,000"]], "1,900,000", ROLES
+def test_repair_requires_row_identity_and_independent_multirow_subtotal() -> None:
+    repaired_row = ["1", "Mobilization", "1", "1,900,000", "1,900,000"]
+    rows = [
+        repaired_row,
+        ["2", "Survey", "1", "100,000", "100,000"],
+    ]
+    row_check = check_row(repaired_row, ROLES)
+    subtotal_check = check_subtotal(
+        rows, "2,000,000", ROLES, candidate_row_index=0
     )
 
-    repair = propose_repair("1 ,900,000", row_check, column_check)
+    repair = propose_repair(
+        "1 ,900,000", row_check=row_check, subtotal_check=subtotal_check
+    )
 
     assert repair is not None
     assert repair.before == "1 ,900,000"
@@ -5260,21 +5835,60 @@ def test_repair_requires_two_agreeing_checks() -> None:
 
 
 def test_single_agreeing_check_never_repairs() -> None:
-    row_check = check_row(["1", "Mobilization", "1", "1,900,000", "1 ,900,000"], ROLES)
+    row_check = check_row(["1", "Mobilization", "1", "1,900,000", "1,900,000"], ROLES)
     not_checkable = check_row(["1", "x", "", "", ""], ROLES)
 
-    assert propose_repair("1 ,900,000", row_check, not_checkable) is None
+    assert propose_repair(
+        "1 ,900,000", row_check=row_check, subtotal_check=not_checkable
+    ) is None
 
 
 def test_disagreeing_checks_never_repair() -> None:
-    row_check = check_row(["1", "Widget", "10", "100", "1 ,000"], ROLES)
-    contradicting = check_column_sum([["1", "Widget", "10", "100", "1 ,000"]], "9,999", ROLES)
+    row_check = check_row(["1", "Widget", "10", "100", "1,000"], ROLES)
+    contradicting = check_subtotal(
+        [["1", "Widget", "10", "100", "1,000"], ["2", "Peer", "1", "1", "1"]],
+        "9,999", ROLES, candidate_row_index=0
+    )
 
-    assert propose_repair("1 ,000", row_check, contradicting) is None
+    assert propose_repair(
+        "1 ,000", row_check=row_check, subtotal_check=contradicting
+    ) is None
 
 
-def test_tolerance_constant_is_one_percent_of_a_percent_not_a_percent() -> None:
-    assert ROUNDING_TOLERANCE == 0.01
+def test_quantity_and_money_tolerances_are_separate() -> None:
+    assert QUANTITY_DISPLAY_REL_TOLERANCE == Decimal("0.01")
+    assert MONETARY_ABS_TOLERANCE == Decimal("1")
+
+
+def test_one_percent_monetary_error_does_not_pass() -> None:
+    rows = [["1", "a", "1", "1", "990"], ["2", "b", "1", "1", "10"]]
+    result = check_subtotal(rows, "1,010", ROLES, candidate_row_index=0)
+    assert result.verdict is Verdict.FAIL
+
+
+def test_single_row_total_is_not_independent_corroboration() -> None:
+    row = ["1", "Mobilization", "1", "1,900,000", "1,900,000"]
+    row_check = check_row(row, ROLES)
+    same_row_total = check_subtotal([row], "1,900,000", ROLES, candidate_row_index=0)
+    assert same_row_total.verdict is Verdict.NOT_CHECKABLE
+    assert propose_repair(
+        "1 ,900,000", row_check=row_check, subtotal_check=same_row_total
+    ) is None
+
+
+def test_overlapping_structural_support_is_not_independent() -> None:
+    candidate = Decimal("1900000")
+    row_check = CheckResult(
+        name="row_identity", verdict=Verdict.PASS, candidate_value=candidate,
+        evidence_refs=["candidate.amount", "shared.operand"],
+    )
+    subtotal_check = CheckResult(
+        name="subtotal_identity", verdict=Verdict.PASS, candidate_value=candidate,
+        evidence_refs=["candidate.amount", "shared.operand", "printed.subtotal"],
+    )
+    assert propose_repair(
+        "1 ,900,000", row_check=row_check, subtotal_check=subtotal_check
+    ) is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -5311,6 +5925,8 @@ class CheckResult:
     detail: str = ""
     expected: Optional[Decimal] = None
     actual: Optional[Decimal] = None
+    candidate_value: Optional[Decimal] = None
+    evidence_refs: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -5341,10 +5957,10 @@ class QualityVerdict:
 ```python
 """Arithmetic integrity over extracted table rows.
 
-Two independent checks exist - a row identity (qty x nos x rate = amount) and a
-column sum against a stated total. A repair is proposed only when both agree,
-because the output feeds arbitration and a silently altered figure is worse
-than a flagged one.
+Two independent checks exist: (1) a row identity (qty x nos x rate = amount),
+and (2) a multirow subtotal identity using a separately printed subtotal and at
+least one peer row. Re-summing a one-row "column" merely restates the candidate
+amount and is NOT_CHECKABLE, not corroboration.
 """
 
 from __future__ import annotations
@@ -5356,10 +5972,11 @@ from typing import List, Optional, Sequence
 from .column_roles import ColumnRole, is_checkable
 from .models import CheckResult, NumericRepair, Verdict
 
-# Relative tolerance for rounding: 1%. Companion 3.3 measured a displayed qty of
-# 58 against a true 57.5 - a 0.86% discrepancy that must pass rather than
-# escalate.
-ROUNDING_TOLERANCE = 0.01
+# Quantity display rounding and monetary arithmetic are different error models.
+# A displayed quantity may be rounded by up to 1%; money must balance to the
+# displayed currency precision, with at most one whole displayed unit here.
+QUANTITY_DISPLAY_REL_TOLERANCE = Decimal("0.01")
+MONETARY_ABS_TOLERANCE = Decimal("1")
 
 # A digit, then whitespace, then a group that is clearly the tail of a grouped
 # number. "1 ,900,000" and "5 77,188" match; "52 184615" does not, because the
@@ -5402,10 +6019,23 @@ def _value_for(
     return None
 
 
-def _within_tolerance(expected: Decimal, actual: Decimal) -> bool:
-    if expected == 0:
-        return actual == 0
-    return abs((actual - expected) / expected) <= Decimal(str(ROUNDING_TOLERANCE))
+def _money_matches(expected: Decimal, actual: Decimal) -> bool:
+    return abs(actual - expected) <= MONETARY_ABS_TOLERANCE
+
+
+def _quantity_display_matches(
+    *, quantity: Decimal, nos: Decimal, rate: Decimal, amount: Decimal
+) -> bool:
+    denominator = nos * rate
+    if denominator == 0:
+        return False
+    implied_quantity = amount / denominator
+    if implied_quantity == 0:
+        return quantity == 0
+    return (
+        abs(quantity - implied_quantity) / abs(implied_quantity)
+        <= QUANTITY_DISPLAY_REL_TOLERANCE
+    )
 
 
 def check_row(values: Sequence[str], roles: Sequence[ColumnRole]) -> CheckResult:
@@ -5436,13 +6066,22 @@ def check_row(values: Sequence[str], roles: Sequence[ColumnRole]) -> CheckResult
         multiplier *= nos
 
     expected = multiplier * rate
-    if _within_tolerance(expected, amount):
+    quantity_for_tolerance = quantity or Decimal(1)
+    nos_for_tolerance = nos or Decimal(1)
+    if _money_matches(expected, amount) or _quantity_display_matches(
+        quantity=quantity_for_tolerance,
+        nos=nos_for_tolerance,
+        rate=rate,
+        amount=amount,
+    ):
         return CheckResult(
             name="row_identity",
             verdict=Verdict.PASS,
             detail=f"{multiplier} x {rate} = {amount}",
             expected=expected,
             actual=amount,
+            candidate_value=amount,
+            evidence_refs=["row.quantity", "row.nos", "row.rate", "row.amount"],
         )
     return CheckResult(
         name="row_identity",
@@ -5453,15 +6092,17 @@ def check_row(values: Sequence[str], roles: Sequence[ColumnRole]) -> CheckResult
     )
 
 
-def check_column_sum(
+def check_subtotal(
     rows: Sequence[Sequence[str]],
     stated_total: Optional[str],
     roles: Sequence[ColumnRole],
+    *,
+    candidate_row_index: int,
 ) -> CheckResult:
-    """Check that the amount column sums to a stated total."""
+    """Check a candidate amount through an independent multirow subtotal."""
     if not is_checkable(roles):
         return CheckResult(
-            name="column_sum",
+            name="subtotal_identity",
             verdict=Verdict.NOT_CHECKABLE,
             detail="Column roles were not confidently identified",
         )
@@ -5469,14 +6110,16 @@ def check_column_sum(
     total = parse_amount(stated_total)
     if total is None:
         return CheckResult(
-            name="column_sum",
+            name="subtotal_identity",
             verdict=Verdict.NOT_CHECKABLE,
             detail="No stated total to check against",
         )
 
     running = Decimal(0)
     counted = 0
-    for row in rows:
+    candidate_value: Optional[Decimal] = None
+    peer_count = 0
+    for row_index, row in enumerate(rows):
         raw = _value_for(row, roles, ColumnRole.AMOUNT)
         value = parse_amount(raw)
         if value is None:
@@ -5486,25 +6129,31 @@ def check_column_sum(
             continue
         running += value
         counted += 1
+        if row_index == candidate_row_index:
+            candidate_value = value
+        else:
+            peer_count += 1
 
-    if counted == 0:
+    if counted == 0 or candidate_value is None or peer_count < 1:
         return CheckResult(
-            name="column_sum",
+            name="subtotal_identity",
             verdict=Verdict.NOT_CHECKABLE,
-            detail="No parseable amounts in the column",
+            detail="Independent subtotal requires the candidate plus at least one peer row",
         )
 
     # Absorb single-unit rounding: 18,450,139 against a stated 18,450,140.
-    if abs(running - total) <= 1 or _within_tolerance(total, running):
+    if _money_matches(total, running):
         return CheckResult(
-            name="column_sum",
+            name="subtotal_identity",
             verdict=Verdict.PASS,
             detail=f"sum {running:,} vs stated {total:,}",
             expected=total,
             actual=running,
+            candidate_value=candidate_value,
+            evidence_refs=["printed.subtotal", "candidate.amount", "peer.amounts"],
         )
     return CheckResult(
-        name="column_sum",
+        name="subtotal_identity",
         verdict=Verdict.FAIL,
         detail=f"sum {running:,} does not match stated {total:,}",
         expected=total,
@@ -5513,7 +6162,7 @@ def check_column_sum(
 
 
 def propose_repair(
-    raw: str, first: CheckResult, second: CheckResult
+    raw: str, *, row_check: CheckResult, subtotal_check: CheckResult
 ) -> Optional[NumericRepair]:
     """Propose a split-digit repair only when two checks independently agree.
 
@@ -5524,12 +6173,21 @@ def propose_repair(
     if repaired is None:
         return None
 
-    verdicts = {first.verdict, second.verdict}
-    if Verdict.NOT_CHECKABLE in verdicts or Verdict.INDETERMINATE in verdicts:
+    if row_check.name != "row_identity" or subtotal_check.name != "subtotal_identity":
         return None
-    if first.verdict is not second.verdict:
+    if row_check.verdict is not Verdict.PASS or subtotal_check.verdict is not Verdict.PASS:
         return None
-    if first.verdict is not Verdict.PASS and first.verdict is not Verdict.FAIL:
+    candidate = parse_amount(repaired)
+    if candidate is None:
+        return None
+    if row_check.candidate_value != candidate or subtotal_check.candidate_value != candidate:
+        return None
+    # The candidate itself must be shared; the evidence that validates it must
+    # not be. Row operands and subtotal/peer operands are separate structures.
+    candidate_refs = {"row.amount", "candidate.amount"}
+    row_support = set(row_check.evidence_refs) - candidate_refs
+    subtotal_support = set(subtotal_check.evidence_refs) - candidate_refs
+    if not row_support or not subtotal_support or row_support & subtotal_support:
         return None
 
     return NumericRepair(
@@ -5544,7 +6202,7 @@ def propose_repair(
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_quality_numeric_checks.py -q`
-Expected: PASS — 15 passed
+Expected: PASS — 18 passed
 
 - [ ] **Step 6: Commit**
 
@@ -5563,7 +6221,7 @@ git commit -m "feat: detect split-digit corruption and repair only on dual confi
 
 **Interfaces:**
 - Consumes: `CheckResult`, `Verdict` (6.2)
-- Produces: `class DateConvention(str, Enum)` — `DAY_FIRST`, `MONTH_FIRST`, `MIXED`, `AMBIGUOUS`, `UNKNOWN`; `detect_convention(values) -> DateConvention`; `check_date_column(values) -> CheckResult`
+- Produces: `class DateConvention(str, Enum)` — `DAY_FIRST`, `MONTH_FIRST`, `MIXED`, `AMBIGUOUS`, `UNKNOWN`; `detect_convention(values) -> DateConvention` using ordered-sequence evidence; `check_date_column(values) -> CheckResult`. If two equally plausible interpretations remain, the check returns `Verdict.INDETERMINATE` rather than claiming `MIXED`.
 
 **Context:** `CLAUDE.md` records the repo's move to day-first `DD-MM-YYYY`. Companion §3.4 measured a 52-row register mixing `M/D/YYYY` and `D/M/YYYY` **in one column**, gating ₹9.6M of idling charges. A day-first parse of `2/26/2023` yields month 26 and fails; a silent fallback mis-dates the March entries. Ambiguity must survive as ambiguity.
 
@@ -5608,6 +6266,17 @@ def test_the_measured_mixed_column_is_flagged_mixed() -> None:
     ]
 
     assert detect_convention(values) is DateConvention.MIXED
+
+
+def test_ambiguous_run_is_day_first_only_when_sequence_evidence_is_unique() -> None:
+    # M/D for the middle values would move Feb 28 -> Jan 3 -> Feb 3 -> Dec 3
+    # -> Mar 13. D/M yields the unique monotonic sequence Mar 1, 2, 12.
+    values = ["2/28/2023", "1/3/2023", "2/3/2023", "12/3/2023", "3/13/2023"]
+    assert detect_convention(values) is DateConvention.MIXED
+
+
+def test_ambiguous_values_without_unique_sequence_evidence_stay_ambiguous() -> None:
+    assert detect_convention(["1/3/2023", "2/3/2023", "3/3/2023"]) is DateConvention.AMBIGUOUS
 
 
 def test_all_ambiguous_values_stay_ambiguous() -> None:
@@ -5671,8 +6340,9 @@ never resolved here.
 from __future__ import annotations
 
 import re
+from datetime import date
 from enum import Enum
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .models import CheckResult, Verdict
 
@@ -5688,51 +6358,97 @@ class DateConvention(str, Enum):
     UNKNOWN = "unknown"
 
 
-def _parse_parts(value: Optional[str]) -> Optional[Tuple[int, int]]:
-    """Return (first, second) numeric components, or None."""
+def _candidate_dates(
+    value: Optional[str],
+) -> List[Tuple[date, Optional[DateConvention]]]:
+    """Return every calendar-valid interpretation for one value."""
     if value is None:
-        return None
+        return []
     text = str(value)
-    if _ISO_DATE.match(text):
-        return None  # ISO is unambiguous; handled separately
+    iso = _ISO_DATE.match(text)
+    if iso:
+        try:
+            return [(date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3))), None)]
+        except ValueError:
+            return []
     match = _NUMERIC_DATE.match(text)
     if not match:
-        return None
-    return int(match.group(1)), int(match.group(2))
+        return []
+    first, second, raw_year = map(int, match.groups())
+    year = raw_year + 2000 if raw_year < 100 else raw_year
+    candidates: List[Tuple[date, Optional[DateConvention]]] = []
+    for convention, day, month in (
+        (DateConvention.DAY_FIRST, first, second),
+        (DateConvention.MONTH_FIRST, second, first),
+    ):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        item = (candidate, convention)
+        if item not in candidates:
+            candidates.append(item)
+    return candidates
 
 
 def detect_convention(values: Sequence[Optional[str]]) -> DateConvention:
-    """Infer the column's convention from values that can only read one way."""
-    has_iso = False
-    evidence: List[DateConvention] = []
-    parsed_any = False
+    """Choose a convention only when ordered context yields a unique best path.
 
-    for value in values:
-        if value and _ISO_DATE.match(str(value)):
-            has_iso = True
-            parsed_any = True
-            continue
-        parts = _parse_parts(value)
-        if parts is None:
-            continue
-        parsed_any = True
-        first, second = parts
-        if second > 12 >= first:
-            evidence.append(DateConvention.MONTH_FIRST)
-        elif first > 12 >= second:
-            evidence.append(DateConvention.DAY_FIRST)
-
-    if not parsed_any:
+    Dynamic programming minimises, in order: backward date transitions,
+    backward days, then convention switches. All equal-best convention masks are
+    retained; disagreement among them is AMBIGUOUS, not guessed.
+    """
+    observations = [_candidate_dates(value) for value in values]
+    observations = [candidates for candidates in observations if candidates]
+    if not observations:
         return DateConvention.UNKNOWN
 
-    distinct = set(evidence)
-    if len(distinct) > 1:
+    # candidate -> (score tuple, possible convention masks)
+    states: Dict[Tuple[date, Optional[DateConvention]], Tuple[Tuple[int, int, int], set[frozenset[DateConvention]]]] = {}
+    for candidate in observations[0]:
+        mask = frozenset([candidate[1]]) if candidate[1] is not None else frozenset()
+        states[candidate] = ((0, 0, 0), {mask})
+
+    for candidates in observations[1:]:
+        next_states = {}
+        for current in candidates:
+            best_score = None
+            best_masks: set[frozenset[DateConvention]] = set()
+            for previous, (score, masks) in states.items():
+                backwards = current[0] < previous[0]
+                backward_days = (previous[0] - current[0]).days if backwards else 0
+                switched = (
+                    previous[1] is not None
+                    and current[1] is not None
+                    and previous[1] is not current[1]
+                )
+                candidate_score = (
+                    score[0] + int(backwards),
+                    score[1] + backward_days,
+                    score[2] + int(switched),
+                )
+                if best_score is None or candidate_score < best_score:
+                    best_score, best_masks = candidate_score, set()
+                if candidate_score == best_score:
+                    for mask in masks:
+                        best_masks.add(
+                            mask | ({current[1]} if current[1] is not None else set())
+                        )
+            next_states[current] = (best_score, best_masks)
+        states = next_states
+
+    winning_score = min(score for score, _ in states.values())
+    winning_masks = set().union(
+        *(masks for score, masks in states.values() if score == winning_score)
+    )
+    if len(winning_masks) != 1:
+        return DateConvention.AMBIGUOUS
+    conventions = next(iter(winning_masks))
+    if len(conventions) > 1:
         return DateConvention.MIXED
-    if distinct:
-        return distinct.pop()
-    if has_iso:
-        return DateConvention.DAY_FIRST
-    return DateConvention.AMBIGUOUS
+    if len(conventions) == 1:
+        return next(iter(conventions))
+    return DateConvention.DAY_FIRST  # ISO-only input is unambiguous and passes
 
 
 def check_date_column(values: Sequence[Optional[str]]) -> CheckResult:
@@ -5770,7 +6486,7 @@ def check_date_column(values: Sequence[Optional[str]]) -> CheckResult:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_quality_date_checks.py -q`
-Expected: PASS — 10 passed
+Expected: PASS — 12 passed
 
 - [ ] **Step 5: Commit**
 
@@ -5993,11 +6709,18 @@ def check_text_density(
         PageClass.SCANNED_IMAGE,
     }
 
-    if classification.page_class in {PageClass.BLANK, PageClass.UNRENDERABLE}:
+    if classification.page_class is PageClass.UNRENDERABLE:
+        return CheckResult(
+            name="text_density",
+            verdict=Verdict.INDETERMINATE,
+            detail="Page could not be rendered; blankness and content cannot be confirmed",
+        )
+
+    if classification.page_class is PageClass.BLANK:
         return CheckResult(
             name="text_density",
             verdict=Verdict.PASS,
-            detail="Page carries no content, and none was extracted",
+            detail="Page was successfully rendered and confirmed blank",
         )
 
     if classification.page_class in content_bearing and len(body) < 20:
@@ -6068,7 +6791,13 @@ git commit -m "feat: detect destroyed reading order and implausible text density
     {"why": "declared in-table formula Volume [l*b*h]", "headers": ["DW No", "Length", "Breadth", "Height", "Volume"], "row": ["DW2", "5.0", "0.8", "1.2", "4.8"]},
     {"why": "S/N serial read as quantity", "headers": ["S/N", "Description", "Rate", "Amount"], "row": ["2", "Mobilization", "950,000", "950,000"]},
     {"why": "0.86% rounding, displayed qty 58 vs true 57.5", "headers": ["S/N", "Description", "Qty", "Rate", "Amount"], "row": ["1", "Ground improvement", "58", "1,215", "70,500"]},
-    {"why": "sum 18,450,139 vs stated 18,450,140 (1 unit)", "headers": ["S/N", "Description", "Qty", "Rate", "Amount"], "row": ["1", "Sub-total", "1", "18,450,139", "18,450,139"], "stated_total": "18,450,140"}
+    {"why": "sum 18,450,139 vs stated 18,450,140 (1 unit)", "headers": ["S/N", "Description", "Qty", "Rate", "Amount"], "row": ["1", "Sub-total", "1", "18,450,139", "18,450,139"], "stated_total": "18,450,140"},
+    {"why": "lump-sum row has rate and amount but no quantity", "headers": ["S/N", "Description", "Rate", "Amount"], "row": ["7", "Lump sum", "500,000", "500,000"]},
+    {"why": "percentage item is not a quantity-rate identity", "headers": ["S/N", "Description", "Percent", "Amount"], "row": ["8", "Overheads", "10%", "95,000"]},
+    {"why": "negative credit has no multiplication operands", "headers": ["S/N", "Description", "Amount"], "row": ["9", "Less recovery", "-25,000"]},
+    {"why": "repeated header row inside a continued table", "headers": ["S/N", "Description", "Qty", "Rate", "Amount"], "row": ["S/N", "Description", "Qty", "Rate", "Amount"]},
+    {"why": "missing amount is uncheckable rather than false", "headers": ["S/N", "Description", "Qty", "Rate", "Amount"], "row": ["10", "Pending valuation", "2", "50", ""]},
+    {"why": "page range must not be parsed as a financial quantity", "headers": ["S/N", "Description", "Pages", "Amount"], "row": ["11", "Supporting records", "1-3", "100,000"]}
   ]
 }
 ```
@@ -6137,8 +6866,11 @@ def test_all_nine_measured_corruptions_are_detected() -> None:
 
 def test_no_false_positive_case_produces_a_fail() -> None:
     gate = ExtractionQualityGate()
+    cases = GOLDEN["false_positive_cases"]
 
-    for case in GOLDEN["false_positive_cases"]:
+    assert len(cases) == GOLDEN["false_positive_patterns_that_must_not_fail"] == 12
+
+    for case in cases:
         tables = [[case["headers"], case["row"]]]
         verdict = gate.assess(_page("Cost breakdown table"), tables=tables)
 
@@ -6182,6 +6914,15 @@ def test_blank_page_is_not_an_escalation() -> None:
     assert verdict.escalates is False
 
 
+def test_unrenderable_page_is_indeterminate_and_human_review_eligible() -> None:
+    gate = ExtractionQualityGate()
+
+    verdict = gate.assess(_page("", PageClass.UNRENDERABLE))
+
+    assert verdict.verdict is Verdict.INDETERMINATE
+    assert verdict.escalates is True
+
+
 def test_unidentifiable_table_is_not_checkable_and_does_not_escalate() -> None:
     gate = ExtractionQualityGate()
     tables = [[["DW No", "Depth", "Thickness", "Volume"], ["DW1", "1.2", "0.8", "4.8"]]]
@@ -6208,6 +6949,8 @@ def test_repairs_are_recorded_with_full_provenance() -> None:
         [
             ["S/N", "Description", "Qty", "Rate", "Amount"],
             ["1", "Mobilization", "1", "1,900,000", "1 ,900,000"],
+            ["2", "Survey", "1", "100,000", "100,000"],
+            ["", "Sub-total", "", "", "2,000,000"],
         ]
     ]
 
@@ -6243,13 +6986,14 @@ because the alternative is 12 paid model calls per correct document.
 from __future__ import annotations
 
 import logging
+import re
 from typing import List, Optional, Sequence
 
 from ..models import ExtractedPage
 from .column_roles import map_column_roles
 from .date_checks import check_date_column
 from .models import CheckResult, NumericRepair, QualityVerdict, Verdict
-from .numeric_checks import check_column_sum, check_row, propose_repair
+from .numeric_checks import check_row, check_subtotal, detect_split_digits, propose_repair
 from .reading_order import check_reading_order, check_text_density
 
 logger = logging.getLogger(__name__)
@@ -6299,19 +7043,42 @@ class ExtractionQualityGate:
                 [],
             )
 
-        headers, data_rows = rows[0], rows[1:]
+        headers, raw_data_rows = rows[0], rows[1:]
         roles = map_column_roles(headers)
+
+        subtotal_index, stated_total = self._find_stated_subtotal(raw_data_rows, roles)
+        data_rows = [
+            row for index, row in enumerate(raw_data_rows) if index != subtotal_index
+        ]
 
         checks: List[CheckResult] = []
         repairs: List[NumericRepair] = []
 
-        for row in data_rows:
+        for row_index, row in enumerate(data_rows):
             row_check = check_row(row, roles)
             checks.append(row_check)
 
-            column_check = check_column_sum([row], self._stated_total(row, roles), roles)
-            for cell in row:
-                repair = propose_repair(str(cell), row_check, column_check)
+            for cell_index, cell in enumerate(row):
+                repaired_literal = detect_split_digits(str(cell))
+                if repaired_literal is None:
+                    continue
+                candidate_row = list(row)
+                candidate_row[cell_index] = repaired_literal
+                candidate_rows = [list(item) for item in data_rows]
+                candidate_rows[row_index] = candidate_row
+                candidate_row_check = check_row(candidate_row, roles)
+                subtotal_check = check_subtotal(
+                    candidate_rows,
+                    stated_total,
+                    roles,
+                    candidate_row_index=row_index,
+                )
+                checks.extend([candidate_row_check, subtotal_check])
+                repair = propose_repair(
+                    str(cell),
+                    row_check=candidate_row_check,
+                    subtotal_check=subtotal_check,
+                )
                 if repair is not None:
                     repairs.append(
                         NumericRepair(
@@ -6328,13 +7095,29 @@ class ExtractionQualityGate:
         return checks, repairs
 
     @staticmethod
-    def _stated_total(row: Sequence[str], roles: Sequence[object]) -> Optional[str]:
+    def _find_stated_subtotal(
+        rows: Sequence[Sequence[str]], roles: Sequence[object]
+    ) -> tuple[Optional[int], Optional[str]]:
         from .column_roles import ColumnRole
 
-        for index, role in enumerate(roles):
-            if role is ColumnRole.AMOUNT and index < len(row):
-                return str(row[index])
-        return None
+        amount_index = next(
+            (index for index, role in enumerate(roles) if role is ColumnRole.AMOUNT),
+            None,
+        )
+        description_index = next(
+            (index for index, role in enumerate(roles) if role is ColumnRole.DESCRIPTION),
+            None,
+        )
+        if amount_index is None or description_index is None:
+            return None, None
+        for row_index, row in enumerate(rows):
+            description = str(row[description_index] if description_index < len(row) else "")
+            if re.search(r"\b(?:sub[ -]?total|grand total|total)\b", description, re.I):
+                return (
+                    row_index,
+                    str(row[amount_index]) if amount_index < len(row) else None,
+                )
+        return None, None
 
     @staticmethod
     def _date_checks(
@@ -6364,7 +7147,7 @@ class ExtractionQualityGate:
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_quality_gate.py -q`
-Expected: PASS — 9 passed
+Expected: PASS — 10 passed
 
 - [ ] **Step 6: Run the whole quality suite together**
 
@@ -6392,7 +7175,7 @@ git commit -m "feat: assemble the deterministic extraction quality gate"
 
 **Interfaces:**
 - Consumes: nothing
-- Produces: `DEFAULT_DPI = 150`, `class PageRasterizer(dpi: int = DEFAULT_DPI)` with `render_page(source, page_number) -> bytes` (PNG) and `crop_region(source, page_number, bbox) -> bytes`, plus `RasterizationError`
+- Produces: `DEFAULT_DPI = 150`, `class PageRasterizer(dpi: int = DEFAULT_DPI)` with `render_page(source, page_number) -> bytes` (PNG) and `crop_region(source, page_number, bbox) -> bytes`, plus `RasterizationError`. It handles PDF pages and a standalone PNG/JPEG as logical page 1; this keeps image fallback out of `pdfplumber` and PDF page mapping.
 
 **Verified 2026-08-14 in `backend/.venv`:** `pdfplumber.Page.to_image(resolution=150)` renders through **pypdfium2 5.0.0** (already installed transitively) and Pillow crops the result — 1240×1755 RGB measured. No new dependency and no AGPL exposure, so the companion document's rejection of PyMuPDF stands.
 
@@ -6478,6 +7261,15 @@ def test_zero_area_bbox_raises(tmp_path: Path) -> None:
 
     with pytest.raises(RasterizationError):
         PageRasterizer().crop_region(source, 3, (10.0, 10.0, 10.0, 10.0))
+
+
+def test_standalone_image_renders_as_logical_page_one(tmp_path: Path) -> None:
+    source = tmp_path / "scan.png"
+    Image.new("RGB", (320, 240), "white").save(source)
+    rendered = Image.open(io.BytesIO(PageRasterizer().render_page(source, 1)))
+    assert rendered.size == (320, 240)
+    with pytest.raises(RasterizationError):
+        PageRasterizer().render_page(source, 2)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -6528,7 +7320,8 @@ class PageRasterizer:
     ) -> bytes:
         """Render one region of a page to PNG bytes.
 
-        bbox is (x0, top, x1, bottom) in PDF user-space points.
+        bbox is (x0, top, x1, bottom): PDF user-space points for PDFs and source
+        pixels for standalone images.
         """
         x0, top, x1, bottom = bbox
         if x1 <= x0 or bottom <= top:
@@ -6542,6 +7335,28 @@ class PageRasterizer:
         *,
         bbox: Tuple[float, float, float, float] | None,
     ) -> bytes:
+        with source.open("rb") as stream:
+            signature = stream.read(8)
+        if signature.startswith(b"\x89PNG\r\n\x1a\n") or (
+            signature[:3] == b"\xff\xd8\xff"
+        ):
+            if page_number != 1:
+                raise RasterizationError("A standalone image has only logical page 1")
+            from PIL import Image
+
+            try:
+                with Image.open(source) as handle:
+                    image = handle.convert("RGB")
+                    if bbox is not None:
+                        image = image.crop(tuple(map(int, bbox)))
+                    buffer = io.BytesIO()
+                    image.save(buffer, format="PNG")
+                    return buffer.getvalue()
+            except Exception as exc:
+                raise RasterizationError(
+                    f"Could not render standalone image {source.name}: {exc}"
+                ) from exc
+
         import pdfplumber
 
         try:
@@ -6580,7 +7395,7 @@ class PageRasterizer:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_extraction_rasterizer.py -q`
-Expected: PASS — 7 passed
+Expected: PASS — 8 passed
 
 - [ ] **Step 5: Commit**
 
@@ -6605,9 +7420,10 @@ git commit -m "feat: add page rasterizer for the vision fallback"
 - Produces:
   - `class Tier(int, Enum)` — `TIER_1 = 1`, `TIER_2 = 2`
   - `class Corroboration(str, Enum)` — `CORROBORATED`, `UNCORROBORATED`
-  - `class FallbackOutcome(str, Enum)` — `RESOLVED`, `ESCALATED`, `HUMAN_REVIEW_REQUIRED`
+  - `@dataclass ReconstructedValue(value_id, kind, raw_value, location)` and `@dataclass ValueCorroboration(value_id, raw_value, status, check_name, evidence_refs)`
+  - `class FallbackOutcome(str, Enum)` — `UNCHANGED`, `RESOLVED`, `ESCALATED`, `HUMAN_REVIEW_REQUIRED`
   - `@dataclass Evidence(image_png, is_region, bbox, native_text, ocr_text, tables, trigger_reasons, dpi)`
-  - `@dataclass Reconstruction(text, tables, values, confidence, model, model_version, prompt_version)`
+  - `@dataclass Reconstruction(text, tables, factual_values, confidence, model, model_version, prompt_version, input_tokens, output_tokens, cost_usd)`; every number/date emitted in text or tables must appear in `factual_values`, enforced deterministically, and adapters must return measured usage rather than letting the ledger invent zeros
   - `@dataclass ResolvedPage(page, outcome, tier_used, reconstruction, post_verdict)`
   - `@dataclass Intervention(...)` matching spec §4.9.5
   - `assemble_evidence(source, page, verdict, rasterizer, *, region=None) -> Evidence`
@@ -6762,7 +7578,10 @@ async def test_ledger_writes_the_full_provenance_record() -> None:
                     "before": "1 ,900,000",
                     "after": "1,900,000",
                     "reason": "split digit",
+                    "value_id": "table-0-row-1-amount",
                     "corroboration": Corroboration.CORROBORATED.value,
+                    "check_name": "subtotal_identity",
+                    "evidence_refs": ["printed.subtotal", "peer.amounts"],
                 }
             ],
             post_check=Verdict.PASS.value,
@@ -6857,7 +7676,25 @@ class Corroboration(str, Enum):
     UNCORROBORATED = "uncorroborated"
 
 
+@dataclass(frozen=True)
+class ReconstructedValue:
+    value_id: str
+    kind: str  # number | date
+    raw_value: str
+    location: str  # text span id or table/cell id
+
+
+@dataclass(frozen=True)
+class ValueCorroboration:
+    value_id: str
+    raw_value: str
+    status: Corroboration
+    check_name: str = ""
+    evidence_refs: List[str] = field(default_factory=list)
+
+
 class FallbackOutcome(str, Enum):
+    UNCHANGED = "unchanged"
     RESOLVED = "resolved"
     ESCALATED = "escalated"
     HUMAN_REVIEW_REQUIRED = "human_review_required"
@@ -6886,11 +7723,14 @@ class Evidence:
 class Reconstruction:
     text: str
     tables: List[List[List[str]]] = field(default_factory=list)
-    values: Dict[str, str] = field(default_factory=dict)
+    factual_values: List[ReconstructedValue] = field(default_factory=list)
     confidence: float = 0.0
     model: str = ""
     model_version: str = ""
     prompt_version: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -7048,7 +7888,9 @@ git commit -m "feat: add fallback evidence assembly and intervention ledger"
   - `class ReconstructionModel(Protocol)` with `async def reconstruct(evidence, tier) -> Reconstruction`
   - `class NullReconstructionModel` — always raises `ModelUnavailable`
   - `class ExtractionFallbackLadder(gate, rasterizer, ledger, tier1=None, tier2=None, budget=None)` with `async def resolve(source, page, verdict, *, document_id, tables=None) -> ResolvedPage`
-  - `classify_corroboration(value, evidence, post_verdict) -> Corroboration`
+  - `inventory_factual_values(reconstruction) -> set[(kind, normalized_value, location)]` and schema comparison against `reconstruction.factual_values`
+  - `classify_corroboration(reconstructed_value, evidence, post_verdict) -> ValueCorroboration`; a PASS check corroborates only when its `candidate_value` matches that exact normalized value and its `evidence_refs` identify the supporting source/cells
+  - `reconstruction_content_is_source_anchored(reconstruction, evidence) -> bool`; non-value prose/table tokens may be reordered but every token must already exist in the native/OCR/table evidence, so a gate PASS cannot bless novel factual narrative
 
 - [ ] **Step 1: Write the failing test**
 
@@ -7065,6 +7907,7 @@ Rules asserted here:
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -7072,6 +7915,7 @@ from rbac_backend.services.extraction.fallback.ladder import (
     ExtractionFallbackLadder,
     ModelUnavailable,
     NullReconstructionModel,
+    classify_corroboration,
 )
 from rbac_backend.services.extraction.fallback.ledger import InterventionLedger
 from rbac_backend.services.extraction.fallback.models import (
@@ -7079,6 +7923,7 @@ from rbac_backend.services.extraction.fallback.models import (
     Evidence,
     FallbackOutcome,
     Reconstruction,
+    ReconstructedValue,
     Tier,
 )
 from rbac_backend.services.extraction.models import (
@@ -7120,16 +7965,21 @@ class _FakeDb:
 
 
 class _StubModel:
-    def __init__(self, text: str, confidence: float = 0.95, name: str = "stub") -> None:
+    def __init__(
+        self, text: str, confidence: float = 0.95, name: str = "stub",
+        factual_values: list[ReconstructedValue] | None = None,
+    ) -> None:
         self.text = text
         self.confidence = confidence
         self.name = name
+        self.factual_values = factual_values or []
         self.calls = 0
 
     async def reconstruct(self, evidence: Evidence, tier: Tier) -> Reconstruction:
         self.calls += 1
         return Reconstruction(
             text=self.text,
+            factual_values=self.factual_values,
             confidence=self.confidence,
             model=self.name,
             model_version="1",
@@ -7171,6 +8021,18 @@ def _not_checkable_verdict() -> QualityVerdict:
     )
 
 
+class _AlwaysNotCheckableGate:
+    def assess(self, page, *, tables=None) -> QualityVerdict:
+        return _not_checkable_verdict()
+
+
+def empty_evidence() -> Evidence:
+    return Evidence(
+        page_number=1, image_png=b"", is_region=False, bbox=None,
+        native_text="", ocr_text="", tables=[], trigger_reasons=[], dpi=150,
+    )
+
+
 def _ladder(db: _FakeDb, tier1: Any = None, tier2: Any = None) -> ExtractionFallbackLadder:
     return ExtractionFallbackLadder(
         gate=ExtractionQualityGate(),
@@ -7191,17 +8053,20 @@ async def test_not_checkable_never_calls_a_model(tmp_path: Path) -> None:
     )
 
     assert model.calls == 0
-    assert resolved.outcome is FallbackOutcome.RESOLVED
+    assert resolved.outcome is FallbackOutcome.UNCHANGED
     assert db[InterventionLedger.COLLECTION].inserted == []
 
 
 async def test_tier1_success_resolves_and_is_ledgered(tmp_path: Path) -> None:
     source = build_mixed_pdf(tmp_path / "mixed.pdf")
     db = _FakeDb()
-    model = _StubModel("Recovered covering letter text, dated 09 March 2021.")
+    model = _StubModel("Recovered covering letter narrative without factual literals.")
 
     resolved = await _ladder(db, tier1=model).resolve(
-        source, _page("", PageClass.SCANNED_IMAGE), _fail_verdict(), document_id="doc-1"
+        source,
+        _page("factual literals without recovered covering letter narrative"),
+        _fail_verdict(),
+        document_id="doc-1",
     )
 
     assert model.calls == 1
@@ -7226,6 +8091,81 @@ async def test_high_confidence_alone_does_not_accept_a_bad_reconstruction(
     assert resolved.outcome is FallbackOutcome.HUMAN_REVIEW_REQUIRED
 
 
+async def test_post_gate_not_checkable_is_never_accepted(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    db = _FakeDb()
+    ladder = _ladder(db, tier1=_StubModel("model text"))
+    ladder.gate = _AlwaysNotCheckableGate()
+
+    resolved = await ladder.resolve(
+        source, _page("", PageClass.SCANNED_IMAGE), _fail_verdict(), document_id="doc-1"
+    )
+
+    assert resolved.outcome is FallbackOutcome.HUMAN_REVIEW_REQUIRED
+
+
+async def test_pass_with_uncorroborated_reconstructed_number_is_rejected(
+    tmp_path: Path,
+) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    model = _StubModel(
+        "Amount 1,900,000",
+        factual_values=[
+            ReconstructedValue("v1", "number", "1,900,000", "text:7")
+        ],
+    )
+    resolved = await _ladder(_FakeDb(), tier1=model).resolve(
+        source, _page("", PageClass.SCANNED_IMAGE), _fail_verdict(), document_id="doc-1"
+    )
+    assert resolved.outcome is FallbackOutcome.HUMAN_REVIEW_REQUIRED
+
+
+def test_unrelated_pass_check_does_not_corroborate_a_reconstructed_number() -> None:
+    value = ReconstructedValue("v1", "number", "1,900,000", "table-0-r1-c4")
+    post = QualityVerdict(
+        verdict=Verdict.PASS,
+        checks=[CheckResult(name="reading_order", verdict=Verdict.PASS)],
+    )
+    result = classify_corroboration(value, empty_evidence(), post)
+    assert result.status is Corroboration.UNCORROBORATED
+
+
+def test_matching_value_specific_subtotal_check_corroborates() -> None:
+    value = ReconstructedValue("v1", "number", "1,900,000", "table-0-r1-c4")
+    post = QualityVerdict(
+        verdict=Verdict.PASS,
+        checks=[CheckResult(
+            name="subtotal_identity", verdict=Verdict.PASS,
+            candidate_value=Decimal("1900000"),
+            evidence_refs=["printed.subtotal", "candidate.amount", "peer.amounts"],
+        )],
+    )
+    result = classify_corroboration(value, empty_evidence(), post)
+    assert result.status is Corroboration.CORROBORATED
+    assert result.check_name == "subtotal_identity"
+
+
+def test_source_substring_is_not_exact_value_corroboration() -> None:
+    value = ReconstructedValue("v1", "number", "1,900,000", "text:7")
+    evidence = Evidence(
+        page_number=1, image_png=b"", is_region=False, bbox=None,
+        native_text="Amount 11,900,000", ocr_text="", tables=[],
+        trigger_reasons=[], dpi=150,
+    )
+    result = classify_corroboration(value, evidence, _not_checkable_verdict())
+    assert result.status is Corroboration.UNCORROBORATED
+
+
+async def test_novel_uncorroborated_narrative_is_rejected(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    resolved = await _ladder(
+        _FakeDb(), tier1=_StubModel("Novel liability admission by the contractor")
+    ).resolve(
+        source, _page("covering letter"), _fail_verdict(), document_id="doc-1"
+    )
+    assert resolved.outcome is FallbackOutcome.HUMAN_REVIEW_REQUIRED
+
+
 async def test_failed_tier1_escalates_to_tier2(tmp_path: Path) -> None:
     source = build_mixed_pdf(tmp_path / "mixed.pdf")
     db = _FakeDb()
@@ -7233,7 +8173,10 @@ async def test_failed_tier1_escalates_to_tier2(tmp_path: Path) -> None:
     tier2 = _StubModel("Recovered text at last, with real content.", name="large")
 
     resolved = await _ladder(db, tier1=tier1, tier2=tier2).resolve(
-        source, _page("", PageClass.SCANNED_IMAGE), _fail_verdict(), document_id="doc-1"
+        source,
+        _page("real content recovered at last with text"),
+        _fail_verdict(),
+        document_id="doc-1",
     )
 
     assert tier1.calls == 1
@@ -7370,8 +8313,10 @@ Three rules are structural rather than advisory:
 * NOT_CHECKABLE never reaches a model. "We could not verify this" is not
   "this is wrong", and treating it as wrong is what turns a cost control into
   unbounded spend (companion 3.3 measured 12 such cases on a correct document).
-* A reconstruction is accepted only if it passes the SAME gate, not a lighter
-  one. Model confidence is recorded and may route, but never accepts.
+* A reconstruction is accepted only when the SAME gate returns exactly PASS —
+  NOT_CHECKABLE is rejection here — its factual-value inventory is complete,
+  and every reconstructed number/date has value-specific corroboration. A PASS
+  from an unrelated check cannot corroborate it. Model confidence never accepts.
 * Nothing is ever fabricated. An unavailable, over-budget, or failing model
   leaves the page exactly as it was and marks it for a human.
 """
@@ -7379,14 +8324,17 @@ Three rules are structural rather than advisory:
 from __future__ import annotations
 
 import logging
+import re
 import time
-from dataclasses import replace
+from collections import Counter
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from ..models import ExtractedPage, PageSource, PageStatus
 from ..quality.gate import ExtractionQualityGate
 from ..quality.models import QualityVerdict, Verdict
+from ..quality.numeric_checks import parse_amount
 from ..rasterizer import PageRasterizer, RasterizationError
 from .evidence import assemble_evidence
 from .ledger import InterventionLedger
@@ -7396,8 +8344,10 @@ from .models import (
     FallbackOutcome,
     Intervention,
     Reconstruction,
+    ReconstructedValue,
     ResolvedPage,
     Tier,
+    ValueCorroboration,
 )
 from .reconstruction_model import ModelUnavailable, NullReconstructionModel
 
@@ -7411,16 +8361,137 @@ __all__ = [
 ]
 
 
+_DATE_LITERAL = re.compile(r"\b\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\b")
+_NUMBER_LITERAL = re.compile(r"(?<![\w/.-])-?\d[\d,]*(?:\.\d+)?(?![\w/.-])")
+_WORD_LITERAL = re.compile(r"[A-Za-z][A-Za-z'-]+")
+
+
+def normalize_factual_value(value: ReconstructedValue) -> str:
+    if value.kind == "number":
+        parsed = parse_amount(value.raw_value)
+        return str(parsed) if parsed is not None else value.raw_value.strip()
+    return value.raw_value.strip()
+
+
+def inventory_factual_values(
+    reconstruction: Reconstruction,
+) -> set[tuple[str, str, str]]:
+    """Inventory every numeric/date literal with a stable text or cell location."""
+    found: set[tuple[str, str, str]] = set()
+
+    def scan(text: str, location: str) -> None:
+        date_spans = set()
+        for match in _DATE_LITERAL.finditer(text):
+            found.add(("date", match.group(0), f"{location}:{match.start()}"))
+            date_spans.update(range(match.start(), match.end()))
+        for match in _NUMBER_LITERAL.finditer(text):
+            if any(index in date_spans for index in range(match.start(), match.end())):
+                continue
+            parsed = parse_amount(match.group(0))
+            found.add(("number", str(parsed), f"{location}:{match.start()}"))
+
+    scan(reconstruction.text or "", "text")
+    for table_index, table in enumerate(reconstruction.tables):
+        for row_index, row in enumerate(table):
+            for cell_index, cell in enumerate(row):
+                scan(str(cell), f"table-{table_index}-r{row_index}-c{cell_index}")
+    return found
+
+
 def classify_corroboration(
-    value: str, evidence: Evidence, post_verdict: QualityVerdict
-) -> Corroboration:
-    """A value is corroborated if the source text contains it, or a check confirms it."""
-    haystack = f"{evidence.native_text}\n{evidence.ocr_text}"
-    if value and value in haystack:
-        return Corroboration.CORROBORATED
-    if any(check.verdict is Verdict.PASS for check in post_verdict.checks):
-        return Corroboration.CORROBORATED
-    return Corroboration.UNCORROBORATED
+    value: ReconstructedValue,
+    evidence: Evidence,
+    post_verdict: QualityVerdict,
+) -> ValueCorroboration:
+    """Tie corroboration to one value and its actual supporting evidence."""
+    normalized = parse_amount(value.raw_value) if value.kind == "number" else value.raw_value.strip()
+    for source_name, source_text in (
+        ("native_text", evidence.native_text),
+        ("ocr_text", evidence.ocr_text),
+    ):
+        date_spans = {
+            index
+            for match in _DATE_LITERAL.finditer(source_text or "")
+            for index in range(match.start(), match.end())
+        }
+        matches = (
+            _DATE_LITERAL.finditer(source_text or "")
+            if value.kind == "date"
+            else _NUMBER_LITERAL.finditer(source_text or "")
+        )
+        for match in matches:
+            if value.kind == "number":
+                if any(index in date_spans for index in range(match.start(), match.end())):
+                    continue
+                exact = parse_amount(match.group(0)) == normalized
+            else:
+                exact = match.group(0) == normalized
+            if exact:
+                return ValueCorroboration(
+                    value.value_id, value.raw_value, Corroboration.CORROBORATED,
+                    check_name="source_exact_token",
+                    evidence_refs=[f"{source_name}:{match.start()}-{match.end()}"],
+                )
+    for check in post_verdict.checks:
+        if check.verdict is not Verdict.PASS or not check.evidence_refs:
+            continue
+        if value.kind == "number" and normalized is not None and check.candidate_value == normalized:
+            return ValueCorroboration(
+                value.value_id, value.raw_value, Corroboration.CORROBORATED,
+                check_name=check.name, evidence_refs=list(check.evidence_refs),
+            )
+        # Date checks must expose a value-specific evidence ref such as
+        # `date:table-0-r3-c1=2023-03-01`; a generic date-column PASS is not enough.
+        expected_ref = f"date:{value.location}={value.raw_value}"
+        if value.kind == "date" and expected_ref in check.evidence_refs:
+            return ValueCorroboration(
+                value.value_id, value.raw_value, Corroboration.CORROBORATED,
+                check_name=check.name, evidence_refs=list(check.evidence_refs),
+            )
+    return ValueCorroboration(
+        value.value_id, value.raw_value, Corroboration.UNCORROBORATED
+    )
+
+
+def factual_inventory_matches(reconstruction: Reconstruction) -> bool:
+    """Reject omitted numeric/date declarations before acceptance.
+
+    `inventory_factual_values` deterministically scans reconstruction text and
+    tables. Its normalized `(kind, value, location)` set must exactly equal the
+    model's declared `factual_values`; otherwise the structured output is incomplete.
+    """
+    return inventory_factual_values(reconstruction) == {
+        (value.kind, normalize_factual_value(value), value.location)
+        for value in reconstruction.factual_values
+    }
+
+
+def reconstruction_content_is_source_anchored(
+    reconstruction: Reconstruction, evidence: Evidence
+) -> bool:
+    """Reject novel prose; fallback may restructure source words, not invent them."""
+    candidate_material = [reconstruction.text]
+    candidate_material.extend(
+        str(cell)
+        for table in reconstruction.tables
+        for row in table
+        for cell in row
+    )
+    evidence_material = [evidence.native_text, evidence.ocr_text]
+    evidence_material.extend(
+        str(cell) for table in evidence.tables for row in table for cell in row
+    )
+    candidate_tokens = Counter(
+        token.casefold()
+        for token in _WORD_LITERAL.findall(" ".join(candidate_material))
+    )
+    source_tokens = Counter(
+        token.casefold()
+        for token in _WORD_LITERAL.findall(" ".join(evidence_material))
+    )
+    if not candidate_tokens:
+        return bool(reconstruction.factual_values)
+    return all(source_tokens[token] >= count for token, count in candidate_tokens.items())
 
 
 class ExtractionFallbackLadder:
@@ -7452,7 +8523,7 @@ class ExtractionFallbackLadder:
         region: Optional[tuple[float, float, float, float]] = None,
     ) -> ResolvedPage:
         if not verdict.escalates:
-            return ResolvedPage(page=page, outcome=FallbackOutcome.RESOLVED)
+            return ResolvedPage(page=page, outcome=FallbackOutcome.UNCHANGED)
 
         try:
             evidence = assemble_evidence(
@@ -7493,17 +8564,38 @@ class ExtractionFallbackLadder:
             post = self.gate.assess(candidate, tables=reconstruction.tables or tables)
             latency_ms = int((time.monotonic() - started) * 1000)
 
-            accepted = not post.escalates and bool((reconstruction.text or "").strip())
+            corroborations = [
+                classify_corroboration(value, evidence, post)
+                for value in reconstruction.factual_values
+            ]
+            accepted = (
+                post.verdict is Verdict.PASS
+                and bool((reconstruction.text or "").strip())
+                and factual_inventory_matches(reconstruction)
+                and reconstruction_content_is_source_anchored(reconstruction, evidence)
+                and all(
+                    item.status is Corroboration.CORROBORATED
+                    for item in corroborations
+                )
+            )
             await self._record(
                 document_id, page, evidence, tier, trigger,
                 reconstruction=reconstruction, post=post,
                 outcome=FallbackOutcome.RESOLVED if accepted else FallbackOutcome.ESCALATED,
                 latency_ms=latency_ms,
+                corroborations=corroborations,
             )
 
             if accepted:
+                accepted_page = replace(
+                    candidate,
+                    tables=reconstruction.tables or page.tables,
+                    quality_verdict=post.verdict.value,
+                    quality_checks=[asdict(check) for check in post.checks],
+                    needs_review=False,
+                )
                 return ResolvedPage(
-                    page=candidate,
+                    page=accepted_page,
                     outcome=FallbackOutcome.RESOLVED,
                     tier_used=tier,
                     reconstruction=reconstruction,
@@ -7523,7 +8615,11 @@ class ExtractionFallbackLadder:
     @staticmethod
     def _mark_for_review(page: ExtractedPage, reason: str) -> ExtractedPage:
         """Leave the page's text exactly as it was. Nothing is invented."""
-        return replace(page, error=f"Requires human review: {reason}"[:500])
+        return replace(
+            page,
+            error=f"Requires human review: {reason}"[:500],
+            needs_review=True,
+        )
 
     async def _record(
         self,
@@ -7537,20 +8633,19 @@ class ExtractionFallbackLadder:
         post: Optional[QualityVerdict],
         outcome: FallbackOutcome,
         latency_ms: int,
+        corroborations: Optional[Sequence[ValueCorroboration]] = None,
     ) -> None:
         corrections = []
-        if reconstruction is not None and post is not None:
+        if reconstruction is not None:
             corrections = [
                 {
-                    "before": repair.before,
-                    "after": repair.after,
-                    "reason": repair.reason,
-                    "method": repair.method,
-                    "corroboration": classify_corroboration(
-                        repair.after, evidence, post
-                    ).value,
+                    "value_id": item.value_id,
+                    "after": item.raw_value,
+                    "corroboration": item.status.value,
+                    "check_name": item.check_name,
+                    "evidence_refs": list(item.evidence_refs),
                 }
-                for repair in post.repairs
+                for item in (corroborations or [])
             ]
 
         await self.ledger.record(
@@ -7570,8 +8665,11 @@ class ExtractionFallbackLadder:
                 corrections=corrections,
                 post_check=post.verdict.value if post else Verdict.NOT_CHECKABLE.value,
                 outcome=outcome,
-                tokens=0,
-                cost_usd=0.0,
+                tokens=(
+                    reconstruction.input_tokens + reconstruction.output_tokens
+                    if reconstruction else 0
+                ),
+                cost_usd=reconstruction.cost_usd if reconstruction else 0.0,
                 latency_ms=latency_ms,
             )
         )
@@ -7601,7 +8699,7 @@ In `backend/rbac_backend/core/config.py`:
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_fallback_ladder.py -q`
-Expected: PASS — 9 passed
+Expected: PASS — 15 passed
 
 - [ ] **Step 7: Run the whole suite**
 
@@ -7677,6 +8775,21 @@ def test_processing_result_defaults_to_no_human_review_pages() -> None:
     from rbac_backend.models.document_metadata import ProcessingResult
 
     assert ProcessingResult(success=True).pages_human_review == []
+
+
+async def test_quality_gate_runs_for_every_page_when_fallback_is_disabled() -> None:
+    gate = _CountingGate()
+    processor = build_processor(gate=gate, fallback_enabled=False)
+    await processor.process_document(...)
+    assert gate.page_numbers == list(range(1, FIXTURE_PAGE_COUNT + 1))
+    assert processor.model.calls == 0
+
+
+async def test_unrenderable_page_is_review_required_when_fallback_is_disabled() -> None:
+    processor = build_processor(gate=ExtractionQualityGate(), fallback_enabled=False)
+    result = await processor.process_document(..., extracted_pages=[unrenderable_page(2)])
+    assert result.pages_human_review == [2]
+    assert result.processing_state == "human_review_required"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -7691,6 +8804,9 @@ In `backend/rbac_backend/models/document_metadata.py`, add to `ProcessingResult`
 ```python
     pages_human_review: List[int] = Field(default_factory=list)
     extraction_completeness: Optional[str] = None
+    processing_state: Optional[str] = None
+    source_kind: Optional[str] = None
+    extraction_result: Optional[PageExtractionResult] = Field(default=None, exclude=True)
 ```
 
 - [ ] **Step 4: Add the gate-and-ladder pass to `DocumentProcessor`**
@@ -7698,23 +8814,26 @@ In `backend/rbac_backend/models/document_metadata.py`, add to `ProcessingResult`
 In `document_processor.py`, immediately after the Step 1 extraction block added in Task 3.3:
 
 ```python
-            # Step 1b: assess every page - native and OCR alike - and route
-            # anything that fails to the bounded fallback ladder. NOT_CHECKABLE
-            # is accepted and marked unverified; it never reaches a model.
+            # Step 1b: assess every page, native and OCR alike. This block is
+            # unconditional. The feature flag below controls model calls only.
             from ..core.config import settings
             from .extraction.fallback.ladder import ExtractionFallbackLadder
             from .extraction.fallback.ledger import InterventionLedger
             from .extraction.quality.gate import ExtractionQualityGate
             from .extraction.rasterizer import PageRasterizer
 
+            gate = self.quality_gate or ExtractionQualityGate()
             pages_human_review: list[int] = []
-
-            if settings.EXTRACTION_FALLBACK_ENABLED:
-                gate = ExtractionQualityGate()
+            db = await self.database_service.get_database()
+            ladder = None
+            if settings.EXTRACTION_FALLBACK_ENABLED and source_kind in {
+                SourceKind.PDF,
+                SourceKind.IMAGE,
+            }:
                 ladder = ExtractionFallbackLadder(
                     gate=gate,
                     rasterizer=PageRasterizer(dpi=int(settings.EXTRACTION_FALLBACK_DPI)),
-                    ledger=InterventionLedger(db=self.database_service.db),
+                    ledger=InterventionLedger(db=db),
                     tier1=self.reconstruction_tier1,
                     tier2=(
                         self.reconstruction_tier2
@@ -7722,57 +8841,220 @@ In `document_processor.py`, immediately after the Step 1 extraction block added 
                         else None
                     ),
                 )
-                budget = int(settings.EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT)
-                escalated = 0
-                resolved_pages = []
+            budget = int(settings.EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT)
+            escalated = 0
+            resolved_pages = []
 
-                for page in extraction.pages:
-                    page_verdict = gate.assess(page)
-                    if not page_verdict.escalates or escalated >= budget:
-                        resolved_pages.append(page)
-                        if page_verdict.escalates:
-                            pages_human_review.append(page.number)
-                        continue
-
-                    escalated += 1
-                    outcome = await ladder.resolve(
-                        input_path, page, page_verdict, document_id=document_id or ""
-                    )
-                    resolved_pages.append(outcome.page)
-                    if outcome.outcome.value == "human_review_required":
-                        pages_human_review.append(page.number)
-
-                extraction.pages = resolved_pages
-                extraction.combined_text = "\n\n".join(
-                    page.text or "" for page in resolved_pages
+            for page in extraction.pages:
+                page_verdict = gate.assess(page, tables=page.tables)
+                assessed_page = replace(
+                    page,
+                    quality_verdict=page_verdict.verdict.value,
+                    quality_checks=[asdict(check) for check in page_verdict.checks],
                 )
-                raw_ocr_text = extraction.combined_text or None
+                if not page_verdict.escalates:
+                    # PASS and original deterministic NOT_CHECKABLE remain
+                    # unchanged. NOT_CHECKABLE never invokes a model.
+                    resolved_pages.append(assessed_page)
+                    continue
+
+                if ladder is None or escalated >= budget:
+                    reviewed = replace(assessed_page, needs_review=True)
+                    resolved_pages.append(reviewed)
+                    pages_human_review.append(page.number)
+                    continue
+
+                escalated += 1
+                outcome = await ladder.resolve(
+                    input_path, assessed_page, page_verdict,
+                    document_id=document_id or "",
+                    tables=page.tables,
+                )
+                final_page = outcome.page
+                if outcome.outcome is FallbackOutcome.HUMAN_REVIEW_REQUIRED:
+                    final_page = replace(final_page, needs_review=True)
+                    pages_human_review.append(page.number)
+                resolved_pages.append(final_page)
+
+            extraction.pages = resolved_pages
+            extraction.combined_text = "\n\n".join(page.text or "" for page in resolved_pages)
+            if pages_human_review:
+                extraction.completeness = Completeness.PARTIAL
+            await page_store.record_pages(resolved_pages)  # versioned upsert, no delete
+            raw_ocr_text = extraction.combined_text or None
 ```
 
-Add `self.reconstruction_tier1 = None` and `self.reconstruction_tier2 = None` to `DocumentProcessor.__init__` — deployments inject real models; the default declines, which is the safe default.
+Add imports for `asdict`, `replace`, `Completeness`, `SourceKind`, and `FallbackOutcome`. Add injectable `quality_gate`, `reconstruction_tier1`, and `reconstruction_tier2` constructor seams; their production defaults remain deterministic gate + no models. Task 1.5 must populate `ExtractedPage.tables` from `pdfplumber.Page.extract_tables()` for native pages (and leave it empty where no structured table exists). The `DocumentPageStore` write above persists gate verdicts even when fallback is disabled. Text and archive sources never invoke a visual model: an unresolved text page goes to review, while Task 4.3 returns archives as `STORED_ONLY` before this block. `PageRasterizer` handles PNG/JPEG directly as logical page 1.
 
 Then pass `pages_human_review=pages_human_review` and `extraction_completeness=extraction.completeness.value` into the returned `ProcessingResult`.
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_pipeline_gate_and_ladder_integration.py -q`
-Expected: PASS — 3 passed
+Expected: PASS — 5 passed
 
 - [ ] **Step 6: Run the whole suite**
 
 Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests -q`
 Expected: PASS (allowing the known notifications manifest failure)
 
-- [ ] **Step 7: Confirm spend on fixture #1 is zero**
+- [ ] **Step 7: Confirm the gate is independent of the fallback flag**
 
-Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_quality_gate.py::test_no_false_positive_case_produces_a_fail -q`
-Expected: PASS. This is the assertion that fixture #1 triggers **no** escalations — the whole economic argument for Phase 6 preceding Phase 7.
+Run: `backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests/test_pipeline_gate_and_ladder_integration.py::test_quality_gate_runs_for_every_page_when_fallback_is_disabled -q`
+Expected: PASS. This proves `EXTRACTION_FALLBACK_ENABLED=false` produces zero model calls **without** suppressing page assessment or verdict persistence. Task 7.5 proves the complete clean-fixture cost path.
 
 - [ ] **Step 8: Commit**
 
 ```bash
 git add projectDMS/backend/rbac_backend/services/document_processor.py projectDMS/backend/rbac_backend/models/document_metadata.py projectDMS/backend/rbac_backend/tests/test_pipeline_gate_and_ladder_integration.py
 git commit -m "feat: run the quality gate and fallback ladder in the document pipeline"
+```
+
+---
+
+### Task 7.5: Real end-to-end quality/fallback/cost acceptance test
+
+The Phase 7.4 test is a wiring/unit test. This task is the release gate: it enters through the real Mongo-backed document job and exercises the real `DocumentProcessor`, source dispatch, extraction engine, quality gate, optional ladder decision, versioned page store, durable job checkpoint, and final document state.
+
+**Files:**
+- Modify: `backend/rbac_backend/services/document_service.py` (injectable `document_processor_factory`, production default unchanged)
+- Extend: `backend/rbac_backend/tests/fixtures/pdf_builders.py` with `build_clean_native_pdf`
+- Create: `backend/rbac_backend/tests/integration/test_unified_extraction_e2e.py`
+- Modify: `backend/rbac_backend/tests/integration/README.md`
+
+**Interfaces:**
+- Consumes: Tasks 3.2–3.4, 4.3, 6.5, and 7.3–7.4.
+- Uses a real temporary Mongo database on the test replica set and real Motor/ObjectId behaviour. Do not replace `DocumentPageStore`, job claim/checkpoint code, `SourceKindRouter`, `PageExtractionEngine`, `ExtractionQualityGate`, or final-state writes with fakes.
+- External model adapters are counting stubs. The clean native fixture must call neither fallback tier. OCR runner may be a fail-on-call stub because the fixture has adequate native text; a call is a test failure.
+
+- [ ] **Step 1: Build the clean native fixture**
+
+Create a two-page PDF with more than 30 coherent words per page and one arithmetically exact table whose column roles are identifiable. No page requires OCR; every applicable deterministic check passes and the aggregate page verdict is `PASS` (irrelevant checks may remain `NOT_CHECKABLE`). Record expected page count and table values next to the builder.
+
+- [ ] **Step 2: Write the real clean-path test**
+
+```python
+async def test_document_job_clean_fixture_is_gated_persisted_and_costs_zero(
+    tmp_path: Path,
+) -> None:
+    async with temporary_replica_set_database() as db:
+        source = build_clean_native_pdf(tmp_path / "clean.pdf")
+        tier1 = CountingReconstructionModel()
+        tier2 = CountingReconstructionModel()
+        processor = DocumentProcessor(
+            database_service=_BoundDatabaseService(db),
+            quality_gate=ExtractionQualityGate(),
+            reconstruction_tier1=tier1,
+            reconstruction_tier2=tier2,
+            pdf_ocr_runner=FailIfCalledOcrRunner(),
+        )
+        service = DocumentService(
+            db=db, document_processor_factory=lambda: processor
+        )
+        document, job_id = await seed_document_and_job(
+            db, source, source_mime="application/pdf"
+        )
+
+        with override_extraction_settings(fallback_enabled=True):
+            assert await service.process_document_job(job_id) is True
+
+        pages = await current_document_pages(db, document.id)
+        job = await db.document_processing_jobs.find_one({"_id": job_id})
+        stored = await db.documents.find_one({"_id": ObjectId(document.id)})
+        interventions = await db.page_extraction_interventions.count_documents(
+            {"document_id": document.id}
+        )
+
+        assert len(pages) == 2
+        assert all(page["quality_verdict"] == "pass" for page in pages)
+        assert all(page["needs_review"] is False for page in pages)
+        assert await db.document_extraction_heads.count_documents(
+            {"document_id": document.id}
+        ) == 1
+        assert job["status"] == "completed"
+        assert job["remaining_page_numbers"] == []
+        assert stored["processing_status"] == "completed"
+        assert tier1.calls == tier2.calls == 0
+        assert interventions == 0
+```
+
+This assertion is the actual zero-fallback-cost proof. The 12-case golden unit dataset alone is not an end-to-end spend test.
+
+- [ ] **Step 3: Add failure-path acceptance cases through the same entry point**
+
+Add one unrenderable/corrupt PDF fixture and one PNG job whose direct image OCR is empty and whose model reconstruction returns post-gate `NOT_CHECKABLE`. Assert both finish `human_review_required`, never `completed`; the PNG case proves `DocumentProcessor` routes image extraction and direct-image raster evidence without touching OCRmyPDF/pdfplumber, creates an intervention row with `outcome=escalated`/final review, and does not publish the reconstruction as accepted evidence. Add a resumable PDF fixture that defers pages on attempt one and completes after reclaim, proving the visible page version and final state survive the boundary.
+
+- [ ] **Step 4: Add a bounded-cost assertion**
+
+For a fixture with more failing pages than `EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT`, assert model calls equal the configured bound (not total pages), excess pages are review-required, and the document does not reach `completed`. Assert every call has a ledger row with tokens/cost/latency and value-specific corroboration records.
+
+- [ ] **Step 5: Run in the backend container against the replica set**
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
+  run --rm --build -e RUN_UNIFIED_EXTRACTION_E2E=1 backend \
+  python -m pytest rbac_backend/tests/integration/test_unified_extraction_e2e.py -q
+```
+
+Expected: PASS. If Mongo is unavailable, the test must skip only when `RUN_UNIFIED_EXTRACTION_E2E` is absent; with the variable set, inability to connect is a failure.
+
+- [ ] **Step 6: Run the full backend suite and commit**
+
+```bash
+backend/.venv/Scripts/python.exe -m pytest backend/rbac_backend/tests -q
+git add projectDMS/backend/rbac_backend/services/document_service.py projectDMS/backend/rbac_backend/tests/fixtures/pdf_builders.py projectDMS/backend/rbac_backend/tests/integration/test_unified_extraction_e2e.py projectDMS/backend/rbac_backend/tests/integration/README.md
+git commit -m "test: prove unified extraction end to end with zero clean fallback cost"
+```
+
+---
+
+### Task 7.6: Production worker canary and rollback validation
+
+This task is an operational acceptance gate, not permission to deploy while merely executing the implementation plan. Run it only under an explicitly authorised production change window, using an existing safe demo organisation/document and the backup-first production runbook.
+
+**Files:**
+- Modify: `backend/rbac_backend/core/config.py`
+- Modify: `.env.example`
+- Modify: `docker-compose.prod.yml`
+- Create: `scripts/unified_extraction_canary_status.py`
+- Modify: `scripts/post_deploy_verify.sh`
+- Create: `docs/operations/unified_extraction_canary_and_rollback.md`
+
+**Interfaces:**
+- Adds `UNIFIED_EXTRACTION_ENABLED=false` and `UNIFIED_EXTRACTION_CANARY_ORG_IDS=`. Job creation records `pipeline_version="unified_v1"` only for allowlisted organisations while the global flag is false; all other jobs remain on the legacy path. The worker claim predicate and processor dispatch honour the persisted job version, so a canary worker cannot accidentally claim/upgrade every tenant.
+- Rollback disables new `unified_v1` assignment, gracefully stops the document worker, preserves page evidence/checkpoints, and requeues only unfinished canary jobs after validation. No Docker prune and no page-evidence deletion.
+
+- [ ] **Step 1: Prove pre-canary safety**
+
+Back up production `.env`, uploads, and Mongo using the existing production runbook; record deployed commit, replica-set health, current job counts by status/pipeline version, worker restart counts, readiness, and the latest verified backup age. Confirm Task 0.4's RAR result: if it is not positive, production keeps `RAR_UPLOAD_ENABLED=false` throughout the canary.
+
+- [ ] **Step 2: Deploy code with unified routing globally off**
+
+Rebuild only affected backend/document-worker services. Start with `UNIFIED_EXTRACTION_ENABLED=false` and an empty canary allowlist. Verify readiness, route/auth controls, one document-worker owner, no duplicate background document loop on the web tier, stable restart counts, and no change in normal job throughput.
+
+- [ ] **Step 3: Enable one safe canary scope**
+
+Add only the approved demo organisation to `UNIFIED_EXTRACTION_CANARY_ORG_IDS`, recreate the document worker, and enqueue one clean PDF plus one controlled mixed fixture. Assert:
+
+- only those jobs have `pipeline_version=unified_v1`;
+- clean fixture ends `completed`, has PASS page verdicts, a published extraction head, and zero intervention/model rows;
+- mixed fixture checkpoints/reclaims remaining pages and reaches the expected completed/review state;
+- no non-canary organisation acquires unified page rows or intervention rows;
+- CPU/memory, queue age, latency, error rate, model calls, and cost remain within the recorded acceptance bounds.
+
+- [ ] **Step 4: Execute and validate rollback**
+
+Set the canary allowlist empty/disable unified assignment, gracefully recreate the document worker, and confirm new demo jobs use the legacy pipeline. If a unified canary job was deliberately paused mid-run, verify its `extraction_run_id`, remaining pages, attempts, and prior visible head survive; requeue it only after deciding whether to resume on the new image or mark review-required. Prove readiness, legacy job completion, no restart loop, and no loss of the pre-canary or canary page evidence.
+
+- [ ] **Step 5: Record the go/no-go evidence**
+
+The operations document records exact commands/output, deployed commit, canary document IDs (demo data only), job/page/intervention counts, zero-call clean result, resource metrics, rollback result, and a go/no-go decision. Global enablement is a separate authorised change and is blocked unless both canary and rollback validations pass.
+
+- [ ] **Step 6: Commit the canary controls/runbook (before any authorised deployment)**
+
+```bash
+git add projectDMS/backend/rbac_backend/core/config.py projectDMS/.env.example projectDMS/docker-compose.prod.yml projectDMS/scripts/unified_extraction_canary_status.py projectDMS/scripts/post_deploy_verify.sh projectDMS/docs/operations/unified_extraction_canary_and_rollback.md
+git commit -m "ops: add unified extraction canary and rollback controls"
 ```
 
 ---
@@ -7790,30 +9072,32 @@ git commit -m "feat: run the quality gate and fallback ladder in the document pi
 | `PageExtractionEngine` behind a `PageStore` seam | 1.4, 1.5 |
 | Contract path delegates, behaviour-preserving | 1.7 |
 | Dedicated worker, `START_BACKGROUND_SERVICES` not reused | 2.1, 2.2 |
-| `PARTIALLY_PROCESSED` / `HUMAN_REVIEW_REQUIRED`, resumable batching | 1.5, 3.1 |
-| General path page-wise; §3.1 defect fixed | 3.2, 3.3 |
+| `PARTIALLY_PROCESSED` / `HUMAN_REVIEW_REQUIRED`, durable remaining-page reclaim and final transitions | 1.5, 3.1, 3.4 |
+| General path page-wise; §3.1 defect fixed; BSON-safe versioned persistence | 3.2, 3.3, 3.4 |
 | Page classification beyond the char threshold | 1.3 |
-| Source-kind routing; images stored as-is | 4.1, 4.2 |
-| ZIP/RAR store-only with AV + duplicate checks | 5.1, 5.2 |
+| PDF/PNG/JPEG/TXT/archive source-kind dispatch wired into `DocumentProcessor`; images stored as-is with direct image OCR | 4.1, 4.2, 4.3 |
+| ZIP store-only; RAR admitted only after positive ClamAV inner-member proof | 0.4, 5.1, 5.2 |
 | Letter number optional for archives | 5.2 |
 | Backend-canonical file policy; picker aligned | 5.3 |
-| Column-role aware gate, in-table formulas, tolerance | 6.1, 6.2 |
-| Split-digit dual-confirmation repair | 6.2 |
-| Date-convention checker with an uncertain state | 6.3 |
-| Reading-order and density checks | 6.4 |
-| Four verdicts; `NOT_CHECKABLE` never escalates | 6.5 |
-| 12-false-positive and 9-corruption hard gates | 6.5 |
-| Rasterizer, minimal evidence, region-preferred | 7.1, 7.2 |
+| Column-role aware gate, separate quantity/display and monetary tolerances | 6.1, 6.2 |
+| Split-digit repair requires independent row and multirow-subtotal identities | 6.2 |
+| Date-convention checker uses sequence context or remains indeterminate | 6.3 |
+| Reading-order/density checks; unrenderable is unresolved, not PASS | 6.4 |
+| Four verdicts; deterministic gate always runs; original `NOT_CHECKABLE` never escalates | 6.5, 7.4 |
+| Exactly 12 false-positive cases and 9 corruption hard gates | 6.5 |
+| PDF plus direct-image rasterizer, minimal evidence, region-preferred | 7.1, 7.2 |
 | Two-tier ladder terminating in human review | 7.3 |
-| Re-verification through the same gate | 7.3 |
+| Re-verification requires exact PASS, source-anchored content, and value-specific corroboration; unrelated PASS cannot accept | 7.3 |
 | Confidence never accepts | 7.3 |
 | Intervention provenance ledger | 7.2, 7.3 |
-| Page-level failure containment | 1.5, 7.3, 7.4 |
+| Page-level failure containment | 1.5, 3.4, 7.3, 7.4 |
+| Real job-to-persistence-to-final-state test; zero clean fallback calls | 7.5 |
+| Production worker canary and proven rollback | 7.6 |
 
-**Deliberately deferred to the Phases 8–11 plan:** enclosure child documents, progress-photo extraction, photo-candidate Vision adjudication, review UI, and the rollout benchmark. Phase 0.5 captures the baseline those measurements compare against.
+**Deliberately deferred to the Phases 8–11 plan:** enclosure child documents, progress-photo extraction, photo-candidate Vision adjudication, and review UI. Phase 7.6 now owns the worker canary and rollback evidence; broader global-rollout benchmarking still follows the Phase 0.5 baseline.
 
 **2. Placeholder scan.** One intentional placeholder remains: Task 0.4 Step 3's findings template contains `<...>` markers, and Step 4 explicitly requires every one to be replaced with a measured value before the task is complete. No other step defers work.
 
-**3. Type consistency.** `PageStore` (`begin_batch` / `finish_batch` / `record_pages`) is implemented identically by `NullPageStore` (1.4), `ContractPageStore` (1.7), and `DocumentPageStore` (3.2). `OcrRunner.run(source, page_numbers, language)` is satisfied by `OcrMyPdfRunner` (1.6) and every test stub. `Verdict` (6.2) is consumed unchanged by 6.3, 6.4, 6.5, and 7.3. `Tier`, `FallbackOutcome`, `Evidence`, `Reconstruction`, and `Intervention` are defined once in `fallback/models.py` (7.2) and used unchanged in 7.3.
+**3. Type consistency.** `PageStore` (`begin_batch` / `finish_batch` / `record_pages`) is implemented by `NullPageStore` (1.4), `ContractPageStore` (1.7), and the versioned `DocumentPageStore` (3.2); only the document adapter adds `publish_run`. PDF-only `OcrRunner.run(source_pdf, page_numbers, language)` is satisfied by `OcrMyPdfRunner` (1.6). Standalone-image `ImageOcrRunner.run(source_image, language)` is satisfied by `TesseractImageOcrRunner` (4.2); the protocols are intentionally incompatible. `Verdict` (6.2) is consumed unchanged by 6.3, 6.4, 6.5, and 7.3. `Tier`, `FallbackOutcome`, `Evidence`, `Reconstruction`, `ReconstructedValue`, `ValueCorroboration`, and `Intervention` are defined once in `fallback/models.py` (7.2) and used unchanged in 7.3.
 
-**One known interface caveat for the implementer:** Task 1.7's delegation calls `self._combine_pages(...)`, which exists in `contracts_ingest.py` today and must be kept when the four other private methods are deleted. Task 3.3 references `self.database_service.db`; if that attribute is named differently, read the real name from `database_service.py` and use it verbatim rather than adding an accessor.
+**Verified current-code seams:** Task 1.7's delegation calls `self._combine_pages(...)`, which exists in `contracts_ingest.py` today and must be kept when the four other private methods are deleted. `DatabaseService` exposes async `get_database()` and has no public `db` attribute, so Tasks 3.3 and 7.4 call `await self.database_service.get_database()`. `Document.filetype` already stores MIME; Task 4.3 preserves the upload validator's detected value in that field and the durable job instead of adding a competing source-of-truth field. The active job API is `queue_document_processing` / `_claim_next_processing_job`, and `rbac_backend.worker` currently starts no document loop; Tasks 0.3, 2.1, and 5.2 use those actual names and Task 2.1 wires both FastAPI and worker lifecycles.
