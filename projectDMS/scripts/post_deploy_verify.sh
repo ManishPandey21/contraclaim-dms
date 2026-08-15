@@ -201,6 +201,213 @@ else
   pass "No obvious recent backend exception signatures"
 fi
 
+# ---------------------------------------------------------------------------
+# Unified page extraction: canary topology verification (Task 7.6)
+#
+# READ-ONLY. Everything below inspects running state and reports; nothing
+# starts, stops, scales, or writes. Values are read from the CONTAINERS, not
+# from .env, because .env is what someone intended and the container is what is
+# actually running. See docs/operations/unified_extraction_canary_and_rollback.md
+# ---------------------------------------------------------------------------
+
+printf '\n--- Unified extraction canary topology ---\n'
+
+compose_ps_q() {
+  docker compose --env-file "$ENV_FILE" $COMPOSE_FILES ps -q "$1" 2>/dev/null || true
+}
+
+# Read one environment variable out of a running container.
+container_env() {
+  local cid=$1 key=$2
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null \
+    | grep -E "^${key}=" | tail -n 1 | cut -d= -f2- || true
+}
+
+# 1. Deployed branch and commit - what is actually checked out here.
+deployed_commit=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)
+deployed_branch=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+if [[ -n "$deployed_commit" ]]; then
+  pass "Deployed checkout: branch=${deployed_branch:-<detached>} commit=${deployed_commit}"
+  if ! git -C "$ROOT_DIR" diff --quiet 2>/dev/null || \
+     ! git -C "$ROOT_DIR" diff --cached --quiet 2>/dev/null; then
+    warn "Deployed checkout has uncommitted modifications; the running code may not match ${deployed_commit}"
+  fi
+else
+  fail "Could not determine deployed branch/commit from $ROOT_DIR"
+fi
+
+# 2. The compose file set the RUNNING stack was created from. The stack is
+#    started with prod + mongo-replicaset; including the base compose file is a
+#    known deployment error that only surfaces at `up`.
+backend_cid=$(compose_ps_q backend)
+if [[ -n "$backend_cid" ]]; then
+  actual_config_files=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}}' "$backend_cid" 2>/dev/null || true)
+  if [[ -n "$actual_config_files" ]]; then
+    pass "Running stack compose files: $actual_config_files"
+    if grep -qE '(^|,|/)docker-compose\.yml' <<<"$actual_config_files"; then
+      warn "Running stack includes the base docker-compose.yml; production expects prod + mongo-replicaset only"
+    fi
+  else
+    warn "Could not read com.docker.compose.project.config_files from the backend container"
+  fi
+else
+  warn "No running backend container; skipping compose file-set verification"
+fi
+
+# 3/4. Global flag and canary allowlist, as the worker actually sees them.
+worker_cid=$(compose_ps_q document-worker)
+canary_cids=$(compose_ps_q document-worker-canary)
+canary_replicas=$(printf '%s' "$canary_cids" | grep -c . || true)
+
+if [[ -n "$worker_cid" ]]; then
+  unified_enabled=$(container_env "$worker_cid" UNIFIED_EXTRACTION_ENABLED)
+  canary_orgs=$(container_env "$worker_cid" UNIFIED_EXTRACTION_CANARY_ORG_IDS)
+  pass "document-worker UNIFIED_EXTRACTION_ENABLED=${unified_enabled:-<unset>}"
+  pass "document-worker UNIFIED_EXTRACTION_CANARY_ORG_IDS=[${canary_orgs}]"
+
+  # Global enablement is a separate authorised change. Flag it loudly.
+  if [[ "$unified_enabled" == "true" || "$unified_enabled" == "True" ]]; then
+    warn "UNIFIED_EXTRACTION_ENABLED is true: every organisation is on the unified pipeline, not just the allowlist"
+  fi
+else
+  fail "No running document-worker container; document extraction has no owner"
+fi
+
+# 5/6/7. Claim restrictions and canary scale.
+worker_versions=""
+if [[ -n "$worker_cid" ]]; then
+  worker_versions=$(container_env "$worker_cid" DOCUMENT_WORKER_PIPELINE_VERSIONS)
+  pass "document-worker DOCUMENT_WORKER_PIPELINE_VERSIONS=[${worker_versions}]"
+fi
+
+canary_versions=""
+if [[ "$canary_replicas" -gt 0 ]]; then
+  first_canary=$(printf '%s' "$canary_cids" | head -n 1)
+  canary_versions=$(container_env "$first_canary" DOCUMENT_WORKER_PIPELINE_VERSIONS)
+  pass "document-worker-canary replicas=${canary_replicas} DOCUMENT_WORKER_PIPELINE_VERSIONS=[${canary_versions}]"
+  if [[ "$canary_versions" != "unified_v1" ]]; then
+    fail "document-worker-canary must be pinned to unified_v1, found [${canary_versions}]"
+  fi
+else
+  pass "document-worker-canary replicas=0 (normal, non-canary state)"
+fi
+
+# 9. No worker may be unrestricted while a canary is running. An unrestricted
+#    worker claims anything, which defeats the whole isolation property.
+canary_mode=false
+if [[ "$canary_replicas" -gt 0 || -n "${canary_orgs:-}" ]]; then
+  canary_mode=true
+fi
+
+if [[ "$canary_mode" == "true" ]]; then
+  pass "Canary mode is ACTIVE (replicas=${canary_replicas}, allowlist=[${canary_orgs:-}])"
+  if [[ -z "$worker_versions" ]]; then
+    fail "Canary mode with an UNRESTRICTED document-worker: it can claim unified_v1 jobs and drain the canary queue"
+  fi
+  if [[ -n "$worker_versions" ]] && grep -q "unified_v1" <<<"$worker_versions"; then
+    fail "Canary mode but document-worker may also claim unified_v1: claim domains are not disjoint"
+  fi
+  if [[ "$canary_replicas" -gt 0 && -z "${canary_orgs:-}" ]]; then
+    warn "Canary worker is running but the allowlist is empty; no new unified jobs will be created (expected mid-rollback)"
+  fi
+else
+  pass "Canary mode is INACTIVE; single-worker operation"
+fi
+
+# 12. Disjointness, stated explicitly from the two observed sets.
+if [[ "$canary_replicas" -gt 0 ]]; then
+  overlap=""
+  for v in ${worker_versions//,/ }; do
+    for c in ${canary_versions//,/ }; do
+      [[ "$v" == "$c" ]] && overlap="$v"
+    done
+  done
+  if [[ -z "$worker_versions" ]]; then
+    fail "Claim domains NOT provably disjoint: document-worker is unrestricted"
+  elif [[ -n "$overlap" ]]; then
+    fail "Claim domains overlap on [${overlap}]: both workers can claim the same jobs"
+  else
+    pass "Claim domains are disjoint: document-worker=[${worker_versions}] canary=[${canary_versions}]"
+  fi
+fi
+
+# 8. Exactly one scheduler owner across every running service.
+scheduler_owners=""
+for svc in backend contract-worker document-worker document-worker-canary; do
+  for cid in $(compose_ps_q "$svc"); do
+    [[ -z "$cid" ]] && continue
+    if [[ "$(container_env "$cid" RUN_SCHEDULER)" == "true" ]]; then
+      scheduler_owners="$scheduler_owners $svc"
+    fi
+  done
+done
+scheduler_count=$(printf '%s' "$scheduler_owners" | wc -w | tr -d ' ')
+if [[ "$scheduler_count" == "1" ]]; then
+  pass "Exactly one scheduler owner:${scheduler_owners}"
+else
+  fail "Expected exactly 1 scheduler owner, found ${scheduler_count}:${scheduler_owners:-<none>}"
+fi
+
+# Extraction must not also run on the request-serving tier.
+if [[ -n "$backend_cid" ]]; then
+  backend_extraction=$(container_env "$backend_cid" START_DOCUMENT_EXTRACTION_WORKERS)
+  if [[ "$backend_extraction" == "true" || "$backend_extraction" == "True" ]]; then
+    fail "backend has START_DOCUMENT_EXTRACTION_WORKERS=true: the web tier is acting as an extraction worker"
+  else
+    pass "backend is not an extraction worker (START_DOCUMENT_EXTRACTION_WORKERS=${backend_extraction:-<unset>})"
+  fi
+fi
+
+# 10. Migration and index presence required by Task 7.6. Read-only index read.
+if [[ -n "$backend_cid" ]]; then
+  if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false backend \
+    python -c '
+import os, sys
+from pymongo import MongoClient
+c = MongoClient(os.environ["DATABASE_URL"], serverSelectionTimeoutMS=8000)
+db = c.get_default_database()
+missing = []
+pages = {tuple(k["key"].items()): k for k in db["document_ocr_pages"].list_indexes()}
+want = (("document_id",1),("extraction_run_id",1),("page_number",1))
+hit = [i for k,i in pages.items() if k == want]
+if not hit or not hit[0].get("unique"):
+    missing.append("document_ocr_pages unique(document_id,extraction_run_id,page_number)")
+heads = [i for i in db["document_extraction_heads"].list_indexes()
+         if tuple(i["key"].items()) == (("document_id",1),)]
+if not heads or not heads[0].get("unique"):
+    missing.append("document_extraction_heads unique(document_id)")
+applied = db["schema_migrations"].find_one({"version": "20260814_0001"})
+if not applied:
+    missing.append("migration 20260814_0001 not recorded as applied")
+if missing:
+    print("MISSING: " + "; ".join(missing)); sys.exit(1)
+print("ok")
+' >/tmp/extraction_indexes.out 2>&1; then
+    pass "Task 7.6 page-evidence indexes and migration 20260814_0001 present"
+  else
+    fail "Page-evidence index/migration check failed: $(cat /tmp/extraction_indexes.out 2>/dev/null | tail -n 3)"
+  fi
+fi
+
+# 11. Archive MIME configuration. ZIP is stored intact and never unpacked; RAR
+#     stays disabled until clamd is proven to scan inside a .rar (Task 0.4).
+if [[ -n "$worker_cid" ]]; then
+  rar_enabled=$(container_env "$worker_cid" RAR_UPLOAD_ENABLED)
+  allowed_doc_mimes=$(container_env "$worker_cid" ALLOWED_DOCUMENT_MIMES)
+  pass "RAR_UPLOAD_ENABLED=${rar_enabled:-<unset>}"
+  if [[ "$rar_enabled" == "true" || "$rar_enabled" == "True" ]]; then
+    warn "RAR uploads are ENABLED; Task 0.4 requires positive ClamAV inner-member proof before this is permitted"
+  fi
+  if [[ -n "$allowed_doc_mimes" ]]; then
+    pass "ALLOWED_DOCUMENT_MIMES=${allowed_doc_mimes}"
+    if grep -q "rar" <<<"$allowed_doc_mimes" && [[ "$rar_enabled" != "true" ]]; then
+      warn "A RAR MIME appears in ALLOWED_DOCUMENT_MIMES while RAR_UPLOAD_ENABLED is not true; confirm which gate wins"
+    fi
+  else
+    warn "ALLOWED_DOCUMENT_MIMES not visible on the worker container"
+  fi
+fi
+
 printf '\nPost-deploy verification complete: %s failure(s), %s warning(s).\n' "$failures" "$warnings"
 if [[ "$failures" -gt 0 ]]; then
   exit 1

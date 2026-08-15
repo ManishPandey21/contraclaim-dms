@@ -284,7 +284,6 @@ class DocumentProcessor:
         
         logger.info("[document_pipeline] Starting document processing for %s", pdf_path)
 
-        file_id: Optional[str] = None
         processed_path: Optional[Path] = None
 
         try:
@@ -330,6 +329,7 @@ class DocumentProcessor:
                 )
                 return await self._extract_and_persist(
                     input_path=input_path,
+                    original_path=pdf_path,
                     processed_path=processed_path,
                     raw_ocr_text=raw_ocr_text,
                     extraction=None,
@@ -393,6 +393,7 @@ class DocumentProcessor:
 
             return await self._extract_and_persist(
                 input_path=input_path,
+                original_path=pdf_path,
                 processed_path=processed_path,
                 raw_ocr_text=raw_ocr_text,
                 extraction=extraction,
@@ -414,14 +415,10 @@ class DocumentProcessor:
             )
             
         finally:
-            # Cleanup
-            if file_id:
-                try:
-                    await self.openai_service.cleanup_file(file_id)
-                except Exception as e:
-                    logger.warning(f"Error during cleanup: {e}")
-            
-            # Close database connection
+            # Single owner of the database connection, so it is closed exactly
+            # once per document and on every path - including a failure that
+            # happens before _extract_and_persist is ever reached. OpenAI file
+            # cleanup belongs to _extract_and_persist, which owns that handle.
             try:
                 await self.database_service.close_connection()
             except Exception as e:
@@ -580,6 +577,7 @@ class DocumentProcessor:
         self,
         *,
         input_path: Path,
+        original_path: str,
         processed_path: Optional[Path],
         raw_ocr_text: Optional[str],
         extraction: Optional[Any],
@@ -683,7 +681,7 @@ class DocumentProcessor:
             # Step 5: Save results
             logger.info("[document_pipeline] Persisting OCR, metadata, and embeddings for %s", input_path.name)
             chunks_created = await self._save_results(
-                extracted_content, raw_ocr_text, str(input_path), path_structure,
+                extracted_content, raw_ocr_text, original_path, path_structure,
                 upload_type, document_id, parsed_metadata,
                 skip_embeddings=skip_embeddings,
             )
@@ -721,15 +719,14 @@ class DocumentProcessor:
                 success=False, error=str(e), processing_time=processing_time
             )
         finally:
+            # This method owns file_id, so it cleans it up. It deliberately does
+            # NOT close the database connection: process_document owns that, and
+            # closing here as well would double-close every document.
             if file_id:
                 try:
                     await self.openai_service.cleanup_file(file_id)
                 except Exception as exc:
                     logger.warning("Error during cleanup: %s", exc)
-            try:
-                await self.database_service.close_connection()
-            except Exception as exc:
-                logger.warning("Error closing database connection: %s", exc)
 
 
 # Factory function

@@ -1,17 +1,27 @@
 # Unified extraction — canary and rollback runbook
 
-> ## STATUS: NOT PRODUCTION-ACCEPTED
+> ## STATUS: IMPLEMENTATION VERIFIED — NOT PRODUCTION-ACCEPTED
 >
-> The system is **not** production-accepted. Controls and this runbook existing
-> is not acceptance. No deployment, canary window, or rollback drill has been
-> executed, and the canary routing control is **not yet functional** (§0).
+> These are four different things and this document keeps them apart:
+>
+> | | State | Meaning |
+> |---|---|---|
+> | **Implementation** | **VERIFIED** | The canary routing, claim boundary, legacy control path and compose topology exist and are proven by automated test on this branch. |
+> | **Production operational acceptance** | **NOT RUN** | No deployment, canary window, or production command has been executed. Nothing here has met production. |
+> | **Rollback mechanism** | **IMPLEMENTED + TESTED LOCALLY** | Emptying the allowlist provably reroutes new work while in-flight jobs keep their persisted version and evidence identities. Proven in tests, not in production. |
+> | **Rollback drill** | **NOT EXECUTED** | No process has been stopped, scaled, or recreated. See G13. |
+>
+> Controls existing is not acceptance, and a passing test suite is not a
+> production window.
 >
 > - Phase 7 **implementation** (7.1–7.5): complete.
-> - Task 7.6 **Step 6** (controls/runbook): **INCOMPLETE** — see §0.
-> - Task 7.6 **Steps 1–5** (operational acceptance): **PENDING AUTHORISATION**.
+> - Task 7.6 **Step 6** (controls/runbook): **PASS — implementation-frozen** (§8).
+> - Task 7.6 **Steps 1–5** (operational acceptance): **PENDING AUTHORISATION / BLOCKED**.
 > - Phase 7 **operational acceptance**: **NOT COMPLETE**.
 >
 > Full matrix in §8. Section 6 is the evidence template and is deliberately empty.
+> Open gaps: G1a, G2–G13 in §7. **G11 (unmeasured production disk capacity)
+> blocks Step 1 sign-off.**
 
 ---
 
@@ -105,6 +115,40 @@ Do not start without all of these recorded:
    `docs/architecture/phase0_extraction_measurements_2026-08-14.md`. **It is
    currently negative — RAR was never functionally proven — so
    `RAR_UPLOAD_ENABLED` stays `false` throughout.**
+
+6. **Filesystem capacity — hard precondition, not yet measured.**
+
+   The unified pipeline writes per-page evidence rows, may rasterise pages, and
+   the window requires a fresh backup and headroom to roll back. All of that
+   consumes disk that the legacy path does not. Record every line below **from
+   the production host** before starting:
+
+   ```bash
+   ssh contraclaim "df -h / /var/lib/docker /opt/contraclaim-dms; docker system df"
+   ```
+
+   | Item | What to record | Why it gates the window |
+   |---|---|---|
+   | Free space on the data filesystem | `df -h` avail + % used | A full disk during extraction corrupts nothing but stalls every tenant |
+   | Docker image/layer headroom | `docker system df` images/build cache | Rebuilding backend + worker images needs room for the new layers *alongside* the old ones |
+   | Mongo data + journal headroom | dbPath size, oplog size, journal dir | Index creation for `20260814_0001` needs working space; a full journal wedges the replica set |
+   | Extraction/OCR/raster temp headroom | free space on the container temp dir and `process_dir` | OCR writes whole intermediate PDFs and page rasters per document |
+   | Backup size and headroom | size of the latest verified backup + free space where it lands | Step 1 requires a fresh backup; it must fit |
+   | Rollback headroom | space to keep the previous image *and* the current one | Rollback must not require deleting the running image first |
+
+   **No threshold is defined yet, and one must not be invented here.** The plan
+   specifies no figure, and this repository holds no measurement of production
+   disk usage or backup size. Before the window, derive an explicit safe minimum
+   from *current* production usage and the *actual* latest backup size, record
+   both numbers and the derived threshold in §6, and have the change authoriser
+   accept it. A window may not start against an unmeasured filesystem.
+
+   > Known, unrelated to production: the development host this work was done on
+   > reported 238G/238G with ~152M free. That is a **local Windows workstation**
+   > (Docker context `desktop-linux`), not the deployment host — production is
+   > remote at `contraclaim:/opt/contraclaim-dms/projectDMS`. It caused a pytest
+   > cache-write failure, worked around with `-p no:cacheprovider`. It says
+   > **nothing** about production capacity, which remains unmeasured (G11).
 
 **Migration dry run — not yet executed.** `20260814_0001_document_extraction_indexes`
 has never run against a real database:
@@ -244,7 +288,7 @@ change** and is blocked until both the canary and the rollback drill pass.
 | **3.** Enable one canary scope | **BLOCKED** | Only canary-org jobs are `unified_v1`; clean doc → `completed`, one head, **zero** interventions; mixed doc checkpoints/reclaims; no non-canary contamination; resource + cost within Phase 0 bounds | None — and **blocked on §0**: without a routing reader or a legacy path, "only canary-org jobs are unified" is unachievable. Every job already runs the unified path. |
 | **4.** Execute and validate rollback | **BLOCKED** | New demo jobs are `legacy_v0`; in-flight run id/remaining pages/attempts/head survive; readiness; no restart loop; no evidence loss | None — **blocked on §0**. Clearing the allowlist changes no behaviour today, so it cannot demonstrate rollback. Rollback currently means redeploying the prior image. |
 | **5.** Record go/no-go evidence | **BLOCKED** | §6 table fully populated from real output; explicit go/no-go | None. §6 is empty by design; an empty row is a no-go. Blocked by Steps 1–4. |
-| **6.** Commit canary controls/runbook | **FAIL (incomplete)** | All six files in the task's Files list changed and committed, with the Interfaces contract satisfied | Partial — see below. |
+| **6.** Commit canary controls/runbook | **PASS (implementation-frozen)** | All six files in the task's Files list changed and committed, with the Interfaces contract satisfied | Complete — see below. Verified by test, not by inspection. This is an *implementation* pass only: it certifies the controls exist and behave, not that they have been exercised in production. |
 
 ### Step 6 detail
 
@@ -255,19 +299,22 @@ change** and is blocked until both the canary and the rollback drill pass.
 | `scripts/unified_extraction_canary_status.py` | PASS | commit `e038fa7`; read-only, syntax-checked |
 | `docs/operations/...canary_and_rollback.md` | PASS | commit `e038fa7`, this file |
 | Job records `pipeline_version` at creation | PASS | `test_unified_extraction_canary.py`, 15 passed |
-| **Interfaces: claim predicate + dispatch honour persisted version** | **PASS** | `pipeline_routing.py`; `test_pipeline_routing_boundary.py` 10 passed; `document-worker-canary` pinned to `unified_v1`, `test_document_worker_compose.py` 15 passed |
+| **Interfaces: claim predicate + dispatch honour persisted version** | **PASS** | `pipeline_routing.py`; `test_pipeline_routing_boundary.py` 29 passed; `document-worker-canary` pinned to `unified_v1`, `test_document_worker_compose.py` 20 passed |
 | Minimal temporary `legacy_v0` extraction path | PASS | `DocumentProcessor._extract_legacy`; both paths converge on `_extract_and_persist` |
-| **`scripts/post_deploy_verify.sh` updated** | **FAIL** | Never modified |
-| **Repository-root `.env.example` updated** | **FAIL** | Only `backend/rbac_backend/.env.example` was changed |
+| **`legacy_v0` is genuinely the pre-Phase-3 control path** | **PASS** | `test_legacy_pipeline_equivalence.py` 31 passed. The pre-Phase-3 `process_document` body is vendored verbatim from commit `ffa844b` (the commit before `c3840f1` introduced page-wise extraction) and run against the same fakes; result fields and all collaborator calls compare equal for text-native, OCR-required and empty fixtures. |
+| **`scripts/post_deploy_verify.sh` updated** | **PASS** | 15 required canary checks present and read-only; `test_post_deploy_verify_canary_checks.py` 21 passed |
+| **Repository-root `.env.example` updated** | **PASS** | Unified extraction canary section added (global flag, allowlist, both worker claim restrictions, canary replicas, fallback, RAR) |
+| **Compose fails closed on omission** | **PASS** | `DOCUMENT_WORKER_PIPELINE_VERSIONS` defaults to `legacy_v0`, not empty; `test_document_worker_compose.py::test_the_default_worker_fails_closed_when_the_variable_is_omitted` |
 
 ### Exact condition permitting "Phase 7 fully complete"
 
 Phase 7 may be declared fully complete **only when all of the following hold**:
 
-1. Task 7.6 Step 6 reaches PASS — the routing contract is genuinely implemented
-   (legacy path + reader), **or** the no-legacy-path decision in §0 is recorded
-   and this runbook is rewritten as a staged rollout with image-level rollback;
-2. `scripts/post_deploy_verify.sh` and the root `.env.example` are updated;
+1. ~~Task 7.6 Step 6 reaches PASS~~ — **DONE.** The routing contract is
+   genuinely implemented (legacy path + reader) and the legacy path is proven
+   equivalent to pre-Phase-3 behaviour against the vendored `ffa844b` oracle;
+2. ~~`scripts/post_deploy_verify.sh` and the root `.env.example` are updated~~ —
+   **DONE**, subject to G12 (the script has never run against a live stack);
 3. Steps 1–5 are executed inside an explicitly authorised production change
    window, and §6 is fully populated from real output;
 4. The rollback drill (Step 4) passes without loss of page evidence;
@@ -299,3 +346,6 @@ explicitly accepted in writing before Phase 7 can be declared fully complete.
 | G8 | **RAR unverified and disabled.** Phase 0 proved ZIP recursion in ClamAV; RAR was never functionally proven. | `RAR_UPLOAD_ENABLED` stays `false`. Enabling requires EICAR-in-RAR evidence in the same reviewed change. |
 | G9 | `contract_ocr_pages` and `document_processing_jobs` remain **unindexed** (pre-existing). | Performance/consistency risk outside this phase's scope. |
 | G10 | Intake still sniffs `filetype` without filename context. | The durable job carries the validated MIME; the original sniff is unchanged. |
+| **G11** | **Production filesystem capacity never measured.** No figure for free space, Docker layer headroom, Mongo/journal headroom, OCR/raster temp space, backup size, or rollback headroom exists anywhere in this repository, and the plan defines no threshold. | **Step 1 cannot be signed off.** An explicit safe minimum must be derived from current production usage and the actual latest backup size, recorded in §6, and accepted by the change authoriser. See §2.6. |
+| **G12** | **`post_deploy_verify.sh` is statically verified only.** Its 15 canary checks are asserted to exist, to be read-only, and to parse — never executed against a running stack. | The script itself is unproven in production. Run it during Step 2 and paste the output into §6; a check that misreads a live container would only surface there. |
+| **G13** | **Rollback is implemented and unit-tested, never drilled.** Claim/routing rollback behaviour is proven in `test_pipeline_routing_boundary.py` (in-flight jobs keep their version, run/evidence identities survive an allowlist change). No process has been stopped, scaled, or recreated. | Step 4 remains BLOCKED on authorisation. "Rollback works" currently means *the code does the right thing*, not *the operation has been performed*. |

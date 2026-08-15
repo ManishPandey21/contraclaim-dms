@@ -102,6 +102,76 @@ def test_the_two_extraction_workers_can_be_given_disjoint_claims() -> None:
     assert default_env["DOCUMENT_WORKER_PIPELINE_VERSIONS"] != "unified_v1"
 
 
+def test_the_default_worker_fails_closed_when_the_variable_is_omitted() -> None:
+    """An omitted DOCUMENT_WORKER_PIPELINE_VERSIONS must not mean "claim all".
+
+    Empty means unrestricted. If the default worker defaulted to empty, an
+    operator who started a canary but forgot to restrict this service would let
+    it drain the canary's unified_v1 queue - the exact failure the canary is
+    supposed to make impossible.
+    """
+    value = _services()["document-worker"]["environment"][
+        "DOCUMENT_WORKER_PIPELINE_VERSIONS"
+    ]
+
+    assert value == "${DOCUMENT_WORKER_PIPELINE_VERSIONS:-legacy_v0}", (
+        "the compose default must be legacy_v0, not empty"
+    )
+
+
+def test_no_worker_is_unrestricted_by_default() -> None:
+    """Neither extraction service may default to claiming every version."""
+    services = _services()
+
+    for name in ("document-worker", "document-worker-canary"):
+        value = str(
+            services[name]["environment"]["DOCUMENT_WORKER_PIPELINE_VERSIONS"]
+        )
+        # A bare "${VAR:-}" or literal empty default is unrestricted.
+        assert not value.endswith(":-}"), f"{name} defaults to unrestricted claims"
+        assert value != "", f"{name} defaults to unrestricted claims"
+
+
+def test_the_default_workers_configuration_is_disjoint_from_the_canary() -> None:
+    """The two default claim sets must not overlap, as configured."""
+    services = _services()
+    default = services["document-worker"]["environment"][
+        "DOCUMENT_WORKER_PIPELINE_VERSIONS"
+    ]
+    canary = services["document-worker-canary"]["environment"][
+        "DOCUMENT_WORKER_PIPELINE_VERSIONS"
+    ]
+
+    # Strip the "${VAR:-default}" wrapper down to the effective default.
+    default_effective = default.split(":-")[-1].rstrip("}")
+
+    assert default_effective == "legacy_v0"
+    assert canary == "unified_v1"
+    assert set(default_effective.split(",")).isdisjoint(set(canary.split(",")))
+
+
+def test_the_global_flag_defaults_to_off_on_every_service() -> None:
+    """A configuration omission must never enable unified extraction globally."""
+    for name, service in _services().items():
+        env = service.get("environment") or {}
+        if "UNIFIED_EXTRACTION_ENABLED" not in env:
+            continue
+        assert env["UNIFIED_EXTRACTION_ENABLED"] == (
+            "${UNIFIED_EXTRACTION_ENABLED:-false}"
+        ), f"{name} does not default the global unified flag to false"
+
+
+def test_the_canary_allowlist_defaults_to_empty() -> None:
+    """Empty allowlist = no organisation is on the unified pipeline."""
+    for name, service in _services().items():
+        env = service.get("environment") or {}
+        if "UNIFIED_EXTRACTION_CANARY_ORG_IDS" not in env:
+            continue
+        assert env["UNIFIED_EXTRACTION_CANARY_ORG_IDS"] == (
+            "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
+        ), f"{name} does not default the canary allowlist to empty"
+
+
 def test_the_canary_worker_is_not_a_second_scheduler_owner() -> None:
     assert _services()["document-worker-canary"]["environment"]["RUN_SCHEDULER"] == "false"
 

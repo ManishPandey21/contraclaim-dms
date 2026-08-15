@@ -269,11 +269,19 @@ services:
       UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
       EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
       EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
-      # Which pipeline versions this worker may claim. Empty = all, the
-      # single-worker default. During a canary set this to legacy_v0 here and
-      # run document-worker-canary for unified_v1, so neither can drain the
-      # other's queue. See docs/operations/unified_extraction_canary_and_rollback.md
-      DOCUMENT_WORKER_PIPELINE_VERSIONS: "${DOCUMENT_WORKER_PIPELINE_VERSIONS:-}"
+      # Which pipeline versions this worker may claim. Defaults to legacy_v0,
+      # NOT empty: empty means "claim anything", so an operator who starts a
+      # canary and forgets to restrict this service would let it drain the
+      # canary's unified_v1 queue. Defaulting closed means the canary is safe
+      # even when this variable is omitted entirely.
+      #
+      # Consequence to know before global enablement: if
+      # UNIFIED_EXTRACTION_ENABLED is ever set true without widening this,
+      # unified jobs are created but never claimed and queue age grows. That is
+      # deliberate - a visibly stalled queue is recoverable, a tenant silently
+      # processed by the wrong pipeline is not. post_deploy_verify.sh checks
+      # for exactly this combination.
+      DOCUMENT_WORKER_PIPELINE_VERSIONS: "${DOCUMENT_WORKER_PIPELINE_VERSIONS:-legacy_v0}"
       # contract-worker is the single scheduler owner. Never flip this to true:
       # two schedulers double-fire cron jobs and the leader lock is a safety
       # net, not a licence.
