@@ -6,7 +6,8 @@ import time
 import os
 import re
 from pathlib import Path
-from typing import Optional, Any, Dict
+from typing import Optional, Any, Dict, Sequence
+from uuid import uuid4
 
 from .text_processing_service import TextProcessingService
 from .database_service import DatabaseService
@@ -49,6 +50,10 @@ class DocumentProcessor:
         upload_type: str,
         document_id: Optional[str] = None,
         skip_embeddings: bool = False,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        extraction_run_id: Optional[str] = None,
+        retry_pages: Optional[Sequence[int]] = None,
     ) -> ProcessingResult:
         """
         Main entry point for document processing.
@@ -85,15 +90,45 @@ class DocumentProcessor:
             if file_size > self.config.max_file_size_mb * 1024 * 1024:
                 raise DocumentProcessingError(f"File too large: {file_size} bytes")
 
-            # Step 1: Process PDF with OCR if needed
-            logger.info("[document_pipeline] Starting OCR step for %s", input_path.name)
-            processed_path, raw_ocr_text = await self.ocr_service.process_pdf(input_path)
+            # Step 1: Page-wise extraction. Pages with a usable text layer keep
+            # their native text; only thin pages are OCR'd. This replaces the
+            # document-level is_pdf_textual decision, which inspected the first
+            # five pages and, on finding any text, skipped OCR for the whole
+            # document - leaving scanned pages indexed as empty.
+            from .extraction_adapters.document_page_store import DocumentPageStore
+
+            logger.info(
+                "[document_pipeline] Starting page-wise extraction for %s",
+                input_path.name,
+            )
+            resolved_document_id = document_id or input_path.stem
+            run_id = extraction_run_id or str(uuid4())
+            db = await self.database_service.get_database()
+            page_store = DocumentPageStore(
+                db=db,
+                document_id=resolved_document_id,
+                organization_id=organization_id or "",
+                project_id=project_id,
+                extraction_run_id=run_id,
+            )
+            extraction = await self.ocr_service.process_pdf_pagewise(
+                input_path,
+                store=page_store,
+                document_id=resolved_document_id,
+                retry_pages=retry_pages,
+            )
+            processed_path = input_path
+            raw_ocr_text = extraction.combined_text or None
             ocr_text_len = len(raw_ocr_text) if raw_ocr_text else 0
             logger.info(
-                "[document_pipeline] OCR step completed for %s (raw_text_chars=%s, processed_path=%s)",
+                "[document_pipeline] Extraction completed for %s "
+                "(chars=%s, ocr_pages=%s, failed=%s, deferred=%s, completeness=%s)",
                 input_path.name,
                 ocr_text_len,
-                processed_path,
+                extraction.ocr_pages_total,
+                extraction.ocr_failed_pages,
+                extraction.ocr_deferred_pages,
+                extraction.completeness.value,
             )
 
             # Step 2: Upload to OpenAI
@@ -201,6 +236,8 @@ class DocumentProcessor:
                 metadata_source=metadata_source,
                 metadata_debug=metadata_debug,
                 partial_failures=partial_failures,
+                extraction_result=extraction,
+                extraction_completeness=extraction.completeness.value,
             )
 
         except Exception as e:

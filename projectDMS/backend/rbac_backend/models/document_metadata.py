@@ -225,6 +225,13 @@ class ProcessingResult(BaseModel):
     metadata_source: str = "legacy_regex"
     metadata_debug: Optional[Dict[str, Any]] = None
     partial_failures: Dict[str, Any] = Field(default_factory=dict)
+    #: Typed page-extraction result. Carried so the durable job layer can
+    #: derive the document state and requeue deferred pages without
+    #: re-deriving them from text. Not a Pydantic model - allow arbitrary types.
+    extraction_result: Optional[Any] = None
+    extraction_completeness: Optional[str] = None
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 __all__ = [

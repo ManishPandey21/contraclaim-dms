@@ -3,16 +3,53 @@ from types import SimpleNamespace
 import pytest
 
 from rbac_backend.services.document_processor import DocumentProcessor
+from rbac_backend.services.extraction.models import (
+    Completeness,
+    ExtractedPage,
+    PageClass,
+    PageClassification,
+    PageExtractionResult,
+    PageSource,
+    PageStatus,
+)
 from rbac_backend.services.text_processing_service import TextProcessingService
 from rbac_backend.utils.exceptions import DocumentProcessingError
 
 
 class FakeOCRService:
+    """Stands in for OCRService's page-wise extraction seam.
+
+    The processor consumes a PageExtractionResult now rather than a
+    (path, text) tuple, so this fake returns one carrying the same text.
+    """
+
     def __init__(self, text: str):
         self.text = text
 
-    async def process_pdf(self, input_path):
-        return input_path, self.text
+    async def process_pdf_pagewise(self, input_path, *, store, document_id, **_kwargs):
+        page = ExtractedPage(
+            number=1,
+            text=self.text,
+            source=PageSource.OCR,
+            status=PageStatus.OCR_COMPLETED,
+            classification=PageClassification(
+                page_class=PageClass.SCANNED_IMAGE,
+                char_count=len(self.text),
+                image_count=1,
+                image_coverage=1.0,
+                table_count=0,
+                width=595.0,
+                height=842.0,
+                rotation=0,
+            ),
+        )
+        await store.record_pages([page])
+        return PageExtractionResult(
+            pages=[page],
+            combined_text=self.text,
+            ocr_pages_total=1,
+            completeness=Completeness.COMPLETE,
+        )
 
 
 class FakeOpenAIService:
@@ -43,12 +80,35 @@ def make_processor(ocr_text: str, openai_service: FakeOpenAIService):
     async def close_connection():
         return None
 
+    async def get_database():
+        # The page store is exercised by its own suite; here it only needs a
+        # collection-shaped object that accepts writes.
+        class _Collection:
+            async def bulk_write(self, requests):
+                return None
+
+            async def insert_one(self, document):
+                return SimpleNamespace(inserted_id="batch-1")
+
+            async def update_one(self, *args, **kwargs):
+                return None
+
+        class _Db:
+            def __getitem__(self, name):
+                return _Collection()
+
+        return _Db()
+
     processor = DocumentProcessor.__new__(DocumentProcessor)
     processor.config = SimpleNamespace(max_file_size_mb=100, chunk_size=3000, chunk_overlap=200)
     processor.ocr_service = FakeOCRService(ocr_text)
     processor.openai_service = openai_service
     processor.text_service = TextProcessingService(processor.config)
-    processor.database_service = SimpleNamespace(partial_failures={}, close_connection=close_connection)
+    processor.database_service = SimpleNamespace(
+        partial_failures={},
+        close_connection=close_connection,
+        get_database=get_database,
+    )
     processor.file_service = SimpleNamespace()
     processor.pydantic_ai_service = SimpleNamespace(is_enabled=False)
     return processor

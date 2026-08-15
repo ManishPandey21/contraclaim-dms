@@ -5,7 +5,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..utils.pipeline_logging import configure_pipeline_logger
@@ -161,6 +161,47 @@ class OCRService:
         except Exception as e:
             logger.error(f"PDF processing failed: {e}")
             raise DocumentProcessingError(f"PDF processing failed: {str(e)}")
+
+    async def process_pdf_pagewise(
+        self,
+        input_path: Path,
+        *,
+        store: Any,
+        document_id: str,
+        ocr_runner: Any = None,
+        retry_pages: Optional[Sequence[int]] = None,
+    ):
+        """Extract a PDF page by page, OCR-ing only the pages that need it.
+
+        Replaces the document-level `is_pdf_textual` decision for the general
+        path. That decision inspected the first five pages and, on finding any
+        text, skipped OCR for the entire document - so a scanned covering
+        letter behind a textual body was indexed as empty.
+        """
+        from ..core.config import settings
+        from .extraction.engine import PageExtractionEngine
+        from .extraction.models import PageExtractionPolicy
+        from .extraction.ocrmypdf_runner import OcrMyPdfRunner
+
+        work_dir = Path(self.config.process_dir) / "page_batches" / document_id
+        runner = ocr_runner or OcrMyPdfRunner(work_dir=work_dir)
+
+        engine = PageExtractionEngine(
+            policy=PageExtractionPolicy(
+                ocr_enabled=self.config.ocr_enabled and self._ocr_available,
+                min_text_chars_per_page=max(
+                    0, int(self.config.contract_ocr_min_text_chars_per_page)
+                ),
+                batch_size=max(1, int(self.config.contract_ocr_batch_size)),
+                max_ocr_pages_per_attempt=int(
+                    getattr(settings, "DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT", 0)
+                ),
+                ocr_language=self.config.ocr_language,
+            ),
+            ocr_runner=runner,
+            store=store,
+        )
+        return await engine.extract(input_path, retry_pages=retry_pages)
 
     async def process_document(self, input_path: Path, language: Optional[str] = None) -> Path:
         """

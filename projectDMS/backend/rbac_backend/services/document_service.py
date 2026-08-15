@@ -1301,6 +1301,12 @@ class DocumentService:
                     upload_type=upload,
                     document_id=document_id,
                     skip_embeddings=duplicate_pending,
+                    organization_id=org_id,
+                    project_id=proj_id,
+                    # Stable across retries of the same job, so a resumed
+                    # attempt upserts into the same extraction run rather than
+                    # starting a fresh one and orphaning the earlier pages.
+                    extraction_run_id=str(job_id) if job_id else None,
                 )
             except DocumentProcessorError as exc:
                 logger.error("Document processor failed for %s: %s", document_id, exc)

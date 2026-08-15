@@ -152,6 +152,11 @@ class Settings(BaseSettings):
     UPLOAD_STREAM_CHUNK_SIZE_MB: int = Field(default=1, validation_alias="UPLOAD_STREAM_CHUNK_SIZE_MB")
     UPLOAD_VALIDATION_SAMPLE_BYTES: int = Field(default=8192, validation_alias="UPLOAD_VALIDATION_SAMPLE_BYTES")
     GENERAL_UPLOAD_MAX_FILE_SIZE_MB: int = Field(default=100, validation_alias="GENERAL_UPLOAD_MAX_FILE_SIZE_MB")
+    # 0 means "no attempt boundary". A positive value bounds the OCR pages one
+    # attempt will run; the remainder is DEFERRED and re-claimed, never dropped.
+    DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT: int = Field(
+        default=0, validation_alias="DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT"
+    )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
     
