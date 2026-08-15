@@ -55,8 +55,8 @@ def test_contract_worker_does_not_also_extract() -> None:
     assert env["START_DOCUMENT_EXTRACTION_WORKERS"] == "false"
 
 
-def test_exactly_one_service_extracts_documents() -> None:
-    extractors = [
+def _extractors() -> list[str]:
+    return [
         name
         for name, service in _services().items()
         if str(
@@ -67,7 +67,43 @@ def test_exactly_one_service_extracts_documents() -> None:
         == "true"
     ]
 
-    assert extractors == ["document-worker"]
+
+def test_only_the_document_workers_extract() -> None:
+    assert sorted(_extractors()) == ["document-worker", "document-worker-canary"]
+
+
+def test_the_canary_worker_is_scaled_to_zero_by_default() -> None:
+    """It exists so a canary window needs no code change - not so it runs."""
+    canary = _services()["document-worker-canary"]
+
+    assert canary["deploy"]["replicas"] == "${DOCUMENT_WORKER_CANARY_REPLICAS:-0}"
+
+
+def test_the_canary_worker_claims_only_unified_jobs() -> None:
+    """This is what makes the canary real rather than a label.
+
+    The claim predicate filters on the job's persisted pipeline_version, so a
+    canary worker physically cannot pick up another tenant's legacy job.
+    """
+    env = _services()["document-worker-canary"]["environment"]
+
+    assert env["DOCUMENT_WORKER_PIPELINE_VERSIONS"] == "unified_v1"
+
+
+def test_the_two_extraction_workers_can_be_given_disjoint_claims() -> None:
+    # The default worker's restriction is env-driven so it can be narrowed to
+    # legacy_v0 for the window; the canary's is pinned to unified_v1.
+    services = _services()
+    default_env = services["document-worker"]["environment"]
+    canary_env = services["document-worker-canary"]["environment"]
+
+    assert "DOCUMENT_WORKER_PIPELINE_VERSIONS" in default_env
+    assert canary_env["DOCUMENT_WORKER_PIPELINE_VERSIONS"] == "unified_v1"
+    assert default_env["DOCUMENT_WORKER_PIPELINE_VERSIONS"] != "unified_v1"
+
+
+def test_the_canary_worker_is_not_a_second_scheduler_owner() -> None:
+    assert _services()["document-worker-canary"]["environment"]["RUN_SCHEDULER"] == "false"
 
 
 def test_contract_worker_remains_the_only_scheduler_owner() -> None:

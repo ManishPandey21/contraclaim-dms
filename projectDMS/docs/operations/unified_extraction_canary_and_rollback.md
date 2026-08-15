@@ -15,40 +15,34 @@
 
 ---
 
-## 0. Correction — the canary control does not yet route
+## 0. Routing history — resolved
 
-Recorded because an earlier report of this work claimed otherwise.
+An earlier revision of this runbook recorded that `pipeline_version` was written
+but never read, so the canary was a label with no effect. **That is now fixed.**
+Both boundaries exist:
 
-`pipeline_version` is decided at job creation and persisted (that part works and
-is tested). **Nothing reads it.** Specifically:
+- **Routing boundary.** `DocumentProcessor.process_document` branches on the
+  job's persisted `pipeline_version`. `legacy_v0` runs `_extract_legacy()` — a
+  deliberately minimal restoration of the pre-Phase-3 path: one document-level
+  `is_pdf_textual` decision, no page store, no quality gate, no fallback.
+  Anything not explicitly `unified_v1` takes it, so an unknown value never opts
+  a tenant into newer code.
+- **Claim boundary.** `_claim_next_processing_job(pipeline_versions=…)` filters
+  on the persisted version. A worker restricted to `unified_v1` **physically
+  cannot claim** another tenant's legacy job, and a legacy-restricted worker
+  also matches jobs with no recorded version.
 
-- `uses_unified_pipeline()` has **no production callers**;
-- `_claim_next_processing_job` does **not** filter on `pipeline_version`, so a
-  document worker claims every job regardless of version;
-- there is **no legacy branch to route to**. Phase 3.3 replaced the general
-  path's `process_pdf` call with `process_pdf_pagewise` wholesale, so
-  `legacy_v0` and `unified_v1` jobs execute identical code today.
+Both paths converge on one shared `_extract_and_persist()`, so there is a single
+implementation of content extraction, metadata parsing and persistence — the
+legacy path differs only in how the text was obtained.
 
-**Consequence:** the claim "a canary worker cannot sweep up other tenants' jobs"
-is **not currently enforced**. Every tenant is already on the unified path in
-this build. Labelling a job `legacy_v0` changes nothing about how it is
-processed.
+`_extract_legacy()` is **temporary**. Delete it, `legacy_v0`, and the claim
+restriction once the unified pipeline is globally accepted.
 
-**Before any canary window, Task 7.6 requires either:**
-
-1. a genuine legacy path retained behind the flag, with the claim predicate and
-   processor dispatch honouring the persisted `pipeline_version`; or
-2. an explicit, recorded decision that no legacy path exists — in which case
-   this is a **staged rollout of a single pipeline**, not a canary, and the
-   runbook's isolation claims must be rewritten to match. Rollback then means
-   redeploying the previous image, not clearing an allowlist.
-
-Until one of those is done, §4's isolation assertions cannot be satisfied.
-
-Two further Step 6 omissions against the task's own Files list:
+**Still outstanding from Step 6's Files list:**
 
 - `scripts/post_deploy_verify.sh` was **not** modified; it does not check the
-  document-worker flag matrix, the single-scheduler-owner invariant, or canary
+  worker flag matrix, the single-scheduler-owner invariant, or canary
   contamination.
 - The repository-root `.env.example` was **not** updated. Only
   `backend/rbac_backend/.env.example` carries the new variables.
@@ -69,17 +63,19 @@ organisation at a time, and proving rollback before any global enablement.
 | `EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT` | `5` | Hard per-document ceiling on model calls. |
 | `RAR_UPLOAD_ENABLED` | `false` | Blocked until EICAR-in-RAR detection is proven on the deployed clamd. |
 
-**The intended property:** `pipeline_version` is decided **once, at job creation**,
-and persisted on the job, so that:
+| `DOCUMENT_WORKER_PIPELINE_VERSIONS` | *(empty)* | Restricts which versions a worker may claim. Empty = all. |
+| `DOCUMENT_WORKER_CANARY_REPLICAS` | `0` | Replicas of `document-worker-canary`, which is pinned to `unified_v1`. |
+
+**The property that makes this safe**, and which is now implemented and tested:
+`pipeline_version` is decided **once, at job creation**, persisted on the job,
+and honoured by both the claim predicate and the processor. Therefore:
 
 - emptying the allowlist cannot reclassify work already queued;
-- a canary worker cannot sweep up other tenants' jobs;
-- a job queued before this change has no `pipeline_version` and is treated as legacy.
+- a worker restricted to one version cannot claim the other's jobs;
+- a job queued before this change has no `pipeline_version` and is legacy.
 
-**What is actually implemented today:** only the first bullet. The decision is
-pinned and tested, but no reader consumes it and no legacy path exists — see §0.
-The second and third bullets are **design intent, not current behaviour**, and
-must not be relied on during a canary window.
+Everything fails closed onto the legacy path: unknown scope, missing
+organisation, unrecognised version, or absent version all stay legacy.
 
 ---
 
@@ -145,13 +141,22 @@ Verify before going further:
 
 ## 4. Enable one canary organisation (Step 3)
 
-Add **only** the approved demo organisation id, then recreate the worker:
+Two workers with **disjoint claims**: the existing worker keeps every tenant on
+legacy, and a separate canary worker takes only unified jobs.
 
 ```bash
+# .env
 UNIFIED_EXTRACTION_CANARY_ORG_IDS=<demo-org-id>
+DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0   # existing worker: legacy only
+DOCUMENT_WORKER_CANARY_REPLICAS=1             # canary worker: unified_v1 only
+
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps document-worker
+  up -d --no-deps document-worker document-worker-canary
 ```
+
+The isolation is enforced by the claim predicate, not by convention: the canary
+worker's query filters on `pipeline_version`, so it cannot claim a legacy job
+even if one is queued ahead of it.
 
 Enqueue one clean PDF and one mixed fixture in that organisation only. Assert:
 
@@ -170,13 +175,23 @@ Enqueue one clean PDF and one mixed fixture in that organisation only. Assert:
 
 ## 5. Rollback drill (Step 4)
 
-Rollback is **not** a redeploy and **never** deletes evidence.
+Rollback is **server-side**: no image redeploy, no evidence deletion.
 
 ```bash
-UNIFIED_EXTRACTION_CANARY_ORG_IDS=
+# .env
+UNIFIED_EXTRACTION_CANARY_ORG_IDS=          # new jobs are legacy_v0 again
+DOCUMENT_WORKER_CANARY_REPLICAS=0           # stop claiming unified jobs
+DOCUMENT_WORKER_PIPELINE_VERSIONS=          # existing worker: unrestricted
+
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
-  up -d --no-deps document-worker
+  up -d --no-deps document-worker document-worker-canary
 ```
+
+Order matters. Clear the allowlist **first** so no further unified jobs are
+created, then scale the canary worker down. Any unified job still queued is
+picked up by the now-unrestricted default worker and processed on the unified
+path — its persisted version is honoured, so it is never silently reprocessed as
+legacy.
 
 Then confirm:
 
@@ -240,7 +255,8 @@ change** and is blocked until both the canary and the rollback drill pass.
 | `scripts/unified_extraction_canary_status.py` | PASS | commit `e038fa7`; read-only, syntax-checked |
 | `docs/operations/...canary_and_rollback.md` | PASS | commit `e038fa7`, this file |
 | Job records `pipeline_version` at creation | PASS | `test_unified_extraction_canary.py`, 15 passed |
-| **Interfaces: claim predicate + dispatch honour persisted version** | **FAIL** | No production reader; no legacy branch. §0 |
+| **Interfaces: claim predicate + dispatch honour persisted version** | **PASS** | `pipeline_routing.py`; `test_pipeline_routing_boundary.py` 10 passed; `document-worker-canary` pinned to `unified_v1`, `test_document_worker_compose.py` 15 passed |
+| Minimal temporary `legacy_v0` extraction path | PASS | `DocumentProcessor._extract_legacy`; both paths converge on `_extract_and_persist` |
 | **`scripts/post_deploy_verify.sh` updated** | **FAIL** | Never modified |
 | **Repository-root `.env.example` updated** | **FAIL** | Only `backend/rbac_backend/.env.example` was changed |
 
@@ -272,7 +288,8 @@ explicitly accepted in writing before Phase 7 can be declared fully complete.
 
 | # | Gap | Effect on acceptance |
 |---|---|---|
-| G1 | **Canary routing is non-functional** (§0) | Steps 3 and 4 are unachievable as written. Highest priority. |
+| ~~G1~~ | ~~Canary routing is non-functional~~ | **CLOSED.** Routing and claim boundaries implemented and tested (§0). |
+| G1a | `_extract_legacy` is **temporary duplicate surface**. While it exists, two extraction behaviours are in production. | Delete it, `legacy_v0`, and the claim restriction once the unified pipeline is globally accepted. Tracked, not a blocker. |
 | G2 | **Mongo-backed end-to-end pipeline never exercised.** The acceptance test fails loudly under `RUN_UNIFIED_EXTRACTION_E2E=1` rather than skipping green. | A canary would be the *first* real-infrastructure run of this pipeline. Elevated risk for Step 3. |
 | G3 | **Migration `20260814_0001` not verified against the production database.** Dry run never executed. | Step 1 cannot be signed off. |
 | G4 | **Unique `(document_id, extraction_run_id, page_number)` index must exist before concurrent worker writes.** Created only by G3's migration. | Without it, two workers can write contradictory evidence for the same page while `publish_run`'s count check still passes. Hard prerequisite for running more than one document worker. |

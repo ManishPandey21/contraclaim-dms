@@ -5,9 +5,9 @@ import logging
 import time
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Any, Dict, Sequence
+from typing import Optional, Any, Dict, List, Sequence
 from uuid import uuid4
 
 from .text_processing_service import TextProcessingService
@@ -23,7 +23,9 @@ from .extraction.image_ocr_runner import TesseractImageOcrRunner
 from .extraction.models import Completeness, SourceKind
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
+from .pipeline_routing import LEGACY_PIPELINE, UNIFIED_PIPELINE
 
+from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import ParsedDocumentMetadata, ProcessingResult
 from ..models.processing_state import ProcessingState
@@ -54,6 +56,21 @@ class SourceDispatchResult:
     kind: SourceKind
     extraction: Optional[Any] = None
     processing_state: Optional[ProcessingState] = None
+
+
+@dataclass(frozen=True)
+class LegacyDispatchResult:
+    """What the pre-unified path produced: text, and nothing else.
+
+    No pages, no per-page evidence, no quality verdicts. That absence is the
+    point - this is the known-good path kept so a canary has something real to
+    roll back to, not a second implementation of the new one.
+    """
+
+    raw_text: Optional[str]
+    processed_path: Path
+    extraction: None = None
+    pages_human_review: List[int] = field(default_factory=list)
 
 
 class DocumentProcessor:
@@ -160,6 +177,24 @@ class DocumentProcessor:
 
         return needs_review
 
+    async def _extract_legacy(self, input_path: Path) -> LegacyDispatchResult:
+        """The pre-Phase-3 extraction path, retained for canary rollback.
+
+        Deliberately minimal and temporary: one document-level `is_pdf_textual`
+        decision, no page store, no quality gate, no fallback. It exists so
+        `pipeline_version=legacy_v0` means something a tenant can actually be
+        rolled back onto without redeploying an image.
+
+        Remove it once the unified pipeline is globally accepted.
+        """
+        logger.info(
+            "[document_pipeline] Legacy extraction path for %s", input_path.name
+        )
+        processed_path, raw_text = await self.ocr_service.process_pdf(input_path)
+        return LegacyDispatchResult(
+            raw_text=raw_text, processed_path=processed_path or input_path
+        )
+
     async def _extract_source(
         self,
         input_path: Path,
@@ -226,6 +261,7 @@ class DocumentProcessor:
         extraction_run_id: Optional[str] = None,
         retry_pages: Optional[Sequence[int]] = None,
         source_mime: Optional[str] = None,
+        pipeline_version: str = LEGACY_PIPELINE,
     ) -> ProcessingResult:
         """
         Main entry point for document processing.
@@ -274,6 +310,37 @@ class DocumentProcessor:
                 input_path.name,
             )
             resolved_document_id = document_id or input_path.stem
+
+            # Routing boundary. A job carries the pipeline it was created for,
+            # and that decision - not current configuration - decides which
+            # extractor runs. Anything not explicitly unified takes the legacy
+            # path, so an unknown value never opts a tenant into newer code.
+            extraction = None
+            pages_human_review: List[int] = []
+
+            if pipeline_version != UNIFIED_PIPELINE:
+                legacy = await self._extract_legacy(input_path)
+                processed_path = legacy.processed_path
+                raw_ocr_text = legacy.raw_text
+                logger.info(
+                    "[document_pipeline] Legacy extraction completed for %s "
+                    "(chars=%s)",
+                    input_path.name,
+                    len(raw_ocr_text or ""),
+                )
+                return await self._extract_and_persist(
+                    input_path=input_path,
+                    processed_path=processed_path,
+                    raw_ocr_text=raw_ocr_text,
+                    extraction=None,
+                    pages_human_review=[],
+                    path_structure=path_structure,
+                    upload_type=upload_type,
+                    document_id=document_id,
+                    skip_embeddings=skip_embeddings,
+                    start_time=start_time,
+                )
+
             run_id = extraction_run_id or str(uuid4())
             db = await self.database_service.get_database()
             page_store = DocumentPageStore(
@@ -323,116 +390,19 @@ class DocumentProcessor:
                 extraction.completeness.value,
             )
 
-            # Step 2: Upload to OpenAI
-            partial_failures: Dict[str, Any] = {}
-            extracted_content = ""
-            metadata_source = "legacy_regex"
 
-            if raw_ocr_text and raw_ocr_text.strip():
-                logger.info(
-                    "[document_pipeline] Requesting content extraction from OCR text for %s (chars=%s)",
-                    input_path.name,
-                    len(raw_ocr_text),
-                )
-                try:
-                    extracted_content = await self.openai_service.process_text(
-                        raw_ocr_text,
-                        filename=input_path.name,
-                    )
-                    metadata_source = "openai_text_legacy_regex"
-                except Exception as exc:
-                    logger.warning(
-                        "[document_pipeline] OpenAI OCR-text extraction failed for %s; "
-                        "falling back to deterministic OCR metadata parser: %s",
-                        input_path.name,
-                        exc,
-                    )
-                    partial_failures["ai_extraction"] = {
-                        "stage": "ocr_text_extraction",
-                        "message": str(exc),
-                    }
-                    extracted_content = self._build_ocr_fallback_report(
-                        raw_ocr_text,
-                        filename=input_path.name,
-                    )
-                    metadata_source = "ocr_fallback_regex"
-            else:
-                logger.info("[document_pipeline] Uploading %s to OpenAI", processed_path.name if processed_path else input_path.name)
-                file_id = await self.openai_service.upload_file(str(processed_path))
-                logger.info("[document_pipeline] Uploaded file_id=%s for %s", file_id, input_path.name)
-
-                # Step 3: Extract content using OpenAI
-                logger.info("[document_pipeline] Requesting content extraction for %s", input_path.name)
-                extracted_content = await self.openai_service.process_document(file_id)
-            extracted_length = len(extracted_content or "")
-            logger.info("[document_pipeline] Content extraction complete for %s (chars=%s)", input_path.name, extracted_length)
-
-            # Step 4: Parse extracted content
-            metadata_debug: Optional[Dict[str, Any]] = None
-            parsed_metadata: Optional[ParsedDocumentMetadata] = None
-
-            if self.pydantic_ai_service.is_enabled:
-                logger.info("[document_pipeline] [%s] Attempting metadata extraction via PydanticAI", input_path.name)
-                try:
-                    agent_result = await self.pydantic_ai_service.extract_metadata(
-                        document_text=raw_ocr_text or extracted_content,
-                        context={"filename": input_path.name, "upload_type": upload_type},
-                    )
-                except PydanticAIMetadataError as exc:
-                    logger.warning(f"PydanticAI metadata extraction failed for {pdf_path}: {exc}")
-                    logger.info("[document_pipeline] [%s] Falling back to legacy regex metadata parser", input_path.name)
-                else:
-                    if agent_result:
-                        metadata_source = "pydantic_ai"
-                        parsed_metadata = agent_result.metadata
-                        metadata_debug = {**agent_result.debug, "raw_result": agent_result.raw_result}
-                        logger.info("[document_pipeline] [%s] Metadata extracted successfully via PydanticAI", input_path.name)
-                    else:
-                        logger.info("[document_pipeline] [%s] PydanticAI returned no metadata; using legacy regex parser", input_path.name)
-            else:
-                logger.info(
-                    "[document_pipeline] [%s] PydanticAI disabled or unavailable (use_pydantic_ai=%s, api_key=%s); using legacy regex parser",
-                    input_path.name,
-                    getattr(self.config, "use_pydantic_ai", False),
-                    "set" if bool(getattr(self.config, "openai_api_key", None)) else "unset",
-                )
-
-            if parsed_metadata is None:
-                logger.info("[document_pipeline] [%s] Parsing metadata with legacy regex parser", input_path.name)
-                parsed_metadata = self.text_service.parse_extraction_report(extracted_content)
-                if metadata_source not in {"pydantic_ai", "openai_text_legacy_regex", "ocr_fallback_regex"}:
-                    metadata_source = "legacy_regex"
-
-
-
-            # Step 5: Save results
-            logger.info("[document_pipeline] Persisting OCR, metadata, and embeddings for %s", input_path.name)
-            chunks_created = await self._save_results(
-                extracted_content, raw_ocr_text, pdf_path, path_structure,
-                upload_type, document_id, parsed_metadata,
-                skip_embeddings=skip_embeddings,
-            )
-            partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
-
-            processing_time = time.time() - start_time
-
-            logger.info("[document_pipeline] Document processing completed successfully for %s in %.2fs", pdf_path, processing_time)
-
-            return ProcessingResult(
-                success=True,
-                document_id=document_id,
-                processed_path=str(processed_path),
-                metadata=parsed_metadata,
-                chunks_created=chunks_created,
-                processing_time=processing_time,
-                metadata_source=metadata_source,
-                metadata_debug=metadata_debug,
-                partial_failures=partial_failures,
-                extraction_result=extraction,
-                extraction_completeness=extraction.completeness.value,
+            return await self._extract_and_persist(
+                input_path=input_path,
+                processed_path=processed_path,
+                raw_ocr_text=raw_ocr_text,
+                extraction=extraction,
                 pages_human_review=pages_human_review,
+                path_structure=path_structure,
+                upload_type=upload_type,
+                document_id=document_id,
+                skip_embeddings=skip_embeddings,
+                start_time=start_time,
             )
-
         except Exception as e:
             processing_time = time.time() - start_time
             logger.error(f"[document_pipeline] Document processing failed for {pdf_path}: {e}")
@@ -605,6 +575,162 @@ class DocumentProcessor:
         except Exception as e:
             logger.error(f"Failed to save results: {e}")
             raise DocumentProcessingError(f"Failed to save results: {str(e)}")
+
+    async def _extract_and_persist(
+        self,
+        *,
+        input_path: Path,
+        processed_path: Optional[Path],
+        raw_ocr_text: Optional[str],
+        extraction: Optional[Any],
+        pages_human_review: List[int],
+        path_structure: str,
+        upload_type: str,
+        document_id: Optional[str],
+        skip_embeddings: bool,
+        start_time: float,
+    ) -> ProcessingResult:
+        """Content extraction, metadata parsing and persistence.
+
+        Shared by both pipelines so there is one implementation, not two. The
+        legacy path passes extraction=None and no review pages; everything
+        downstream of the text is identical.
+        """
+        file_id: Optional[str] = None
+        try:
+            # Step 2: Upload to OpenAI
+            partial_failures: Dict[str, Any] = {}
+            extracted_content = ""
+            metadata_source = "legacy_regex"
+
+            if raw_ocr_text and raw_ocr_text.strip():
+                logger.info(
+                    "[document_pipeline] Requesting content extraction from OCR text for %s (chars=%s)",
+                    input_path.name,
+                    len(raw_ocr_text),
+                )
+                try:
+                    extracted_content = await self.openai_service.process_text(
+                        raw_ocr_text,
+                        filename=input_path.name,
+                    )
+                    metadata_source = "openai_text_legacy_regex"
+                except Exception as exc:
+                    logger.warning(
+                        "[document_pipeline] OpenAI OCR-text extraction failed for %s; "
+                        "falling back to deterministic OCR metadata parser: %s",
+                        input_path.name,
+                        exc,
+                    )
+                    partial_failures["ai_extraction"] = {
+                        "stage": "ocr_text_extraction",
+                        "message": str(exc),
+                    }
+                    extracted_content = self._build_ocr_fallback_report(
+                        raw_ocr_text,
+                        filename=input_path.name,
+                    )
+                    metadata_source = "ocr_fallback_regex"
+            else:
+                logger.info("[document_pipeline] Uploading %s to OpenAI", processed_path.name if processed_path else input_path.name)
+                file_id = await self.openai_service.upload_file(str(processed_path))
+                logger.info("[document_pipeline] Uploaded file_id=%s for %s", file_id, input_path.name)
+
+                # Step 3: Extract content using OpenAI
+                logger.info("[document_pipeline] Requesting content extraction for %s", input_path.name)
+                extracted_content = await self.openai_service.process_document(file_id)
+            extracted_length = len(extracted_content or "")
+            logger.info("[document_pipeline] Content extraction complete for %s (chars=%s)", input_path.name, extracted_length)
+
+            # Step 4: Parse extracted content
+            metadata_debug: Optional[Dict[str, Any]] = None
+            parsed_metadata: Optional[ParsedDocumentMetadata] = None
+
+            if self.pydantic_ai_service.is_enabled:
+                logger.info("[document_pipeline] [%s] Attempting metadata extraction via PydanticAI", input_path.name)
+                try:
+                    agent_result = await self.pydantic_ai_service.extract_metadata(
+                        document_text=raw_ocr_text or extracted_content,
+                        context={"filename": input_path.name, "upload_type": upload_type},
+                    )
+                except PydanticAIMetadataError as exc:
+                    logger.warning(f"PydanticAI metadata extraction failed for {input_path}: {exc}")
+                    logger.info("[document_pipeline] [%s] Falling back to legacy regex metadata parser", input_path.name)
+                else:
+                    if agent_result:
+                        metadata_source = "pydantic_ai"
+                        parsed_metadata = agent_result.metadata
+                        metadata_debug = {**agent_result.debug, "raw_result": agent_result.raw_result}
+                        logger.info("[document_pipeline] [%s] Metadata extracted successfully via PydanticAI", input_path.name)
+                    else:
+                        logger.info("[document_pipeline] [%s] PydanticAI returned no metadata; using legacy regex parser", input_path.name)
+            else:
+                logger.info(
+                    "[document_pipeline] [%s] PydanticAI disabled or unavailable (use_pydantic_ai=%s, api_key=%s); using legacy regex parser",
+                    input_path.name,
+                    getattr(self.config, "use_pydantic_ai", False),
+                    "set" if bool(getattr(self.config, "openai_api_key", None)) else "unset",
+                )
+
+            if parsed_metadata is None:
+                logger.info("[document_pipeline] [%s] Parsing metadata with legacy regex parser", input_path.name)
+                parsed_metadata = self.text_service.parse_extraction_report(extracted_content)
+                if metadata_source not in {"pydantic_ai", "openai_text_legacy_regex", "ocr_fallback_regex"}:
+                    metadata_source = "legacy_regex"
+
+
+
+            # Step 5: Save results
+            logger.info("[document_pipeline] Persisting OCR, metadata, and embeddings for %s", input_path.name)
+            chunks_created = await self._save_results(
+                extracted_content, raw_ocr_text, str(input_path), path_structure,
+                upload_type, document_id, parsed_metadata,
+                skip_embeddings=skip_embeddings,
+            )
+            partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
+
+            processing_time = time.time() - start_time
+
+            logger.info("[document_pipeline] Document processing completed successfully for %s in %.2fs", input_path, processing_time)
+
+            return ProcessingResult(
+                success=True,
+                document_id=document_id,
+                processed_path=str(processed_path),
+                metadata=parsed_metadata,
+                chunks_created=chunks_created,
+                processing_time=processing_time,
+                metadata_source=metadata_source,
+                metadata_debug=metadata_debug,
+                partial_failures=partial_failures,
+                extraction_result=extraction,
+                # None on the legacy path, which produces no page evidence.
+                extraction_completeness=(
+                    extraction.completeness.value if extraction is not None else None
+                ),
+                pages_human_review=pages_human_review,
+            )
+
+
+        except Exception as e:
+            processing_time = time.time() - start_time
+            logger.error(
+                "[document_pipeline] Persistence failed for %s: %s", input_path, e
+            )
+            return ProcessingResult(
+                success=False, error=str(e), processing_time=processing_time
+            )
+        finally:
+            if file_id:
+                try:
+                    await self.openai_service.cleanup_file(file_id)
+                except Exception as exc:
+                    logger.warning("Error during cleanup: %s", exc)
+            try:
+                await self.database_service.close_connection()
+            except Exception as exc:
+                logger.warning("Error closing database connection: %s", exc)
+
 
 # Factory function
 def create_document_processor(config: Optional[DocumentProcessingConfig] = None) -> DocumentProcessor:

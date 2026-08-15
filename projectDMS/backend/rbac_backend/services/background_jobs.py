@@ -449,10 +449,23 @@ async def periodic_document_processing_jobs(stop_event: asyncio.Event) -> None:
     """Poll durable Mongo-backed document processing jobs until stopped."""
     from .document_service import DocumentService
 
+    from ..core.config import settings
+
     service = DocumentService()
+    # An empty restriction claims every version - the single-worker default.
+    # A canary sets this so a second worker cannot drain other tenants' jobs.
+    pipeline_versions = settings.worker_pipeline_versions() or None
+    if pipeline_versions:
+        logger.info(
+            "Document extraction worker restricted to pipeline versions: %s",
+            sorted(pipeline_versions),
+        )
+
     while not stop_event.is_set():
         try:
-            processed = await service.process_next_processing_jobs(limit=3)
+            processed = await service.process_next_processing_jobs(
+                limit=3, pipeline_versions=pipeline_versions
+            )
             await asyncio.sleep(1 if processed else 3)
         except asyncio.CancelledError:
             break

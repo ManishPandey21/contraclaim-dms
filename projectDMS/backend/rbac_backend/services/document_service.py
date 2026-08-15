@@ -23,7 +23,11 @@ from ..models.document import (
 )
 from ..models.document_metadata import extracted_metadata_updates
 from ..models.processing_state import ProcessingState, build_attempt_outcome
-from .pipeline_routing import resolve_pipeline_version
+from .pipeline_routing import (
+    claim_filter_for,
+    pipeline_version_of,
+    resolve_pipeline_version,
+)
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.date_parser import format_date_ddmmyyyy, parse_date_safely
 from .common import fetch_paginated, validate_pagination
@@ -877,30 +881,46 @@ class DocumentService:
             }
         return job
 
-    async def process_next_processing_jobs(self, *, limit: int = 3) -> int:
+    async def process_next_processing_jobs(
+        self, *, limit: int = 3, pipeline_versions: Optional[Set[str]] = None
+    ) -> int:
         """Claim and process queued durable jobs. Intended for worker/background loops."""
 
         await self.recover_stale_processing_jobs(limit=max(1, limit))
         processed = 0
         for _ in range(max(1, limit)):
-            job = await self._claim_next_processing_job()
+            job = await self._claim_next_processing_job(
+                pipeline_versions=pipeline_versions
+            )
             if not job:
                 break
             await self.process_document_job(str(job["_id"]), claimed_job=job)
             processed += 1
         return processed
 
-    async def _claim_next_processing_job(self) -> Optional[Dict[str, Any]]:
+    async def _claim_next_processing_job(
+        self, *, pipeline_versions: Optional[Set[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
         now = datetime.utcnow()
+        # A restricted worker physically cannot claim the other pipeline's
+        # jobs. This is what makes a per-tenant canary real rather than a
+        # label: without it, one worker drains every tenant's queue.
+        query: Dict[str, Any] = {
+            "status": {"$in": ["queued", "retrying"]},
+            "$or": [
+                {"run_after": {"$exists": False}},
+                {"run_after": {"$lte": now}},
+            ],
+        }
+        restriction = claim_filter_for(pipeline_versions)
+        if restriction:
+            # Only wrap when actually restricting, so the unrestricted claim
+            # keeps exactly the shape it had before pipeline versioning.
+            query = {"$and": [query, restriction]}
+
         return await db.document_processing_jobs.find_one_and_update(
-            {
-                "status": {"$in": ["queued", "retrying"]},
-                "$or": [
-                    {"run_after": {"$exists": False}},
-                    {"run_after": {"$lte": now}},
-                ],
-            },
+            query,
             {
                 "$set": {
                     "status": "processing",
@@ -1529,6 +1549,9 @@ class DocumentService:
                         job_record.get("source_mime")
                         or getattr(document, "filetype", None)
                     ),
+                    # Routing boundary: the job's persisted version decides the
+                    # extractor, never current configuration.
+                    pipeline_version=pipeline_version_of(job_record),
                 )
                 await self._checkpoint_extraction_attempt(
                     db, job_id, job_record, result

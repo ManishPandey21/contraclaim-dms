@@ -269,9 +269,58 @@ services:
       UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
       EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
       EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
+      # Which pipeline versions this worker may claim. Empty = all, the
+      # single-worker default. During a canary set this to legacy_v0 here and
+      # run document-worker-canary for unified_v1, so neither can drain the
+      # other's queue. See docs/operations/unified_extraction_canary_and_rollback.md
+      DOCUMENT_WORKER_PIPELINE_VERSIONS: "${DOCUMENT_WORKER_PIPELINE_VERSIONS:-}"
       # contract-worker is the single scheduler owner. Never flip this to true:
       # two schedulers double-fire cron jobs and the leader lock is a safety
       # net, not a licence.
+      RUN_SCHEDULER: "false"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - service-net
+      - data-net
+      - egress-net
+    volumes:
+      - backend_uploads:/app/uploads
+      - backend_logs:/app/logs
+    logging: *default-logging
+
+  # Canary extraction worker. Scale to 1 ONLY during an authorised canary
+  # window, with document-worker restricted to legacy_v0. Because the claim
+  # predicate filters on the job's persisted pipeline_version, this worker
+  # physically cannot claim another tenant's legacy job.
+  #
+  # Rollback is server-side: empty UNIFIED_EXTRACTION_CANARY_ORG_IDS so new
+  # jobs are created legacy_v0, then scale this service back to 0. No image
+  # redeploy, no page-evidence deletion.
+  document-worker-canary:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "rbac_backend.worker"]
+    deploy:
+      replicas: ${DOCUMENT_WORKER_CANARY_REPLICAS:-0}
+    environment:
+      <<: *backend-env
+      START_BACKGROUND_SERVICES: "false"
+      START_CONTRACT_QUEUE_WORKERS: "false"
+      START_DOCUMENT_EXTRACTION_WORKERS: "true"
+      UNIFIED_EXTRACTION_ENABLED: "${UNIFIED_EXTRACTION_ENABLED:-false}"
+      UNIFIED_EXTRACTION_CANARY_ORG_IDS: "${UNIFIED_EXTRACTION_CANARY_ORG_IDS:-}"
+      EXTRACTION_FALLBACK_ENABLED: "${EXTRACTION_FALLBACK_ENABLED:-false}"
+      EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT: "${EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT:-5}"
+      # The whole point of this service: it claims unified jobs and nothing else.
+      DOCUMENT_WORKER_PIPELINE_VERSIONS: "unified_v1"
       RUN_SCHEDULER: "false"
     depends_on:
       qdrant:

@@ -27,6 +27,10 @@ class FakeOCRService:
     def __init__(self, text: str):
         self.text = text
 
+    async def process_pdf(self, input_path):
+        """The legacy path's seam. Both pipelines reach the same downstream."""
+        return input_path, self.text
+
     async def process_pdf_pagewise(self, input_path, *, store, document_id, **_kwargs):
         page = ExtractedPage(
             number=1,

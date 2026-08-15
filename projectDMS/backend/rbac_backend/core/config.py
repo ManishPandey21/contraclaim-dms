@@ -184,6 +184,13 @@ class Settings(BaseSettings):
     UNIFIED_EXTRACTION_CANARY_ORG_IDS: str = Field(
         default="", validation_alias="UNIFIED_EXTRACTION_CANARY_ORG_IDS"
     )
+    # Restricts which pipeline versions this worker may claim. Empty means
+    # "claim anything", the single-worker default. Setting it to one version is
+    # what lets a canary run a second worker without it draining every tenant's
+    # queue. Comma-separated: legacy_v0, unified_v1.
+    DOCUMENT_WORKER_PIPELINE_VERSIONS: str = Field(
+        default="", validation_alias="DOCUMENT_WORKER_PIPELINE_VERSIONS"
+    )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
     
@@ -583,6 +590,11 @@ class Settings(BaseSettings):
     def canary_org_id_set(self) -> set[str]:
         """Parse the canary allowlist into exact organisation ids."""
         raw = self.UNIFIED_EXTRACTION_CANARY_ORG_IDS or ""
+        return {part.strip() for part in raw.split(",") if part.strip()}
+
+    def worker_pipeline_versions(self) -> set[str]:
+        """Which pipeline versions this worker may claim. Empty means all."""
+        raw = self.DOCUMENT_WORKER_PIPELINE_VERSIONS or ""
         return {part.strip() for part in raw.split(",") if part.strip()}
 
     def _apply_rar_upload_gate(self) -> None:
