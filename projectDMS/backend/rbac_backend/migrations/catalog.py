@@ -70,6 +70,16 @@ from .v20260811_0001_key_date_eot_revision_workflow import upgrade as upgrade_ke
 from .v20260813_0001_key_date_eot_attribution import DESCRIPTION as KEY_DATE_ATTRIBUTION_DESCRIPTION
 from .v20260813_0001_key_date_eot_attribution import NAME as KEY_DATE_ATTRIBUTION_NAME
 from .v20260813_0001_key_date_eot_attribution import VERSION as KEY_DATE_ATTRIBUTION_VERSION
+from .v20260814_0001_document_extraction_indexes import (
+    DESCRIPTION as DOC_EXTRACTION_IDX_DESCRIPTION,
+)
+from .v20260814_0001_document_extraction_indexes import NAME as DOC_EXTRACTION_IDX_NAME
+from .v20260814_0001_document_extraction_indexes import (
+    VERSION as DOC_EXTRACTION_IDX_VERSION,
+)
+from .v20260814_0001_document_extraction_indexes import (
+    upgrade as upgrade_document_extraction_indexes,
+)
 from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
 
 
@@ -169,5 +179,11 @@ MIGRATIONS = [
         name=KEY_DATE_ATTRIBUTION_NAME,
         description=KEY_DATE_ATTRIBUTION_DESCRIPTION,
         upgrade=upgrade_key_date_attribution,
+    ),
+    Migration(
+        version=DOC_EXTRACTION_IDX_VERSION,
+        name=DOC_EXTRACTION_IDX_NAME,
+        description=DOC_EXTRACTION_IDX_DESCRIPTION,
+        upgrade=upgrade_document_extraction_indexes,
     ),
 ]
