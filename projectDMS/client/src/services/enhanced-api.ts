@@ -21,6 +21,35 @@ import {
 
 import axios from "axios";
 import { API_BASE_URL, joinApiUrl } from "../config/api";
+
+export interface UploadSurfacePolicy {
+  mimes: string[];
+  extensions: string[];
+  max_size_mb: number;
+}
+
+export interface UploadPolicy {
+  document: UploadSurfacePolicy;
+  enclosure: UploadSurfacePolicy;
+  contract: UploadSurfacePolicy;
+  version: UploadSurfacePolicy;
+}
+
+/**
+ * Offline fallback only - the backend owns the real policy.
+ *
+ * A backend test asserts this stays a subset of what the server accepts, so
+ * the two cannot drift the way the old hard-coded accept list did: it offered
+ * .doc/.docx/.gif while the backend answered 415.
+ */
+export const FALLBACK_UPLOAD_EXTENSIONS = [
+  ".pdf",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".txt",
+  ".zip",
+];
 import {
   ensureValidToken,
   refreshToken,
@@ -1139,6 +1168,18 @@ class EnhancedApiService {
         method: "DELETE",
       },
     );
+  }
+
+  /** Canonical supported-file policy. Null when the request fails. */
+  async getUploadPolicy(): Promise<UploadPolicy | null> {
+    try {
+      const response = await this.request<{ policy: UploadPolicy }>(
+        "/config/upload-policy",
+      );
+      return response.policy;
+    } catch {
+      return null;
+    }
   }
 
   // Document Enclosures

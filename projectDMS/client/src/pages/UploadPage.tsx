@@ -43,7 +43,9 @@ import {
 import enhancedApi, {
   BulkUploadStatus,
   DocumentProcessingResult,
+  FALLBACK_UPLOAD_EXTENSIONS,
   Organization as OrgModel,
+  UploadPolicy,
 } from "@/services/enhanced-api";
 
 interface DuplicateBlock {
@@ -163,6 +165,9 @@ const UploadPage: React.FC = () => {
 
   // Single upload states
   const [files, setFiles] = useState<UploadFile[]>([]);
+  // The backend owns the supported-file policy; the picker renders it. The
+  // fallback is used only when the request fails.
+  const [uploadPolicy, setUploadPolicy] = useState<UploadPolicy | null>(null);
   const [uploadType, setUploadType] = useState<"incoming" | "outgoing">(
     "incoming"
   );
@@ -250,6 +255,17 @@ const UploadPage: React.FC = () => {
         .replace(/(^-|-$)/g, "") || "untitled"
     ); // Fallback
   };
+
+  // Fetch the canonical upload policy so the picker offers exactly what the
+  // backend accepts. Previously this list was hard-coded and drifted: it
+  // offered .doc/.docx/.gif, all of which the backend rejects with 415.
+  useEffect(() => {
+    void enhancedApi.getUploadPolicy().then(setUploadPolicy);
+  }, []);
+
+  const acceptedExtensions = (
+    uploadPolicy?.document.extensions ?? FALLBACK_UPLOAD_EXTENSIONS
+  ).join(",");
 
   // Fetch organizations and projects
   useEffect(() => {
@@ -806,7 +822,7 @@ const UploadPage: React.FC = () => {
                     className="hidden"
                     multiple
                     onChange={handleFileChange}
-                    accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png,.gif"
+                    accept={acceptedExtensions}
                   />
                   <div className="flex flex-col items-center">
                     <Upload className="h-12 w-12 text-muted-foreground mb-4" />
