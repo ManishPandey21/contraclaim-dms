@@ -20,8 +20,14 @@
 > - Phase 7 **operational acceptance**: **NOT COMPLETE**.
 >
 > Full matrix in §8. Section 6 is the evidence template and is deliberately empty.
-> Open gaps: G1a, G2–G13 in §7. **G11 (unmeasured production disk capacity)
+> Open gaps: G1a, G2–G14 in §7. **G11 (unmeasured production disk capacity)
 > blocks Step 1 sign-off.**
+>
+> **▶ To execute Steps 1–5 in an authorised window, use
+> [`unified_extraction_canary_execution_package.md`](unified_extraction_canary_execution_package.md).**
+> That document is the sequential, command-by-command package with evidence
+> tables and GO/NO-GO gates. This document remains the design rationale and gap
+> register. Neither authorises anything by itself.
 
 ---
 
@@ -348,4 +354,5 @@ explicitly accepted in writing before Phase 7 can be declared fully complete.
 | G10 | Intake still sniffs `filetype` without filename context. | The durable job carries the validated MIME; the original sniff is unchanged. |
 | **G11** | **Production filesystem capacity never measured.** No figure for free space, Docker layer headroom, Mongo/journal headroom, OCR/raster temp space, backup size, or rollback headroom exists anywhere in this repository, and the plan defines no threshold. | **Step 1 cannot be signed off.** An explicit safe minimum must be derived from current production usage and the actual latest backup size, recorded in §6, and accepted by the change authoriser. See §2.6. |
 | **G12** | **`post_deploy_verify.sh` is statically verified only.** Its 15 canary checks are asserted to exist, to be read-only, and to parse — never executed against a running stack. | The script itself is unproven in production. Run it during Step 2 and paste the output into §6; a check that misreads a live container would only surface there. |
+| **G14** | **Jobs carry no claiming-worker identity.** `_claim_next_processing_job` writes `status`/`stage`/`started_at`/`heartbeat_at`/`updated_at`/`attempts` only. | Step 3's "which worker claimed this job" is **not answerable from Mongo**. The execution package substitutes code-path detection (unified writes page evidence, legacy writes none), which is stronger, plus per-container log correlation. Adding a `claimed_by` field is a recommended small pre-window change. |
 | **G13** | **Rollback is implemented and unit-tested, never drilled.** Claim/routing rollback behaviour is proven in `test_pipeline_routing_boundary.py` (in-flight jobs keep their version, run/evidence identities survive an allowlist change). No process has been stopped, scaled, or recreated. | Step 4 remains BLOCKED on authorisation. "Rollback works" currently means *the code does the right thing*, not *the operation has been performed*. |
