@@ -57,6 +57,8 @@ class NumericRepair:
     method: str
     confidence: float
     confirming_checks: List[str] = field(default_factory=list)
+    #: Where the repaired value lives, so the audit trail can point at it.
+    page: Optional[int] = None
 
     def to_record(self) -> Dict[str, Any]:
         return {
@@ -66,6 +68,7 @@ class NumericRepair:
             "method": self.method,
             "confidence": self.confidence,
             "confirming_checks": list(self.confirming_checks),
+            "page": self.page,
         }
 
 
