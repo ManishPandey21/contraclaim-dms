@@ -113,10 +113,7 @@ def test_a_legacy_document_is_still_returned() -> None:
 
 @pytest.mark.parametrize(
     "status",
-    [
-        ProcessingState.FAILED.value,
-        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-    ],
+    [ProcessingState.HUMAN_REVIEW_REQUIRED.value],
 )
 def test_every_adverse_state_is_dropped(status: str) -> None:
     """Safety half: a terminal verdict against the run denies retrieval."""
@@ -130,6 +127,7 @@ def test_every_adverse_state_is_dropped(status: str) -> None:
     [
         ProcessingState.PROCESSING.value,
         ProcessingState.PARTIALLY_PROCESSED.value,
+        ProcessingState.FAILED.value,
         "retrying",
         "metadata_extracted",
     ],
@@ -269,7 +267,7 @@ def test_the_retrieval_filter_uses_the_same_policy_as_the_consumers() -> None:
         (ProcessingState.COMPLETED.value, True),
         ("metadata_extracted", True),
         (ProcessingState.HUMAN_REVIEW_REQUIRED.value, False),
-        (ProcessingState.FAILED.value, False),
+        (ProcessingState.FAILED.value, True),  # operational, not adverse
         (None, True),
         ("unknown_state", True),
     ]:

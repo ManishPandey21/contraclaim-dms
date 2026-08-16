@@ -111,15 +111,17 @@ def test_an_in_flight_run_does_not_retract_the_previous_publication(
 # --- Safety: adverse judgements still deny ------------------------------------
 
 
-@pytest.mark.parametrize("status", ["human_review_required", "failed"])
+@pytest.mark.parametrize("status", ["human_review_required"])
 def test_an_adverse_judgement_denies_consumption(status: str) -> None:
     assert is_consumable(_doc(status)) is False
     assert authoritative_text(_doc(status)) == ""
     assert authoritative_summary(_doc(status, summary="S")) == ""
 
 
-def test_the_adverse_set_is_exactly_the_terminal_verdicts_against_a_run() -> None:
-    assert ADVERSE_STATES == frozenset({"human_review_required", "failed"})
+def test_the_adverse_set_is_only_the_quality_verdict() -> None:
+    """`failed` is operational and was removed: both its production writers are
+    pipeline breakage, not a judgement about the document."""
+    assert ADVERSE_STATES == frozenset({"human_review_required"})
 
 
 # --- Historical rows ----------------------------------------------------------

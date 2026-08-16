@@ -52,8 +52,12 @@ def test_a_human_review_document_is_not_consumable() -> None:
     assert is_consumable(_doc(ProcessingState.HUMAN_REVIEW_REQUIRED.value)) is False
 
 
-def test_a_failed_document_is_not_consumable() -> None:
-    assert is_consumable(_doc(ProcessingState.FAILED.value)) is False
+def test_a_failed_document_keeps_its_last_known_good_content() -> None:
+    """`failed` is operational - a crashed worker or a timeout, not a verdict.
+
+    Updated: this previously asserted denial, which retracted good content
+    because the pipeline broke."""
+    assert is_consumable(_doc(ProcessingState.FAILED.value)) is True
 
 
 def test_a_partially_processed_document_keeps_its_publication() -> None:

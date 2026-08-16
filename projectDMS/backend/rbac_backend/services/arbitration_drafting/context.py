@@ -150,7 +150,11 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
     return f"{currency or ''} {value}".strip()
 
 
-from ..publication_policy import authoritative_summary, authoritative_text
+from ..publication_policy import (
+    authoritative_summary,
+    authoritative_text,
+    resolve_document_authority,
+)
 
 
 class ArbitrationContextBuilder:
@@ -382,14 +386,25 @@ class ArbitrationContextBuilder:
                 or record.get("variation_number")
                 or record.get("filename")
             )
-            snippet = (
-                authoritative_summary(record)
-                or authoritative_text(record)
-                or record.get("text")
-                or record.get("text_enriched")
-                or record.get("description")
-                or label
+            # G34: these records come from document_vectors / contract_clauses,
+            # which carry no processing_status - so asking THEM whether they are
+            # consumable always said yes, and the chain fell through to raw
+            # text. A guard that reads the wrong record is no guard. Authority
+            # is resolved from the canonical document instead.
+            decision = await resolve_document_authority(
+                self.db, record.get("document_id") or record.get("documentId")
             )
+            if not decision.consumable:
+                snippet = label
+            else:
+                snippet = (
+                    authoritative_summary(record)
+                    or authoritative_text(record)
+                    or record.get("text")
+                    or record.get("text_enriched")
+                    or record.get("description")
+                    or label
+                )
             return {
                 "source_type": source_type,
                 "source_id": source_id,

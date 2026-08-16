@@ -23,6 +23,7 @@ second source of truth.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 from ..models.processing_state import ProcessingState
@@ -40,9 +41,21 @@ from ..models.processing_state import ProcessingState
 ADVERSE_STATES = frozenset(
     {
         ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-        ProcessingState.FAILED.value,
     }
 )
+
+#: The pipeline broke. NOT a judgement about the document.
+#:
+#: Both production writers of `failed` are operational: `_mark_processing_failure`
+#: (document_service.py:1472) fires when retries are exhausted after an exception
+#: in the job loop, and :1927 is a bare `except Exception` around the whole run.
+#: An OCR crash, a Mongo timeout and an S3 error all land here.
+#:
+#: Treating that as adverse retracted last-known-good content because a worker
+#: died, which contradicts the lifecycle: only an outcome ABOUT THE CONTENT may
+#: invalidate a previous publication. A failure to reach a verdict is not a
+#: verdict.
+OPERATIONAL_STATES = frozenset({ProcessingState.FAILED.value})
 
 #: States that mean the pipeline is still working. Under the last-known-good
 #: lifecycle these do NOT retract a previous publication: a reprocess starting
@@ -73,7 +86,9 @@ SETTLED_STATES = frozenset(
 #: a test (`test_no_unclassified_state_is_written_by_production_code`), not by
 #: denying unknown values at runtime - denying them at runtime is precisely what
 #: hid the main path in G33.
-KNOWN_STATES = ADVERSE_STATES | IN_FLIGHT_STATES | SETTLED_STATES
+KNOWN_STATES = (
+    ADVERSE_STATES | OPERATIONAL_STATES | IN_FLIGHT_STATES | SETTLED_STATES
+)
 
 #: Retained for callers that still import it; equal to the adverse set.
 BLOCKED_STATES = ADVERSE_STATES
@@ -262,3 +277,73 @@ def authoritative_summary(document: Optional[Mapping[str, Any]]) -> str:
         if value:
             return str(value)
     return ""
+
+
+@dataclass(frozen=True)
+class AuthorityDecision:
+    """Why a document's content may or may not be used, not just whether."""
+
+    document_id: Optional[str]
+    consumable: bool
+    reason: str
+
+
+async def resolve_document_authority(db: Any, document_id: Optional[str]):
+    """Resolve authority from the CANONICAL document record.
+
+    The reason this exists: `is_consumable(record)` is vacuous when the record
+    has no authority fields. `document_vectors` and `contract_clauses` carry no
+    `processing_status`, so the guard returned True for a clause belonging to a
+    blocked document and the caller fell through to raw text (G34). A guard that
+    runs but reads the wrong record is equivalent to no guard.
+
+    Downstream records carry a `document_id`. That is the only thing they can be
+    trusted for, so authority is resolved from it rather than from whatever
+    dictionary the caller happens to hold.
+
+    Fails CLOSED on a missing id, a missing document, or a lookup error. That is
+    the opposite of `has_consumable_supporter`, deliberately: this decides
+    whether to SERVE content, where uncertainty must deny, while that one
+    decides whether to DELETE a shared node, where uncertainty must preserve.
+    """
+    if not document_id:
+        return AuthorityDecision(None, False, "no_document_id")
+
+    try:
+        document = await db.documents.find_one({"_id": _document_key(document_id)})
+    except Exception:
+        return AuthorityDecision(str(document_id), False, "resolution_error")
+
+    if not document:
+        return AuthorityDecision(str(document_id), False, "document_not_found")
+
+    if str(document.get("duplicate_status") or "") == "duplicate" or str(
+        document.get("lifecycle_state") or ""
+    ) in {"duplicate", "deleted"}:
+        return AuthorityDecision(str(document_id), False, "quarantined")
+
+    status = str(document.get("processing_status") or "")
+    if status in ADVERSE_STATES:
+        return AuthorityDecision(
+            str(document_id), False, "adverse_quality_judgement"
+        )
+    if status in OPERATIONAL_STATES:
+        # The run broke without reaching a verdict; last-known-good stands.
+        return AuthorityDecision(
+            str(document_id), True, "operational_failure_last_known_good"
+        )
+    if not status:
+        return AuthorityDecision(str(document_id), True, "legacy")
+    if status in IN_FLIGHT_STATES:
+        return AuthorityDecision(str(document_id), True, "in_flight_last_known_good")
+    return AuthorityDecision(str(document_id), True, "settled")
+
+
+def _document_key(document_id: Any) -> Any:
+    """Match how the id is stored: ObjectId where possible, else the raw value."""
+    try:
+        from bson import ObjectId
+
+        return ObjectId(str(document_id))
+    except Exception:
+        return document_id
