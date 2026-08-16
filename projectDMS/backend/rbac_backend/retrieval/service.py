@@ -33,6 +33,11 @@ from .reranker import RerankerService
 from .source_metadata import normalize_source_payload
 from .vector_client import VectorClient
 
+# One publication decision, shared with the drafting/planning/arbitration
+# consumers, so a stale vector cannot be served for a document whose current
+# extraction is blocked.
+from ..services.publication_policy import is_consumable
+
 logger = logging.getLogger(__name__)
 
 
@@ -1621,6 +1626,25 @@ class RetrievalService:
         async for doc in cursor:
             doc_id = str(doc.get("_id") or doc.get("id"))
             if not doc_id:
+                continue
+            # Logical containment, and deliberately the primary defence.
+            #
+            # A vector published by an earlier successful run outlives a later
+            # blocking one: the purge that would remove it lives inside the
+            # embedding path, which the publication barrier skips. Physical
+            # cleanup is hygiene; this check is what makes a surviving stale
+            # point unusable anyway. Containment must not depend on a remote
+            # delete having succeeded.
+            #
+            # Same predicate the drafting and planning consumers use, so the
+            # two cannot drift apart.
+            if not is_consumable(doc):
+                logger.info(
+                    "[retrieval] Dropping result for document %s: current "
+                    "extraction state %r is not consumable",
+                    doc_id,
+                    doc.get("processing_status"),
+                )
                 continue
             meta[doc_id] = {
                 "title": doc.get("subject") or doc.get("filename"),

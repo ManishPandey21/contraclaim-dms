@@ -1205,6 +1205,44 @@ class DocumentService:
             remaining,
         )
 
+    async def _invalidate_stale_publication(self, document_id: str) -> None:
+        """Purge artifacts an EARLIER successful run published for this document.
+
+        Defence-in-depth, deliberately not the primary containment. The
+        publication policy already denies a blocked document at every read
+        boundary - retrieval, drafting, planning, arbitration - so a stale point
+        that survives this purge is still unusable. That ordering matters: if
+        containment depended on a remote delete succeeding, a Qdrant outage
+        would silently reopen the hole this closes.
+
+        Best effort by design. A failure here is logged and swallowed rather
+        than raised, because raising would abort the transition into
+        human_review_required and leave the document in a worse state - still
+        blocked in fact, but not marked as such.
+        """
+        try:
+            db = await self._get_db()
+            raw_doc = await db.documents.find_one(
+                {"_id": self._validate_document_id(document_id)}
+            )
+            if not raw_doc:
+                return
+            await self._delete_qdrant_vectors(raw_doc, str(document_id))
+            await db.document_vectors.delete_many({"document_id": str(document_id)})
+            logger.info(
+                "[document_pipeline] Purged stale published vectors for %s "
+                "after a blocking extraction result",
+                document_id,
+            )
+        except Exception as exc:
+            # Logical containment still holds; this is hygiene.
+            logger.warning(
+                "[document_pipeline] Could not purge stale vectors for %s: %s. "
+                "The document remains logically non-consumable.",
+                document_id,
+                exc,
+            )
+
     async def _mark_human_review(
         self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
     ) -> None:
@@ -1247,6 +1285,13 @@ class DocumentService:
             document_id,
             remaining,
         )
+
+        # Only after the blocking state is durably persisted. If this ran first
+        # and then crashed, the document would be physically unpublished but
+        # still marked consumable - stale-safe, but wrong in the other
+        # direction. Persisting the block first means every intermediate state
+        # is non-consumable.
+        await self._invalidate_stale_publication(document_id)
 
     async def _mark_stored_only(self, job_id: str, document_id: str) -> None:
         """Terminal, non-success: stored deliberately, never extracted."""

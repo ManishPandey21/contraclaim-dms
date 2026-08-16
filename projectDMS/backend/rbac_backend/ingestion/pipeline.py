@@ -278,6 +278,15 @@ class IngestionPipeline:
         return doc
 
     def _extract_text(self, document: Dict[str, Any]) -> str:
+        # This text becomes chunks and then vectors, so this is a publication
+        # producer, not an internal transformation stage. Without the guard a
+        # reindex of a blocked document would republish exactly the content the
+        # publication barrier withheld.
+        from ..services.publication_policy import is_consumable
+
+        if not is_consumable(document):
+            return ""
+
         for key in ("full_text", "ocrText", "text"):
             value = document.get(key)
             if value:
