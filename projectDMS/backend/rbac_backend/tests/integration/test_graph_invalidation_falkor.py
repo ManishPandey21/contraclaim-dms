@@ -283,3 +283,61 @@ def test_deleting_an_absent_node_is_safe(graph) -> None:
     graph("MATCH (l:Letter {normCode:'GHOST'}) DETACH DELETE l")
 
     assert _codes(graph("MATCH (l:Letter) RETURN l.normCode")) == []
+
+
+# --- G32: a kept node still carries the blocked supporter's properties --------
+
+
+def test_a_kept_shared_node_retains_the_blocked_supporters_properties(graph) -> None:
+    """G32, reproduced against the real engine.
+
+    The keep/delete decision is binary, but MERGE ... ON MATCH SET means the
+    LAST writer's mutable properties persist regardless of who supports the
+    node. So keeping a node because document A still supports it does not
+    restore A's values when blocked document B wrote last.
+
+    Note `organization_id` in particular: the node ends up carrying the wrong
+    tenant's identifier, because the merge key is global and the property is
+    not.
+    """
+    graph(
+        "MERGE (l:Letter {normCode:'PROP-1'}) ON CREATE SET "
+        "l.subject='Subject from A', l.organization_id='org-A', "
+        "l.direction='incoming'"
+    )
+    graph(
+        "MERGE (l:Letter {normCode:'PROP-1'}) ON MATCH SET "
+        "l.subject='Subject from B', l.organization_id='org-B', "
+        "l.direction='outgoing'"
+    )
+
+    row = graph(
+        "MATCH (l:Letter {normCode:'PROP-1'}) "
+        "RETURN l.subject, l.organization_id, l.direction"
+    )[1][0]
+
+    # Document B is now blocked; document A still supports the code, so the
+    # node is correctly KEPT - and still exposes B's values.
+    assert row[0] == "Subject from B", (
+        "G32: the shared node still exposes the blocked supporter's subject"
+    )
+    assert row[1] == "org-B", (
+        "G32: the shared node carries the wrong tenant's organization_id"
+    )
+    assert row[2] == "outgoing"
+
+
+def test_property_ownership_is_not_recoverable_from_the_node_alone(graph) -> None:
+    """Why G32 cannot be fixed by inspecting the graph.
+
+    There is no record on the node of which document supplied which property,
+    so 'recompute from a remaining consumable supporter' has to read the values
+    back out of Mongo. The graph cannot answer it.
+    """
+    graph("MERGE (l:Letter {normCode:'PROP-2'}) SET l.subject='S', l.date='2026-01-01'")
+
+    keys = graph("MATCH (l:Letter {normCode:'PROP-2'}) RETURN keys(l)")[1][0][0]
+
+    assert not any(
+        key in keys for key in ("subject_document_id", "source_document_id", "supporters")
+    ), "no per-property provenance exists on the node"

@@ -88,6 +88,54 @@ def is_consumable(document: Optional[Mapping[str, Any]]) -> bool:
     return str(status) in CONSUMABLE_STATES
 
 
+#: States that mean "this document has been judged and the answer was no".
+#: Distinct from the in-flight states, which mean "not judged yet".
+BLOCKED_TERMINAL_STATES = frozenset(
+    {
+        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+        ProcessingState.FAILED.value,
+    }
+)
+
+
+def is_publication_blocked(document: Optional[Mapping[str, Any]]) -> bool:
+    """Has this document been judged non-publishable?
+
+    Deliberately narrower than ``not is_consumable(...)``, and the difference
+    matters for WRITERS.
+
+    A reader asks "may I use this content?", and the answer for an in-flight
+    document is no - nothing has been verified yet. A writer inside the
+    publishing pipeline is a different question: the document is `processing`
+    precisely *because* the pipeline is deciding its fate, and the graph sync is
+    part of that publication. Refusing it there would stop every document from
+    ever being published, which is what happened when this guard first reused
+    the reader predicate.
+
+    So writers block on an explicit adverse judgement - human review, failure -
+    or on a state nobody recognises, and let in-flight work proceed. The
+    publication barrier upstream already prevents a blocked *outcome* from
+    reaching publication; this stops an already-blocked document being
+    re-published after the fact.
+    """
+    if not document:
+        return True
+
+    status = document.get("processing_status")
+    if status is None or status == "":
+        return False  # Legacy record; see is_consumable.
+
+    status = str(status)
+    if status in BLOCKED_TERMINAL_STATES:
+        return True
+    # Unknown state: fail closed for writers too.
+    return status not in CONSUMABLE_STATES and status not in {
+        ProcessingState.QUEUED.value,
+        ProcessingState.PROCESSING.value,
+        ProcessingState.PARTIALLY_PROCESSED.value,
+    }
+
+
 def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:
     """The document body, or empty when the document may not be consumed.
 

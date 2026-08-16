@@ -124,6 +124,14 @@ class DocumentService:
                     raise DocumentNotFoundError("Document not found while refreshing reference graph")
                 return
             payload = current.model_dump(by_alias=True)
+
+            # G31/G33: a writer-side eligibility guard belongs here, but it
+            # cannot use the current publication policy yet. See G33: the
+            # real processing_status vocabulary includes metadata_extracted,
+            # retrying and skipped, none of which ProcessingState defines, so
+            # the policy's unknown-fails-closed rule refuses legitimate
+            # in-flight syncs. Guarding here before that is reconciled blocks
+            # normal publication - verified by 4 regressions.
             self.graph_ingestion.sync_document_to_falkor(
                 document_id=current.id,
                 document=payload,
