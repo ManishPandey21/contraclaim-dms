@@ -270,7 +270,12 @@ class IngestionPipeline:
             )
 
     async def _load_document(self, document_id: str) -> Dict[str, Any]:
-        doc = await self.db.documents.find_one({"_id": document_id}) or await self.db.documents.find_one(
+        # documents._id is ObjectId-keyed; the raw string never matched, so
+        # this reindex path raised "Document not found" for every real
+        # document - and its publication guard below never ran.
+        from ..services.publication_policy import resolve_canonical_document
+
+        doc = await resolve_canonical_document(self.db, document_id) or await self.db.documents.find_one(
             {"id": document_id}
         )
         if not doc:

@@ -310,7 +310,7 @@ async def resolve_document_authority(db: Any, document_id: Optional[str]):
         return AuthorityDecision(None, False, "no_document_id")
 
     try:
-        document = await db.documents.find_one({"_id": _document_key(document_id)})
+        document = await resolve_canonical_document(db, document_id)
     except Exception:
         return AuthorityDecision(str(document_id), False, "resolution_error")
 
@@ -339,11 +339,47 @@ async def resolve_document_authority(db: Any, document_id: Optional[str]):
     return AuthorityDecision(str(document_id), True, "settled")
 
 
-def _document_key(document_id: Any) -> Any:
-    """Match how the id is stored: ObjectId where possible, else the raw value."""
+def document_id_candidates(document_id: Any) -> list:
+    """Every form this identifier might be stored as, most likely first.
+
+    `documents._id` is ObjectId-keyed - `document_service` pops any supplied
+    `_id` before `insert_one`, so Mongo always generates one - while callers
+    almost always hold the string form from a URL or a payload. Querying with
+    the raw string silently matches nothing.
+
+    Returning candidates instead of guessing one form is deliberate. The
+    previous single-shot version relied on real and non-real ids being
+    syntactically distinguishable: a plain string that happened to be valid
+    24-hex would convert to an ObjectId that matches a DIFFERENT document, or
+    none at all, with no error either way. Trying both forms cannot do that.
+    """
+    candidates = [document_id]
     try:
         from bson import ObjectId
 
-        return ObjectId(str(document_id))
+        oid = ObjectId(str(document_id))
+        if oid not in candidates:
+            candidates.append(oid)
     except Exception:
-        return document_id
+        pass
+    return candidates
+
+
+async def resolve_canonical_document(db: Any, document_id: Any):
+    """The one place that turns an identifier into the canonical document.
+
+    Every authority decision resolves through here so identifier handling is
+    not reimplemented per caller - four sites had already drifted into querying
+    `{"_id": <raw string>}` against an ObjectId-keyed collection, which fails
+    closed and silently returns nothing.
+    """
+    if not document_id:
+        return None
+    for key in document_id_candidates(document_id):
+        try:
+            found = await db.documents.find_one({"_id": key})
+        except Exception:
+            raise
+        if found:
+            return found
+    return None

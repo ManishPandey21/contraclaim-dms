@@ -356,7 +356,9 @@ class ArbitrationWorkflowDomain:
         )
         document_signals: List[Dict[str, Any]] = []
         for item in ((document_manifest or {}).get("payload") or {}).get("documents") or []:
-            query = {"_id": item.get("document_id")}
+            from ..publication_policy import document_id_candidates
+
+            query = {"_id": {"$in": document_id_candidates(item.get("document_id"))}}
             if case.get("organization_id"):
                 query["organization_id"] = case.get("organization_id")
             if case.get("project_id"):

@@ -383,7 +383,12 @@ class ChronologyService:
             "project_id": chronology.get("project_id"),
         }
         if source_ids:
-            query["_id"] = {"$in": source_ids[: payload.max_documents]}
+            from .publication_policy import document_id_candidates
+
+            _ids = []
+            for _sid in source_ids[: payload.max_documents]:
+                _ids.extend(document_id_candidates(_sid))
+            query["_id"] = {"$in": _ids}
         cursor = self.db.documents.find(query).limit(payload.max_documents)
         docs = await _collect(cursor)
         created: List[Dict[str, Any]] = []
