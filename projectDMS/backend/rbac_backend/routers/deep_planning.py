@@ -22,6 +22,10 @@ import time
 import json
 from ratelimit import limits, sleep_and_retry
 
+# One server-side decision about whether a document's extracted text may be
+# consumed. Planning prompts are a downstream knowledge consumer like any other.
+from ..services.publication_policy import authoritative_text, is_consumable
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -381,8 +385,11 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                 if summary:
                     doc_info += f"Summary: {summary}\n"
                 
-                # Add OCR text if available (truncate if too long)
-                ocr_text = document.get('ocrText')
+                # Add OCR text if available (truncate if too long).
+                # Read through the publication policy: a document with
+                # unresolved extraction-quality findings must not reach the
+                # planning prompt. See services/publication_policy.py.
+                ocr_text = authoritative_text(document)
                 if ocr_text:
                     # Limit OCR text length to prevent token overflow
                     max_ocr_length = 4000
@@ -891,7 +898,9 @@ async def generate_deep_planning_draft(
                         if ref_text.strip():
                             parts.append(f"References:\n{ref_text}")
                     # OCR text (excerpts)
-                    _ocr = (tl.get("ocrText") or tl.get("ocr_text") or "").strip()
+                    _ocr = (
+                        authoritative_text(tl) or tl.get("ocr_text") or ""
+                    ).strip() if is_consumable(tl) else ""
                     if _ocr:
                         truncated = _ocr[:1200] + (" ...(truncated)" if len(_ocr) > 1200 else "")
                         parts.append(f"OCR Text (excerpts):\n{truncated}")

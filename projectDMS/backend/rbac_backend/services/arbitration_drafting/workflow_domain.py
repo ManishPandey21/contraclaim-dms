@@ -203,6 +203,9 @@ def _branch_matrices(branch: str, pleading_type: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(matrices))
 
 
+from ..publication_policy import is_consumable
+
+
 class ArbitrationWorkflowDomain:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -362,9 +365,19 @@ class ArbitrationWorkflowDomain:
             if not record:
                 document_signals.append({"document_id": item.get("document_id"), "resolution_status": "missing_or_out_of_scope"})
                 continue
+            # Extracted body text only when the document may be consumed;
+            # metadata fields stay searchable either way so a blocked document
+            # is still findable by subject/filename for review.
             searchable = " ".join(
-                str(record.get(key) or "")
-                for key in ("subject", "filename", "summary", "ocrText", "text", "text_enriched")
+                [
+                    str(record.get(key) or "")
+                    for key in ("subject", "filename", "summary")
+                ]
+                + [
+                    str(record.get(key) or "")
+                    for key in ("ocrText", "text", "text_enriched")
+                    if is_consumable(record)
+                ]
             ).lower()
             document_signals.append(
                 {

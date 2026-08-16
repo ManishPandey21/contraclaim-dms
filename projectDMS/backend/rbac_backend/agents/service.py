@@ -123,7 +123,12 @@ class DraftingAgentService:
         doc = await self.db.letters.find_one({"_id": letter_id}) or await self.db.documents.find_one({"_id": letter_id})
         if not doc:
             return ""
-        return doc.get("body") or doc.get("full_text") or doc.get("ocrText") or ""
+        # Read through the publication policy, not the raw fields: a document
+        # with unresolved extraction-quality findings must not reach drafting
+        # just because its text is stored. See services/publication_policy.py.
+        from ..services.publication_policy import authoritative_text
+
+        return authoritative_text(doc)
 
     def _analyze_incoming(self, text: str, goal: Optional[str]) -> Tuple[List[str], List[str]]:
         issues: List[str] = []

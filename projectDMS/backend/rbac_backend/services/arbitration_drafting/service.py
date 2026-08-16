@@ -118,6 +118,9 @@ def immutable_version_hash(version: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
+from ..publication_policy import authoritative_text
+
+
 class ArbitrationDraftingService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -895,7 +898,12 @@ class ArbitrationDraftingService:
                         source_id=str(doc.get("_id")),
                         label=doc.get("subject") or doc.get("filename") or "Document",
                         citation=doc.get("letterNo") or doc.get("filename"),
-                        snippet=condense(doc.get("summary") or doc.get("ocrText") or doc.get("subject"), 500),
+                        snippet=condense(
+                            doc.get("summary")
+                            or authoritative_text(doc)
+                            or doc.get("subject"),
+                            500,
+                        ),
                         letter_no=doc.get("letterNo"),
                     )
                 )
