@@ -128,19 +128,37 @@ async def has_consumable_supporter(db: Any, norm_code: str) -> bool:
     if not db or not norm_code:
         return False
 
-    for collection, field in (
-        ("documents", "letterNoNormalized"),
-        ("letters", "letter_no_normalized"),
-    ):
-        try:
-            cursor = db[collection].find(
-                {field: norm_code, "lifecycle_state": {"$ne": "deleted"}}
-            )
-        except Exception:
-            continue
+    # `documents` stores the normalized code; `letters` stores the RAW
+    # `letter_no` and has no normalized column - querying a
+    # `letter_no_normalized` field that is written nowhere would silently find
+    # no supporter and let a node another live letter depends on be deleted.
+    from .falkor_graph_service import normalize_letter_code
+
+    try:
+        cursor = db["documents"].find(
+            {"letterNoNormalized": norm_code, "lifecycle_state": {"$ne": "deleted"}}
+        )
         async for record in cursor:
             if is_consumable(record):
                 return True
+    except Exception:
+        # Cannot establish support. Fail SAFE for deletion: report a supporter
+        # so nothing is destroyed on the strength of a failed lookup.
+        return True
+
+    try:
+        cursor = db["letters"].find({})
+        async for record in cursor:
+            raw = record.get("letter_no") or record.get("letterNo")
+            if not raw:
+                continue
+            if normalize_letter_code(str(raw)) != norm_code:
+                continue
+            if is_consumable(record):
+                return True
+    except Exception:
+        return True
+
     return False
 
 

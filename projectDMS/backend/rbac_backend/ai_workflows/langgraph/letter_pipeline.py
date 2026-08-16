@@ -1611,7 +1611,13 @@ class LetterDraftGraph:
                         falkor_service.upsert_letter_with_refs(base_letter, agent_refs, cleanup=False)
                     refreshed = falkor_service.get_thread(primary_code, depth=6)
                     if refreshed:
-                        graph_thread = refreshed
+                        # Re-filter. An earlier revision assigned the raw
+                        # refresh here and silently undid the containment
+                        # applied above - the last write wins, so the filter
+                        # has to be applied to it too.
+                        graph_thread = await _filter_consumable_graph_entries(
+                            db, refreshed
+                        )
                 except Exception as exc:
                     warnings.append(f"falkor_sync: {exc}")
 
