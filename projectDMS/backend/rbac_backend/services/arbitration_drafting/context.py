@@ -154,6 +154,7 @@ from ..publication_policy import (
     authoritative_summary,
     authoritative_text,
     document_id_candidates,
+    is_consumable,
     resolve_document_authority,
 )
 
@@ -390,12 +391,36 @@ class ArbitrationContextBuilder:
             # G34: these records come from document_vectors / contract_clauses,
             # which carry no processing_status - so asking THEM whether they are
             # consumable always said yes, and the chain fell through to raw
-            # text. A guard that reads the wrong record is no guard. Authority
-            # is resolved from the canonical document instead.
-            decision = await resolve_document_authority(
-                self.db, record.get("document_id") or record.get("documentId")
-            )
-            if not decision.consumable:
+            # text. A guard that reads the wrong record is no guard.
+            #
+            # But WHICH record is canonical depends on the collection that
+            # matched, and an earlier version of this guard ignored that: it
+            # always resolved `record["document_id"]`, a field only
+            # document_vectors/contract_clauses carry. For `documents` the
+            # record IS canonical, and letters/claims/variations/events have no
+            # such field at all - so 8 of the 9 source types resolved to
+            # "no_document_id", were denied, and had their snippet silently
+            # collapsed to the label while still reporting verified/strong.
+            if collection_name in {"document_vectors", "contract_clauses"}:
+                # Partial record: resolve back to the document it came from.
+                decision_ok = (
+                    await resolve_document_authority(
+                        self.db,
+                        record.get("document_id") or record.get("documentId"),
+                    )
+                ).consumable
+            elif collection_name == "documents":
+                # Already the canonical document.
+                decision_ok = is_consumable(record)
+            else:
+                # Independent application records (letters, claims, variations,
+                # chronology events). They are not extraction-controlled
+                # document content and carry their own approval gate via
+                # _is_verified_source, so the document-authority model does not
+                # apply to them.
+                decision_ok = True
+
+            if not decision_ok:
                 snippet = label
             else:
                 snippet = (
@@ -657,8 +682,8 @@ class ArbitrationContextBuilder:
                     "_id": {"$in": document_id_candidates(row.get("source_id"))}
                 }
                 for scope_key in ("organization_id", "project_id"):
-                    if case.get(scope_key):
-                        query[scope_key] = case.get(scope_key)
+                    # Unconditional - see the note in _rehydrate_direct_reference.
+                    query[scope_key] = case.get(scope_key)
                 authoritative = await collection.find_one(query)
                 if authoritative:
                     authoritative_collection = collection_name

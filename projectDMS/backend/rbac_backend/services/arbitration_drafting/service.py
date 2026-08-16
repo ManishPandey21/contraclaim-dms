@@ -118,7 +118,11 @@ def immutable_version_hash(version: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
-from ..publication_policy import authoritative_summary, authoritative_text
+from ..publication_policy import (
+    authoritative_summary,
+    authoritative_text,
+    resolve_document_authority,
+)
 
 
 class ArbitrationDraftingService:
@@ -936,7 +940,22 @@ class ArbitrationDraftingService:
                         source_id=str(doc.get("_id") or doc.get("document_id")),
                         label=f"{doc.get('clause_number') or 'Clause'} {doc.get('clause_title') or ''}".strip(),
                         citation=doc.get("clause_number"),
-                        snippet=condense(doc.get("text") or doc.get("text_enriched"), 500),
+                        # Guarded like its sibling _search_documents. These are
+                        # partial document_vectors records with no authority
+                        # fields, so eligibility resolves back to the document
+                        # they came from. Without this, blocked clause text was
+                        # exposed to anyone with search access before any
+                        # authority decision was made.
+                        snippet=(
+                            condense(doc.get("text") or doc.get("text_enriched"), 500)
+                            if (
+                                await resolve_document_authority(
+                                    self.db,
+                                    doc.get("document_id") or doc.get("documentId"),
+                                )
+                            ).consumable
+                            else ""
+                        ),
                         page_numbers=doc.get("page_numbers") or [],
                         clause_number=doc.get("clause_number"),
                         allowed_use="clause",
