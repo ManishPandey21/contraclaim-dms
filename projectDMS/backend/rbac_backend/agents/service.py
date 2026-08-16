@@ -120,7 +120,26 @@ class DraftingAgentService:
     async def _load_letter_text(self, letter_id: Optional[str]) -> str:
         if not letter_id:
             return ""
-        doc = await self.db.letters.find_one({"_id": letter_id}) or await self.db.documents.find_one({"_id": letter_id})
+        # Both collections are ObjectId-keyed: document_service pops any
+        # supplied _id before insert_one so Mongo generates one. Querying with
+        # the raw string never matched, so this returned "" for every real
+        # document - and the publication guard below never ran on anything.
+        # Try both forms rather than relying on the string happening to work.
+        candidates = [letter_id]
+        try:
+            from bson import ObjectId
+
+            candidates.append(ObjectId(str(letter_id)))
+        except Exception:
+            pass
+
+        doc = None
+        for key in candidates:
+            doc = await self.db.letters.find_one({"_id": key}) or await self.db.documents.find_one(
+                {"_id": key}
+            )
+            if doc:
+                break
         if not doc:
             return ""
         # Read through the publication policy, not the raw fields: a document

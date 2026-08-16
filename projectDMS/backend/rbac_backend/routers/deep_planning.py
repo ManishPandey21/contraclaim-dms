@@ -904,9 +904,15 @@ async def generate_deep_planning_draft(
                         if ref_text.strip():
                             parts.append(f"References:\n{ref_text}")
                     # OCR text (excerpts)
-                    _ocr = (
-                        authoritative_text(tl) or tl.get("ocr_text") or ""
-                    ).strip() if is_consumable(tl) else ""
+                    # `tl` is a db.letters record. No production code writes
+                    # processing_status/duplicate_status/lifecycle_state to that
+                    # collection, so a publication guard here reads fields that
+                    # never exist and can never block - it looked like a gate
+                    # and was not one. Letters are drafted correspondence, not
+                    # extracted documents, so the extraction-authority policy
+                    # genuinely does not apply; the honest form is to say so
+                    # rather than call a predicate that always returns True.
+                    _ocr = (tl.get("ocrText") or tl.get("ocr_text") or "").strip()
                     if _ocr:
                         truncated = _ocr[:1200] + (" ...(truncated)" if len(_ocr) > 1200 else "")
                         parts.append(f"OCR Text (excerpts):\n{truncated}")

@@ -19,7 +19,15 @@ from typing import Any, Dict, List
 
 import pytest
 
-QDRANT_URL = os.environ.get("QDRANT_TEST_URL", "http://localhost:6333")
+# 127.0.0.1, not localhost. On Windows `localhost` resolves to ::1 first and
+# the IPv6 hop to a Docker Desktop port binding can stall past a short timeout -
+# which is what made this suite skip intermittently while the container was
+# healthy and serving the same request in ~50ms.
+QDRANT_URL = os.environ.get("QDRANT_TEST_URL", "http://127.0.0.1:6333")
+
+#: Collection creation on a loaded host has been measured at 1.9-2.7s, so the
+#: probe timeout is generous enough not to mistake slowness for absence.
+_TIMEOUT = int(os.environ.get("QDRANT_TEST_TIMEOUT", "30"))
 
 
 def _api_key() -> str:
@@ -47,7 +55,7 @@ def _client():
     requests = pytest.importorskip("requests")
     try:
         response = requests.get(
-            f"{QDRANT_URL}/collections", timeout=5, headers=_HEADERS
+            f"{QDRANT_URL}/collections", timeout=_TIMEOUT, headers=_HEADERS
         )
         response.raise_for_status()
     except Exception as exc:  # pragma: no cover - environment dependent
@@ -62,14 +70,14 @@ def collection():
     requests.put(
         f"{QDRANT_URL}/collections/{name}",
         json={"vectors": {"size": 4, "distance": "Cosine"}},
-        timeout=10,
+        timeout=_TIMEOUT,
         headers=_HEADERS,
     ).raise_for_status()
 
     yield name, requests
 
     try:
-        requests.delete(f"{QDRANT_URL}/collections/{name}", timeout=10, headers=_HEADERS)
+        requests.delete(f"{QDRANT_URL}/collections/{name}", timeout=_TIMEOUT, headers=_HEADERS)
     except Exception:
         pass
 
@@ -78,7 +86,7 @@ def _upsert(requests, name: str, points: List[Dict[str, Any]]) -> None:
     requests.put(
         f"{QDRANT_URL}/collections/{name}/points?wait=true",
         json={"points": points},
-        timeout=10,
+        timeout=_TIMEOUT,
         headers=_HEADERS,
     ).raise_for_status()
 
@@ -87,7 +95,7 @@ def _search_document_ids(requests, name: str) -> List[str]:
     response = requests.post(
         f"{QDRANT_URL}/collections/{name}/points/search",
         json={"vector": [0.1, 0.1, 0.1, 0.1], "limit": 10, "with_payload": True},
-        timeout=10,
+        timeout=_TIMEOUT,
         headers=_HEADERS,
     )
     response.raise_for_status()
@@ -126,7 +134,7 @@ def test_purging_by_document_id_removes_only_that_document(collection) -> None:
                 "must": [{"key": "document_id", "match": {"value": "docA"}}]
             }
         },
-        timeout=10,
+        timeout=_TIMEOUT,
         headers=_HEADERS,
     ).raise_for_status()
 
@@ -194,7 +202,7 @@ def test_purging_an_absent_document_is_idempotent(collection) -> None:
                     "must": [{"key": "document_id", "match": {"value": "ghost"}}]
                 }
             },
-            timeout=10,
+            timeout=_TIMEOUT,
             headers=_HEADERS,
         )
         response.raise_for_status()
