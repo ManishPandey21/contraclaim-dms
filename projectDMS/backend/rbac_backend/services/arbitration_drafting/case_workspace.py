@@ -231,6 +231,9 @@ def _date_sort_value(row: Dict[str, Any]) -> str:
     return str(value)
 
 
+from ..publication_policy import consumable_derived_text
+
+
 class ArbitrationCaseWorkspaceService:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -1107,7 +1110,7 @@ class ArbitrationCaseWorkspaceService:
         ]
         clause_rows = [row for row in await self.list_matrix_rows(str(case_id), "clause-matrix") if _is_ready_row(row)]
         claim_rows = [row for row in await self.list_matrix_rows(str(case_id), "claim-matrix") if _is_ready_row(row)]
-        references = self._references_from_case_rows(draft_id, document_rows, clause_rows, current_user)
+        references = await self._references_from_case_rows(draft_id, document_rows, clause_rows, current_user)
         claim_heads = self._claim_heads_from_case_rows(draft_id, claim_rows)
         await self.draft_repo.replace_references(draft_id, references)
         if claim_heads:
@@ -2648,7 +2651,7 @@ class ArbitrationCaseWorkspaceService:
             },
         )
 
-    def _references_from_case_rows(
+    async def _references_from_case_rows(
         self,
         draft_id: str,
         document_rows: List[Dict[str, Any]],
@@ -2664,7 +2667,14 @@ class ArbitrationCaseWorkspaceService:
                     source_id=str(row.get("source_id")),
                     label=row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
                     citation=row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
-                    snippet=row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    # Both relevance_note and summary are derived from the
+                    # source document's extracted text, so they are gated by
+                    # that document's current authority. document_type is
+                    # metadata and remains, so a blocked exhibit is still
+                    # identifiable without asserting its content as evidence.
+                    snippet=await consumable_derived_text(
+                        self.db, row, "relevance_note", "summary"
+                    ) or row.get("document_type"),
                     page_numbers=row.get("page_numbers") or [],
                     letter_no=row.get("letter_no"),
                     event_date=row.get("document_date") if isinstance(row.get("document_date"), datetime) else None,

@@ -739,10 +739,14 @@ class ArbitrationContextBuilder:
                 # would have turned a fail-closed availability bug into a real
                 # leak, by making blocked documents resolvable for the first
                 # time.
+                # relevance_note is derived from this same document's extracted
+                # text, so it cannot be a fallback for the guarded fields above -
+                # that would hand back exactly what they withheld. It is gated by
+                # the same authority; document_type is metadata and stays.
                 "snippet": condense(
                     authoritative_summary(authoritative)
                     or authoritative_text(authoritative)
-                    or row.get("relevance_note")
+                    or await consumable_derived_text(self.db, row, "relevance_note")
                     or row.get("document_type"),
                     650,
                 ),
