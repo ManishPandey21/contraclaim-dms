@@ -407,3 +407,36 @@ def consumable_text(document: Any) -> str:
 def consumable_summary(document: Any) -> str:
     """authoritative_summary for callers holding a model object."""
     return authoritative_summary(_as_mapping(document))
+
+
+async def consumable_derived_text(db: Any, row: Optional[Mapping[str, Any]], *fields: str) -> str:
+    """Text DERIVED from an extracted document, gated by that document's authority.
+
+    A persistent derivative cannot outlive the publication authority of its
+    source. An arbitration index row's `relevance_note` is condensed from a
+    document's summary/full_content at derivation time; once stored it looks
+    like independent, human-approved matrix evidence, and the matrix approval
+    flag says nothing about whether the underlying extraction is still trusted.
+
+    Write-time guarding alone cannot fix that: authority changes AFTER the
+    derivative exists. A document that was clean when indexed and is later sent
+    to human review leaves a stale note behind. So the check has to happen at
+    read time, using the `source_id` these rows already carry.
+
+    Returns "" when the source cannot be resolved or is not consumable, so the
+    caller falls through to its own non-derived label rather than to raw text.
+    """
+    if not row:
+        return ""
+    source_id = (
+        row.get("source_id")
+        or row.get("source_document_id")
+        or row.get("document_id")
+    )
+    if not (await resolve_document_authority(db, source_id)).consumable:
+        return ""
+    for field in fields:
+        value = row.get(field)
+        if value:
+            return str(value)
+    return ""

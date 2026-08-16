@@ -153,6 +153,7 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
 from ..publication_policy import (
     authoritative_summary,
     authoritative_text,
+    consumable_derived_text,
     document_id_candidates,
     is_consumable,
     resolve_document_authority,
@@ -292,7 +293,13 @@ class ArbitrationContextBuilder:
                     "source_id": str(row.get("source_id")),
                     "label": row.get("title") or row.get("document_type") or row.get("exhibit_id") or "Case document",
                     "citation": row.get("exhibit_id") or row.get("letter_no") or row.get("title"),
-                    "snippet": row.get("relevance_note") or row.get("summary") or row.get("document_type"),
+                    # Derived from the source document's extracted text, so it
+                    # is gated by that document's CURRENT authority - not by the
+                    # matrix approval flag, which says nothing about extraction
+                    # trust. Falls back to document_type, which is metadata.
+                    "snippet": await consumable_derived_text(
+                        self.db, row, "relevance_note", "summary"
+                    ) or row.get("document_type"),
                     "page_numbers": row.get("page_numbers") or [],
                     "letter_no": row.get("letter_no"),
                     "allowed_use": row.get("allowed_use") or "fact",
@@ -327,7 +334,11 @@ class ArbitrationContextBuilder:
                 "source_id": str(row.get("source_id") or row.get("_id")),
                 "label": row.get("title") or row.get("claim_head") or row.get("issue") or row.get("topic") or slug,
                 "citation": row.get("citation") or row.get("claim_no") or row.get("issue_no"),
-                "snippet": row.get("facts") or row.get("summary") or row.get("relevance_note"),
+                # `facts` is matrix content authored in-app; summary and
+                # relevance_note are derived from the source document.
+                "snippet": row.get("facts") or await consumable_derived_text(
+                    self.db, row, "summary", "relevance_note"
+                ),
                 "page_numbers": row.get("page_numbers") or [],
                 "allowed_use": row.get("allowed_use") or "fact",
                 "metadata": {
