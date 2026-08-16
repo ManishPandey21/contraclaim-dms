@@ -153,6 +153,7 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
 from ..publication_policy import (
     authoritative_summary,
     authoritative_text,
+    document_id_candidates,
     resolve_document_authority,
 )
 
@@ -649,7 +650,12 @@ class ArbitrationContextBuilder:
                 collection = getattr(self.db, collection_name, None)
                 if collection is None:
                     continue
-                query: Dict[str, Any] = {"_id": str(row.get("source_id"))}
+                # documents._id is ObjectId-keyed; the raw string matched
+                # nothing and every approved source was skipped as "outside
+                # case scope".
+                query: Dict[str, Any] = {
+                    "_id": {"$in": document_id_candidates(row.get("source_id"))}
+                }
                 for scope_key in ("organization_id", "project_id"):
                     if case.get(scope_key):
                         query[scope_key] = case.get(scope_key)
@@ -681,11 +687,15 @@ class ArbitrationContextBuilder:
                 "permitted_uses": sorted(set([allowed, *[_allowed_use(item, allowed) for item in _as_list(row.get("permitted_uses"))]])),
                 "label": authoritative.get("subject") or authoritative.get("filename") or row.get("title") or row.get("document_type") or exhibit_id or "Case document",
                 "citation": exhibit_id or authoritative.get("letterNo") or row.get("letter_no") or authoritative.get("filename") or row.get("title"),
+                # Guarded. The sibling rehydration path was fixed for G34 and
+                # this one was missed: it read summary/ocrText straight off the
+                # canonical document. Repairing the lookup above without this
+                # would have turned a fail-closed availability bug into a real
+                # leak, by making blocked documents resolvable for the first
+                # time.
                 "snippet": condense(
-                    authoritative.get("summary")
-                    or authoritative.get("ocrText")
-                    or authoritative.get("text")
-                    or authoritative.get("text_enriched")
+                    authoritative_summary(authoritative)
+                    or authoritative_text(authoritative)
                     or row.get("relevance_note")
                     or row.get("document_type"),
                     650,
