@@ -544,15 +544,22 @@ class ChronologyService:
         return await self.create_event(event, current_user)
 
     def _document_text(self, source_doc: Dict[str, Any]) -> str:
+        # Suggested chronology entries feed EOT and claim reasoning, so this is
+        # an authoritative-content consumer. Metadata stays available so a
+        # blocked document is still identifiable; only extracted body text and
+        # its derived summary are withheld.
+        from .publication_policy import is_consumable
+
+        consumable = is_consumable(source_doc)
         parts = [
             source_doc.get("subject"),
-            source_doc.get("summary"),
+            source_doc.get("summary") if consumable else None,
             source_doc.get("description"),
-            source_doc.get("ocrText"),
-            source_doc.get("ocr_text"),
-            source_doc.get("full_content"),
-            source_doc.get("content"),
-            source_doc.get("text"),
+            source_doc.get("ocrText") if consumable else None,
+            source_doc.get("ocr_text") if consumable else None,
+            source_doc.get("full_content") if consumable else None,
+            source_doc.get("content") if consumable else None,
+            source_doc.get("text") if consumable else None,
             source_doc.get("filename"),
         ]
         return " ".join(str(part) for part in parts if part)

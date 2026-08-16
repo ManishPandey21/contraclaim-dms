@@ -150,6 +150,9 @@ def _money(value: Any, currency: Optional[str] = None) -> Optional[str]:
     return f"{currency or ''} {value}".strip()
 
 
+from ..publication_policy import authoritative_summary, authoritative_text
+
+
 class ArbitrationContextBuilder:
     def __init__(self, db: Any) -> None:
         self.db = db
@@ -380,8 +383,8 @@ class ArbitrationContextBuilder:
                 or record.get("filename")
             )
             snippet = (
-                record.get("summary")
-                or record.get("ocrText")
+                authoritative_summary(record)
+                or authoritative_text(record)
                 or record.get("text")
                 or record.get("text_enriched")
                 or record.get("description")
