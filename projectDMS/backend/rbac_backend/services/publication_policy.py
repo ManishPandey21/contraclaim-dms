@@ -153,30 +153,18 @@ def is_consumable(document: Optional[Mapping[str, Any]]) -> bool:
 
 
 def is_publication_blocked(document: Optional[Mapping[str, Any]]) -> bool:
-    """Has this document been judged non-publishable?
+    """The writer-side view: may this document be (re)published?
 
-    The writer-side companion to `is_consumable`. Both now turn on the same
-    question - has this document been judged adverse - so they cannot drift
-    apart, which is why this is the exact complement rather than a second
-    definition of "blocked".
+    Defined as the exact complement of `is_consumable` rather than as a second
+    reimplementation of the same rules. An earlier version restated them and
+    immediately drifted: it omitted the quarantine axis, so a confirmed
+    duplicate was neither consumable NOR blocked, and any writer trusting it as
+    the complement would have happily republished quarantined content.
 
-    It exists separately because the two are asked at different moments and a
-    caller reading `not is_consumable(...)` at write time would read wrongly if
-    the reader rule ever grows a condition that is meaningless for writers. The
-    distinction is kept explicit rather than implied.
-
-    The publication barrier upstream already stops a blocked *outcome* from
-    reaching publication; this stops an already-blocked document being
-    re-published after the fact.
+    Deriving it removes the possibility of that drift instead of asserting the
+    absence of it in a docstring.
     """
-    if not document:
-        return True
-
-    status = document.get("processing_status")
-    if status is None or status == "":
-        return False  # Legacy record; see is_consumable.
-
-    return str(status) in ADVERSE_STATES
+    return not is_consumable(document)
 
 
 def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:

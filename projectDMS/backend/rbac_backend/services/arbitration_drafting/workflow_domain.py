@@ -370,15 +370,20 @@ class ArbitrationWorkflowDomain:
             # Extracted body text only when the document may be consumed;
             # metadata fields stay searchable either way so a blocked document
             # is still findable by subject/filename for review.
+            # `summary` belongs with the extracted content, not the metadata.
+            # It is generated from the same extraction pass, which is why the
+            # policy lists it in _TEXT_FIELDS and exposes authoritative_summary
+            # - leaving it unguarded here let a blocked document's condensed
+            # content influence arbitration document selection. Only genuinely
+            # independent identifiers stay ungated so a blocked document is
+            # still findable for review.
+            _consumable = is_consumable(record)
             searchable = " ".join(
-                [
-                    str(record.get(key) or "")
-                    for key in ("subject", "filename", "summary")
-                ]
+                [str(record.get(key) or "") for key in ("subject", "filename")]
                 + [
                     str(record.get(key) or "")
-                    for key in ("ocrText", "text", "text_enriched")
-                    if is_consumable(record)
+                    for key in ("summary", "ocrText", "text", "text_enriched")
+                    if _consumable
                 ]
             ).lower()
             document_signals.append(

@@ -182,3 +182,45 @@ def test_the_resolver_agrees_with_the_document_level_predicate() -> None:
     for status in ("metadata_extracted", "failed", "human_review_required", "skipped"):
         document = _doc(status)
         assert _resolve([document], "doc-1").consumable is is_consumable(document)
+
+
+# --- The writer-side complement (Review A, HIGH) -------------------------------
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"_id": "d", "processing_status": "metadata_extracted"},
+        {"_id": "d", "processing_status": "human_review_required"},
+        {"_id": "d", "processing_status": "failed"},
+        {"_id": "d", "processing_status": "processing"},
+        {"_id": "d", "processing_status": "some_future_state"},
+        {"_id": "d"},
+        {"_id": "d", "processing_status": "metadata_extracted", "duplicate_status": "duplicate"},
+        {"_id": "d", "processing_status": "metadata_extracted", "lifecycle_state": "deleted"},
+        {"_id": "d", "processing_status": "metadata_extracted", "lifecycle_state": "duplicate"},
+    ],
+)
+def test_publication_blocked_is_the_exact_complement_of_consumable(doc) -> None:
+    """It had no test at all, and had already drifted.
+
+    The earlier version restated the rules instead of deriving them and omitted
+    the quarantine axis, so a confirmed duplicate was neither consumable NOR
+    blocked - and a writer trusting the complement would have republished
+    quarantined content.
+    """
+    from rbac_backend.services.publication_policy import (
+        is_consumable,
+        is_publication_blocked,
+    )
+
+    assert is_publication_blocked(doc) == (not is_consumable(doc))
+
+
+def test_a_quarantined_document_is_blocked_for_writers() -> None:
+    from rbac_backend.services.publication_policy import is_publication_blocked
+
+    assert is_publication_blocked(
+        {"_id": "d", "processing_status": "metadata_extracted",
+         "duplicate_status": "duplicate"}
+    ) is True
