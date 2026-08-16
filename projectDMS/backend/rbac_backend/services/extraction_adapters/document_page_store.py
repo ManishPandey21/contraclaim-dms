@@ -51,6 +51,12 @@ def to_document_page_record(
         "needs_review": page.needs_review,
         "raw_text": text,
         "raw_text_length": len(text),
+        # What extraction originally read, when a deterministic repair changed
+        # the published text. None means text and original are the same.
+        # Kept separate so a repaired page stays auditable: `raw_text` above is
+        # the published representation, this is the document's own wording.
+        "original_text": page.raw_text,
+        "applied_repairs": list(page.applied_repairs),
         "page_class": classification.page_class.value,
         "char_count": classification.char_count,
         "image_count": classification.image_count,
@@ -128,6 +134,21 @@ class DocumentPageStore:
                 }
             },
         )
+
+    async def finalize_pages(self, pages: Sequence[ExtractedPage]) -> None:
+        """Persist the assessed page evidence, after the gate and any repair.
+
+        A deliberate second stage, not an afterthought. `record_pages` runs
+        inside the engine and captures what extraction read; at that moment no
+        verdict exists, so `quality_verdict` was always written as None and the
+        canary's own monitoring query would have reported every page as unset.
+
+        Idempotent by construction: the same ReplaceOne upsert on
+        (document_id, extraction_run_id, page_number), so a retry rewrites the
+        same identity rather than creating a second contradictory row, and the
+        unique index stays valid.
+        """
+        await self.record_pages(pages)
 
     async def record_pages(self, pages: Sequence[ExtractedPage]) -> None:
         if not pages:

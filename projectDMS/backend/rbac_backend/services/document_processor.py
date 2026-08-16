@@ -112,6 +112,68 @@ class DocumentProcessor:
             getattr(settings, "EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT", 0)
         )
 
+    #: The ladder rasterizes and sends page images to a model, so it is
+    #: restricted to the source kinds that have pages to rasterize. Per the
+    #: committed specification.
+    FALLBACK_ELIGIBLE_SOURCE_KINDS = frozenset({SourceKind.PDF, SourceKind.IMAGE})
+
+    def resolve_fallback_ladder(
+        self, source_kind: Any, *, enabled: Optional[bool] = None, db: Any = None
+    ) -> Any:
+        """Decide whether this document gets a fallback ladder.
+
+        This is the production reader `EXTRACTION_FALLBACK_ENABLED` never had.
+        The flag was defined, documented, shipped in compose and reported by the
+        status script, while nothing in the application read it - so the ladder
+        was inert because no code constructed one, and the runbook's rollback
+        lever did nothing at all.
+
+        Fails closed on every uncertain path: flag off, ineligible source kind,
+        unrecognised source kind, or a ladder that cannot be constructed all
+        yield None, which means deterministic-only and zero model spend.
+        """
+        if enabled is None:
+            enabled = bool(getattr(settings, "EXTRACTION_FALLBACK_ENABLED", False))
+        if not enabled:
+            return None
+        if source_kind not in self.FALLBACK_ELIGIBLE_SOURCE_KINDS:
+            return None
+
+        # An explicitly injected ladder wins: tests and callers that build their
+        # own must not be overridden by configuration.
+        if getattr(self, "fallback_ladder", None) is not None:
+            return self.fallback_ladder
+
+        try:
+            from .extraction.fallback.ladder import ExtractionFallbackLadder
+            from .extraction.fallback.ledger import InterventionLedger
+            from .extraction.rasterizer import PageRasterizer
+
+            return ExtractionFallbackLadder(
+                gate=self.quality_gate,
+                rasterizer=PageRasterizer(
+                    dpi=int(getattr(settings, "EXTRACTION_FALLBACK_DPI", 200))
+                ),
+                ledger=InterventionLedger(db=db),
+                tier1=getattr(self, "reconstruction_tier1", None),
+                tier2=(
+                    getattr(self, "reconstruction_tier2", None)
+                    if getattr(settings, "EXTRACTION_FALLBACK_TIER2_ENABLED", False)
+                    else None
+                ),
+                budget=int(
+                    getattr(settings, "EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT", 0)
+                ),
+            )
+        except Exception as exc:
+            # Never let a construction failure silently become "enabled".
+            logger.warning(
+                "[document_pipeline] Fallback ladder requested but could not be "
+                "constructed; continuing deterministic-only: %s",
+                exc,
+            )
+            return None
+
     def _apply_repairs(self, page: Any, verdict: Any) -> Any:
         """Adopt dual-confirmed repairs into the page text, then re-verify.
 
@@ -223,6 +285,8 @@ class DocumentProcessor:
         extraction: Any,
         *,
         document_id: str,
+        fallback_ladder: Any = None,
+        page_store: Any = None,
     ) -> list:
         """Assess every page, escalating only what the gate says is wrong.
 
@@ -232,6 +296,9 @@ class DocumentProcessor:
         such is what produced 12 paid calls on a correct document.
         """
         needs_review: list = []
+        # A ladder resolved from configuration wins; self.fallback_ladder is the
+        # injected/test path and the default when nothing was resolved.
+        ladder = fallback_ladder if fallback_ladder is not None else self.fallback_ladder
         # The cap lives here, not in the ladder: the ladder sees one page at a
         # time and cannot know how many siblings have already spent.
         budget = max(0, int(getattr(self, "fallback_max_pages_per_document", 0)))
@@ -254,9 +321,9 @@ class DocumentProcessor:
                 continue
 
             outcome = None
-            if self.fallback_ladder is not None and spent < budget:
+            if ladder is not None and spent < budget:
                 spent += 1
-                resolved = await self.fallback_ladder.resolve(
+                resolved = await ladder.resolve(
                     source, page, verdict, document_id=document_id
                 )
                 outcome = resolved.outcome
@@ -265,7 +332,7 @@ class DocumentProcessor:
                     page.text = resolved.page.text
                     page.source = resolved.page.source
                     continue
-            elif self.fallback_ladder is not None:
+            elif ladder is not None:
                 logger.warning(
                     "[document_pipeline] Fallback budget of %s page(s) exhausted "
                     "for %s; page %s goes to human review unattempted",
@@ -285,14 +352,23 @@ class DocumentProcessor:
                 outcome.value if outcome else "disabled",
             )
 
+        pages = getattr(extraction, "pages", []) or []
+
         if needs_review:
             extraction.completeness = Completeness.PARTIAL
+
+        # Persist the assessed evidence. The engine wrote the raw pages before
+        # any verdict existed, so without this every persisted quality_verdict
+        # stays None and the page evidence cannot be monitored or reviewed.
+        if page_store is not None and pages:
+            finalize = getattr(page_store, "finalize_pages", None)
+            if finalize is not None:
+                await finalize(pages)
 
         # Rebuild the canonical text from the (possibly repaired) pages. The
         # engine froze combined_text before this gate ran, so without this the
         # corrected values could never reach persistence, embeddings or
         # retrieval - the repair would exist only in a log line.
-        pages = getattr(extraction, "pages", []) or []
         if pages and any(page.applied_repairs for page in pages):
             extraction.combined_text = "\n\n".join(page.text or "" for page in pages)
 
@@ -493,8 +569,16 @@ class DocumentProcessor:
             # Step 1b: assess every page. Runs unconditionally - companion
             # evidence measured 9 corruptions in a PDF's own text layer, so
             # there is no page this may skip.
+            # The flag's production reader. Resolved from the dispatched source
+            # kind so an ineligible kind cannot opt into paid model calls, and
+            # so flipping EXTRACTION_FALLBACK_ENABLED changes what actually
+            # executes rather than only what the status script reports.
             pages_human_review = await self._apply_quality_gate(
-                input_path, extraction, document_id=resolved_document_id
+                input_path,
+                extraction,
+                document_id=resolved_document_id,
+                fallback_ladder=self.resolve_fallback_ladder(dispatch.kind, db=db),
+                page_store=page_store,
             )
 
             processed_path = input_path
