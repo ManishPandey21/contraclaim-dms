@@ -112,6 +112,111 @@ class DocumentProcessor:
             getattr(settings, "EXTRACTION_FALLBACK_MAX_PAGES_PER_DOCUMENT", 0)
         )
 
+    def _apply_repairs(self, page: Any, verdict: Any) -> Any:
+        """Adopt dual-confirmed repairs into the page text, then re-verify.
+
+        Three representations are kept distinct:
+
+          * ``page.raw_text`` - what extraction read. Written once, never
+            overwritten, so the document's own wording stays auditable.
+          * ``page.text`` - the published representation, carrying corrections.
+          * ``page.applied_repairs`` - provenance for every substitution.
+
+        The gate is re-run over the repaired text rather than assumed correct:
+        a repair that does not survive re-verification is not adopted, and
+        confidence alone never accepts one (that is `propose_repair`'s dual
+        confirmation, upstream of here).
+        """
+        original_text = page.text or ""
+        repaired_text = original_text
+        original_tables = [
+            [list(row) for row in table] for table in (page.tables or [])
+        ]
+        repaired_tables = [[list(row) for row in table] for table in original_tables]
+        applied = []
+
+        def _substitute_in_tables(before: str, after: str) -> bool:
+            """Replace the corrupted cell wherever it appears in the tables.
+
+            The tables are the structured evidence the gate checks. Repairing
+            only the flat text would leave re-verification reading the original
+            corruption and failing a page that was just corrected.
+            """
+            changed = False
+            for table in repaired_tables:
+                for row in table:
+                    for index, cell in enumerate(row):
+                        if cell == before:
+                            row[index] = after
+                            changed = True
+            return changed
+
+        for repair in verdict.repairs:
+            before, after = repair.before, repair.after
+            in_tables = bool(before) and after is not None and _substitute_in_tables(
+                before, after
+            )
+            if in_tables and before and before not in repaired_text:
+                # Corrected in the structured evidence; the flat text simply
+                # does not reproduce the cell verbatim.
+                applied.append(
+                    {
+                        "before": before,
+                        "after": after,
+                        "applied": True,
+                        "scope": "tables",
+                        "reason": repair.reason,
+                        "method": repair.method,
+                        "confirming_checks": list(repair.confirming_checks),
+                        "page": repair.page,
+                    }
+                )
+                continue
+
+            if not before or after is None or before not in repaired_text:
+                # Nothing to substitute: the corruption is inside a table cell
+                # that the flat text does not reproduce verbatim. Record the
+                # attempt so the page is not silently reported as clean.
+                applied.append(
+                    {
+                        "before": before,
+                        "after": after,
+                        "applied": False,
+                        "reason": "literal not present in page text",
+                        "method": repair.method,
+                        "confirming_checks": list(repair.confirming_checks),
+                        "page": repair.page,
+                    }
+                )
+                continue
+
+            repaired_text = repaired_text.replace(before, after)
+            applied.append(
+                {
+                    "before": before,
+                    "after": after,
+                    "applied": True,
+                    "scope": "tables+text" if in_tables else "text",
+                    "reason": repair.reason,
+                    "method": repair.method,
+                    "confirming_checks": list(repair.confirming_checks),
+                    "page": repair.page,
+                }
+            )
+
+        if repaired_text == original_text and repaired_tables == original_tables:
+            page.applied_repairs = applied
+            return verdict
+
+        if page.raw_text is None:
+            page.raw_text = original_text
+        page.text = repaired_text
+        page.tables = repaired_tables
+        page.applied_repairs = applied
+
+        # Re-verify. The repaired text is only canonical if the gate agrees.
+        return self.quality_gate.assess(page, tables=page.tables or None)
+
     async def _apply_quality_gate(
         self,
         source: Path,
@@ -134,6 +239,14 @@ class DocumentProcessor:
 
         for page in getattr(extraction, "pages", []) or []:
             verdict = self.quality_gate.assess(page, tables=page.tables or None)
+
+            # Adopt deterministic repairs, then re-run the same gate over the
+            # repaired text. A repair the gate proposed but nothing applied is
+            # the defect this closes: the corrected value has to reach the text
+            # that gets persisted and indexed, or the detection was decorative.
+            if verdict.repairs:
+                verdict = self._apply_repairs(page, verdict)
+
             page.quality_verdict = verdict.verdict.value
             page.quality_checks = [check.to_record() for check in verdict.checks]
 
@@ -174,6 +287,14 @@ class DocumentProcessor:
 
         if needs_review:
             extraction.completeness = Completeness.PARTIAL
+
+        # Rebuild the canonical text from the (possibly repaired) pages. The
+        # engine froze combined_text before this gate ran, so without this the
+        # corrected values could never reach persistence, embeddings or
+        # retrieval - the repair would exist only in a log line.
+        pages = getattr(extraction, "pages", []) or []
+        if pages and any(page.applied_repairs for page in pages):
+            extraction.combined_text = "\n\n".join(page.text or "" for page in pages)
 
         return needs_review
 

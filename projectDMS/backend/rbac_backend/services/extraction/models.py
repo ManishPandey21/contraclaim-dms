@@ -87,6 +87,14 @@ class ExtractedPage:
     quality_verdict: Optional[str] = None
     quality_checks: List[Dict[str, Any]] = field(default_factory=list)
     needs_review: bool = False
+    #: What extraction actually read, before any deterministic repair. Set the
+    #: first time a repair rewrites `text`, so the document's own wording stays
+    #: auditable: `text` is the published representation, `raw_text` is
+    #: evidence. Never overwritten once set.
+    raw_text: Optional[str] = None
+    #: Applied repairs, as provenance records. Distinct from the gate's
+    #: proposals: these are the ones that were re-verified and adopted.
+    applied_repairs: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def char_count(self) -> int:
