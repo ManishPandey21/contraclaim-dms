@@ -115,20 +115,35 @@ def test_a_legacy_document_is_still_returned() -> None:
     "status",
     [
         ProcessingState.FAILED.value,
-        ProcessingState.PARTIALLY_PROCESSED.value,
-        ProcessingState.PROCESSING.value,
+        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
     ],
 )
-def test_every_non_consumable_state_is_dropped(status: str) -> None:
+def test_every_adverse_state_is_dropped(status: str) -> None:
+    """Safety half: a terminal verdict against the run denies retrieval."""
     service = _service([_doc("d", status)])
 
     assert _meta(service, ["d"]) == {}
 
 
-def test_an_unknown_state_is_dropped() -> None:
-    service = _service([_doc("d", "some_future_state")])
+@pytest.mark.parametrize(
+    "status",
+    [
+        ProcessingState.PROCESSING.value,
+        ProcessingState.PARTIALLY_PROCESSED.value,
+        "retrying",
+        "metadata_extracted",
+    ],
+)
+def test_an_in_flight_or_settled_document_is_still_retrievable(status: str) -> None:
+    """Availability half, updated for G33.
 
-    assert _meta(service, ["d"]) == {}
+    These previously asserted the document was dropped. `metadata_extracted` is
+    the terminal success state of the normal path, so that assertion amounted to
+    dropping every healthy document from retrieval.
+    """
+    service = _service([_doc("d", status)])
+
+    assert "d" in _meta(service, ["d"])
 
 
 def test_a_mixed_result_set_keeps_only_the_consumable_documents() -> None:
@@ -252,9 +267,11 @@ def test_the_retrieval_filter_uses_the_same_policy_as_the_consumers() -> None:
     """One decision, not two that can drift apart."""
     for status, expected in [
         (ProcessingState.COMPLETED.value, True),
+        ("metadata_extracted", True),
         (ProcessingState.HUMAN_REVIEW_REQUIRED.value, False),
+        (ProcessingState.FAILED.value, False),
         (None, True),
-        ("unknown_state", False),
+        ("unknown_state", True),
     ]:
         service = _service([_doc("d", status)])
         in_retrieval = "d" in _meta(service, ["d"])

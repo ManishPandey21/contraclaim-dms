@@ -56,22 +56,33 @@ def test_a_failed_document_is_not_consumable() -> None:
     assert is_consumable(_doc(ProcessingState.FAILED.value)) is False
 
 
-def test_a_partially_processed_document_is_not_consumable() -> None:
-    assert is_consumable(_doc(ProcessingState.PARTIALLY_PROCESSED.value)) is False
+def test_a_partially_processed_document_keeps_its_publication() -> None:
+    """Retries remain; no adverse verdict has been reached."""
+    assert is_consumable(_doc(ProcessingState.PARTIALLY_PROCESSED.value)) is True
 
 
 @pytest.mark.parametrize(
     "status",
     [ProcessingState.QUEUED.value, ProcessingState.PROCESSING.value],
 )
-def test_an_in_flight_document_is_not_consumable(status: str) -> None:
-    """Processing incomplete is not the same as processing passed."""
-    assert is_consumable(_doc(status)) is False
+def test_an_in_flight_document_keeps_its_previous_publication(status: str) -> None:
+    """Last-known-good: a run in flight does not retract what already passed.
+
+    Updated for G33. This previously asserted the opposite - that in-flight
+    meant non-consumable - which turned every routine retry into an
+    availability outage and, combined with `metadata_extracted` being
+    unrecognised, hid the main path entirely.
+    """
+    assert is_consumable(_doc(status)) is True
 
 
-def test_an_unknown_state_fails_closed() -> None:
-    """A value nobody recognises must never be treated as safe."""
-    assert is_consumable(_doc("some_future_state")) is False
+def test_an_unknown_state_does_not_silently_hide_a_document() -> None:
+    """Updated for G33: drift is caught by a build-time test, not at runtime.
+
+    Denying unknown values is what hid every successfully processed document,
+    because the state a healthy document rests in was itself unrecognised.
+    """
+    assert is_consumable(_doc("some_future_state")) is True
 
 
 def test_a_legacy_document_without_the_field_stays_consumable() -> None:

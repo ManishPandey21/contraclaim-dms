@@ -27,30 +27,56 @@ from typing import Any, Mapping, Optional
 
 from ..models.processing_state import ProcessingState
 
-#: States in which extracted content may be treated as authoritative.
+#: The terminal verdicts AGAINST the latest run. These are the only states that
+#: deny consumption.
 #:
-#: `STORED_ONLY` is included deliberately: an archive is stored without
-#: extraction, so it has no extracted text to leak - and excluding it would
-#: block archives from ordinary listing behaviour for no safety gain.
-CONSUMABLE_STATES = frozenset(
+#: The policy is a deny-list on adverse judgement, not an allow-list on success,
+#: and that inversion is the correction for G33. An allow-list of
+#: {completed, stored_only} denied the main path outright, because
+#: `metadata_extracted` - not `completed` - is where a normally processed
+#: document actually comes to rest: `_checkpoint_extraction_attempt` writes
+#: `completed` (document_service.py:1133), the caller then sets
+#: `metadata_extracted` (:1687) and applies it last (:1777).
+ADVERSE_STATES = frozenset(
     {
+        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+        ProcessingState.FAILED.value,
+    }
+)
+
+#: States that mean the pipeline is still working. Under the last-known-good
+#: lifecycle these do NOT retract a previous publication: a reprocess starting
+#: is not evidence the existing content is bad, only an outcome is. Retries are
+#: routine (`retrying` is written on two paths, max_attempts=3) and a crashed
+#: worker can strand a document here, so retracting on entry would turn ordinary
+#: operations into availability outages.
+IN_FLIGHT_STATES = frozenset(
+    {
+        "queued",
+        "processing",
+        "retrying",
+        ProcessingState.PARTIALLY_PROCESSED.value,
+    }
+)
+
+#: States that mean the latest run finished without an adverse verdict.
+SETTLED_STATES = frozenset(
+    {
+        "metadata_extracted",
+        "skipped",
         ProcessingState.COMPLETED.value,
         ProcessingState.STORED_ONLY.value,
     }
 )
 
-#: Everything else is non-consumable, including the in-flight states. Content
-#: that is still being processed has not passed anything yet, and "processing
-#: incomplete" must not read as "processing passed".
-BLOCKED_STATES = frozenset(
-    {
-        ProcessingState.QUEUED.value,
-        ProcessingState.PROCESSING.value,
-        ProcessingState.PARTIALLY_PROCESSED.value,
-        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-        ProcessingState.FAILED.value,
-    }
-)
+#: Every value production code is known to write. Vocabulary drift is caught by
+#: a test (`test_no_unclassified_state_is_written_by_production_code`), not by
+#: denying unknown values at runtime - denying them at runtime is precisely what
+#: hid the main path in G33.
+KNOWN_STATES = ADVERSE_STATES | IN_FLIGHT_STATES | SETTLED_STATES
+
+#: Retained for callers that still import it; equal to the adverse set.
+BLOCKED_STATES = ADVERSE_STATES
 
 #: Fields that carry document body text, in precedence order.
 #:
@@ -67,54 +93,52 @@ _DERIVED_FIELDS = ("summary",)
 def is_consumable(document: Optional[Mapping[str, Any]]) -> bool:
     """May this document's extracted content be used authoritatively?
 
-    Fails closed on an unrecognised state: a value nobody has heard of is not a
-    licence to treat content as verified.
+    Content is authoritative UNLESS something has judged it adverse. Only a
+    terminal verdict against the latest run - human review or failure - denies
+    consumption.
 
-    Fails *open* on an ABSENT state, and that asymmetry is deliberate.
-    `processing_status` postdates most of the corpus, so treating a missing
-    field as blocked would silently remove every historical document from
-    drafting and retrieval - an outage dressed up as a safety control. An
-    absent field means "predates this pipeline"; an unrecognised value means
-    "something wrote a state we do not understand", which is a real signal.
+    Everything else is either settled without objection or still in flight, and
+    under the last-known-good lifecycle an in-flight run does not retract the
+    previous publication.
+
+    An unrecognised state is ALLOWED, which reverses the earlier rule. Denying
+    unknown values looks like the safe default and is not: the value that a
+    healthy document rests in (`metadata_extracted`) was itself unrecognised,
+    so the "safe" default silently hid every successfully processed document
+    from drafting, planning, arbitration, chronology and retrieval. Drift is
+    caught at build time by
+    `test_no_unclassified_state_is_written_by_production_code`, which fails when
+    production starts writing a value nobody has classified - a visible failure
+    instead of a silent outage.
+
+    An absent state is allowed too: `processing_status` postdates most of the
+    corpus, and a legacy row acquires modern semantics the moment it is
+    reprocessed.
     """
     if not document:
         return False
 
     status = document.get("processing_status")
     if status is None or status == "":
-        # Legacy document from before the state existed. See docstring.
         return True
 
-    return str(status) in CONSUMABLE_STATES
-
-
-#: States that mean "this document has been judged and the answer was no".
-#: Distinct from the in-flight states, which mean "not judged yet".
-BLOCKED_TERMINAL_STATES = frozenset(
-    {
-        ProcessingState.HUMAN_REVIEW_REQUIRED.value,
-        ProcessingState.FAILED.value,
-    }
-)
+    return str(status) not in ADVERSE_STATES
 
 
 def is_publication_blocked(document: Optional[Mapping[str, Any]]) -> bool:
     """Has this document been judged non-publishable?
 
-    Deliberately narrower than ``not is_consumable(...)``, and the difference
-    matters for WRITERS.
+    The writer-side companion to `is_consumable`. Both now turn on the same
+    question - has this document been judged adverse - so they cannot drift
+    apart, which is why this is the exact complement rather than a second
+    definition of "blocked".
 
-    A reader asks "may I use this content?", and the answer for an in-flight
-    document is no - nothing has been verified yet. A writer inside the
-    publishing pipeline is a different question: the document is `processing`
-    precisely *because* the pipeline is deciding its fate, and the graph sync is
-    part of that publication. Refusing it there would stop every document from
-    ever being published, which is what happened when this guard first reused
-    the reader predicate.
+    It exists separately because the two are asked at different moments and a
+    caller reading `not is_consumable(...)` at write time would read wrongly if
+    the reader rule ever grows a condition that is meaningless for writers. The
+    distinction is kept explicit rather than implied.
 
-    So writers block on an explicit adverse judgement - human review, failure -
-    or on a state nobody recognises, and let in-flight work proceed. The
-    publication barrier upstream already prevents a blocked *outcome* from
+    The publication barrier upstream already stops a blocked *outcome* from
     reaching publication; this stops an already-blocked document being
     re-published after the fact.
     """
@@ -125,15 +149,7 @@ def is_publication_blocked(document: Optional[Mapping[str, Any]]) -> bool:
     if status is None or status == "":
         return False  # Legacy record; see is_consumable.
 
-    status = str(status)
-    if status in BLOCKED_TERMINAL_STATES:
-        return True
-    # Unknown state: fail closed for writers too.
-    return status not in CONSUMABLE_STATES and status not in {
-        ProcessingState.QUEUED.value,
-        ProcessingState.PROCESSING.value,
-        ProcessingState.PARTIALLY_PROCESSED.value,
-    }
+    return str(status) in ADVERSE_STATES
 
 
 def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:
