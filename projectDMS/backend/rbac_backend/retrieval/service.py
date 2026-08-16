@@ -1015,6 +1015,9 @@ class RetrievalService:
         *,
         base_score: float,
     ) -> List[SearchResult]:
+        blocked_graph_documents = await self._blocked_document_ids(
+            [str(row.get("document_id")) for row in rows if row.get("document_id")]
+        )
         filters = [
             {"uploadType": "contract", "document_id": str(row.get("document_id")), "clause_number": str(row.get("clause_number"))}
             for row in rows
@@ -1033,6 +1036,14 @@ class RetrievalService:
         out: List[SearchResult] = []
         for row in rows:
             document_id = str(row.get("document_id") or "")
+            # Graph-expanded clause rows are extraction-controlled content that
+            # bypassed search()'s _blocked_document_ids filter: they are hydrated
+            # straight from document_vectors and merged into the results used to
+            # build the LLM prompt, while the only authority check ran afterwards
+            # and merely enriched titles. They carry document_id, so eligibility
+            # resolves back to the source document here, before the prompt.
+            if document_id and document_id in blocked_graph_documents:
+                continue
             clause_number = str(row.get("clause_number") or "")
             key = (document_id, clause_number.lower())
             chunks = chunks_by_key.get(key) or []

@@ -28,6 +28,7 @@ from ..services.publication_policy import (
     authoritative_summary,
     authoritative_text,
     is_consumable,
+    resolve_document_authority,
 )
 
 router = APIRouter()
@@ -198,6 +199,18 @@ async def _fetch_vector_chunks_for_query(
         cursor = db.document_vectors.find(f).sort("createdAt", -1).limit(max_scan)
         rows = await cursor.to_list(length=max_scan)
 
+        # Resolve authority once per source document. Chunks are
+        # extraction-controlled content and carry document_id, so eligibility
+        # comes from the canonical document rather than the chunk itself.
+        _authority: Dict[str, bool] = {}
+
+        async def _ok(doc_id: str) -> bool:
+            if doc_id not in _authority:
+                _authority[doc_id] = (
+                    await resolve_document_authority(db, doc_id)
+                ).consumable
+            return _authority[doc_id]
+
         # Group by document_id and compute similarities
         by_doc: Dict[str, List[Dict[str, Any]]] = {}
         for r in rows:
@@ -213,6 +226,7 @@ async def _fetch_vector_chunks_for_query(
                 "uploadType": r.get("uploadType", ""),
                 "letterNo": r.get("letterNo"),
                 "createdAt": r.get("createdAt"),
+                "_authority_ok": await _ok(str(r.get("document_id"))),
             }
             by_doc.setdefault(entry["document_id"], []).append(entry)
 
@@ -268,7 +282,11 @@ def _format_vector_chunks_for_prompt(chunks: List[Dict[str, Any]]) -> str:
             except Exception:
                 pass
         header = f"[{i}] " + " | ".join(meta) if meta else f"[{i}]"
-        body = (c.get("text") or "").strip()
+        # Chunk text is extraction-controlled. The sibling path
+        # (extract_document_content) is guarded; this one fed vector chunks
+        # straight into the planning prompt. Chunks carry document_id, so
+        # eligibility resolves back to the source document.
+        body = (c.get("text") or "").strip() if c.get("_authority_ok", True) else ""
         if body:
             if len(body) > 1800:
                 body = body[:1800] + " ..."

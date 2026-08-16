@@ -24,6 +24,9 @@ def condense_text(value: Optional[str], width: int = 600) -> Optional[str]:
     return shorten(normalized, width=width, placeholder="...")
 
 
+from ..publication_policy import consumable_summary, consumable_text
+
+
 class DraftContextBuilder:
     """Builds a scoped v2 context bundle and deterministic source ledger."""
 
@@ -165,10 +168,15 @@ class DraftContextBuilder:
                 warnings.append(f"Skipped out-of-workspace document {doc_id}")
                 continue
             selected_ids.append(doc_id)
+            # Extraction-controlled content, so it goes through the
+            # publication policy. This package never imported the policy at
+            # all, so a document in human review or a confirmed duplicate had
+            # its unverified OCR text injected straight into the drafting
+            # prompt. `subject` stays ungated - it is filing metadata, not
+            # extracted body text, so a blocked document remains identifiable.
             text = condense_text(
-                getattr(doc, "summary", None)
-                or getattr(doc, "full_text", None)
-                or getattr(doc, "ocrText", None)
+                consumable_summary(doc)
+                or consumable_text(doc)
                 or getattr(doc, "subject", None),
                 1000,
             )

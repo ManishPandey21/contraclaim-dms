@@ -57,6 +57,9 @@ ISSUE_KEYWORDS = [
 ]
 
 
+from ..publication_policy import consumable_summary, consumable_text
+
+
 class IncomingLetterAnalyzer:
     """Document Understanding Agent: extracts a reviewable analysis from an
     incoming source.
@@ -211,7 +214,7 @@ class IncomingLetterAnalyzer:
                 getattr(doc, "from_", None) or getattr(doc, "from", None), 160
             ),
             "recipient": condense_text(getattr(doc, "to", None), 160),
-            "summary": condense_text(getattr(doc, "summary", None), 800),
+            "summary": condense_text(consumable_summary(doc), 800),
             "contractual_clauses": _clean_list(getattr(doc, "contractual_clauses", None)),
             "key_reply_points": _clean_list(getattr(doc, "key_reply_points", None)),
             "references": references[:12],
@@ -234,10 +237,11 @@ class IncomingLetterAnalyzer:
         if doc is None and request.incoming_document_id:
             doc = await self._incoming_document(request, document_service)
         if doc is not None:
+            # This text becomes the basis of the AI-drafted reply, so a
+            # blocked or quarantined incoming document must not supply it.
             text = condense_text(
-                getattr(doc, "summary", None)
-                or getattr(doc, "full_text", None)
-                or getattr(doc, "ocrText", None)
+                consumable_summary(doc)
+                or consumable_text(doc)
                 or getattr(doc, "content", None),
                 2500,
             )

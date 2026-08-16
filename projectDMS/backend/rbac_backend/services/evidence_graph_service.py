@@ -541,6 +541,21 @@ class EvidenceGraphService:
     ) -> Optional[Dict[str, Any]]:
         org_id = str(document_data.get("organization_id") or "")
         project_id = str(document_data.get("project_id") or "")
+        # Defence in depth. The production call site is already inside the
+        # publishable-gated block, but this function would otherwise happily
+        # build persistent AI-extraction and project-event records from any
+        # dict handed to it. Derived artifacts retain source_document_id, so a
+        # consumer can re-establish authority - but they should not be created
+        # from blocked content in the first place.
+        from .publication_policy import is_consumable
+
+        if not is_consumable(document_data):
+            logger.info(
+                "[evidence_graph] Skipping ingestion for %s: source is not consumable",
+                document_id,
+            )
+            return
+
         full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
         content_seed = "|".join(
             [

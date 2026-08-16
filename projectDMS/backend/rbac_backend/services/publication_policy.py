@@ -371,3 +371,39 @@ async def resolve_canonical_document(db: Any, document_id: Any):
         if found:
             return found
     return None
+
+
+def _as_mapping(document: Any) -> Optional[Mapping[str, Any]]:
+    """Accept either a Mongo dict or a Pydantic/attr document object.
+
+    Callers in letter_drafting hold model objects and reach fields with
+    getattr, so a Mapping-only guard silently could not be applied there at
+    all - which is part of why that package never imported this module.
+    """
+    if document is None or isinstance(document, Mapping):
+        return document
+    dump = getattr(document, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump()
+        except Exception:
+            pass
+    return {
+        key: getattr(document, key, None)
+        for key in (
+            "processing_status",
+            "duplicate_status",
+            "lifecycle_state",
+            *_TEXT_FIELDS,
+        )
+    }
+
+
+def consumable_text(document: Any) -> str:
+    """authoritative_text for callers holding a model object rather than a dict."""
+    return authoritative_text(_as_mapping(document))
+
+
+def consumable_summary(document: Any) -> str:
+    """authoritative_summary for callers holding a model object."""
+    return authoritative_summary(_as_mapping(document))
