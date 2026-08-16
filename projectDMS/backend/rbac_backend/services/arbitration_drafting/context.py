@@ -361,11 +361,19 @@ class ArbitrationContextBuilder:
             "expert_report": ("documents",),
         }.get(source_type, ())
         for collection_name in collection_names:
-            query: Dict[str, Any] = {"_id": source_id}
-            if draft.get("organization_id"):
-                query["organization_id"] = draft.get("organization_id")
-            if draft.get("project_id"):
-                query["project_id"] = draft.get("project_id")
+            # Both fixes together, deliberately. The identifier bug (raw
+            # string against ObjectId-keyed collections) was masking the scope
+            # bug: almost nothing matched, so the conditional filter never had
+            # the chance to widen. Fixing the id alone would have turned a
+            # silent availability bug into a cross-tenant leak of
+            # claim/variation/payment/bank-guarantee/chronology records, which
+            # apply no document-authority check because they are independent
+            # application records - tenant scope is their only gate.
+            query: Dict[str, Any] = {
+                "_id": {"$in": document_id_candidates(source_id)},
+                "organization_id": draft.get("organization_id"),
+                "project_id": draft.get("project_id"),
+            }
             record = await self.db[collection_name].find_one(query)
             if not record and source_type == "clause" and collection_name == "document_vectors":
                 query.pop("_id", None)
@@ -420,6 +428,7 @@ class ArbitrationContextBuilder:
                 # apply to them.
                 decision_ok = True
 
+            authority_denied = not decision_ok
             if not decision_ok:
                 snippet = label
             else:
@@ -434,6 +443,7 @@ class ArbitrationContextBuilder:
             return {
                 "source_type": source_type,
                 "source_id": source_id,
+                "authority_denied": authority_denied,
                 "label": str(label or source_id),
                 "citation": citation,
                 "snippet": condense(snippet, 650),
@@ -1558,6 +1568,13 @@ class ArbitrationContextBuilder:
                 flags.append("missing_citation")
             if not row.get("snippet"):
                 flags.append("missing_snippet")
+            # An authority-denied source keeps a non-empty label as its snippet,
+            # so `missing_snippet` never fires and the row was reported
+            # verified/strong while carrying no supporting content. Source
+            # exists, authority accepted, and content available are three
+            # different things.
+            if row.get("authority_denied"):
+                flags.append("authority_denied")
             if row.get("source_origin") == "case_document_index":
                 metadata = row.get("metadata") or {}
                 if not row.get("exhibit_id"):

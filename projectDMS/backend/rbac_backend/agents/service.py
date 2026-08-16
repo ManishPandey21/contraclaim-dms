@@ -38,7 +38,11 @@ class DraftingAgentService:
         conversation_id = request.conversation_id or str(uuid.uuid4())
         conversation = await self._ensure_conversation(conversation_id, request, current_user)
 
-        incoming_text = request.incoming_text or await self._load_letter_text(request.incoming_letter_id)
+        incoming_text = request.incoming_text or await self._load_letter_text(
+            request.incoming_letter_id,
+            org_id=request.org_id,
+            project_id=request.project_id,
+        )
         issues, questions = self._analyze_incoming(incoming_text, request.user_goal)
 
         filters = request.filters or SearchFilters(org_id=request.org_id, project_id=request.project_id)
@@ -117,7 +121,13 @@ class DraftingAgentService:
             {"$push": {"messages": payload}, "$set": {"updated_at": payload["created_at"]}},
         )
 
-    async def _load_letter_text(self, letter_id: Optional[str]) -> str:
+    async def _load_letter_text(
+        self,
+        letter_id: Optional[str],
+        *,
+        org_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> str:
         if not letter_id:
             return ""
         # Both collections are ObjectId-keyed: document_service pops any
@@ -133,11 +143,26 @@ class DraftingAgentService:
         except Exception:
             pass
 
+        # Tenant scope, applied UNCONDITIONALLY. This lookup had no scope at
+        # all: the caller supplies incoming_letter_id and the route authorises
+        # only the caller's own org, never re-checking that the id falls inside
+        # it - so any authenticated user could name another tenant's document
+        # and have its text folded into the draft prompt.
+        #
+        # Worse, the ObjectId fix above is what made that reachable. While the
+        # raw string never matched, this failed closed by accident. Repairing a
+        # lookup can activate code that was never exercised, which is exactly
+        # why scope has to be applied here and not left to the caller.
+        #
+        # Scoping on None matches null/missing, so genuinely unscoped legacy
+        # records keep working without ever crossing a tenant boundary.
+        scope = {"organization_id": org_id, "project_id": project_id}
+
         doc = None
         for key in candidates:
-            doc = await self.db.letters.find_one({"_id": key}) or await self.db.documents.find_one(
-                {"_id": key}
-            )
+            doc = await self.db.letters.find_one(
+                {"_id": key, **scope}
+            ) or await self.db.documents.find_one({"_id": key, **scope})
             if doc:
                 break
         if not doc:
