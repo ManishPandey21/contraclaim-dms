@@ -1372,7 +1372,19 @@ class ArbitrationCaseWorkspaceService:
             if not exhibit_id:
                 continue
             loaded = await self._load_exhibit_file(row)
-            volume = _exhibit_volume(row)
+            # Bundle volume is a material legal-filing decision: it determines
+            # where an exhibit appears in the arbitration bundle. Authority
+            # protects against unsafe INFLUENCE, not only disclosure, so a
+            # relevance_note derived from a now-blocked document must not steer
+            # placement. document_type and title are metadata and still do.
+            volume = _exhibit_volume(
+                {
+                    **row,
+                    "relevance_note": await consumable_derived_text(
+                        self.db, row, "relevance_note"
+                    ),
+                }
+            )
             filename = str(loaded.get("filename") or f"{exhibit_id}.bin")
             suffix = Path(filename).suffix or ".bin"
             title = re.sub(r"[^A-Za-z0-9 _.-]+", "", str(row.get("title") or row.get("document_type") or "exhibit")).strip()

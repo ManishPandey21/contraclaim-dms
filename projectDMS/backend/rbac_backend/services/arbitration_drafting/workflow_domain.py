@@ -203,7 +203,7 @@ def _branch_matrices(branch: str, pleading_type: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(matrices))
 
 
-from ..publication_policy import is_consumable
+from ..publication_policy import consumable_derived_text, is_consumable
 
 
 class ArbitrationWorkflowDomain:
@@ -436,8 +436,21 @@ class ArbitrationWorkflowDomain:
                             "row_id": canonical["row_id"],
                             "source_revision_ids": canonical["source_revision_ids"],
                             "evidence_status": canonical["evidence_status"],
+                            # ANALYSIS_FINDING_FIELDS is a declaration that is
+                            # generically dereferenced here, so a field named in
+                            # it becomes content. For document_understanding
+                            # that list includes relevance_note, which is
+                            # derived from the source document's extracted text
+                            # - so it is gated by that document's current
+                            # authority like any other derivative.
                             "facts": {
-                                key: row.get(key)
+                                key: (
+                                    await consumable_derived_text(
+                                        self.db, row, key
+                                    )
+                                    if key == "relevance_note"
+                                    else row.get(key)
+                                )
                                 for key in allowed_fields
                                 if row.get(key) not in (None, "", [])
                             },

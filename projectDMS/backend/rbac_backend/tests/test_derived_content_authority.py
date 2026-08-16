@@ -126,3 +126,58 @@ def test_a_derivative_whose_source_is_missing_is_denied() -> None:
 
 def test_an_empty_row_is_denied() -> None:
     assert _derived([_doc("metadata_extracted")], {}) == ""
+
+
+# --- Input contract: source_id does not always name a document -----------------
+
+
+def test_a_non_document_source_type_is_not_resolved_as_a_document() -> None:
+    """The helper's original assumption was wrong in BOTH directions.
+
+    A claim row's `source_id` names a row in `claims`, not a document. Resolving
+    it as a document finds nothing, denies, and silently hides legitimate
+    application content that document authority was never meant to govern.
+    """
+    row = {
+        "source_type": "claim",
+        "source_id": "claim-1",
+        "relevance_note": NOTE,
+    }
+
+    assert _derived([], row) == NOTE
+
+
+@pytest.mark.parametrize(
+    "source_type",
+    ["chronology_event", "bank_guarantee", "variation", "payment_event", "letter"],
+)
+def test_independent_record_types_are_not_document_gated(source_type: str) -> None:
+    row = {"source_type": source_type, "source_id": "x-1", "relevance_note": NOTE}
+
+    assert _derived([], row) == NOTE
+
+
+@pytest.mark.parametrize("source_type", ["document", "expert_report", "clause"])
+def test_document_derived_types_are_gated(source_type: str) -> None:
+    row = {"source_type": source_type, "source_id": "doc-1", "relevance_note": NOTE}
+
+    assert _derived([_doc("human_review_required")], row) == ""
+    assert _derived([_doc("metadata_extracted")], row) == NOTE
+
+
+def test_a_missing_source_type_is_treated_as_document_derived() -> None:
+    """The index writer defaults to "document", so absence must not opt out."""
+    row = {"source_id": "doc-1", "relevance_note": NOTE}
+
+    assert _derived([_doc("human_review_required")], row) == ""
+
+
+def test_an_unknown_source_type_is_still_gated() -> None:
+    """A new type must not quietly escape the check by being unrecognised."""
+    row = {
+        "source_type": "some_future_type",
+        "source_id": "doc-1",
+        "relevance_note": NOTE,
+    }
+
+    assert _derived([_doc("human_review_required")], row) == ""

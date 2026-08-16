@@ -409,7 +409,21 @@ def consumable_summary(document: Any) -> str:
     return authoritative_summary(_as_mapping(document))
 
 
-async def consumable_derived_text(db: Any, row: Optional[Mapping[str, Any]], *fields: str) -> str:
+#: Source types whose text is derived from an extracted DOCUMENT, so that
+#: document's current authority governs the derivative.
+#:
+#: The others - claims, variations, payment events, bank guarantees, chronology
+#: events, matrix rows - are independent application records. Their `source_id`
+#: does not name a document at all, and resolving it as one would find nothing
+#: and deny, silently hiding legitimate content.
+DOCUMENT_DERIVED_SOURCE_TYPES = frozenset(
+    {"document", "expert_report", "clause"}
+)
+
+
+async def consumable_derived_text(
+    db: Any, row: Optional[Mapping[str, Any]], *fields: str
+) -> str:
     """Text DERIVED from an extracted document, gated by that document's authority.
 
     A persistent derivative cannot outlive the publication authority of its
@@ -419,15 +433,44 @@ async def consumable_derived_text(db: Any, row: Optional[Mapping[str, Any]], *fi
     flag says nothing about whether the underlying extraction is still trusted.
 
     Write-time guarding alone cannot fix that: authority changes AFTER the
-    derivative exists. A document that was clean when indexed and is later sent
-    to human review leaves a stale note behind. So the check has to happen at
-    read time, using the `source_id` these rows already carry.
+    derivative exists. A document that was clean when indexed and later sent to
+    human review leaves a stale note behind. So the check happens at read time,
+    using the `source_id` these rows already carry.
 
-    Returns "" when the source cannot be resolved or is not consumable, so the
-    caller falls through to its own non-derived label rather than to raw text.
+    INPUT CONTRACT. The row must carry `source_type`. Only the document-derived
+    types are resolved as documents - the earlier version assumed every
+    `source_id` named a document, which is wrong in both directions: it would
+    have denied a perfectly good claim or chronology row (whose id names another
+    collection entirely) while proving nothing.
+
+    A MISSING source_type is treated as document-derived, because that is what
+    the index writer defaults to; unknown-but-present types are also resolved,
+    so a new type cannot quietly opt out of the check.
     """
     if not row:
         return ""
+
+    source_type = str(row.get("source_type") or "document")
+    non_document = source_type not in DOCUMENT_DERIVED_SOURCE_TYPES and source_type in {
+        "claim",
+        "variation",
+        "payment_event",
+        "bank_guarantee",
+        "chronology_event",
+        "project_event",
+        "letter",
+        "issue_matrix",
+        "jurisdiction_check",
+        "event_link",
+    }
+    if non_document:
+        # Independent application record; document authority does not apply.
+        for field in fields:
+            value = row.get(field)
+            if value:
+                return str(value)
+        return ""
+
     source_id = (
         row.get("source_id")
         or row.get("source_document_id")
