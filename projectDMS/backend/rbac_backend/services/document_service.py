@@ -1234,6 +1234,7 @@ class DocumentService:
                 "after a blocking extraction result",
                 document_id,
             )
+            await self._invalidate_graph_contribution(db, raw_doc, str(document_id))
         except Exception as exc:
             # Logical containment still holds; this is hygiene.
             logger.warning(
@@ -1242,6 +1243,55 @@ class DocumentService:
                 document_id,
                 exc,
             )
+
+    async def _invalidate_graph_contribution(
+        self, db: Any, raw_doc: Dict[str, Any], document_id: str
+    ) -> None:
+        """Remove this document's graph node only if nothing else supports it.
+
+        The node is merged on ``normCode`` alone and carries no ``document_id``,
+        so a `DETACH DELETE` keyed on the code would take every other
+        document's contribution with it - including other organisations',
+        because the key is global. Verified against a real FalkorDB in
+        `tests/integration/test_graph_invalidation_falkor.py`: deleting a shared
+        node destroyed the peer document's REPLIES_TO edge.
+
+        So deletion is conditional on there being no consumable supporter left.
+        This is the existing letter-deletion rule ("still owned by another live
+        record") plus publication state.
+
+        Logical denial is the primary containment and does not depend on this
+        succeeding: graph results are filtered by the same supporter rule at
+        read time, so a node that survives here is still not consumable.
+        """
+        from .falkor_graph_service import FalkorGraphService, normalize_letter_code
+        from .publication_policy import has_consumable_supporter
+
+        letter_no = (
+            raw_doc.get("letterNoNormalized")
+            or raw_doc.get("letterNo")
+            or raw_doc.get("letter_no")
+        )
+        norm_code = normalize_letter_code(str(letter_no or ""))
+        if not norm_code:
+            return
+
+        if await has_consumable_supporter(db, norm_code):
+            logger.info(
+                "[document_pipeline] Keeping graph node %s after blocking %s: "
+                "another consumable document still supports it",
+                norm_code,
+                document_id,
+            )
+            return
+
+        FalkorGraphService().delete_letter(norm_code)
+        logger.info(
+            "[document_pipeline] Removed graph node %s: its last consumable "
+            "supporter (%s) is now blocked",
+            norm_code,
+            document_id,
+        )
 
     async def _mark_human_review(
         self, job_id: str, document_id: str, checkpoint: Dict[str, Any]

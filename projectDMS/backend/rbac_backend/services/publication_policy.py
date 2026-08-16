@@ -105,6 +105,45 @@ def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:
     return ""
 
 
+async def has_consumable_supporter(db: Any, norm_code: str) -> bool:
+    """Is any consumable document still behind this graph node?
+
+    FalkorDB merges letter nodes on ``normCode`` alone and stores no
+    ``document_id``, so the graph cannot say which document contributed a fact.
+    Two documents - in different organisations - collapse onto one node, and
+    `ON MATCH SET` lets the later writer overwrite the earlier one's properties.
+
+    Attribution therefore has to come from Mongo, keyed by the same code. That
+    is already how the letter-deletion cascade decides whether a node is safe to
+    remove ("still owned by another live record"); this adds the publication
+    state to that rule, because a supporter that nobody may consume is not a
+    reason to keep serving a fact.
+
+    Deliberately NOT organisation-scoped. The node is global, so the question is
+    global too: while any tenant has a consumable document behind this code, the
+    node stays and stays usable. Scoping the lookup to one organisation would
+    let one tenant's invalidation delete another tenant's knowledge - the exact
+    failure the shared-key design makes possible.
+    """
+    if not db or not norm_code:
+        return False
+
+    for collection, field in (
+        ("documents", "letterNoNormalized"),
+        ("letters", "letter_no_normalized"),
+    ):
+        try:
+            cursor = db[collection].find(
+                {field: norm_code, "lifecycle_state": {"$ne": "deleted"}}
+            )
+        except Exception:
+            continue
+        async for record in cursor:
+            if is_consumable(record):
+                return True
+    return False
+
+
 def authoritative_summary(document: Optional[Mapping[str, Any]]) -> str:
     """The document summary, or empty when the document may not be consumed.
 

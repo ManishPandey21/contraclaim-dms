@@ -415,6 +415,14 @@ class LetterDraftGraph:
                 if target_code:
                     try:
                         graph_thread = falkor_service.get_thread(target_code, depth=6)
+                        # Logical denial, and the primary containment: a node
+                        # whose last consumable supporter is blocked must not
+                        # reach drafting context even if physical cleanup was
+                        # skipped or failed. The graph carries no document_id,
+                        # so eligibility is resolved from Mongo by normCode.
+                        graph_thread = await _filter_consumable_graph_entries(
+                            db, graph_thread
+                        )
                     except Exception as exc:
                         warnings.append(f"graph_context: {exc}")
                         graph_thread = []
@@ -1684,3 +1692,33 @@ class LetterDraftGraph:
             return []
         cursor = db.documents.find({"letterNo": letter_no}).limit(limit)
         return await cursor.to_list(length=limit)
+
+
+async def _filter_consumable_graph_entries(db, entries):
+    """Drop graph entries whose code has no consumable supporting document.
+
+    FalkorDB merges letter nodes on normCode alone and stores no document_id,
+    so a stale node from a document that has since been blocked is
+    indistinguishable in the graph from a live one. Attribution comes from
+    Mongo, which is also how the letter-deletion cascade already decides
+    ownership.
+    """
+    if not entries or db is None:
+        return entries
+
+    from ....services.publication_policy import has_consumable_supporter
+
+    kept = []
+    for entry in entries:
+        code = (entry or {}).get("normCode") or (entry or {}).get("code")
+        if not code:
+            kept.append(entry)
+            continue
+        try:
+            if await has_consumable_supporter(db, str(code)):
+                kept.append(entry)
+        except Exception:
+            # Cannot resolve support: keep current behaviour rather than
+            # silently emptying drafting context on an infrastructure error.
+            kept.append(entry)
+    return kept
