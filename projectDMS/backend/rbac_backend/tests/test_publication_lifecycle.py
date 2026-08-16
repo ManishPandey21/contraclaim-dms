@@ -190,3 +190,28 @@ def test_no_unclassified_state_is_written_by_production_code() -> None:
         f"classified in publication_policy: {sorted(unclassified)}. "
         f"Decide explicitly whether each is an adverse judgement."
     )
+
+
+# --- Safety holes found by independent review ---------------------------------
+
+
+def test_a_confirmed_duplicate_is_not_consumable() -> None:
+    """Quarantine is a second axis the policy was blind to.
+
+    Duplicate detection sets duplicate_status/lifecycle_state and never touches
+    processing_status, which by then already reads `metadata_extracted`. So a
+    document the system had explicitly quarantined was declared fully
+    authoritative by the gate every consumer trusts.
+    """
+    assert is_consumable(_doc("metadata_extracted", duplicate_status="duplicate")) is False
+    assert is_consumable(_doc("metadata_extracted", lifecycle_state="duplicate")) is False
+    assert authoritative_text(_doc("metadata_extracted", lifecycle_state="duplicate")) == ""
+
+
+def test_a_soft_deleted_document_is_not_consumable() -> None:
+    assert is_consumable(_doc("metadata_extracted", lifecycle_state="deleted")) is False
+
+
+def test_a_pending_duplicate_is_still_consumable() -> None:
+    """Only a CONFIRMED duplicate is quarantined; pending is undecided."""
+    assert is_consumable(_doc("metadata_extracted", duplicate_status="pending")) is True

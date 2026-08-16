@@ -1684,7 +1684,37 @@ class DocumentService:
                 )
                 metadata = getattr(result, "metadata", None)
                 update_fields["ocrEnabled"] = True
-                update_fields["processing_status"] = "metadata_extracted"
+                # `success` means extraction ran; `publishable` means the gate
+                # raised no unresolved blocking finding. Writing the settled
+                # state on `success` alone marked a blocked document
+                # `metadata_extracted` - a consumable state - and, on the
+                # no-job path below, nothing ever corrected it.
+                #
+                # That path is reachable: POST /documents/{id}/process and the
+                # internal variant call process_document_async without a
+                # job_id, and _checkpoint_extraction_attempt returns early
+                # without one, so _mark_human_review never runs. The document
+                # stayed draftable forever.
+                if getattr(result, "publishable", True):
+                    update_fields["processing_status"] = "metadata_extracted"
+                else:
+                    update_fields["processing_status"] = (
+                        ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                    )
+                    update_fields["processing_error"] = {
+                        "message": (
+                            f"{len(getattr(result, 'pages_human_review', []) or [])} "
+                            "page(s) need review; publication withheld"
+                        ),
+                        "pages": list(getattr(result, "pages_human_review", []) or []),
+                        "timestamp": datetime.utcnow(),
+                        "terminal": True,
+                    }
+                    logger.warning(
+                        "[document_pipeline] %s extracted but not publishable; "
+                        "marking human_review_required",
+                        document_id,
+                    )
                 update_fields["metadata_source"] = metadata_source
                 update_fields["processing_metadata"] = {
                     "processed_at": datetime.utcnow(),

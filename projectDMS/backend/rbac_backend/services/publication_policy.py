@@ -118,6 +118,18 @@ def is_consumable(document: Optional[Mapping[str, Any]]) -> bool:
     if not document:
         return False
 
+    # Quarantine is a second, independent axis. Duplicate detection marks a
+    # confirmed duplicate with `duplicate_status`/`lifecycle_state` and never
+    # touches `processing_status`, which by then already reads
+    # `metadata_extracted` from the extraction pass that ran moments earlier.
+    # Reading only the processing axis therefore declared a quarantined
+    # duplicate fully authoritative - the subsystem that decided "do not treat
+    # this as real" was invisible to the gate every consumer trusts.
+    if str(document.get("duplicate_status") or "") == "duplicate":
+        return False
+    if str(document.get("lifecycle_state") or "") in {"duplicate", "deleted"}:
+        return False
+
     status = document.get("processing_status")
     if status is None or status == "":
         return True
