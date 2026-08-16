@@ -24,7 +24,11 @@ from ratelimit import limits, sleep_and_retry
 
 # One server-side decision about whether a document's extracted text may be
 # consumed. Planning prompts are a downstream knowledge consumer like any other.
-from ..services.publication_policy import authoritative_text, is_consumable
+from ..services.publication_policy import (
+    authoritative_summary,
+    authoritative_text,
+    is_consumable,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -380,8 +384,10 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                 doc_info += f"From: {document.get('from_', document.get('from', 'Unknown'))}\n"
                 doc_info += f"To: {document.get('to', 'Unknown')}\n"
                 
-                # Add summary if available
-                summary = document.get('summary')
+                # Add summary if available. Gated: the summary is derived
+                # from the same extracted text, so serving it for a blocked
+                # document withholds nothing.
+                summary = authoritative_summary(document)
                 if summary:
                     doc_info += f"Summary: {summary}\n"
                 

@@ -118,7 +118,7 @@ def immutable_version_hash(version: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
-from ..publication_policy import authoritative_text
+from ..publication_policy import authoritative_summary, authoritative_text
 
 
 class ArbitrationDraftingService:
@@ -898,8 +898,11 @@ class ArbitrationDraftingService:
                         source_id=str(doc.get("_id")),
                         label=doc.get("subject") or doc.get("filename") or "Document",
                         citation=doc.get("letterNo") or doc.get("filename"),
+                        # authoritative_summary first: `doc.get("summary") or
+                        # authoritative_text(doc)` short-circuits on a truthy
+                        # summary and never evaluates the guard.
                         snippet=condense(
-                            doc.get("summary")
+                            authoritative_summary(doc)
                             or authoritative_text(doc)
                             or doc.get("subject"),
                             500,

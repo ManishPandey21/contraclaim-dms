@@ -163,12 +163,20 @@ class RetrievalService:
         timings["vector_search_ms"] = (time.perf_counter() - search_start) * 1000
 
         fused = self._fuse_results(retrievals, request.limit, request.strategy)
-        doc_meta = await self._fetch_documents_meta([str(item["payload"].get("document_id")) for item in fused])
+        candidate_ids = [str(item["payload"].get("document_id")) for item in fused]
+        doc_meta = await self._fetch_documents_meta(candidate_ids)
+        # Drop the RESULT, not just its title. An earlier revision filtered only
+        # `doc_meta` and left `snippet` flowing from the raw payload, so a
+        # blocked document's text still reached the caller with its title
+        # stripped - containment that looked right in a log line and did
+        # nothing. The snippet is the content; it has to be the thing dropped.
+        blocked = await self._blocked_document_ids(candidate_ids)
         search_results = []
         for item in fused:
             payload = normalize_source_payload(item["payload"])
             doc_id = str(payload.get("document_id"))
-            meta = doc_meta.get(doc_id, {})
+            if doc_id in blocked:
+                continue
             search_results.append(
                 SearchResult(
                     document_id=doc_id,
@@ -1607,6 +1615,45 @@ class RetrievalService:
         if answer_style:
             base += f" Style preference: {answer_style}."
         return f"{base}\n\nContext:\n{context}\n\nQuestion:\n{query}\n\nAnswer:"
+
+    async def _blocked_document_ids(self, document_ids: List[str]) -> set:
+        """Ids whose document EXISTS and is currently non-consumable.
+
+        Deliberately not "everything absent from the meta lookup": a vector
+        whose document is missing from Mongo entirely is a different problem
+        (orphaned point) and silently dropping those would change unrelated
+        behaviour. This set contains only documents we positively resolved and
+        positively judged unusable.
+        """
+        ids = [doc_id for doc_id in document_ids if doc_id]
+        if not ids:
+            return set()
+
+        # No document store to consult. Not a production path - `db` is a
+        # required dependency and `_fetch_documents_meta` would fail on the same
+        # attribute - but the degraded-mode failsafe tests construct the service
+        # with db=None, and turning that into an AttributeError would break the
+        # Qdrant-outage fallback rather than contain anything.
+        if getattr(self, "db", None) is None:
+            return set()
+
+        query_ids: List[Any] = []
+        for doc_id in ids:
+            query_ids.append(doc_id)
+            try:
+                from bson import ObjectId
+
+                query_ids.append(ObjectId(str(doc_id)))
+            except Exception:
+                pass
+
+        blocked: set = set()
+        cursor = self.db.documents.find({"_id": {"$in": query_ids}})
+        async for doc in cursor:
+            doc_id = str(doc.get("_id") or doc.get("id"))
+            if doc_id and not is_consumable(doc):
+                blocked.add(doc_id)
+        return blocked
 
     async def _fetch_documents_meta(self, document_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         ids = [doc_id for doc_id in document_ids if doc_id]

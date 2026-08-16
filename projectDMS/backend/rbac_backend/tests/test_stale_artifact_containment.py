@@ -179,6 +179,75 @@ def test_blocked_then_clean_republishes() -> None:
 # --- Policy agreement ----------------------------------------------------------
 
 
+def test_blocked_ids_are_reported_for_dropping_results() -> None:
+    """The filter must identify the RESULT to drop, not just its title.
+
+    An earlier revision filtered only the metadata lookup and left `snippet`
+    flowing from the raw payload, so blocked text still reached the caller with
+    its title stripped. An adversarial review caught it; this pins it.
+    """
+    service = _service(
+        [
+            _doc("clean", ProcessingState.COMPLETED.value),
+            _doc("blocked", ProcessingState.HUMAN_REVIEW_REQUIRED.value),
+        ]
+    )
+
+    blocked = asyncio.run(service._blocked_document_ids(["clean", "blocked"]))
+
+    assert blocked == {"blocked"}
+
+
+def test_a_document_absent_from_mongo_is_not_reported_blocked() -> None:
+    """An orphaned vector is a different problem; do not change that behaviour."""
+    service = _service([])
+
+    assert asyncio.run(service._blocked_document_ids(["ghost"])) == set()
+
+
+def test_the_summary_is_withheld_for_a_blocked_document() -> None:
+    """`summary` is derived from the same extracted text.
+
+    Withholding `ocrText` while serving `summary` withholds nothing, and three
+    consumers were doing exactly that - two of them inside guards that had
+    already been added.
+    """
+    from rbac_backend.services.publication_policy import authoritative_summary
+
+    blocked = {
+        "_id": "d",
+        "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+        "summary": "CONDENSED CLAIM CONTENT",
+    }
+
+    assert authoritative_summary(blocked) == ""
+
+
+def test_the_summary_is_served_for_a_clean_document() -> None:
+    from rbac_backend.services.publication_policy import authoritative_summary
+
+    clean = {
+        "_id": "d",
+        "processing_status": ProcessingState.COMPLETED.value,
+        "summary": "CONDENSED CLAIM CONTENT",
+    }
+
+    assert authoritative_summary(clean) == "CONDENSED CLAIM CONTENT"
+
+
+def test_authoritative_text_also_falls_back_to_summary() -> None:
+    """A blocked document must not leak through the body accessor either."""
+    from rbac_backend.services.publication_policy import authoritative_text
+
+    blocked = {
+        "_id": "d",
+        "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+        "summary": "CONDENSED CLAIM CONTENT",
+    }
+
+    assert authoritative_text(blocked) == ""
+
+
 def test_the_retrieval_filter_uses_the_same_policy_as_the_consumers() -> None:
     """One decision, not two that can drift apart."""
     for status, expected in [

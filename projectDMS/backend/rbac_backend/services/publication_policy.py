@@ -53,7 +53,15 @@ BLOCKED_STATES = frozenset(
 )
 
 #: Fields that carry document body text, in precedence order.
-_TEXT_FIELDS = ("body", "full_text", "ocrText")
+#:
+#: `summary` is included. It is *derived from* the extracted text by the same
+#: pipeline pass, so withholding `ocrText` while serving `summary` withholds
+#: nothing - an adversarial review found exactly that bypass in three consumers,
+#: including two this policy had supposedly already fixed.
+_TEXT_FIELDS = ("body", "full_text", "ocrText", "summary")
+
+#: Derived fields that must be withheld alongside the body text.
+_DERIVED_FIELDS = ("summary",)
 
 
 def is_consumable(document: Optional[Mapping[str, Any]]) -> bool:
@@ -91,6 +99,32 @@ def authoritative_text(document: Optional[Mapping[str, Any]]) -> str:
         return ""
 
     for field in _TEXT_FIELDS:
+        value = (document or {}).get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def authoritative_summary(document: Optional[Mapping[str, Any]]) -> str:
+    """The document summary, or empty when the document may not be consumed.
+
+    A separate accessor because callers legitimately want the summary *instead
+    of* the body - a short citation snippet, a planning hint. They must not get
+    it for a blocked document: the summary is generated from the same extracted
+    text and leaks the same unverified content in condensed form.
+
+    Note for callers: prefer
+
+        authoritative_summary(doc) or authoritative_text(doc)
+
+    over ``doc.get("summary") or authoritative_text(doc)``. The latter
+    short-circuits on a truthy summary and never evaluates the guard at all,
+    which is how this bypass survived its first fix.
+    """
+    if not is_consumable(document):
+        return ""
+
+    for field in _DERIVED_FIELDS:
         value = (document or {}).get(field)
         if value:
             return str(value)

@@ -110,6 +110,9 @@ _ACTIVE_STATUSES = frozenset(["completed", "needs_attention", "blocked"])
 _EXPORTED_ISSUED_STATUSES = frozenset(["exported", "issued"])
 
 
+from ..publication_policy import authoritative_summary, authoritative_text
+
+
 class DraftRunService:
     """Coordinates v2 letter drafting runs."""
 
@@ -1223,7 +1226,14 @@ class DraftRunService:
         for doc in docs:
             doc_id = str(doc.get("_id") or doc.get("document_id") or "")
             letter_no = doc.get("letterNo") or doc.get("letter_no") or raw_reference
-            text = doc.get("summary") or doc.get("full_text") or doc.get("ocrText") or doc.get("subject")
+            # Reference resolution hands this to the drafting model as
+            # citable fact, so it obeys the publication policy like any other
+            # authoritative-content consumer.
+            text = (
+                authoritative_summary(doc)
+                or authoritative_text(doc)
+                or doc.get("subject")
+            )
             sources.append(
                 SourceEvidence(
                     source_id=f"document:{doc_id}",
