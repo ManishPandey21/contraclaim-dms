@@ -238,6 +238,14 @@ class ProcessingResult(BaseModel):
     #: Pages the quality gate and fallback ladder could not resolve. A
     #: non-empty list means this document cannot be reported as completed.
     pages_human_review: List[int] = Field(default_factory=list)
+    #: The single publishability decision, derived once from the quality
+    #: outcome and honoured by every downstream boundary.
+    #:
+    #: `success` means "extraction ran"; it must never be read as "safe to
+    #: publish". Keeping them separate is what stops a blocked document being
+    #: embedded, graph-published or answered from retrieval while its review
+    #: flag is still being written.
+    publishable: bool = True
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

@@ -43,6 +43,43 @@ _FUNCTION_WORDS = frozenset(
 )
 
 
+#: The vocabulary an adjacent column actually contributes. This check exists to
+#: catch "a narrative shredded by an adjacent column's cells", and what a column
+#: splices in is its *header*: measure and quantity nouns.
+#:
+#: Capitalisation alone is not evidence and must never be the trigger. Ordinary
+#: contractual prose ends in capitalised proper nouns constantly - a company, a
+#: JV, a drawing title, a station - and treating that as corruption escalated 5
+#: of 7 realistic sentences, every one of which then needed a human because the
+#: fallback ladder is disabled.
+#: Deliberately narrow: dimensional and quantity terms only. Ordinary business
+#: nouns are excluded even though they head real columns, because they also
+#: appear in ordinary titles - "the Revised Cost Estimate" must not escalate,
+#: so "cost", "total", "amount", "item", "description" and "sum" are NOT here.
+#: A false negative on an oddly-headed column is recoverable; a false positive
+#: sends correspondence to a human who has nothing to fix.
+_COLUMN_HEADER_TERMS = frozenset(
+    {
+        "depth", "thickness", "volume", "dia", "diameter", "qty", "nos",
+        "rmt", "cum", "sqm", "girth", "spacing",
+    }
+)
+
+
+def _looks_like_column_headers(tokens: List[str]) -> bool:
+    """True when a trailing run carries the vocabulary of a table header.
+
+    One measure noun is enough: a sentence that genuinely ends in a proper-noun
+    name does not contain "Thickness" or "Qty" in its final run, while a
+    spliced header row almost always does.
+    """
+    for token in tokens:
+        cleaned = token.strip(",.;:&()").lower()
+        if cleaned in _COLUMN_HEADER_TERMS:
+            return True
+    return False
+
+
 def _is_header_token(token: str) -> bool:
     """A capitalised noun or a unit fragment - the stuff of table headers."""
     cleaned = token.strip(",.;:&()")
@@ -85,6 +122,11 @@ def _line_is_interleaved(line: str) -> bool:
     # among them. Ordinary prose always carries function words in its tail.
     run = _trailing_header_run(tokens)
     if run < _HEADER_RUN_MIN:
+        return False
+
+    # Corroboration, not capitalisation. Without this the check fires on any
+    # sentence ending in a proper-noun name - see _COLUMN_HEADER_TERMS.
+    if not _looks_like_column_headers(tokens[len(tokens) - run :]):
         return False
 
     head = tokens[: len(tokens) - run]

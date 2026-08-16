@@ -1627,7 +1627,19 @@ class DocumentService:
 
                 graph_document_payload = document.model_dump(by_alias=True)
                 graph_document_payload.update(update_fields)
-                if not duplicate_pending:
+                # The second publication boundary. The processor already
+                # decided publishability from the quality outcome; this honours
+                # the same decision rather than re-deriving it, so a page the
+                # gate failed cannot be graph-published while its review flag
+                # is still being written.
+                publishable = getattr(result, "publishable", True)
+                if not publishable:
+                    logger.warning(
+                        "[document_pipeline] Withholding graph publication for %s: "
+                        "unresolved extraction-quality findings",
+                        document_id,
+                    )
+                if not duplicate_pending and publishable:
                     try:
                         await self.graph_ingestion.ingest_document(
                             document_id=document_id,

@@ -532,7 +532,9 @@ class DocumentProcessor:
             return ProcessingResult(
                 success=False,
                 error=str(e),
-                processing_time=processing_time
+                processing_time=processing_time,
+                # A failed extraction is never publishable.
+                publishable=False,
             )
             
         finally:
@@ -799,12 +801,32 @@ class DocumentProcessor:
 
 
 
-            # Step 5: Save results
+            # The publication barrier. Decided once, here, BEFORE any
+            # publishing side effect runs, and carried on the result so every
+            # downstream boundary honours the same decision instead of
+            # re-deriving it.
+            #
+            # Previously the embeddings were created first and the review flag
+            # written afterwards by DocumentService, so a page the gate had
+            # already failed was retrievable and draftable before anyone was
+            # told. A status written later is not containment.
+            blocked_for_review = bool(pages_human_review)
+            publishable = not blocked_for_review
+            if blocked_for_review:
+                logger.warning(
+                    "[document_pipeline] Withholding publication for %s: "
+                    "page(s) %s need human review",
+                    input_path.name,
+                    pages_human_review,
+                )
+
+            # Step 5: Save results. Diagnostic evidence is still persisted - a
+            # reviewer needs the record - but vectors are withheld.
             logger.info("[document_pipeline] Persisting OCR, metadata, and embeddings for %s", input_path.name)
             chunks_created = await self._save_results(
                 extracted_content, raw_ocr_text, original_path, path_structure,
                 upload_type, document_id, parsed_metadata,
-                skip_embeddings=skip_embeddings,
+                skip_embeddings=skip_embeddings or blocked_for_review,
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 
@@ -828,6 +850,7 @@ class DocumentProcessor:
                     extraction.completeness.value if extraction is not None else None
                 ),
                 pages_human_review=pages_human_review,
+                publishable=publishable,
             )
 
 
@@ -837,7 +860,11 @@ class DocumentProcessor:
                 "[document_pipeline] Persistence failed for %s: %s", input_path, e
             )
             return ProcessingResult(
-                success=False, error=str(e), processing_time=processing_time
+                success=False,
+                error=str(e),
+                processing_time=processing_time,
+                # A failed extraction is never publishable.
+                publishable=False,
             )
         finally:
             # This method owns file_id, so it cleans it up. It deliberately does
