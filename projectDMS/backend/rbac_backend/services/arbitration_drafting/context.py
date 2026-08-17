@@ -317,7 +317,14 @@ class ArbitrationContextBuilder:
                     "source_id": str(row.get("clause_source_id") or row.get("source_id") or row.get("_id")),
                     "label": row.get("topic") or row.get("clause_number") or "Clause matrix row",
                     "citation": row.get("clause_number") or row.get("topic"),
-                    "snippet": row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    # Derived from the parent document, like the ledger path.
+                    "snippet": await consumable_derived_text(
+                        self.db,
+                        row,
+                        "clause_text_excerpt",
+                        source_type="clause",
+                        source_id=row.get("clause_source_id"),
+                    ) or row.get("obligation_or_right"),
                     "page_numbers": row.get("page_numbers") or [],
                     "clause_number": row.get("clause_number"),
                     "allowed_use": "clause",
@@ -802,7 +809,19 @@ class ArbitrationContextBuilder:
             event_data = {**row, **{f"event_{key}": value for key, value in (event or {}).items()}}
             title = row.get("event") or (event or {}).get("title") or "Chronology event"
             citation = row.get("document_ref") or row.get("date") or (event or {}).get("date_text") or (event or {}).get("letter_no") or title
-            snippet = row.get("impact") or row.get("evidence") or (event or {}).get("description") or (event or {}).get("manual_notes")
+            # `description` is lifted from the source document's extracted text
+            # (`chronology.py:530` sets it from span_text), so it is a document
+            # derivative and cannot outlive that document's authority - the same
+            # stale-derivative rule as relevance_note. `impact`, `evidence` and
+            # `manual_notes` are authored in-app and stay ungated, and an event
+            # with no source_document_id is a manual entry that document
+            # authority has no jurisdiction over.
+            description = (event or {}).get("description")
+            if description and (event or {}).get("source_document_id"):
+                description = await consumable_derived_text(
+                    self.db, event, "description"
+                )
+            snippet = row.get("impact") or row.get("evidence") or description or (event or {}).get("manual_notes")
             allowed = _allowed_use(row.get("pleading_use") or (event or {}).get("pleading_use"), "chronology")
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
@@ -870,7 +889,17 @@ class ArbitrationContextBuilder:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             citation = row.get("clause_number") or row.get("topic") or row.get("_id")
-            snippet = row.get("clause_text_excerpt") or row.get("obligation_or_right")
+            # `clause_text_excerpt` is up to 900 characters of the parent
+            # document's extracted text; `obligation_or_right` is authored in
+            # the matrix. The clause id lives under `clause_source_id` and the
+            # row carries no source_type, so both have to be supplied.
+            snippet = await consumable_derived_text(
+                self.db,
+                row,
+                "clause_text_excerpt",
+                source_type="clause",
+                source_id=row.get("clause_source_id"),
+            ) or row.get("obligation_or_right")
             ledger_row = {
                 "source_key": f"S{offset + len(out) + 1}",
                 "source_id": str(row.get("clause_source_id") or row.get("_id")),

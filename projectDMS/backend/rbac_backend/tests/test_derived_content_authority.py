@@ -149,7 +149,7 @@ def test_a_non_document_source_type_is_not_resolved_as_a_document() -> None:
 
 @pytest.mark.parametrize(
     "source_type",
-    ["chronology_event", "bank_guarantee", "variation", "payment_event", "letter"],
+    ["chronology_event", "bank_guarantee", "variation", "payment_event"],
 )
 def test_independent_record_types_are_not_document_gated(source_type: str) -> None:
     row = {"source_type": source_type, "source_id": "x-1", "relevance_note": NOTE}
@@ -157,12 +157,38 @@ def test_independent_record_types_are_not_document_gated(source_type: str) -> No
     assert _derived([], row) == NOTE
 
 
-@pytest.mark.parametrize("source_type", ["document", "expert_report", "clause"])
+def test_letter_is_not_an_independent_record_type() -> None:
+    """`letter` used to sit in the list above, and that was a bypass.
+
+    The reference resolver looks a letter id up in ("letters", "documents") -
+    it is ambiguous, not independent. Skipping the check meant a blocked
+    document reached drafting whenever the row happened to be typed `letter`.
+    Resolution now decides; see test_derived_source_type_mapping.py.
+    """
+    row = {"source_type": "letter", "source_id": "doc-1", "relevance_note": NOTE}
+
+    assert _derived([_doc("human_review_required")], row) == ""
+
+
+@pytest.mark.parametrize("source_type", ["document", "expert_report"])
 def test_document_derived_types_are_gated(source_type: str) -> None:
     row = {"source_type": source_type, "source_id": "doc-1", "relevance_note": NOTE}
 
     assert _derived([_doc("human_review_required")], row) == ""
     assert _derived([_doc("metadata_extracted")], row) == NOTE
+
+
+def test_a_clause_id_is_not_a_document_id() -> None:
+    """The other half of the same error.
+
+    `clause` was gated by resolving its `source_id` as a document id. Clause
+    ids name `contract_clauses`/`document_vectors` rows, so that lookup matched
+    nothing and denied every clause row - without ever consulting the document
+    the clause came from. Parent resolution is covered in the mapping suite.
+    """
+    row = {"source_type": "clause", "source_id": "clause-9", "relevance_note": NOTE}
+
+    assert _derived([_doc("metadata_extracted")], row) == ""
 
 
 def test_a_missing_source_type_is_treated_as_document_derived() -> None:

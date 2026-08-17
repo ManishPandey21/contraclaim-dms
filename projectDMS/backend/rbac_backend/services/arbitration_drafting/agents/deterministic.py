@@ -6,6 +6,11 @@ from textwrap import shorten
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ....models.arbitration_drafting import ArbitrationMatrixRow
+from ...publication_policy import (
+    consumable_derived_text,
+    is_consumable,
+    resolve_document_authority,
+)
 from ..matrix_registry import MATRIX_COLLECTIONS
 from ..repository import _collect, _jsonable
 
@@ -980,7 +985,40 @@ class DeterministicArbitrationAgent:
         except Exception as exc:
             self.warnings.append(f"Unable to read {collection_name}: {exc}")
             return []
-        return [row for row in rows if _in_case_scope(row, self.case)]
+        scoped = [row for row in rows if _in_case_scope(row, self.case)]
+        return await self._authorised_source_rows(collection_name, scoped)
+
+    async def _authorised_source_rows(
+        self, collection_name: str, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Drop rows whose originating document is no longer publishable.
+
+        Both agents build their matrices from here, and both used to condense
+        `full_content`/`extracted_text` into `relevance_note` (deterministic
+        `:171`) or into the LLM prompt (`llm.py:563`) with no authority check at
+        all. Read-time gating cannot cover that: it stops a stale derivative
+        being *used*, not a blocked source being *summarised into a new one*.
+
+        Only extraction-controlled collections are filtered. Claims, variations,
+        chronology events and the rest are independent application records whose
+        `_id` names no document - filtering them here would hide legitimate
+        content that document authority was never meant to govern.
+        """
+        if not rows:
+            return rows
+        if collection_name == "documents":
+            # Canonical records: the authority fields are on the row itself.
+            return [row for row in rows if is_consumable(row)]
+        if collection_name in {"document_vectors", "contract_clauses"}:
+            # Partial records carrying no authority fields of their own, so
+            # asking THEM is vacuous (G34). Resolve back to the parent.
+            kept: List[Dict[str, Any]] = []
+            for row in rows:
+                parent = row.get("document_id") or row.get("documentId")
+                if (await resolve_document_authority(self.db, parent)).consumable:
+                    kept.append(row)
+            return kept
+        return rows
 
     async def _matrix_rows(self, matrix_slug: str) -> List[Dict[str, Any]]:
         collection_name = MATRIX_COLLECTIONS[matrix_slug]
@@ -990,7 +1028,41 @@ class DeterministicArbitrationAgent:
         cursor = collection.find({"case_id": self.case_id, "deleted_at": {"$exists": False}})
         if hasattr(cursor, "sort"):
             cursor = cursor.sort("created_at", 1)
-        return await _collect(cursor)
+        return await self._authorised_matrix_rows(matrix_slug, await _collect(cursor))
+
+    async def _authorised_matrix_rows(
+        self, matrix_slug: str, rows: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Re-gate the derived text on a PERSISTED matrix row before reading it.
+
+        `_authorised_source_rows` covers raw source collections. This is its
+        twin, and its absence left the same hole open one layer up: a
+        `document-index` row keeps the `relevance_note` an earlier run condensed
+        from the document body, and nothing revisits it when the document is
+        later rejected - `_insert_matrix_row` returns early on an existing row
+        and never deletes.
+
+        Three agents then decide with it and none of them display it, which is
+        why it survived review: `_looks_like_notice` decides whether a
+        notice-compliance row exists at all, `_expert_report_documents`
+        nominates the expert report source, and `_review_consistency` raises
+        `final_bill_or_no_dues_waiver_risk`. Authority governs influence, not
+        just disclosure.
+
+        The row is not rewritten in Mongo - only the copy handed to the caller
+        is blanked, so authority returning restores the note.
+        """
+        if matrix_slug != "document-index" or not rows:
+            return rows
+        gated: List[Dict[str, Any]] = []
+        for row in rows:
+            derived = {
+                field: await consumable_derived_text(self.db, row, field)
+                for field in ("relevance_note", "summary")
+                if field in row
+            }
+            gated.append({**row, **derived} if derived else row)
+        return gated
 
     async def _paragraph_responses(self) -> List[Dict[str, Any]]:
         if not self.draft_id:

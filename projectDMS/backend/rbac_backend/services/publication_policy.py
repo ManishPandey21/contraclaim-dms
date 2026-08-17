@@ -24,7 +24,7 @@ second source of truth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Tuple
 
 from ..models.processing_state import ProcessingState
 
@@ -327,6 +327,34 @@ async def resolve_document_authority(db: Any, document_id: Optional[str]):
     return AuthorityDecision(str(document_id), True, "settled")
 
 
+def _collection(db: Any, name: str) -> Any:
+    """Reach a collection by either access style.
+
+    Motor supports both `db["documents"]` and `db.documents`, and callers here
+    are split between them. Picking one silently broke the other.
+    """
+    try:
+        return db[name]
+    except Exception:
+        return getattr(db, name, None)
+
+
+async def _find_by_id(db: Any, name: str, record_id: Any):
+    """Look a record up by `_id`, trying every form the id may be stored as.
+
+    Same reasoning as `resolve_canonical_document`: string-vs-ObjectId drift
+    fails closed and silently, so both forms are tried rather than guessed.
+    """
+    collection = _collection(db, name)
+    if collection is None:
+        return None
+    for key in document_id_candidates(record_id):
+        found = await collection.find_one({"_id": key})
+        if found:
+            return found
+    return None
+
+
 def document_id_candidates(document_id: Any) -> list:
     """Every form this identifier might be stored as, most likely first.
 
@@ -365,7 +393,7 @@ async def resolve_canonical_document(db: Any, document_id: Any):
         return None
     for key in document_id_candidates(document_id):
         try:
-            found = await db.documents.find_one({"_id": key})
+            found = await _collection(db, "documents").find_one({"_id": key})
         except Exception:
             raise
         if found:
@@ -409,20 +437,135 @@ def consumable_summary(document: Any) -> str:
     return authoritative_summary(_as_mapping(document))
 
 
-#: Source types whose text is derived from an extracted DOCUMENT, so that
-#: document's current authority governs the derivative.
+#: What a `source_id` actually names, per `source_type`.
 #:
-#: The others - claims, variations, payment events, bank guarantees, chronology
-#: events, matrix rows - are independent application records. Their `source_id`
-#: does not name a document at all, and resolving it as one would find nothing
-#: and deny, silently hiding legitimate content.
-DOCUMENT_DERIVED_SOURCE_TYPES = frozenset(
-    {"document", "expert_report", "clause"}
-)
+#: This is the one registry; `arbitration_drafting/context.py` resolves selected
+#: references through it too. Keeping a second, restated list of "document-ish"
+#: types beside it is what produced two bugs at once: `letter` was assumed to be
+#: an application record and skipped its authority check altogether, while
+#: `clause` was assumed to be a document id and so never resolved at all.
+#:
+#: Order matters - the first collection that matches decides which authority
+#: model applies, exactly as the reference resolver does it.
+DERIVED_SOURCE_COLLECTIONS: Mapping[str, Tuple[str, ...]] = {
+    "document": ("documents",),
+    "expert_report": ("documents",),
+    "letter": ("letters", "documents"),
+    "clause": ("document_vectors", "contract_clauses"),
+    "drawing": ("documents",),
+    "claim": ("claims",),
+    "variation": ("variations",),
+    "payment_event": ("ipc_bills",),
+    "bank_guarantee": ("bank_guarantees",),
+    "chronology_event": ("matter_chronology_events",),
+    "project_event": ("matter_chronology_events",),
+    "event_link": ("evidence_event_links",),
+    "delay_event": ("matter_chronology_events",),
+    "key_date": ("key_dates",),
+    "programme_milestone": ("key_dates",),
+    "issue_matrix": ("arbitration_issue_matrix",),
+    "jurisdiction_check": ("arbitration_jurisdiction_matrix",),
+}
+
+#: Collections whose rows ARE the canonical document.
+CANONICAL_DOCUMENT_COLLECTIONS = frozenset({"documents"})
+
+#: Partial records extracted FROM a document. They carry no authority fields of
+#: their own (G34), so the parent has to be resolved.
+DOCUMENT_CHILD_COLLECTIONS = frozenset({"document_vectors", "contract_clauses"})
+
+
+def _is_document_governed(source_type: str) -> bool:
+    """Could an id of this type name extraction-controlled content?"""
+    collections = DERIVED_SOURCE_COLLECTIONS.get(source_type)
+    if not collections:
+        return True  # unknown origin - assume it might be
+    return any(
+        name in CANONICAL_DOCUMENT_COLLECTIONS or name in DOCUMENT_CHILD_COLLECTIONS
+        for name in collections
+    )
+
+
+async def resolve_derived_authority(
+    db: Any, source_type: Optional[str], source_id: Any
+) -> AuthorityDecision:
+    """Decide authority against the object the id ACTUALLY names.
+
+    Three outcomes, deliberately distinguished:
+
+    * KNOWN NON-DOCUMENT APPLICATION SOURCE - a claim, variation, IPC bill,
+      guarantee or chronology event. Document publication authority has no
+      jurisdiction over these, and denying them would delete legitimate matrix
+      evidence from a live filing. Allowed without a lookup.
+    * DOCUMENT-GOVERNED - the id resolves into `documents` (directly, or via a
+      clause/vector child row). The canonical document decides.
+    * UNKNOWN AUTHORITY ORIGIN - an unclassified type, or a document-ish id that
+      resolves to nothing. Denied, because nothing proves it is safe.
+    """
+    resolved_type = str(source_type or "document")
+    if not _is_document_governed(resolved_type):
+        return AuthorityDecision(
+            document_id=source_id, consumable=True, reason="independent_application_record"
+        )
+    collections = DERIVED_SOURCE_COLLECTIONS.get(resolved_type)
+    if not collections:
+        return AuthorityDecision(
+            document_id=source_id, consumable=False, reason="unknown_source_type"
+        )
+    if not source_id:
+        return AuthorityDecision(
+            document_id=source_id, consumable=False, reason="no_source_id"
+        )
+
+    for name in collections:
+        try:
+            if name in CANONICAL_DOCUMENT_COLLECTIONS:
+                # One implementation of canonical resolution, not two.
+                decision = await resolve_document_authority(db, source_id)
+                if decision.reason == "document_not_found":
+                    continue
+                return decision
+            record = await _find_by_id(db, name, source_id)
+            if not record and name in DOCUMENT_CHILD_COLLECTIONS:
+                # Callers sometimes hold the parent document id rather than the
+                # chunk id; the reference resolver accepts both.
+                collection = _collection(db, name)
+                record = collection and await collection.find_one(
+                    {"document_id": source_id}
+                )
+        except Exception:
+            return AuthorityDecision(
+                document_id=source_id, consumable=False, reason="resolution_error"
+            )
+        if not record:
+            continue
+        if name in DOCUMENT_CHILD_COLLECTIONS:
+            return await resolve_document_authority(
+                db, record.get("document_id") or record.get("documentId")
+            )
+        # Not extraction-controlled, so the processing axis has nothing to say
+        # about it - but quarantine does. `letters` carries `lifecycle_state`
+        # and letter_service already filters deleted rows out of its listings,
+        # so returning True unconditionally here let a soft-deleted letter keep
+        # feeding its derived matrix text into drafting. `is_consumable` adds
+        # only the quarantine axis for a record with no processing_status, so
+        # this cannot over-block a healthy one.
+        return AuthorityDecision(
+            document_id=source_id,
+            consumable=is_consumable(record),
+            reason="independent_application_record",
+        )
+    return AuthorityDecision(
+        document_id=source_id, consumable=False, reason="source_not_found"
+    )
 
 
 async def consumable_derived_text(
-    db: Any, row: Optional[Mapping[str, Any]], *fields: str
+    db: Any,
+    row: Optional[Mapping[str, Any]],
+    *fields: str,
+    source_type: Optional[str] = None,
+    source_id: Any = None,
 ) -> str:
     """Text DERIVED from an extracted document, gated by that document's authority.
 
@@ -437,46 +580,35 @@ async def consumable_derived_text(
     human review leaves a stale note behind. So the check happens at read time,
     using the `source_id` these rows already carry.
 
-    INPUT CONTRACT. The row must carry `source_type`. Only the document-derived
-    types are resolved as documents - the earlier version assumed every
-    `source_id` named a document, which is wrong in both directions: it would
-    have denied a perfectly good claim or chronology row (whose id names another
-    collection entirely) while proving nothing.
+    A MISSING `source_type` is read as `document`, and that is a traced fact
+    rather than a convenient default: `document-index` is the only matrix whose
+    writer puts a `source_id` in the row body at all
+    (`agents/deterministic.py:162`), and `ArbitrationMatrixRow` is `extra="allow"`
+    with no default for the field. A row carrying a `source_id` and no
+    `source_type` therefore came from the document index.
 
-    A MISSING source_type is treated as document-derived, because that is what
-    the index writer defaults to; unknown-but-present types are also resolved,
-    so a new type cannot quietly opt out of the check.
+    `source_type`/`source_id` may be supplied explicitly for rows that name
+    their source under some other key. A clause-matrix row is the case that
+    forced this: it stores a `contract_clauses` child id under
+    `clause_source_id` and carries no `source_type` at all, so inferring from
+    the row alone resolved a CHILD id as a DOCUMENT id and found nothing -
+    denying every clause row while never consulting the document the clause
+    text actually came from.
     """
     if not row:
         return ""
 
-    source_type = str(row.get("source_type") or "document")
-    non_document = source_type not in DOCUMENT_DERIVED_SOURCE_TYPES and source_type in {
-        "claim",
-        "variation",
-        "payment_event",
-        "bank_guarantee",
-        "chronology_event",
-        "project_event",
-        "letter",
-        "issue_matrix",
-        "jurisdiction_check",
-        "event_link",
-    }
-    if non_document:
-        # Independent application record; document authority does not apply.
-        for field in fields:
-            value = row.get(field)
-            if value:
-                return str(value)
-        return ""
-
     source_id = (
-        row.get("source_id")
+        source_id
+        or row.get("source_id")
+        or row.get("clause_source_id")
         or row.get("source_document_id")
         or row.get("document_id")
     )
-    if not (await resolve_document_authority(db, source_id)).consumable:
+    decision = await resolve_derived_authority(
+        db, source_type or row.get("source_type"), source_id
+    )
+    if not decision.consumable:
         return ""
     for field in fields:
         value = row.get(field)

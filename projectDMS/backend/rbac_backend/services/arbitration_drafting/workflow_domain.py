@@ -69,6 +69,38 @@ ANALYSIS_FINDING_FIELDS = {
     "expert_alignment": ("expert_type", "claim_no", "alignment_status", "verified_amount", "contradictions"),
 }
 
+#: Which of the fields named above are DERIVED from a document's extracted
+#: text, and how to reach the document they came from: (source_type override,
+#: id field on the row). `None` means infer from the row, which is right for
+#: document-index rows and wrong for clause-matrix rows - those store a
+#: `contract_clauses` child id under a different key and carry no source_type.
+#:
+#: One list, because the dereference below is generic: the earlier version
+#: special-cased `relevance_note` inline, so `clause_text_excerpt` - 900
+#: characters of the parent document's text, on the very next line of
+#: ANALYSIS_FINDING_FIELDS - went straight into the analysis artifact ungated.
+DERIVED_ANALYSIS_FIELDS = {
+    "relevance_note": (None, None),
+    "summary": (None, None),
+    "clause_text_excerpt": ("clause", "clause_source_id"),
+}
+
+
+async def _gated_fact(db: Any, row: Dict[str, Any], key: str) -> Any:
+    """One finding field, withheld when its source document is not publishable."""
+    derived = DERIVED_ANALYSIS_FIELDS.get(key)
+    if derived is None:
+        return row.get(key)
+    source_type, id_field = derived
+    return await consumable_derived_text(
+        db,
+        row,
+        key,
+        source_type=source_type,
+        source_id=row.get(id_field) if id_field else None,
+    )
+
+
 DOCUMENT_SIGNAL_TERMS = (
     "notice", "delay", "extension of time", "clause", "jurisdiction",
     "limitation", "quantum", "payment", "expert", "counterclaim",
@@ -438,19 +470,14 @@ class ArbitrationWorkflowDomain:
                             "evidence_status": canonical["evidence_status"],
                             # ANALYSIS_FINDING_FIELDS is a declaration that is
                             # generically dereferenced here, so a field named in
-                            # it becomes content. For document_understanding
-                            # that list includes relevance_note, which is
-                            # derived from the source document's extracted text
-                            # - so it is gated by that document's current
-                            # authority like any other derivative.
+                            # it becomes content. Any field on that list which
+                            # is derived from a document's extracted text is
+                            # gated by that document's current authority -
+                            # DERIVED_ANALYSIS_FIELDS is the single list of
+                            # which ones those are, so adding a derived field to
+                            # a branch cannot silently escape the check.
                             "facts": {
-                                key: (
-                                    await consumable_derived_text(
-                                        self.db, row, key
-                                    )
-                                    if key == "relevance_note"
-                                    else row.get(key)
-                                )
+                                key: await _gated_fact(self.db, row, key)
                                 for key in allowed_fields
                                 if row.get(key) not in (None, "", [])
                             },

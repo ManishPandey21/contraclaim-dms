@@ -2709,7 +2709,15 @@ class ArbitrationCaseWorkspaceService:
                     source_id=str(row.get("clause_source_id") or row.get("_id")),
                     label=row.get("topic") or row.get("clause_number") or "Clause matrix row",
                     citation=row.get("clause_number") or row.get("topic"),
-                    snippet=row.get("clause_text_excerpt") or row.get("obligation_or_right"),
+                    # The excerpt is parent-document text; the obligation is
+                    # matrix-authored. See context.py:_clause_matrix_sources.
+                    snippet=await consumable_derived_text(
+                        self.db,
+                        row,
+                        "clause_text_excerpt",
+                        source_type="clause",
+                        source_id=row.get("clause_source_id"),
+                    ) or row.get("obligation_or_right"),
                     clause_number=row.get("clause_number"),
                     allowed_use="clause",
                     selected_by=_actor_id(current_user),
