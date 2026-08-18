@@ -191,18 +191,32 @@ def test_an_unresolvable_letter_is_denied() -> None:
 
 @pytest.mark.parametrize(
     "source_type",
-    ["claim", "variation", "payment_event", "bank_guarantee", "chronology_event", "project_event"],
+    ["claim", "variation", "payment_event", "bank_guarantee"],
 )
 def test_an_application_record_is_not_governed_by_document_authority(
     source_type: str,
 ) -> None:
     """Over-blocking is a real failure too, not the safe side of the trade.
 
-    These ids name claims, variations, IPC bills, guarantees and chronology
-    events. Resolving them as documents finds nothing and denies - silently
-    deleting legitimate matrix evidence from a live filing.
+    These ids name claims, variations, IPC bills, guarantees. Resolving them as
+    documents finds nothing and denies - silently deleting legitimate matrix
+    evidence from a live filing.
     """
     assert _text(_DB(documents=[BLOCKED]), _row(source_type, "app-record-1")) == NOTE
+
+
+@pytest.mark.parametrize("source_type", ["chronology_event", "project_event"])
+def test_a_manual_event_is_not_governed_by_document_authority(source_type: str) -> None:
+    """Event types are per-record: a MANUAL event (no source_document_id) is
+    independent and must not be suppressed by an unrelated blocked document."""
+    manual_event = {"_id": "app-record-1", "description": "Counsel's own note"}
+    # Each event type is resolved against the collection it is actually stored
+    # in: chronology events in matter_chronology_events, project events in
+    # project_events.
+    collection = "project_events" if source_type == "project_event" else "matter_chronology_events"
+    db = _DB(**{collection: [manual_event]}, documents=[BLOCKED])
+
+    assert _text(db, _row(source_type, "app-record-1")) == NOTE
 
 
 def test_an_application_record_needs_no_lookup_at_all() -> None:

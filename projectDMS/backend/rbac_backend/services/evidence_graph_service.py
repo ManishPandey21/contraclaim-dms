@@ -95,7 +95,12 @@ class EvidenceGraphService:
 
     async def get_project_event(self, event_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
-        return await db.project_events.find_one({"_id": event_id})
+        record = await db.project_events.find_one({"_id": event_id})
+        if not record:
+            return None
+        from .publication_policy import safe_event_records
+
+        return (await safe_event_records(db, [record], ("description", "title"), dict_fields=("metadata",)))[0]
 
     async def list_project_events(
         self,
@@ -140,7 +145,9 @@ class EvidenceGraphService:
                 range_query["$lte"] = date_to
             query["event_date"] = range_query
         cursor = db.project_events.find(query).sort("event_date", -1).skip(skip).limit(limit)
-        return await _collect_cursor(cursor)
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(db, await _collect_cursor(cursor), ("description", "title"), dict_fields=("metadata",))
 
     async def create_ai_extraction(self, payload: AIExtractionCreate, current_user: Any = None) -> Dict[str, Any]:
         db = await self._get_db()
@@ -294,7 +301,14 @@ class EvidenceGraphService:
         query = dict(scope_filter or {})
         query["link_group_id"] = link_group_id
         cursor = db.event_links.find(query).sort("revision", 1)
-        return await _collect_cursor(cursor)
+        # Same gate as `list_links`: a link whose document target is blocked must
+        # not serve that document's evidence_text/source_spans, even on the
+        # history/audit surface.
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(
+            db, await _collect_cursor(cursor), ("evidence_text",), span_fields=("source_spans",)
+        )
 
     async def list_links(
         self,
@@ -323,6 +337,9 @@ class EvidenceGraphService:
             query["target_id"] = target_id
         cursor = db.event_links.find(query).sort("created_at", -1).skip(skip).limit(limit)
         links = await _collect_cursor(cursor)
+        from .publication_policy import safe_event_records
+
+        links = await safe_event_records(db, links, ("evidence_text",), span_fields=("source_spans",))
         if not latest_only:
             return links
         return self._latest_by_group(links)

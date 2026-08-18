@@ -103,6 +103,26 @@ def stable_generation_input_hash(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _logical_source_identity(row: Dict[str, Any]) -> tuple:
+    """The stable identity of a ledger source, independent of its revision.
+
+    Type and id say WHICH source; the matrix row says which selection of it,
+    because two document-index rows can legitimately cite the same document and
+    collapsing them would silently drop evidence.
+
+    Deliberately excludes `source_hash`, `snippet`, `verification_status` and
+    `authority_denied` - those are mutable state ABOUT this identity, and
+    treating them as part of it is what let a stale authorised row survive
+    beside its own blocked replacement.
+    """
+    metadata = row.get("metadata") or {}
+    return (
+        str(row.get("source_type") or ""),
+        str(row.get("source_id") or ""),
+        str(metadata.get("matrix_row_id") or row.get("matrix_row_id") or ""),
+    )
+
+
 def immutable_version_hash(version: Dict[str, Any]) -> str:
     payload = {
         "draft_id": version.get("draft_id"),
@@ -971,23 +991,40 @@ class ArbitrationDraftingService:
         current_ledger: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         merged = [dict(row) for row in parent_ledger or []]
-        seen = {
-            (str(row.get("source_type") or ""), str(row.get("source_id") or ""), str(row.get("source_hash") or ""))
-            for row in merged
-        }
+        by_identity = {_logical_source_identity(row): index for index, row in enumerate(merged)}
         next_number = max(
             [int(str(row.get("source_key") or "S0")[1:]) for row in merged if str(row.get("source_key") or "").startswith("S") and str(row.get("source_key"))[1:].isdigit()]
             or [0]
         ) + 1
         for row in current_ledger or []:
-            key = (str(row.get("source_type") or ""), str(row.get("source_id") or ""), str(row.get("source_hash") or ""))
-            if key in seen:
+            identity = _logical_source_identity(row)
+            existing = by_identity.get(identity)
+            if existing is not None:
+                # SUPERSEDE. The current build is the only statement about this
+                # source that reflects present authority, so it replaces the
+                # stored one wholesale - snippet, quality flags, authority_denied
+                # and hash together.
+                #
+                # `source_hash` used to be part of the dedupe key, and it is
+                # computed over the whole row including the snippet and
+                # verification status. So a document moving to human review
+                # changed the hash, missed the match, and the DENIED row was
+                # appended beside the stale AUTHORISED one - which
+                # `generator._facts()` then read straight into the Factual
+                # Background. A fingerprint is a revision, not an identity.
+                #
+                # The parent's `source_key` is kept: `[S3]` may be cited in a
+                # section that is not being regenerated, and renumbering or
+                # dropping the row would dangle that citation.
+                superseded = dict(row)
+                superseded["source_key"] = merged[existing].get("source_key")
+                merged[existing] = superseded
                 continue
             appended = dict(row)
             appended["source_key"] = f"S{next_number}"
             next_number += 1
+            by_identity[identity] = len(merged)
             merged.append(appended)
-            seen.add(key)
         return merged
 
     def _merge_regenerated_section(

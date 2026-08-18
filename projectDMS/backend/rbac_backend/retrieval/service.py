@@ -1636,35 +1636,14 @@ class RetrievalService:
         behaviour. This set contains only documents we positively resolved and
         positively judged unusable.
         """
-        ids = [doc_id for doc_id in document_ids if doc_id]
-        if not ids:
-            return set()
+        # One shared authority-aware retrieval filter, so this stack and
+        # ContractService.search_contracts cannot drift apart again - a divergence
+        # between them is exactly how blocked contract clauses reached drafting.
+        # `db=None` (degraded-mode Qdrant-outage failsafe tests) yields an empty
+        # set rather than an AttributeError, preserving the fallback.
+        from ..services.publication_policy import blocked_document_ids
 
-        # No document store to consult. Not a production path - `db` is a
-        # required dependency and `_fetch_documents_meta` would fail on the same
-        # attribute - but the degraded-mode failsafe tests construct the service
-        # with db=None, and turning that into an AttributeError would break the
-        # Qdrant-outage fallback rather than contain anything.
-        if getattr(self, "db", None) is None:
-            return set()
-
-        query_ids: List[Any] = []
-        for doc_id in ids:
-            query_ids.append(doc_id)
-            try:
-                from bson import ObjectId
-
-                query_ids.append(ObjectId(str(doc_id)))
-            except Exception:
-                pass
-
-        blocked: set = set()
-        cursor = self.db.documents.find({"_id": {"$in": query_ids}})
-        async for doc in cursor:
-            doc_id = str(doc.get("_id") or doc.get("id"))
-            if doc_id and not is_consumable(doc):
-                blocked.add(doc_id)
-        return blocked
+        return await blocked_document_ids(getattr(self, "db", None), document_ids)
 
     async def _fetch_documents_meta(self, document_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         ids = [doc_id for doc_id in document_ids if doc_id]

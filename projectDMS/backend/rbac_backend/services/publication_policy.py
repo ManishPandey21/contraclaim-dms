@@ -23,6 +23,7 @@ second source of truth.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Tuple
 
@@ -381,6 +382,40 @@ def document_id_candidates(document_id: Any) -> list:
     return candidates
 
 
+async def blocked_document_ids(db: Any, document_ids: Any) -> set:
+    """The document ids in this set whose canonical record is NOT consumable.
+
+    ONE authority-aware retrieval filter, shared by every retrieval stack.
+    `RetrievalService.search` had this logic; `ContractService.search_contracts`
+    was a second, parallel implementation that never resolved authority at all,
+    so a blocked or quarantined contract's clause text reached the drafting
+    prompt, the pleading and the public API. Two services implementing the same
+    containment differently is the defect; the cure is that they share the
+    filter, not that each remembers to call `is_consumable`.
+
+    Returns only ids POSITIVELY resolved and POSITIVELY judged unusable. An id
+    absent from Mongo entirely is an orphaned point - a different problem -
+    and is deliberately not returned, so this cannot silently swallow unrelated
+    rows. Logical denial, not physical purge: a stale vector or clause left
+    behind by a best-effort delete is contained here regardless.
+    """
+    ids = [str(doc_id) for doc_id in (document_ids or []) if doc_id]
+    if not ids or getattr(db, "documents", None) is None:
+        return set()
+
+    query_ids: list = []
+    for doc_id in ids:
+        query_ids.extend(document_id_candidates(doc_id))
+
+    blocked: set = set()
+    cursor = db.documents.find({"_id": {"$in": query_ids}})
+    async for doc in cursor:
+        resolved = str(doc.get("_id") or doc.get("id") or "")
+        if resolved and not is_consumable(doc):
+            blocked.add(resolved)
+    return blocked
+
+
 async def resolve_canonical_document(db: Any, document_id: Any):
     """The one place that turns an identifier into the canonical document.
 
@@ -458,14 +493,204 @@ DERIVED_SOURCE_COLLECTIONS: Mapping[str, Tuple[str, ...]] = {
     "payment_event": ("ipc_bills",),
     "bank_guarantee": ("bank_guarantees",),
     "chronology_event": ("matter_chronology_events",),
-    "project_event": ("matter_chronology_events",),
-    "event_link": ("evidence_event_links",),
+    "project_event": ("project_events",),
+    "event_link": ("event_links",),
     "delay_event": ("matter_chronology_events",),
     "key_date": ("key_dates",),
     "programme_milestone": ("key_dates",),
     "issue_matrix": ("arbitration_issue_matrix",),
     "jurisdiction_check": ("arbitration_jurisdiction_matrix",),
 }
+
+#: Identifiers the application MINTS for content it authored itself, which
+#: therefore name no stored record at all.
+#:
+#: The arbitration agreement is the case in point: when a case has no scoped
+#: contract clauses, the clause agent synthesises one matrix row from
+#: `arbitration_cases.arbitration_clause` - text a user typed onto the case -
+#: under this identifier. Resolving it as a clause child id finds nothing and
+#: denies, which withholds the jurisdictional basis of the pleading. Document
+#: publication authority has nothing to say about it: there is no extraction.
+#:
+#: The pattern is anchored deliberately. A `startswith("case:")` test would let
+#: any id beginning with that prefix opt out of authority entirely.
+_SYNTHETIC_SOURCE_ID = re.compile(r"^case:[^:]+:arbitration_clause$")
+
+#: Source types that are user/application authored and name no extracted
+#: document - so document publication authority does not apply to them and
+#: denying them would over-block legitimate content. `manual_fact` is prose the
+#: user typed into a working draft.
+INDEPENDENT_APPLICATION_TYPES = frozenset({"manual_fact"})
+
+#: Event families whose PROVENANCE decides authority, per record rather than per
+#: type. A chronology/project/delay event or an evidence link may carry span
+#: text lifted from a document (writer stamps `source_document_id`, or
+#: `source_entity_type=document` + `source_entity_id`), or it may be a manual
+#: entry with no document behind it. The coarse type test cannot tell them
+#: apart, so the record must be loaded and its provenance read.
+EVENT_PROVENANCE_TYPES: Mapping[str, str] = {
+    "chronology_event": "matter_chronology_events",
+    "project_event": "project_events",
+    "delay_event": "matter_chronology_events",
+    "event_link": "event_links",
+}
+
+
+#: Per matrix slug: (source_type, id-field-in-row, derived-fields-to-withhold).
+#: Only these three slugs carry text lifted from a document; the rest hold
+#: matrix-authored application content (facts, findings, claim heads) that
+#: document publication authority does not govern.
+MATRIX_DERIVATIVE_FIELDS: Mapping[str, Tuple[str, str, Tuple[str, ...]]] = {
+    "document-index": ("document", "source_id", ("relevance_note", "summary", "document_type")),
+    "clause-matrix": ("clause", "clause_source_id", ("clause_text_excerpt",)),
+    "chronology-matrix": ("chronology_event", "chronology_event_id", ("event",)),
+}
+
+
+async def safe_matrix_rows(db: Any, rows: Any, matrix_slug: str) -> list:
+    """Withhold a matrix row's derived fields when its source is not publishable.
+
+    ONE projection for the matrix publication boundary. The internal agent read
+    (`_authorised_matrix_rows`) already gates these; the API read
+    (`GET /cases/{id}/{matrix_slug}` -> `list_matrix_rows`) did not, so a blocked
+    document's `relevance_note`/`summary`/`clause_text_excerpt`/`event` was
+    serialized raw. Both must agree on eligibility.
+
+    Resolution reuses the same per-record authority resolver as the ledger, so a
+    matrix row cannot disagree with a ledger row about the same source. A slug
+    that carries no document-derived field is returned unchanged - application
+    content is not over-blocked. A copy is returned; storage is never mutated.
+    """
+    config = MATRIX_DERIVATIVE_FIELDS.get(matrix_slug)
+    if not config:
+        return [dict(row) for row in (rows or [])]
+    source_type, id_field, derivative_fields = config
+    resolved: list = []
+    cache: Dict[str, bool] = {}
+    for record in rows or []:
+        row = dict(record)
+        source_id = row.get(id_field) or row.get("source_id")
+        key = f"{source_type}:{source_id}"
+        if key not in cache:
+            try:
+                cache[key] = (await resolve_derived_authority(db, source_type, source_id)).consumable
+            except Exception:
+                cache[key] = False
+        if not cache[key]:
+            # Carry the decision, not just the redaction: evidence-status and
+            # readiness consumers must be able to see that this row's source is
+            # blocked, or a content-blanked row still counts as supported.
+            row["authority_denied"] = True
+            for field in derivative_fields:
+                if field in row:
+                    row[field] = ""
+        resolved.append(row)
+    return resolved
+
+
+async def safe_event_records(
+    db: Any,
+    records: Any,
+    derivative_fields: Tuple[str, ...],
+    *,
+    span_fields: Tuple[str, ...] = (),
+    dict_fields: Tuple[str, ...] = (),
+) -> list:
+    """Withhold document-derived fields on event records the source now blocks.
+
+    ONE projection for every event-serving consumer - the API routes, the
+    timeline, the chronology export - instead of authority logic copied into
+    each. The provenance resolver is already correct; the leak was that these
+    read paths returned raw Mongo dicts.
+
+    Independent metadata (dates, parties, ids, status) is always preserved: a
+    blocked document must stay identifiable, and a manual event that shares the
+    collection must be untouched. Only the named derivative fields - text lifted
+    from or classified out of the document body - are blanked, and only when the
+    record's originating document is currently non-consumable.
+
+    A copy is returned; the stored record is never mutated. Physical staleness
+    is fine - logical publishability is what this governs.
+    """
+    resolved: list = []
+    cache: Dict[str, bool] = {}
+    for record in records or []:
+        row = dict(record)
+        parent = event_document_provenance(row)
+        if parent is None:
+            # A document-ingest suggested link carries no direct provenance; its
+            # document is reachable only through the project_event it points at
+            # (`evidence_graph_service.py:823`). Make that one hop, or the whole
+            # class of metadata links leaks blocked evidence_text/spans.
+            for id_field, type_field in (("source_id", "source_type"), ("target_id", "target_type")):
+                if str(row.get(type_field) or "").lower() == "project_event" and row.get(id_field):
+                    try:
+                        event = await _find_by_id(db, "project_events", row.get(id_field))
+                    except Exception:
+                        event = None
+                    if event:
+                        parent = event_document_provenance(event)
+                        if parent:
+                            break
+        if parent:
+            key = str(parent)
+            if key not in cache:
+                try:
+                    cache[key] = (await resolve_document_authority(db, parent)).consumable
+                except Exception:
+                    cache[key] = False  # fail closed on resolution error
+            if not cache[key]:
+                for field in derivative_fields:
+                    if field in row:
+                        row[field] = ""
+                for field in dict_fields:
+                    # For a document-derived event the whole metadata dict is
+                    # populated from the extraction (`evidence_graph_service.py:783`),
+                    # so blank it to an empty dict of the same type - never leave
+                    # a stray key, never break consumers expecting a mapping.
+                    if isinstance(row.get(field), dict):
+                        row[field] = {}
+                for field in span_fields:
+                    spans = row.get(field)
+                    if isinstance(spans, list):
+                        row[field] = [
+                            {k: ("" if str(k).lower() in {"text", "excerpt", "snippet"} else v)
+                             for k, v in (span or {}).items()}
+                            if isinstance(span, dict) else span
+                            for span in spans
+                        ]
+        resolved.append(row)
+    return resolved
+
+
+def event_document_provenance(record: Mapping[str, Any]) -> Optional[str]:
+    """The originating document id of an event record, or None if manual.
+
+    Two shapes exist and both are read from the actual writers:
+    `source_document_id` (chronology/project events, `chronology.py:530`,
+    `evidence_graph_service.py:149`) and `source_entity_type=document` with
+    `source_entity_id` (event links, `evidence_graph_service.py:737`).
+    """
+    direct = record.get("source_document_id") or record.get("document_id")
+    if direct:
+        return str(direct)
+    # project_events name the document via source_entity_*; event_links via
+    # target_* (`evidence_graph_service.py:744`, arbitration `_link_source_document_id`).
+    for type_field, id_field in (("source_entity_type", "source_entity_id"), ("target_type", "target_id")):
+        if str(record.get(type_field) or "").lower() == "document" and record.get(id_field):
+            return str(record.get(id_field))
+    return None
+
+
+def synthetic_case_clause_id(case_id: Any) -> str:
+    """Mint the synthetic arbitration-agreement identifier for a case.
+
+    Shared with the writer so the two cannot drift: if the writer's format
+    changed, the exemption below would silently stop matching and the
+    arbitration agreement would vanish from drafting again.
+    """
+    return f"case:{case_id}:arbitration_clause"
+
 
 #: Collections whose rows ARE the canonical document.
 CANONICAL_DOCUMENT_COLLECTIONS = frozenset({"documents"})
@@ -503,6 +728,49 @@ async def resolve_derived_authority(
       resolves to nothing. Denied, because nothing proves it is safe.
     """
     resolved_type = str(source_type or "document")
+    if resolved_type in INDEPENDENT_APPLICATION_TYPES:
+        # User-authored prose that names no server record at all (manual_fact).
+        # Document publication authority has no jurisdiction; RBAC governs it.
+        return AuthorityDecision(
+            document_id=source_id,
+            consumable=True,
+            reason="independent_application_record",
+        )
+    if isinstance(source_id, str) and _SYNTHETIC_SOURCE_ID.match(source_id):
+        # Application-authored content under a minted identifier. There is no
+        # extraction behind it, so there is no authority to resolve.
+        return AuthorityDecision(
+            document_id=source_id,
+            consumable=True,
+            reason="application_generated_source",
+        )
+    if resolved_type in EVENT_PROVENANCE_TYPES:
+        # Per-record provenance: load the event, read where it came from.
+        if not source_id:
+            return AuthorityDecision(
+                document_id=source_id, consumable=False, reason="no_source_id"
+            )
+        try:
+            record = await _find_by_id(db, EVENT_PROVENANCE_TYPES[resolved_type], source_id)
+        except Exception:
+            return AuthorityDecision(
+                document_id=source_id, consumable=False, reason="resolution_error"
+            )
+        if record is None:
+            # The id names no event. For authority-controlled derivative content
+            # we cannot prove it is safe, so fail closed.
+            return AuthorityDecision(
+                document_id=source_id, consumable=False, reason="event_not_found"
+            )
+        parent = event_document_provenance(record)
+        if not parent:
+            # Manual/application event - no document behind it.
+            return AuthorityDecision(
+                document_id=source_id,
+                consumable=True,
+                reason="independent_application_record",
+            )
+        return await resolve_document_authority(db, parent)
     if not _is_document_governed(resolved_type):
         return AuthorityDecision(
             document_id=source_id, consumable=True, reason="independent_application_record"

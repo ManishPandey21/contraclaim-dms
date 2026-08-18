@@ -149,12 +149,24 @@ def test_a_non_document_source_type_is_not_resolved_as_a_document() -> None:
 
 @pytest.mark.parametrize(
     "source_type",
-    ["chronology_event", "bank_guarantee", "variation", "payment_event"],
+    ["bank_guarantee", "variation", "payment_event"],
 )
 def test_independent_record_types_are_not_document_gated(source_type: str) -> None:
     row = {"source_type": source_type, "source_id": "x-1", "relevance_note": NOTE}
 
     assert _derived([], row) == NOTE
+
+
+def test_event_types_are_per_record_not_unconditionally_independent() -> None:
+    """`chronology_event` was in the list above, which was the Class B bug.
+
+    An event id that names no event record can no longer be waved through as
+    independent - it fails closed. Manual/document provenance is decided per
+    record; see test_event_provenance_authority.py.
+    """
+    row = {"source_type": "chronology_event", "source_id": "x-1", "relevance_note": NOTE}
+
+    assert _derived([], row) == ""
 
 
 def test_letter_is_not_an_independent_record_type() -> None:

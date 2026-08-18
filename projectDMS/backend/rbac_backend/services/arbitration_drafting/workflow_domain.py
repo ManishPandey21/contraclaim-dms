@@ -83,6 +83,9 @@ DERIVED_ANALYSIS_FIELDS = {
     "relevance_note": (None, None),
     "summary": (None, None),
     "clause_text_excerpt": ("clause", "clause_source_id"),
+    # `f"{title}. {description}"` composed from the source document's extracted
+    # span by the chronology adapter, so it is document text under another name.
+    "event": (None, "source_document_id"),
 }
 
 
@@ -168,7 +171,27 @@ def _source_revision_ids(row: Dict[str, Any]) -> List[str]:
     return sorted(revisions)
 
 
+def _row_satisfies_requirement(row: Dict[str, Any]) -> bool:
+    """Whether a matrix row counts toward the required-matrix presence gate.
+
+    Approval is necessary but not sufficient: a row whose source authority was
+    refused (stamped `authority_denied` by `safe_matrix_rows`) must not satisfy a
+    requirement, or the `matrix_review` gate advances the pleading on the
+    strength of a source nobody may consume - influence, not disclosure, since
+    the derived text is already blanked but the row's PRESENCE is what the gate
+    reads.
+    """
+    return _is_ready_row(row) and not row.get("authority_denied")
+
+
 def _evidence_status(row: Dict[str, Any], source_revision_ids: Sequence[str]) -> str:
+    # A row whose source authority was refused cannot count as supported
+    # evidence, no matter how complete or approved it looks - counting it would
+    # improve readiness and legal completeness on the strength of a document
+    # nobody may consume. The decision is carried on the row by the matrix
+    # projection (`safe_matrix_rows`), not re-inferred here.
+    if row.get("authority_denied"):
+        return "authority_denied"
     if not source_revision_ids:
         return "missing"
     if not _is_ready_row(row) or any(str(value).endswith("@unversioned") for value in source_revision_ids):
@@ -624,7 +647,7 @@ class ArbitrationWorkflowDomain:
         required = PLEADING_MATRIX_REQUIREMENTS.get(pleading_type, ())
         blockers = [
             {"code": "missing_required_matrix", "matrix": slug, "message": f"No approved {slug} row is available"}
-            for slug in required if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
+            for slug in required if not any(_row_satisfies_requirement(row) for row in rows_by_matrix.get(slug) or [])
         ]
         opponent_snapshot = context.get("opponent_snapshot")
         if OPPONENT_REQUIREMENTS.get(pleading_type):
@@ -741,13 +764,17 @@ class ArbitrationWorkflowDomain:
                 "message": f"No approved {slug} row is available",
             }
             for slug in required
-            if not any(_is_ready_row(row) for row in rows_by_matrix.get(slug) or [])
+            if not any(_row_satisfies_requirement(row) for row in rows_by_matrix.get(slug) or [])
         ]
         return {**merged, "blockers": blockers}
 
     async def build_plan(self, run: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         case_id = str(run["case_id"])
-        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) if _is_ready_row(row)] for slug in MATRIX_COLLECTIONS}
+        # `_row_satisfies_requirement`, not bare `_is_ready_row`: the plan's
+        # provenance map must not list a source whose authority was refused, so
+        # the same authority-aware predicate the required-matrix gate uses
+        # governs which rows enter the plan.
+        rows = {slug: [row for row in await self.cases.list_matrix_rows(case_id, slug, draft_id=run.get("draft_id")) if _row_satisfies_requirement(row)] for slug in MATRIX_COLLECTIONS}
         structure = {
             "statement_of_claim": ["introduction", "jurisdiction", "facts", "claims", "quantum", "relief"],
             "statement_of_defence": ["introduction", "preliminary_objections", "paragraph_responses", "defences", "quantum", "relief"],

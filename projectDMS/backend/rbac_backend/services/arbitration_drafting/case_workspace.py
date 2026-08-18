@@ -231,7 +231,7 @@ def _date_sort_value(row: Dict[str, Any]) -> str:
     return str(value)
 
 
-from ..publication_policy import consumable_derived_text
+from ..publication_policy import consumable_derived_text, resolve_derived_authority
 
 
 class ArbitrationCaseWorkspaceService:
@@ -334,7 +334,13 @@ class ArbitrationCaseWorkspaceService:
         rows = await _collect(self._collection(matrix_slug).find(query).sort("created_at", 1))
         if matrix_slug == "document-index":
             rows.sort(key=lambda row: (str(row.get("exhibit_prefix") or ""), int(row.get("exhibit_number") or 0), _date_sort_value(row)))
-        return rows
+        # Publication boundary: this is the API read path and it wraps each row
+        # in ArbitrationMatrixRow(**row) (extra="allow"), so a blocked document's
+        # derived fields would serialize raw. One shared projection, the same
+        # authority resolver as the internal agent read - they must agree.
+        from ..publication_policy import safe_matrix_rows
+
+        return await safe_matrix_rows(self.db, rows, matrix_slug)
 
     async def create_matrix_row(
         self,
@@ -740,7 +746,7 @@ class ArbitrationCaseWorkspaceService:
             draft = await self.draft_repo.get_draft(draft_id)
             draft_type = (draft or {}).get("draft_type")
         rows = {slug: await self.list_matrix_rows(case_id, slug) for slug in MATRIX_COLLECTIONS}
-        checks = self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
+        checks = await self._compute_readiness_checks(case, rows, draft_id=draft_id, draft_type=draft_type)
         evidence_manifest = await self._authoritative_evidence_manifest(case, rows)
         unresolved_sources = [item for item in evidence_manifest if item.get("resolution_status") != "resolved"]
         if unresolved_sources:
@@ -2270,7 +2276,7 @@ class ArbitrationCaseWorkspaceService:
         completed = {str(role).lower() for role in row.get("review_completed_roles") or [] if role}
         return bool(required and not required.issubset(completed))
 
-    def _compute_readiness_checks(
+    async def _compute_readiness_checks(
         self,
         case: Dict[str, Any],
         rows: Dict[str, List[Dict[str, Any]]],
@@ -2278,6 +2284,14 @@ class ArbitrationCaseWorkspaceService:
         draft_id: Optional[str] = None,
         draft_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """Async because readiness is an authority question, not only an approval one.
+
+        Approval says a human looked at the matrix row. It says nothing about
+        whether the extraction underneath it is still trusted, and readiness is
+        the gate that authorises filing - so a document rejected by the quality
+        gate after approval was still counted as filing-ready evidence. Nothing
+        is displayed on this path, which is why every text-side guard missed it.
+        """
         checks: List[Dict[str, Any]] = []
 
         def add(check_key: str, check_group: str, check_status: ReadinessCheckStatus, message: str, row_id: Optional[str] = None) -> None:
@@ -2298,7 +2312,14 @@ class ArbitrationCaseWorkspaceService:
         usable_documents = [
             row
             for row in document_rows
-            if row.get("source_id") and row.get("exhibit_id") and _is_ready_row(row)
+            if row.get("source_id")
+            and row.get("exhibit_id")
+            and _is_ready_row(row)
+            and (
+                await resolve_derived_authority(
+                    self.db, row.get("source_type"), row.get("source_id")
+                )
+            ).consumable
         ]
         add(
             "document_index_verified",
@@ -2318,7 +2339,15 @@ class ArbitrationCaseWorkspaceService:
 
         clause_rows = rows.get("clause-matrix") or []
         usable_clauses = [
-            row for row in clause_rows if (row.get("clause_number") or row.get("clause_text_excerpt")) and _is_ready_row(row)
+            row
+            for row in clause_rows
+            if (row.get("clause_number") or row.get("clause_text_excerpt"))
+            and _is_ready_row(row)
+            and (
+                await resolve_derived_authority(
+                    self.db, "clause", row.get("clause_source_id")
+                )
+            ).consumable
         ]
         add(
             "clause_support",

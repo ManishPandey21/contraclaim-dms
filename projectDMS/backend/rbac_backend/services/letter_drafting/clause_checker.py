@@ -104,10 +104,25 @@ class ClauseCheckingAgent:
                     "is_authorised_for_ai": True,
                 }
             ).limit(400)
-            return [doc async for doc in cursor]
+            records = [doc async for doc in cursor]
         except Exception as exc:
             logger.warning("clause check: record load failed: %s", exc)
             return []
+
+        # `is_authorised_for_ai` is a clause-level flag fixed at index time from
+        # clause confidence; it is never revisited when the PARENT document's
+        # authority later becomes adverse, and contract_clauses carries no
+        # processing_status of its own. Resolve the canonical document through
+        # the one shared retrieval filter - the sibling _clause_record_sources
+        # path was already gated, and this checker must match it.
+        from ..publication_policy import blocked_document_ids
+
+        blocked = await blocked_document_ids(
+            self.db, [record.get("document_id") for record in records]
+        )
+        if blocked:
+            records = [r for r in records if str(r.get("document_id") or "") not in blocked]
+        return records
 
     def _evaluate(
         self,

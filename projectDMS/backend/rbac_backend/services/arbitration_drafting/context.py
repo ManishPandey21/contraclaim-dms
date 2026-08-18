@@ -156,7 +156,116 @@ from ..publication_policy import (
     consumable_derived_text,
     document_id_candidates,
     is_consumable,
+    resolve_derived_authority,
     resolve_document_authority,
+)
+
+
+#: Fields the reference hydrator computes for SAFETY rather than for display.
+#:
+#: `_ledger_row` rebuilds the ledger row from a fixed key literal, so a field
+#: that is not copied across simply ceases to exist - and a downstream guard on
+#: it becomes unreachable without any error. That is how `authority_denied`
+#: spent its whole life as dead code while looking like an implemented control.
+#:
+#: A test asserts every name here survives construction, so adding a safety
+#: field without wiring it through fails the build instead of going quiet.
+LEDGER_SAFETY_FIELDS = ("authority_denied",)
+
+#: Chronology fields that are RECORDED ABOUT a document rather than EXTRACTED
+#: FROM it, so publication authority does not reach them. Dates, parties, page
+#: numbers, letter numbers, classifications and ids keep a withheld event
+#: identifiable and reviewable; without them a blocked row is unciteable.
+#:
+#: Deliberately an allowlist. `metadata["event"]` used to be `{**row, **event}`,
+#: which re-published the very span the label and snippet had just withheld -
+#: and a denylist over that spread would fail open the moment a writer added a
+#: field. Extracted text (`event`, `title`, `description`, `source_spans`) is
+#: absent here on purpose and re-added only after an authority decision.
+SAFE_EVENT_METADATA_FIELDS = (
+    "date",
+    "document_ref",
+    "party_responsible",
+    "clause",
+    "issue_link",
+    "claim_link",
+    "pleading_use",
+    "chronology_id",
+    "chronology_event_id",
+    "evidence",
+)
+
+#: The same rule for fields copied off the chronology event itself.
+SAFE_CHRONOLOGY_EVENT_FIELDS = (
+    "event_date",
+    "date_text",
+    "date_type",
+    "source_document_id",
+    "source_document_name",
+    "source_page",
+    "letter_no",
+    "from_party",
+    "to_party",
+    "contract_clauses",
+    "issue_tags",
+    "claim_heads",
+    "event_classification",
+    "impact_type",
+    "confidence_score",
+    "verification_status",
+    "pleading_use",
+    "related_document_ids",
+)
+
+
+def _safe_event_metadata(
+    row: Dict[str, Any],
+    event: Optional[Dict[str, Any]],
+    gated_event: Any,
+    gated_description: Any,
+) -> Dict[str, Any]:
+    """Construct the published event metadata; never filter a raw spread.
+
+    The two text fields are re-admitted only in the form the authority check
+    already returned, so this cannot disagree with the label and snippet built
+    from the same decision a few lines above.
+    """
+    metadata: Dict[str, Any] = {
+        key: row.get(key) for key in SAFE_EVENT_METADATA_FIELDS if row.get(key) not in (None, "")
+    }
+    for key in SAFE_CHRONOLOGY_EVENT_FIELDS:
+        value = (event or {}).get(key)
+        if value not in (None, "", []):
+            metadata[f"event_{key}"] = value
+    if gated_event:
+        metadata["event"] = gated_event
+    if gated_description:
+        metadata["event_description"] = gated_description
+    manual_notes = (event or {}).get("manual_notes")
+    if manual_notes:
+        # Authored by counsel, not extracted - authority has no jurisdiction.
+        metadata["event_manual_notes"] = manual_notes
+    return metadata
+
+#: Every flag `_annotate_source_quality` can emit.
+#:
+#: Exported because the filing gate has to decide which of these block a filing,
+#: and it must decide over the REAL vocabulary. It previously restated its own
+#: set - `manual_or_unverified`, `source_drift`, `stale` - none of which any
+#: code produces, so the only per-source safety branch in the filing gate was
+#: dead. Deriving the gate's set from this one means a new flag cannot be
+#: invented without a filing decision being made.
+PRODUCIBLE_QUALITY_FLAGS = frozenset(
+    {
+        "missing_citation",
+        "missing_snippet",
+        "authority_denied",
+        "missing_exhibit_id",
+        "missing_source_link",
+        "not_verified_for_filing",
+        "user_supplied",
+        "unverified_ai_suggestion",
+    }
 )
 
 
@@ -195,7 +304,7 @@ class ArbitrationContextBuilder:
             )
         )
         source_ledger = self._dedupe(source_ledger)
-        self._annotate_source_quality(source_ledger, context_warnings)
+        await self._annotate_source_quality(source_ledger, context_warnings)
         matrix_context = self._matrix_context(source_ledger)
         self._expert_consistency_warnings(matrix_context, context_warnings)
         missing = self._missing_evidence(draft, source_ledger, claim_heads, paragraph_responses)
@@ -375,7 +484,7 @@ class ArbitrationContextBuilder:
             "payment_event": ("ipc_bills",),
             "bank_guarantee": ("bank_guarantees",),
             "chronology_event": ("matter_chronology_events",),
-            "project_event": ("matter_chronology_events",),
+            "project_event": ("project_events",),
             "expert_report": ("documents",),
         }.get(source_type, ())
         for collection_name in collection_names:
@@ -438,12 +547,31 @@ class ArbitrationContextBuilder:
             elif collection_name == "documents":
                 # Already the canonical document.
                 decision_ok = is_consumable(record)
+            elif record.get("source_document_id"):
+                # A chronology event is only an application record when a human
+                # wrote it. `ChronologySuggestionService` lifts `description`
+                # straight out of a document's extracted span
+                # (`chronology.py:530`) and records `source_document_id`
+                # alongside it - so an event WITH that pointer is a document
+                # derivative, and the snippet chain below reaches
+                # `record["description"]`. Lumping it in with claims and
+                # variations meant the one path in this file that was never
+                # converted handed the span back verbatim.
+                #
+                # Keyed on the provenance field the writer actually sets, not on
+                # source_type: a manual event has no such pointer and stays
+                # application content, which is why this is not a blanket gate.
+                decision_ok = (
+                    await resolve_document_authority(
+                        self.db, record.get("source_document_id")
+                    )
+                ).consumable
             else:
                 # Independent application records (letters, claims, variations,
-                # chronology events). They are not extraction-controlled
-                # document content and carry their own approval gate via
-                # _is_verified_source, so the document-authority model does not
-                # apply to them.
+                # manually authored chronology events). They are not
+                # extraction-controlled document content and carry their own
+                # approval gate via _is_verified_source, so the
+                # document-authority model does not apply to them.
                 decision_ok = True
 
             authority_denied = not decision_ok
@@ -480,6 +608,16 @@ class ArbitrationContextBuilder:
         return None
 
     def _ledger_row(self, ref: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        """Project a hydrated reference onto the ledger schema.
+
+        This is a fixed-key rebuild, which is why it needs
+        `LEDGER_SAFETY_FIELDS`: anything the hydrator computes that is not
+        named in the literal below is dropped here, silently, and every
+        downstream check on it becomes dead code. `authority_denied` was
+        exactly that - computed at `_rehydrate_direct_reference`, dropped
+        here, and then tested for in `_annotate_source_quality` where it could
+        never be true.
+        """
         citation = ref.get("citation") or ref.get("clause_number") or ref.get("letter_no") or ref.get("label")
         row = {
             "source_key": f"S{idx}",
@@ -500,6 +638,14 @@ class ArbitrationContextBuilder:
             "metadata": ref.get("metadata") or {},
             "source_hash": "",
         }
+        for field in LEDGER_SAFETY_FIELDS:
+            row[field] = ref.get(field)
+        if row.get("authority_denied"):
+            # The hydrator already collapsed the snippet to the label, so
+            # `missing_snippet` cannot fire. Without this the row still reports
+            # the metadata's "verified" and scores strong, and a blocked
+            # document reaches the drafting prompt as trusted evidence.
+            row["verification_status"] = "authority_denied"
         row["source_hash"] = source_hash(row)
         return row
 
@@ -806,8 +952,28 @@ class ArbitrationContextBuilder:
             if not _is_verified_source(row, include_review_sources=include_review_sources):
                 continue
             event = await self._load_chronology_event(row)
-            event_data = {**row, **{f"event_{key}": value for key, value in (event or {}).items()}}
-            title = row.get("event") or (event or {}).get("title") or "Chronology event"
+            # `row["event"]` is `f"{title}. {description}"` composed by the
+            # adapter from the source document's extracted span, so the LABEL
+            # carries the same text the snippet below is gated on. A label is
+            # not free-standing metadata here: it is displayed, and it is what
+            # counsel picks evidence by.
+            gated_event = await consumable_derived_text(
+                self.db,
+                row,
+                "event",
+                source_id=row.get("source_document_id")
+                or (event or {}).get("source_document_id"),
+            )
+            if gated_event:
+                title = gated_event
+            elif row.get("event"):
+                # Withheld. The event's own `title` is no safer - it is written
+                # by `_title(source_doc, raw_text)` from the same extraction -
+                # so degrade to a static placeholder rather than vanishing: an
+                # unlabelled ledger row cannot be reviewed or cited.
+                title = "Chronology event (source withheld)"
+            else:
+                title = (event or {}).get("title") or "Chronology event"
             citation = row.get("document_ref") or row.get("date") or (event or {}).get("date_text") or (event or {}).get("letter_no") or title
             # `description` is lifted from the source document's extracted text
             # (`chronology.py:530` sets it from span_text), so it is a document
@@ -821,6 +987,7 @@ class ArbitrationContextBuilder:
                 description = await consumable_derived_text(
                     self.db, event, "description"
                 )
+            gated_description = description
             snippet = row.get("impact") or row.get("evidence") or description or (event or {}).get("manual_notes")
             allowed = _allowed_use(row.get("pleading_use") or (event or {}).get("pleading_use"), "chronology")
             ledger_row = {
@@ -849,7 +1016,7 @@ class ArbitrationContextBuilder:
                     "party_responsible": row.get("party_responsible") or (event or {}).get("responsible_party"),
                     "issue_link": row.get("issue_link"),
                     "claim_link": row.get("claim_link"),
-                    "event": event_data,
+                    "event": _safe_event_metadata(row, event, gated_event, gated_description),
                 },
                 "source_hash": "",
             }
@@ -1435,6 +1602,21 @@ class ArbitrationContextBuilder:
             rows.append(row)
         return rows
 
+    async def _link_source_document_id(self, link: Dict[str, Any]) -> Optional[str]:
+        """The document an evidence link's text ultimately came from, if any.
+
+        A document-target link names it outright. A clause-target link carries
+        the same `evidence_text` but points at a clause reference, so it has to
+        go back through the chronology event that produced both.
+        """
+        if str(link.get("target_type") or "") == "document" and link.get("target_id"):
+            return str(link.get("target_id"))
+        event_id = (link.get("metadata") or {}).get("chronology_event_id")
+        if not event_id:
+            return None
+        event = await self._load_chronology_event({"chronology_event_id": event_id})
+        return (event or {}).get("source_document_id")
+
     async def _verified_graph_sources(
         self,
         draft: Dict[str, Any],
@@ -1458,6 +1640,27 @@ class ArbitrationContextBuilder:
             return []
         out: List[Dict[str, Any]] = []
         for idx, link in enumerate(rows[:10], start=offset + 1):
+            # `evidence_text` is the chronology event's `description` copied on
+            # to the link (`chronology.py:713`, `:733`), which is span text
+            # lifted from the source document. Gating it where it was born and
+            # not where it was copied is no gate at all.
+            source_document_id = await self._link_source_document_id(link)
+            evidence_text = (
+                await consumable_derived_text(
+                    self.db,
+                    link,
+                    "evidence_text",
+                    # An evidence link's OWN `source_type` is the graph edge's
+                    # source entity ("project_event"), not the provenance of
+                    # this text. Left to infer, the helper read that field and
+                    # waved the row through as an application record.
+                    source_type="document",
+                    source_id=source_document_id,
+                )
+                if source_document_id
+                # No document behind it - manual evidence, no jurisdiction.
+                else link.get("evidence_text")
+            )
             row = {
                 "source_key": f"S{idx}",
                 "source_id": str(link.get("link_group_id") or link.get("_id")),
@@ -1466,7 +1669,7 @@ class ArbitrationContextBuilder:
                 "permitted_uses": ["chronology", "fact"],
                 "label": f"{link.get('source_type')} {link.get('relation_type')} {link.get('target_type')}",
                 "citation": link.get("relation_type"),
-                "snippet": condense(link.get("evidence_text"), 650),
+                "snippet": condense(evidence_text, 650),
                 "page_numbers": [],
                 "clause_number": None,
                 "letter_no": None,
@@ -1605,19 +1808,34 @@ class ArbitrationContextBuilder:
                     f"Concurrency has not been addressed for delay claim {claim_no}; align the pleading with the delay expert."
                 )
 
-    def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
+    async def _annotate_source_quality(self, rows: List[Dict[str, Any]], context_warnings: List[str]) -> None:
         for row in rows:
             flags: List[str] = list(row.get("quality_flags") or [])
             if not row.get("citation"):
                 flags.append("missing_citation")
             if not row.get("snippet"):
                 flags.append("missing_snippet")
-            # An authority-denied source keeps a non-empty label as its snippet,
-            # so `missing_snippet` never fires and the row was reported
-            # verified/strong while carrying no supporting content. Source
-            # exists, authority accepted, and content available are three
-            # different things.
-            if row.get("authority_denied"):
+            # Authority is RE-RESOLVED here, centrally, from the row's own
+            # provenance - not trusted from a flag the builder may or may not
+            # have set. `authority_denied` was written by exactly one of the
+            # ledger builders; the rest gated their snippet and dropped the
+            # decision, so this check was dead for them and a blocked document
+            # scored strong/verified. Deriving the decision from source_type +
+            # source_id means a builder cannot emit a document-governed row that
+            # escapes it. An explicit builder denial is still honoured.
+            denied = bool(row.get("authority_denied"))
+            db = getattr(self, "db", None)
+            if not denied and getattr(db, "documents", None) is not None:
+                decision = await resolve_derived_authority(
+                    db,
+                    row.get("source_type"),
+                    (row.get("metadata") or {}).get("source_document_id") or row.get("source_id"),
+                )
+                denied = not decision.consumable
+            if denied:
+                row["authority_denied"] = True
+                if str(row.get("verification_status") or "") in VERIFIED_SOURCE_STATUSES:
+                    row["verification_status"] = "authority_denied"
                 flags.append("authority_denied")
             if row.get("source_origin") == "case_document_index":
                 metadata = row.get("metadata") or {}

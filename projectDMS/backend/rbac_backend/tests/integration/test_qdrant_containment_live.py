@@ -206,3 +206,109 @@ def test_purging_an_absent_document_is_idempotent(collection) -> None:
             headers=_HEADERS,
         )
         response.raise_for_status()
+
+
+# --- the remaining certification cases, against the real engine ----------------
+#
+# The suite proved physical containment (purge, stale point, idempotence). These
+# four close the LOGICAL half: what a live retrieval is allowed to return once
+# the points are actually there. Each one upserts a real point, searches the
+# real collection, and then applies the production predicate to the hit - so a
+# regression in either layer fails here.
+
+
+def _consumable_hits(requests, name: str, documents: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Live Qdrant hits filtered by the production publication predicate."""
+    from rbac_backend.services.publication_policy import is_consumable
+
+    return [
+        doc_id
+        for doc_id in _search_document_ids(requests, name)
+        if is_consumable(documents.get(doc_id))
+    ]
+
+
+def test_an_operationally_failed_document_still_returns_last_known_good(collection) -> None:
+    """Model B against the real engine: a worker crash is not a verdict."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+    documents = {"docA": {"_id": "docA", "processing_status": "failed"}}
+
+    assert _consumable_hits(requests, name, documents) == ["docA"]
+
+
+def test_a_quarantined_duplicate_is_denied_even_though_its_points_remain(
+    collection,
+) -> None:
+    """Quarantine never touches processing_status, so the vectors survive."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "docA"}}],
+    )
+    documents = {
+        "docA": {
+            "_id": "docA",
+            "processing_status": "metadata_extracted",
+            "duplicate_status": "duplicate",
+        }
+    }
+
+    assert _search_document_ids(requests, name) == ["docA"], "the point is present"
+    assert _consumable_hits(requests, name, documents) == []
+
+
+def test_a_hit_with_no_surviving_source_document_is_denied(collection) -> None:
+    """An orphaned vector outlived its Mongo record; it cannot be authorised."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [{"id": 1, "vector": [0.1, 0.1, 0.1, 0.1], "payload": {"document_id": "ghost"}}],
+    )
+
+    assert _search_document_ids(requests, name) == ["ghost"]
+    assert _consumable_hits(requests, name, {}) == []
+
+
+def test_a_foreign_tenants_points_are_excluded_by_the_scoped_filter(collection) -> None:
+    """Tenant scope is a filter on the query, not a post-hoc trim."""
+    name, requests = collection
+    _upsert(
+        requests,
+        name,
+        [
+            {
+                "id": 1,
+                "vector": [0.1, 0.1, 0.1, 0.1],
+                "payload": {"document_id": "docA", "organization_id": "org-1"},
+            },
+            {
+                "id": 2,
+                "vector": [0.1, 0.1, 0.1, 0.2],
+                "payload": {"document_id": "docFOREIGN", "organization_id": "org-2"},
+            },
+        ],
+    )
+
+    response = requests.post(
+        f"{QDRANT_URL}/collections/{name}/points/search",
+        json={
+            "vector": [0.1, 0.1, 0.1, 0.1],
+            "limit": 10,
+            "with_payload": True,
+            "filter": {"must": [{"key": "organization_id", "match": {"value": "org-1"}}]},
+        },
+        timeout=_TIMEOUT,
+        headers=_HEADERS,
+    )
+    response.raise_for_status()
+    returned = [hit["payload"]["document_id"] for hit in response.json()["result"]]
+
+    assert returned == ["docA"]
+    assert "docFOREIGN" not in returned

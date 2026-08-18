@@ -532,6 +532,13 @@ class ArbitrationSelectedReference(BaseModel):
     selected_by: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Safety/provenance state, declared explicitly rather than left to
+    # extra="ignore" to drop. A reference whose source authority was refused
+    # must persist that fact, and must carry the originating document id so a
+    # reader can re-resolve current authority instead of trusting a stored flag.
+    authority_denied: bool = False
+    authority_reason: Optional[str] = None
+    source_document_id: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True, use_enum_values=True)
 

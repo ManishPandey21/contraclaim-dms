@@ -1013,6 +1013,26 @@ class ContractService:
             clause_filters.append(clause_filter)
 
         docs = await collection.find({"$or": clause_filters}).sort([("chunk_index", 1)]).to_list(length=None)
+
+        # Publication containment. `document_vectors`/`contract_clauses` carry no
+        # authority fields of their own (G34); the canonical document decides.
+        # Drop the RESULT, not just its metadata - the earlier mistake in the
+        # sibling RetrievalService was computing the block and still letting the
+        # payload through. One shared filter so the two stacks cannot drift.
+        from .publication_policy import blocked_document_ids
+
+        # Resolve the documents collection from the SAME database the vectors
+        # collection belongs to (Motor exposes `.database`), falling back to the
+        # cached handle. Never open a fresh connection here - the caller already
+        # holds one, and reaching for `_get_db()` would make the join depend on
+        # live Mongo even in unit tests of the pure ranking logic.
+        db_obj = getattr(collection, "database", None) or self._db
+        blocked = await blocked_document_ids(
+            db_obj, [self._coerce_id(doc.get("document_id")) for doc in docs]
+        )
+        if blocked:
+            docs = [doc for doc in docs if self._coerce_id(doc.get("document_id")) not in blocked]
+
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for doc in docs:
             doc_id = self._coerce_id(doc.get("document_id"))

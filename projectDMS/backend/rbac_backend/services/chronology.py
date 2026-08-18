@@ -198,7 +198,16 @@ class ChronologyService:
                 range_query["$lte"] = filters["date_to"]
             query["event_date"] = range_query
         cursor = self.db.matter_chronology_events.find(query).sort([("event_date", 1), ("created_at", 1)]).skip(skip).limit(limit)
-        return await _collect(cursor)
+        events = await _collect(cursor)
+        # `description`/`title`/`source_spans` are span text lifted from the
+        # source document (`chronology.py:530`). One shared projection withholds
+        # them when the originating document is no longer consumable; manual
+        # events (no source_document_id) are untouched.
+        from .publication_policy import safe_event_records
+
+        return await safe_event_records(
+            self.db, events, ("description", "title"), span_fields=("source_spans",)
+        )
 
     async def create_event(self, payload: MatterChronologyEventCreate, current_user: Any) -> Dict[str, Any]:
         chronology = await self.get_chronology(payload.chronology_id)
@@ -369,7 +378,22 @@ class ChronologyService:
     async def event_revisions(self, chronology_id: str, event_id: str) -> List[Dict[str, Any]]:
         await self.get_event(chronology_id, event_id)
         cursor = self.db.matter_chronology_event_revisions.find({"chronology_id": chronology_id, "event_id": event_id}).sort("revision", 1)
-        return await _collect(cursor)
+        revisions = await _collect(cursor)
+        # `before`/`after` are event snapshots embedding document-derived span
+        # text. Gate the nested snapshots through the same projection so the
+        # audit surface cannot serve a blocked document's text either.
+        from .publication_policy import safe_event_records
+
+        for rev in revisions:
+            for key in ("before", "after"):
+                snap = rev.get(key)
+                if isinstance(snap, dict):
+                    rev[key] = (
+                        await safe_event_records(
+                            self.db, [snap], ("description", "title"), span_fields=("source_spans",)
+                        )
+                    )[0]
+        return revisions
 
     async def extract_events(self, chronology_id: str, payload: ChronologyExtractRequest, current_user: Any) -> Dict[str, Any]:
         chronology = await self.get_chronology(chronology_id)
@@ -421,6 +445,16 @@ class ChronologyService:
             .limit(limit)
         )
         events = await _collect(cursor)
+        # Same projection as `list_events`: a document-derived event's
+        # description/title/source_spans are span text lifted from the source
+        # document, so they must be withheld once that document is no longer
+        # consumable. `_ledger_row` reads exactly those fields, so gate before
+        # building the ledger. Manual events (no source_document_id) untouched.
+        from .publication_policy import safe_event_records
+
+        events = await safe_event_records(
+            self.db, events, ("description", "title"), span_fields=("source_spans",)
+        )
         ledger = [self._ledger_row(event, idx) for idx, event in enumerate(events, start=1)]
         missing = []
         for event in events:

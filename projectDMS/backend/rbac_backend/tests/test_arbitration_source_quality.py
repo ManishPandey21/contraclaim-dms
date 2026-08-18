@@ -15,13 +15,15 @@ Three things are distinct and were being conflated:
 
 from __future__ import annotations
 
+import asyncio
+
 from rbac_backend.services.arbitration_drafting.context import ArbitrationContextBuilder
 
 
 def _annotate(rows):
     builder = ArbitrationContextBuilder.__new__(ArbitrationContextBuilder)
     warnings = []
-    builder._annotate_source_quality(rows, warnings)
+    asyncio.run(builder._annotate_source_quality(rows, warnings))
     return rows, warnings
 
 

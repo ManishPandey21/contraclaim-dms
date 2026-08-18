@@ -322,6 +322,18 @@ class DraftContextBuilder:
         except Exception as exc:
             warnings.append(f"Clause record retrieval skipped: {exc}")
             return []
+
+        # `is_authorised_for_ai` is written once at clause-index time from clause
+        # quality and never revisited when the PARENT document's authority
+        # changes, so it cannot contain a document later sent to review or
+        # quarantined. Resolve the canonical document through the shared filter.
+        from ..publication_policy import blocked_document_ids
+
+        blocked = await blocked_document_ids(
+            self.db, [record.get("document_id") for record in records]
+        )
+        if blocked:
+            records = [r for r in records if str(r.get("document_id") or "") not in blocked]
         scored: List[tuple[float, dict]] = []
         for record in records:
             haystack = " ".join(
