@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from ..core.permissions import CLIENT_DMS_PERMISSIONS
+from ..core.permissions import CLIENT_DMS_PERMISSIONS, ORG_TIER_ONLY_PERMISSIONS
 
 DOCUMENT_EDITOR_PERMISSIONS = [
     "dms.document.view",
@@ -363,9 +363,20 @@ def _merge_role_permissions(role_ids: set[str], permissions: list[str]) -> None:
         role["permissions"] = existing
 
 
+# Organisation-tier roles receive the full client DMS set.
 _merge_role_permissions(
-    {"superadmin", "orgadmin", "projectadmin", "contractmgr_org"},
+    {"superadmin", "orgadmin", "contractmgr_org"},
     CLIENT_DMS_PERMISSIONS,
+)
+
+# Project Admin receives everything EXCEPT the organisation-tier capabilities.
+# The exclusion is applied here rather than by dropping those permissions from
+# CLIENT_DMS_PERMISSIONS: that list also drives canonical seeding and entitlement
+# scoping, so shrinking it would leave the permissions unseeded and outside the
+# subscription gate.
+_merge_role_permissions(
+    {"projectadmin"},
+    [p for p in CLIENT_DMS_PERMISSIONS if p not in ORG_TIER_ONLY_PERMISSIONS],
 )
 
 _merge_role_permissions(

@@ -557,6 +557,22 @@ async def ensure_indexes(db):
     await db.bg_extension_history.create_index(
         [("bg_id", 1), ("revision_number", 1)], background=True
     )
+    await db.bank_guarantee_events.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("bank_guarantee_id", 1),
+            ("sequence", 1),
+        ],
+        name="uq_bank_guarantee_event_sequence",
+        unique=True,
+        background=True,
+    )
+    await db.bank_guarantee_events.create_index(
+        [("bank_guarantee_id", 1), ("event_type", 1), ("event_date", 1)],
+        name="ix_bank_guarantee_event_timeline",
+        background=True,
+    )
     await db.bg_notifications.create_index(
         [("bg_id", 1), ("notification_type", 1)], background=True
     )
@@ -594,6 +610,59 @@ async def ensure_indexes(db):
     await db.claims.create_index("response_due_date", background=True)
     await db.claims.create_index("event_date", background=True)
     await db.claims.create_index("claim_ref", background=True)
+
+    # Canonical entity/event-to-Document relationships. Active links always
+    # store removed_at=None; history is append/soft-remove rather than delete.
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+            ("document_id", 1),
+            ("relationship_role", 1),
+        ],
+        name="uq_entity_document_links_active",
+        unique=True,
+        background=True,
+        partialFilterExpression={"removed_at": None},
+    )
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("target_type", 1),
+            ("target_id", 1),
+            ("removed_at", 1),
+        ],
+        name="ix_entity_document_links_forward",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [
+            ("organization_id", 1),
+            ("project_id", 1),
+            ("document_id", 1),
+            ("removed_at", 1),
+        ],
+        name="ix_entity_document_links_reverse",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("parent_type", 1), ("parent_id", 1), ("removed_at", 1)],
+        name="ix_entity_document_links_parent",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("target_type", 1), ("target_id", 1), ("created_at", -1)],
+        name="ix_entity_document_links_target_history",
+        background=True,
+    )
+    await db.entity_document_links.create_index(
+        [("document_id", 1), ("created_at", -1)],
+        name="ix_entity_document_links_document_history",
+        background=True,
+    )
     await db.claim_assessments.create_index(
         [("claim_id", 1), ("created_at", -1)], background=True
     )
@@ -851,6 +920,12 @@ async def ensure_indexes(db):
     await db.rag_runs.create_index([("org_id", 1), ("project_id", 1), ("run_type", 1), ("created_at", -1)], background=True)
     await db.agent_conversations.create_index("conversation_id", unique=True, background=True)
     await db.agent_messages.create_index([("conversation_id", 1), ("created_at", -1)], background=True)
+
+    # Contract Master authoritative storage. Imported here rather than at module
+    # scope so the persistence module stays independent of database bootstrap.
+    from ..services.contract_document_store import ensure_contract_document_indexes
+
+    await ensure_contract_document_indexes(db)
 
 
 async def ensure_indexes_with_retry(db, attempts: int = INDEX_CREATION_ATTEMPTS) -> None:

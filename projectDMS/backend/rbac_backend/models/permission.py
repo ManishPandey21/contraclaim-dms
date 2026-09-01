@@ -210,6 +210,8 @@ DEFAULT_PERMISSIONS = [
     # --- Contract controls registers (Contract Master, Variation, BG, IPC, Key Dates) ---
     {"name": "dms.contract.master.view", "description": "View Contract Master", "category": "document_management", "resource": "dms.contract.master", "action": "read", "is_system": True},
     {"name": "dms.contract.master.manage", "description": "Manage Contract Master", "category": "document_management", "resource": "dms.contract.master", "action": "admin", "is_system": True},
+    {"name": "dms.contract.applicability.manage", "description": "Manage Contract Document applicability and legal effects", "category": "document_management", "resource": "dms.contract.applicability", "action": "admin", "is_system": True},
+    {"name": "dms.contract.catalogue.browse", "description": "Browse the organisation Contract Document catalogue", "category": "document_management", "resource": "dms.contract.catalogue", "action": "read", "is_system": True},
     {"name": "dms.variation.view", "description": "View Variations", "category": "document_management", "resource": "dms.variation", "action": "read", "is_system": True},
     {"name": "dms.variation.create", "description": "Create Variations", "category": "document_management", "resource": "dms.variation", "action": "create", "is_system": True},
     {"name": "dms.variation.edit", "description": "Edit Variations", "category": "document_management", "resource": "dms.variation", "action": "update", "is_system": True},

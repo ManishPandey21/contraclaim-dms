@@ -80,6 +80,12 @@ from .v20260814_0001_document_extraction_indexes import (
 from .v20260814_0001_document_extraction_indexes import (
     upgrade as upgrade_document_extraction_indexes,
 )
+from .v20260820_0001_entity_document_links import (
+    DESCRIPTION as ENTITY_DOCUMENT_LINKS_DESCRIPTION,
+)
+from .v20260820_0001_entity_document_links import NAME as ENTITY_DOCUMENT_LINKS_NAME
+from .v20260820_0001_entity_document_links import VERSION as ENTITY_DOCUMENT_LINKS_VERSION
+from .v20260820_0001_entity_document_links import upgrade as upgrade_entity_document_links
 from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
 
 
@@ -185,5 +191,11 @@ MIGRATIONS = [
         name=DOC_EXTRACTION_IDX_NAME,
         description=DOC_EXTRACTION_IDX_DESCRIPTION,
         upgrade=upgrade_document_extraction_indexes,
+    ),
+    Migration(
+        version=ENTITY_DOCUMENT_LINKS_VERSION,
+        name=ENTITY_DOCUMENT_LINKS_NAME,
+        description=ENTITY_DOCUMENT_LINKS_DESCRIPTION,
+        upgrade=upgrade_entity_document_links,
     ),
 ]

@@ -114,6 +114,8 @@ DEFAULT_PERMISSIONS = [
     {"_id": "dms.insurance.manage_types", "name": "Manage Insurance Types"},
     {"_id": "dms.contract.master.view", "name": "View Contract Master"},
     {"_id": "dms.contract.master.manage", "name": "Manage Contract Master"},
+    {"_id": "dms.contract.applicability.manage", "name": "Manage Contract Document Applicability"},
+    {"_id": "dms.contract.catalogue.browse", "name": "Browse Contract Document Catalogue"},
     {"_id": "dms.contract.read", "name": "Read Contract Documents"},
     {"_id": "dms.contract.update", "name": "Update Contract Documents"},
     {"_id": "dms.contract.clause.create", "name": "Create Contract Clauses"},

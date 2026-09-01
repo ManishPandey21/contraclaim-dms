@@ -120,6 +120,125 @@ class CurrentUser(BaseModel):
     projects: List[str] = Field(default_factory=list)
     account_type: str = "client_user"
     disabled: bool = False
+class StoredPrincipalUnavailableError(Exception):
+    """A durable actor reference could not be resolved to a real principal.
+
+    It is deliberately NOT an ``HTTPException``: the callers are background
+    workers with no response to shape. What matters is that it is an error at
+    all — the caller must stop, never continue against a stand-in.
+    """
+
+
+def _principal_from_user_document(user: Dict[str, Any], email: Optional[str] = None) -> CurrentUser:
+    """Build the canonical principal from an entitlement-store row.
+
+    One construction, two doors: the authenticated request (``get_current_user``)
+    and the re-resolution of a durable actor reference on a background worker
+    (``resolve_stored_principal``). Keeping it in one place is the point — a
+    second, slightly different principal builder is how a background path ends up
+    with roles the request path would never have granted.
+    """
+    # Derive organizations for superuser/similar users if not present
+    orgs = user.get("organizations", [])
+    org_id = user.get("organization_id")
+    if (not orgs) and org_id:
+        try:
+            orgs = [str(org_id)]
+        except Exception:
+            orgs = [org_id]
+    roles = _normalize_roles_list(user.get("roles", []))
+    org_id_sanitized = org_id
+    orgs_sanitized = orgs or []
+    projects_sanitized = (user.get("projects", []) or [])
+    if "superadmin" in roles:
+        org_id_sanitized = None
+        orgs_sanitized = []
+        projects_sanitized = []
+    return CurrentUser(
+        id=str(user["_id"]),
+        username=user.get("username", email),
+        email=user.get("email", email),
+        first_name=user.get("first_name") or user.get("firstName"),
+        last_name=user.get("last_name") or user.get("lastName"),
+        job_title=user.get("job_title") or user.get("jobTitle"),
+        roles=roles,
+        organization_id=org_id_sanitized,
+        organizations=orgs_sanitized,
+        projects=projects_sanitized,
+        account_type=user.get("account_type", "client_user"),
+        disabled=user.get("disabled", False),
+    )
+
+
+async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
+    """Re-resolve the authenticated principal behind a durable actor reference.
+
+    Queued work — a LangGraph drafting run, a reconciliation pass — has no HTTP
+    request, so it has no ``get_current_user`` result to carry. What it does have
+    is the identifier of the human who started it, written from the authenticated
+    principal at request time (``created_by`` and friends).
+
+    That identifier is an IDENTITY, never an entitlement. This resolves it
+    against the entitlement store and returns the SAME canonical principal the
+    request would have carried, evaluated NOW: a revoked project assignment or a
+    disabled account is honoured on the next attempt rather than replayed from a
+    role list cached when the job was queued. That is also why user roles must
+    not be persisted alongside the job — see ``docs/AUTHZ.md``.
+
+    It never fabricates authority. A reference that resolves to no enabled user
+    raises ``StoredPrincipalUnavailableError``, and callers must fail rather than
+    continue with a synthesised stand-in; a principal derived from the resource
+    being read is circular and is not authority.
+    """
+    reference = str(actor_reference or "").strip()
+    if not reference:
+        raise StoredPrincipalUnavailableError(
+            "no stored actor reference: this work has no principal to run as"
+        )
+    if db is None:
+        raise StoredPrincipalUnavailableError(
+            "no database available to resolve the stored principal"
+        )
+
+    candidates: List[Dict[str, Any]] = []
+    try:
+        oid = ObjectId(reference)
+    except Exception:
+        oid = None
+    if oid is not None:
+        candidates.append({"_id": oid})
+    candidates.append({"_id": reference})
+    # `_user_id` records `id or email or username`, so the reference may be any
+    # of the three. Resolution follows the same order.
+    candidates.append({"email": reference})
+    candidates.append({"username": reference})
+
+    user: Optional[Dict[str, Any]] = None
+    for query in candidates:
+        try:
+            user = await db.users.find_one(query)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a refusal
+            raise StoredPrincipalUnavailableError(
+                f"the entitlement store could not be read for principal {reference!r}: {exc}"
+            ) from exc
+        if user:
+            break
+    if not user:
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} resolves to no user"
+        )
+    if user.get("disabled"):
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} resolves to a disabled account"
+        )
+    try:
+        return _principal_from_user_document(user)
+    except Exception as exc:  # noqa: BLE001 - an unbuildable principal is a refusal
+        raise StoredPrincipalUnavailableError(
+            f"stored actor reference {reference!r} is not a usable principal: {exc}"
+        ) from exc
+
+
 # Moved from organizations.py
 async def get_current_user(request: Request, db = Depends(get_db)):
     """
@@ -195,36 +314,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                             # timeout mid-call, stale client): apply the policy.
                             await _handle_session_store_unavailable(exc)
 
-                    # Derive organizations for superuser/similar users if not present
-                    orgs = user.get("organizations", [])
-                    org_id = user.get("organization_id")
-                    if (not orgs) and org_id:
-                        try:
-                            orgs = [str(org_id)]
-                        except Exception:
-                            orgs = [org_id]
-                    roles = _normalize_roles_list(user.get("roles", []))
-                    org_id_sanitized = org_id
-                    orgs_sanitized = orgs or []
-                    projects_sanitized = (user.get("projects", []) or [])
-                    if "superadmin" in roles:
-                        org_id_sanitized = None
-                        orgs_sanitized = []
-                        projects_sanitized = []
-                    return CurrentUser(
-                        id=str(user["_id"]),
-                        username=user.get("username", email),
-                        email=user.get("email", email),
-                        first_name=user.get("first_name") or user.get("firstName"),
-                        last_name=user.get("last_name") or user.get("lastName"),
-                        job_title=user.get("job_title") or user.get("jobTitle"),
-                        roles=roles,
-                        organization_id=org_id_sanitized,
-                        organizations=orgs_sanitized,
-                        projects=projects_sanitized,
-                        account_type=user.get("account_type", "client_user"),
-                        disabled=user.get("disabled", False),
-                    )
+                    return _principal_from_user_document(user, email)
         except JWTError:
             # Try the next credential source before falling through to dev mode.
             continue
