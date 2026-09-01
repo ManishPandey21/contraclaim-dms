@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -34,11 +35,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { AlertTriangle, CalendarPlus, Download, Edit, Landmark, Loader2, PlusCircle, Unlock, Upload } from "lucide-react";
+import { AlertTriangle, CalendarPlus, Download, Edit, FileText, Landmark, Loader2, PlusCircle, Unlock, Upload } from "lucide-react";
 import { toast } from "sonner";
 import CsvImportDialog from "@/components/registers/CsvImportDialog";
 import {
   BGDTO,
+  BGEventDTO,
   BGPayload,
   BGSummaryDTO,
   createBG,
@@ -47,18 +49,24 @@ import {
   extendBG,
   getBGs,
   getBGAlerts,
+  getBGEvents,
   getBGSummary,
   importBGsCsv,
   previewBGsCsv,
   releaseBG,
+  transitionBGStatus,
   updateBG,
 } from "@/services/bank-guarantees-api";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { BANK_GUARANTEE_EVENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
+import useHasPermission from "@/hooks/useHasPermission";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import { bgStatusColor, bgStatusLabel, bgTypeLabel, bgAlertText, fmtAmount } from "@/lib/contract-controls-helpers";
 
 const BG_TYPES = ["performance", "mobilisation_advance", "plant_advance", "retention", "additional_performance", "security_deposit", "other"];
 const BG_STATUSES = ["draft", "submitted", "valid", "extension_required", "extended", "expired", "released", "encashment_under_process", "encashed"];
+const BG_CREATE_STATUSES = ["draft"];
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
 
@@ -70,7 +78,7 @@ interface BForm {
 const EMPTY: BForm = {
   project_id: "", bg_type: "performance", bg_number: "", issuing_bank: "", branch: "",
   bg_amount: "", currency: "INR", conversion_rate: "1", submission_date: "", contractual_required_up_to: "",
-  bg_expiry_date: "", claim_expiry_date: "", bg_status: "valid", remarks: "",
+  bg_expiry_date: "", claim_expiry_date: "", bg_status: "draft", remarks: "",
 };
 
 const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label, value, cls }) => (
@@ -85,6 +93,13 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
 );
 
 const BankGuaranteeRegisterPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const deepLinkHandled = useRef(false);
+  const canEdit = useHasPermission("dms.bankguarantee.edit");
+  const canCreate = useHasPermission("dms.bankguarantee.create");
+  const canExport = useHasPermission("dms.bankguarantee.export");
+  const canExtend = useHasPermission("dms.bankguarantee.extend");
+  const canRelease = useHasPermission("dms.bankguarantee.release");
   const [items, setItems] = useState<BGDTO[]>([]);
   const [alerts, setAlerts] = useState<BGDTO[]>([]);
   const [summary, setSummary] = useState<BGSummaryDTO | null>(null);
@@ -99,7 +114,14 @@ const BankGuaranteeRegisterPage: React.FC = () => {
   const [saving, setSaving] = useState(false);
 
   const [extendBg, setExtendBg] = useState<BGDTO | null>(null);
-  const [extForm, setExtForm] = useState({ revised_expiry_date: "", revised_claim_expiry_date: "", revised_required_up_to: "", extension_letter_reference: "", remarks: "" });
+  const [extForm, setExtForm] = useState({ revised_expiry_date: "", revised_claim_expiry_date: "", revised_required_up_to: "", extension_letter_reference: "", extension_date: "", remarks: "" });
+  const [releaseBg, setReleaseBg] = useState<BGDTO | null>(null);
+  const [releaseForm, setReleaseForm] = useState({ release_date: "", release_letter_reference: "", remarks: "" });
+  const [evidenceBg, setEvidenceBg] = useState<BGDTO | null>(null);
+  const [events, setEvents] = useState<BGEventDTO[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState(false);
+  const eventRequestGeneration = useRef(0);
   // Contract currencies for the form's project (award-fixed rates, read-only here).
   const [formBaseCurrency, setFormBaseCurrency] = useState("INR");
   const [formCurrencies, setFormCurrencies] = useState<{ currency: string; conversion_rate: number }[]>([]);
@@ -185,12 +207,18 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         issuing_bank: form.issuing_bank || undefined, branch: form.branch || undefined,
         bg_amount: form.bg_amount ? Number(form.bg_amount) : undefined, currency: form.currency || "INR",
         conversion_rate: form.conversion_rate ? Number(form.conversion_rate) : undefined,
-        submission_date: toISO(form.submission_date), contractual_required_up_to: toISO(form.contractual_required_up_to),
+        contractual_required_up_to: toISO(form.contractual_required_up_to),
         bg_expiry_date: toISO(form.bg_expiry_date), claim_expiry_date: toISO(form.claim_expiry_date),
         bg_status: form.bg_status as any, remarks: form.remarks || undefined,
       };
-      if (editingId) await updateBG(editingId, payload);
-      else await createBG(payload);
+      if (editingId) {
+        await updateBG(editingId, {
+          bg_number: payload.bg_number,
+          issuing_bank: payload.issuing_bank,
+          branch: payload.branch,
+          remarks: payload.remarks,
+        });
+      } else await createBG(payload);
       await load();
       toast.success(editingId ? "BG updated" : "BG created");
       setDialogOpen(false);
@@ -213,11 +241,12 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         revised_claim_expiry_date: toISO(extForm.revised_claim_expiry_date),
         revised_required_up_to: toISO(extForm.revised_required_up_to),
         extension_letter_reference: extForm.extension_letter_reference || undefined,
+        extension_date: toISO(extForm.extension_date),
         remarks: extForm.remarks || undefined,
       });
       toast.success("BG extended");
       setExtendBg(null);
-      setExtForm({ revised_expiry_date: "", revised_claim_expiry_date: "", revised_required_up_to: "", extension_letter_reference: "", remarks: "" });
+      setExtForm({ revised_expiry_date: "", revised_claim_expiry_date: "", revised_required_up_to: "", extension_letter_reference: "", extension_date: "", remarks: "" });
       await load();
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to extend BG");
@@ -226,14 +255,76 @@ const BankGuaranteeRegisterPage: React.FC = () => {
     }
   };
 
-  const onRelease = async (b: BGDTO) => {
+  const onRelease = async () => {
+    if (!releaseBg) return;
+    setSaving(true);
     try {
-      await releaseBG(b.id);
+      await releaseBG(releaseBg.id, {
+        release_date: toISO(releaseForm.release_date),
+        release_letter_reference: releaseForm.release_letter_reference || undefined,
+        remarks: releaseForm.remarks || undefined,
+      });
       await load();
       toast.success("BG released");
+      setReleaseBg(null);
+      setReleaseForm({ release_date: "", release_letter_reference: "", remarks: "" });
     } catch (e: any) {
       toast.error(e?.response?.data?.detail || "Failed to release BG");
+    } finally {
+      setSaving(false);
     }
+  };
+
+  const onStatusTransition = async (
+    targetBg: BGDTO,
+    targetStatus: "submitted" | "valid",
+  ) => {
+    setSaving(true);
+    try {
+      await transitionBGStatus(targetBg.id, { target_status: targetStatus });
+      await load();
+      toast.success(targetStatus === "submitted" ? "BG submitted" : "BG marked valid");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail || "Failed to change BG status");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const openEvidence = useCallback(async (bg: BGDTO) => {
+    const requestGeneration = ++eventRequestGeneration.current;
+    setEvidenceBg(bg);
+    setEvents([]);
+    setEventsError(false);
+    setEventsLoading(true);
+    try {
+      const loaded = await getBGEvents(bg.id);
+      if (requestGeneration === eventRequestGeneration.current) setEvents(loaded);
+    } catch {
+      if (requestGeneration === eventRequestGeneration.current) {
+        setEventsError(true);
+        toast.error("Failed to load Bank Guarantee event evidence");
+      }
+    } finally {
+      if (requestGeneration === eventRequestGeneration.current) setEventsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (deepLinkHandled.current || items.length === 0) return;
+    const bgId = searchParams.get("bg_id");
+    const eventId = searchParams.get("event_id");
+    if (!bgId || !eventId) return;
+    const linkedBg = items.find((item) => item.id === bgId);
+    if (!linkedBg) return;
+    deepLinkHandled.current = true;
+    void openEvidence(linkedBg);
+  }, [items, openEvidence, searchParams]);
+
+  const canManageEvent = (event: BGEventDTO) => {
+    if (event.event_type === "extension") return canExtend;
+    if (event.event_type === "release") return canRelease;
+    return canEdit;
   };
 
   const onExport = async (format: "csv" | "xlsx" | "pdf") => {
@@ -259,11 +350,11 @@ const BankGuaranteeRegisterPage: React.FC = () => {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>
-          <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)}><Upload className="mr-2 h-4 w-4" />Upload CSV</Button>
-          <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>
-          <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>
-          <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add BG</Button>
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("csv")}><Download className="mr-2 h-4 w-4" />CSV</Button>}
+          {canCreate && <Button variant="outline" size="sm" onClick={() => setCsvOpen(true)}><Upload className="mr-2 h-4 w-4" />Upload CSV</Button>}
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("xlsx")}><Download className="mr-2 h-4 w-4" />Excel</Button>}
+          {canExport && <Button variant="outline" size="sm" onClick={() => onExport("pdf")}><Download className="mr-2 h-4 w-4" />PDF</Button>}
+          {canCreate && <Button onClick={openCreate}><PlusCircle className="mr-2 h-4 w-4" />Add BG</Button>}
         </div>
       </div>
 
@@ -292,7 +383,8 @@ const BankGuaranteeRegisterPage: React.FC = () => {
               <button
                 key={b.id}
                 type="button"
-                onClick={() => openEdit(b)}
+                onClick={() => canEdit && openEdit(b)}
+                disabled={!canEdit}
                 className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-left text-sm hover:bg-amber-100"
                 title={`Expiry ${fmtDate(b.bg_expiry_date)}`}
               >
@@ -373,20 +465,38 @@ const BankGuaranteeRegisterPage: React.FC = () => {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
-                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(b)}><Edit className="h-4 w-4" /></Button>
-                        {b.bg_status !== "released" && (
+                        {canEdit && b.bg_status === "draft" && (
+                          <Button variant="ghost" size="sm" disabled={saving}
+                            onClick={() => void onStatusTransition(b, "submitted")}>Submit BG</Button>
+                        )}
+                        {canEdit && b.bg_status === "submitted" && (
+                          <Button variant="ghost" size="sm" disabled={saving}
+                            onClick={() => void onStatusTransition(b, "valid")}>Mark BG valid</Button>
+                        )}
+                        {canEdit && (
+                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(b)}><Edit className="h-4 w-4" /></Button>
+                        )}
+                        {canExtend && !["released", "encashed"].includes(b.bg_status) && (
                           <Button variant="ghost" size="icon" className="h-8 w-8" title="Extend" onClick={() => {
                             setExtendBg(b);
                             setExtForm({
                               revised_expiry_date: "", revised_claim_expiry_date: "",
                               revised_required_up_to: b.contractual_required_up_to ? b.contractual_required_up_to.slice(0, 10) : "",
-                              extension_letter_reference: "", remarks: "",
+                              extension_letter_reference: "", extension_date: "", remarks: "",
                             });
                           }}><CalendarPlus className="h-4 w-4" /></Button>
                         )}
-                        {b.bg_status !== "released" && (
-                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Release" onClick={() => onRelease(b)}><Unlock className="h-4 w-4" /></Button>
+                        {canRelease && !["released", "encashed"].includes(b.bg_status) && (
+                          <Button variant="ghost" size="icon" className="h-8 w-8" title="Release" onClick={() => {
+                            setReleaseBg(b);
+                            setReleaseForm({ release_date: "", release_letter_reference: "", remarks: "" });
+                          }}><Unlock className="h-4 w-4" /></Button>
                         )}
+                        <Button variant="ghost" size="icon" className="h-8 w-8"
+                          aria-label={`Evidence for ${b.bg_number || bgTypeLabel(b.bg_type)}`}
+                          onClick={() => void openEvidence(b)}>
+                          <FileText className="h-4 w-4" />
+                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -415,7 +525,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
               </div>
               <div>
                 <Label>BG type</Label>
-                <Select value={form.bg_type} onValueChange={(v) => setForm({ ...form, bg_type: v })}>
+                <Select disabled={editingId !== null} value={form.bg_type} onValueChange={(v) => setForm({ ...form, bg_type: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>{BG_TYPES.map((t) => <SelectItem key={t} value={t}>{bgTypeLabel(t)}</SelectItem>)}</SelectContent>
                 </Select>
@@ -428,7 +538,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <Label>Amount</Label>
-                <Input type="number" value={form.bg_amount} onChange={(e) => setForm({ ...form, bg_amount: e.target.value })} />
+                <Input disabled={editingId !== null} type="number" value={form.bg_amount} onChange={(e) => setForm({ ...form, bg_amount: e.target.value })} />
                 {form.currency !== formBaseCurrency && form.bg_amount && (
                   <p className="mt-1 text-xs text-muted-foreground">
                     = {fmtAmount(Number(form.bg_amount) * (Number(form.conversion_rate) || 1), formBaseCurrency)} ({formBaseCurrency})
@@ -440,6 +550,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
                 <select
                   className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                   value={form.currency}
+                  disabled={editingId !== null}
                   onChange={(e) => onBgCurrencyChange(e.target.value)}
                 >
                   {Array.from(
@@ -456,16 +567,16 @@ const BankGuaranteeRegisterPage: React.FC = () => {
               </div>
               <div>
                 <Label>Status</Label>
-                <Select value={form.bg_status} onValueChange={(v) => setForm({ ...form, bg_status: v })}>
+                <Select disabled value={form.bg_status} onValueChange={(v) => setForm({ ...form, bg_status: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>{BG_STATUSES.map((s) => <SelectItem key={s} value={s}>{bgStatusLabel(s)}</SelectItem>)}</SelectContent>
+                  <SelectContent>{(editingId ? BG_STATUSES : BG_CREATE_STATUSES).map((s) => <SelectItem key={s} value={s}>{bgStatusLabel(s)}</SelectItem>)}</SelectContent>
                 </Select>
               </div>
             </div>
             <div className="grid grid-cols-3 gap-3">
-              <div><Label>Required up to</Label><Input type="date" value={form.contractual_required_up_to} onChange={(e) => setForm({ ...form, contractual_required_up_to: e.target.value })} /></div>
-              <div><Label>Expiry date</Label><Input type="date" value={form.bg_expiry_date} onChange={(e) => setForm({ ...form, bg_expiry_date: e.target.value })} /></div>
-              <div><Label>Claim expiry</Label><Input type="date" value={form.claim_expiry_date} onChange={(e) => setForm({ ...form, claim_expiry_date: e.target.value })} /></div>
+              <div><Label>Required up to</Label><Input disabled={editingId !== null} type="date" value={form.contractual_required_up_to} onChange={(e) => setForm({ ...form, contractual_required_up_to: e.target.value })} /></div>
+              <div><Label>Expiry date</Label><Input disabled={editingId !== null} type="date" value={form.bg_expiry_date} onChange={(e) => setForm({ ...form, bg_expiry_date: e.target.value })} /></div>
+              <div><Label>Claim expiry</Label><Input disabled={editingId !== null} type="date" value={form.claim_expiry_date} onChange={(e) => setForm({ ...form, claim_expiry_date: e.target.value })} /></div>
             </div>
           </div>
           <DialogFooter>
@@ -490,6 +601,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
               <div><Label>Revised expiry date</Label><Input type="date" value={extForm.revised_expiry_date} onChange={(e) => setExtForm({ ...extForm, revised_expiry_date: e.target.value })} /></div>
               <div><Label>Revised claim expiry</Label><Input type="date" value={extForm.revised_claim_expiry_date} onChange={(e) => setExtForm({ ...extForm, revised_claim_expiry_date: e.target.value })} /></div>
             </div>
+            <div><Label htmlFor="bg-extension-date">Extension date</Label><Input id="bg-extension-date" type="date" value={extForm.extension_date} onChange={(e) => setExtForm({ ...extForm, extension_date: e.target.value })} /></div>
             <div><Label>Revised required up to</Label><Input type="date" value={extForm.revised_required_up_to} onChange={(e) => setExtForm({ ...extForm, revised_required_up_to: e.target.value })} /></div>
             <div><Label>Extension letter reference</Label><Input value={extForm.extension_letter_reference} onChange={(e) => setExtForm({ ...extForm, extension_letter_reference: e.target.value })} /></div>
             <div><Label>Remarks</Label><Textarea value={extForm.remarks} onChange={(e) => setExtForm({ ...extForm, remarks: e.target.value })} rows={2} /></div>
@@ -498,6 +610,92 @@ const BankGuaranteeRegisterPage: React.FC = () => {
             <Button variant="outline" onClick={() => setExtendBg(null)} disabled={saving}>Cancel</Button>
             <Button onClick={onExtend} disabled={saving}>Extend</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Release */}
+      <Dialog open={releaseBg !== null} onOpenChange={(open) => !open && setReleaseBg(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Release BG {releaseBg?.bg_number}</DialogTitle>
+            <DialogDescription>Records an immutable release event and preserves prior extension evidence.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="bg-release-date">Release date</Label>
+              <Input id="bg-release-date" type="date" value={releaseForm.release_date}
+                onChange={(event) => setReleaseForm({ ...releaseForm, release_date: event.target.value })} />
+            </div>
+            <div>
+              <Label htmlFor="bg-release-reference">Release letter reference</Label>
+              <Input id="bg-release-reference" value={releaseForm.release_letter_reference}
+                onChange={(event) => setReleaseForm({ ...releaseForm, release_letter_reference: event.target.value })} />
+            </div>
+            <div>
+              <Label htmlFor="bg-release-remarks">Release remarks</Label>
+              <Textarea id="bg-release-remarks" value={releaseForm.remarks}
+                onChange={(event) => setReleaseForm({ ...releaseForm, remarks: event.target.value })} rows={3} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReleaseBg(null)} disabled={saving}>Cancel</Button>
+            <Button onClick={() => void onRelease()} disabled={saving}>Release BG</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Event-level evidence */}
+      <Dialog open={evidenceBg !== null} onOpenChange={(open) => !open && setEvidenceBg(null)}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Evidence for {evidenceBg?.bg_number || "Bank Guarantee"}</DialogTitle>
+            <DialogDescription>Documents remain attached to the contractual event that they evidence.</DialogDescription>
+          </DialogHeader>
+          {eventsLoading ? (
+            <p className="flex items-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading event history…
+            </p>
+          ) : eventsError ? (
+            <div className="space-y-2 text-sm text-destructive">
+              <p>Event history could not be loaded.</p>
+              <Button variant="outline" size="sm" onClick={() => evidenceBg && void openEvidence(evidenceBg)}>Retry</Button>
+            </div>
+          ) : events.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No first-class events are available for this legacy record.</p>
+          ) : (
+            <div className="space-y-5">
+              {events.map((event) => {
+                const roles = BANK_GUARANTEE_EVENT_RELATIONSHIP_ROLES[event.event_type];
+                const ordinal = event.event_type === "extension" && event.revision_number != null
+                  ? event.revision_number
+                  : event.sequence;
+                const title = `${event.event_type.replace("_", " ").replace(/^./, (value) => value.toUpperCase())} ${ordinal}`;
+                return (
+                  <section
+                    key={event.id}
+                    id={`bank-guarantee-event-${event.id}`}
+                    className={`space-y-3 rounded-md border p-4 ${searchParams.get("event_id") === event.id ? "border-primary" : ""}`}
+                  >
+                    <div>
+                      <h3 className="font-semibold">{title}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {[event.reference, fmtDate(event.event_date)].filter(Boolean).join(" · ")}
+                      </p>
+                    </div>
+                    <EntityDocumentLinks
+                      targetType="bank_guarantee_event"
+                      targetId={event.id}
+                      organizationId={event.organization_id || evidenceBg?.organization_id}
+                      projectId={event.project_id || evidenceBg?.project_id}
+                      roles={roles}
+                      defaultRole={roles[0].value}
+                      canManage={canManageEvent(event)}
+                    />
+                  </section>
+                );
+              })}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
 

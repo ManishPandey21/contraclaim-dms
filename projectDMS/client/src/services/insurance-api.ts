@@ -30,6 +30,13 @@ export interface InsuranceDTO {
   created_by_name?: string | null;
 }
 
+/** The Insurance relationship-role vocabulary, defined once. */
+export type InsuranceUploadRole =
+  | "policy"
+  | "certificate"
+  | "correspondence"
+  | "supporting_document";
+
 export interface InsurancePayload {
   project_id: string;
   insurance_type: string;
@@ -41,18 +48,18 @@ export interface InsurancePayload {
   currency?: string;
   date_of_issue?: string;
   date_of_expiry?: string;
-  document_id?: string;
-  document_name?: string;
-  document_content_type?: string;
-  linked_document_ids?: string[];
   remarks?: string;
   organization_id?: string;
+  /** Create-only: attach Documents that already exist instead of re-uploading. */
+  existing_document_links?: Array<{
+    document_id: string;
+    relationship_role: InsuranceUploadRole;
+  }>;
 }
 
-export interface InsuranceUploadResult {
-  document_id: string;
-  document_name: string;
-  content_type: string;
+export interface InsuranceDocumentUploadResult {
+  document: Record<string, unknown>;
+  link: Record<string, unknown>;
 }
 
 export interface InsuranceSummaryDTO {
@@ -121,33 +128,23 @@ export async function updateInsurance(id: string, payload: Partial<InsurancePayl
   return norm(data);
 }
 
-// Upload a policy file (PDF/JPG/PNG, <=20MB). Returns the token to persist on
-// the insurance record via create / update / replace-file.
-export async function uploadInsuranceFile(file: File): Promise<InsuranceUploadResult> {
+export async function uploadInsuranceDocument(
+  id: string,
+  file: File,
+  relationshipRole: "policy" | "certificate" | "correspondence" | "supporting_document",
+): Promise<InsuranceDocumentUploadResult> {
   const form = new FormData();
   form.append("file", file);
-  const { data } = await api.post("/insurance/upload", form, {
+  form.append("relationship_role", relationshipRole);
+  const { data } = await api.post(`/insurance/${id}/documents/upload`, form, {
     headers: { "Content-Type": "multipart/form-data" },
   });
-  return data as InsuranceUploadResult;
+  return data as InsuranceDocumentUploadResult;
 }
 
 // URL for inline preview (default) or attachment download of a policy file.
 export function insuranceFileUrl(id: string, download = false): string {
   return `/api/insurance/${id}/file${download ? "?download=true" : ""}`;
-}
-
-export async function replaceInsuranceFile(
-  id: string,
-  documentId: string,
-  meta?: { document_name?: string; document_content_type?: string },
-): Promise<InsuranceDTO> {
-  const { data } = await api.post(`/insurance/${id}/replace-file`, {
-    document_id: documentId,
-    document_name: meta?.document_name,
-    document_content_type: meta?.document_content_type,
-  });
-  return norm(data);
 }
 
 export async function deleteInsurance(id: string): Promise<void> {

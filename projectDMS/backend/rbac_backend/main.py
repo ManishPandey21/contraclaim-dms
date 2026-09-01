@@ -22,6 +22,7 @@ from .routers import (
     contract_appraisal,
     contract_clauses,
     contract_master,
+    contract_master_api,
     claims,
     key_dates,
     variations,
@@ -34,6 +35,8 @@ from .routers import (
     sla,
     dashboard,
     deep_planning,
+    document_relationships,
+    legacy_relationship_backfill,
     documents,
     email,
     email_share,
@@ -220,11 +223,14 @@ app.include_router(upload_policy.router, prefix="/api", tags=["config"])
 app.include_router(users.router, prefix="/api", tags=["users"])
 app.include_router(profiles.router, prefix="/api", tags=["profiles"])
 app.include_router(documents.router, prefix="/api", tags=["documents"])
+app.include_router(document_relationships.router, prefix="/api", tags=["document-relationships"])
+app.include_router(legacy_relationship_backfill.router, prefix="/api", tags=["legacy-relationship-backfill"])
 app.include_router(contracts.router, prefix="/api", tags=["contracts"])
 app.include_router(claims.router, prefix="/api", tags=["claims"])
 app.include_router(contract_appraisal.router, prefix="/api", tags=["contract-appraisal"])
 app.include_router(contract_clauses.router, prefix="/api", tags=["contract-clauses"])
 app.include_router(contract_master.router, prefix="/api", tags=["contract-master"])
+app.include_router(contract_master_api.router, prefix="/api", tags=["contract-master-v1"])
 app.include_router(key_dates.router, prefix="/api", tags=["key-dates"])
 app.include_router(variations.router, prefix="/api", tags=["variations"])
 app.include_router(bank_guarantees.router, prefix="/api", tags=["bank-guarantees"])

@@ -29,6 +29,8 @@ import { getTasks, TaskDTO } from "@/services/tasks-api";
 import ClaimApprovalDialog from "@/components/claims/ClaimApprovalDialog";
 import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
 import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
+import ClaimDocumentLinks from "@/components/claims/ClaimDocumentLinks";
+import useHasPermission from "@/hooks/useHasPermission";
 
 const STATUS_COLOR: Record<ClaimStatus, string> = {
   draft: "bg-gray-500",
@@ -69,6 +71,7 @@ const ClaimDetailPage: React.FC = () => {
   const [approvalOpen, setApprovalOpen] = useState(false);
   const [assessOpen, setAssessOpen] = useState(false);
   const [taskOpen, setTaskOpen] = useState(false);
+  const canManageDocumentLinks = useHasPermission("dms.claim.edit");
 
   const loadTasks = useCallback(async () => {
     try {
@@ -195,30 +198,22 @@ const ClaimDetailPage: React.FC = () => {
             <CardDescription>Documents and letters attached to this claim.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            {claim.linked_document_ids.length === 0 && claim.linked_letter_ids.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No linked correspondence yet.</p>
-            ) : (
-              <>
-                {claim.linked_document_ids.map((d) => (
-                  <Link
-                    key={d}
-                    to={`/documentviewer/${d}`}
-                    className="flex items-center gap-2 rounded-md border p-2 text-sm hover:bg-muted/40"
-                  >
-                    <FileText className="h-4 w-4" /> Document {d}
-                  </Link>
-                ))}
-                {claim.linked_letter_ids.map((l) => (
-                  <Link
-                    key={l}
-                    to={`/letters/${l}/input`}
-                    className="flex items-center gap-2 rounded-md border p-2 text-sm hover:bg-muted/40"
-                  >
-                    <FileText className="h-4 w-4" /> Letter {l}
-                  </Link>
-                ))}
-              </>
-            )}
+            <ClaimDocumentLinks
+              claimId={id}
+              organizationId={claim.organization_id}
+              projectId={claim.project_id}
+              frozen={Boolean(claim.evidence_frozen_at)}
+              canManage={canManageDocumentLinks}
+            />
+            {claim.linked_letter_ids.map((letterId) => (
+              <Link
+                key={letterId}
+                to={`/letters/${letterId}/input`}
+                className="flex items-center gap-2 rounded-md border p-2 text-sm hover:bg-muted/40"
+              >
+                <FileText className="h-4 w-4" /> Letter {letterId}
+              </Link>
+            ))}
             {claim.contract_clauses.length > 0 && (
               <p className="pt-2 text-xs text-muted-foreground">
                 Clauses: {claim.contract_clauses.join(", ")}

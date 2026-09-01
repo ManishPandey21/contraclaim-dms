@@ -77,6 +77,13 @@ const ContractQAPage = lazyWithRetry(() => import("./pages/ContractQAPage"));
 const ContractViewerPage = lazyWithRetry(() => import("./pages/ContractViewerPage"));
 const ContractAppraisalPage = lazyWithRetry(() => import("./pages/ContractAppraisalPage"));
 const ContractMasterPage = lazyWithRetry(() => import("./pages/ContractMasterPage"));
+const ContractMasterWorkspacePage = lazyWithRetry(
+  () => import("./pages/ContractMasterWorkspacePage"),
+);
+// HITL layout prototype for Contract Master v1 (BRIDGE phase). Not T26-T30.
+const ContractMasterPrototypePage = lazyWithRetry(
+  () => import("./pages/ContractMasterPrototypePage"),
+);
 const ContractTimelinePage = lazyWithRetry(() => import("./pages/ContractTimelinePage"));
 const LegalWordsPage = lazyWithRetry(() => import("./pages/LegalWordsPage"));
 const AdminLegalWordsPage = lazyWithRetry(() => import("./pages/AdminLegalWordsPage"));
@@ -502,6 +509,10 @@ const AppRoutes = () => (
         />
       </Route>
 
+      {/* HITL layout prototype: fixture data only, no server calls, so it is
+          reviewable without a session. Not a T26-T30 surface. */}
+      <Route path="/contract-master/workspace" element={<ContractMasterWorkspacePage />} />
+      <Route path="/contract-master/prototype" element={<ContractMasterPrototypePage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="*" element={<NotFound />} />
     </Routes>

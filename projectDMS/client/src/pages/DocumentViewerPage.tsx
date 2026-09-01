@@ -27,6 +27,7 @@ import MetadataEditor from "@/components/document-viewer/MetadataEditor";
 import EnclosuresPanel from "@/components/document-viewer/EnclosuresPanel";
 import ReferencesPanel from "@/components/document-viewer/ReferencesPanel";
 import DocumentDetailsPanel from "@/components/document-viewer/DocumentDetailsPanel";
+import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
 
 const DocumentViewer = React.lazy(
   () => import("@/components/document-viewer/DocumentViewer")
@@ -961,11 +962,12 @@ const DocumentViewerPage: React.FC = () => {
                   className="w-full h-full min-h-0 flex flex-col"
                 >
                   <div className="bg-white border-b p-3">
-                    <TabsList className="grid w-full grid-cols-4">
+                    <TabsList className="grid w-full grid-cols-5">
                       <TabsTrigger value="metadata">Metadata</TabsTrigger>
                       <TabsTrigger value="enclosure">Enclosures</TabsTrigger>
                       <TabsTrigger value="references">References</TabsTrigger>
                       <TabsTrigger value="details">Details</TabsTrigger>
+                      <TabsTrigger value="records">Records</TabsTrigger>
                     </TabsList>
                   </div>
 
@@ -1021,6 +1023,10 @@ const DocumentViewerPage: React.FC = () => {
 
                       <TabsContent value="enclosure" className="m-0">
                         <EnclosuresPanel documentId={documentId} />
+                      </TabsContent>
+
+                      <TabsContent value="records" className="m-0">
+                        <LinkedRecordsPanel documentId={documentId!} />
                       </TabsContent>
                     </div>
                   </ScrollArea>

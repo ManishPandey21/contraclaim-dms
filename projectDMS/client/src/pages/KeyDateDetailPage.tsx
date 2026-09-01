@@ -38,6 +38,9 @@ import {
 } from "@/services/key-dates-api";
 import { statusColor, statusLabel, achievementText } from "@/lib/key-date-helpers";
 import { formatDate } from "@/utils/dateFormat";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { KEY_DATE_ACHIEVEMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
+import useHasPermission from "@/hooks/useHasPermission";
 
 const fmt = (d?: string | null) => (d ? formatDate(d) : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
@@ -57,6 +60,7 @@ const KeyDateDetailPage: React.FC = () => {
   const [workflow, setWorkflow] = useState<KeyDateWorkflowSummaryDTO | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const canManageAchievementEvidence = useHasPermission("dms.keydate.achievement");
 
   const [eotOpen, setEotOpen] = useState(false);
   const [eotForm, setEotForm] = useState({ requested_extension_days: "", eot_letter_reference: "", requested_revised_key_date: "", reason: "" });
@@ -232,6 +236,33 @@ const KeyDateDetailPage: React.FC = () => {
           <Field label="Revisions" value={m.current_revision} />
         </CardContent>
       </Card>
+
+      {achieved && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Achievement evidence</CardTitle>
+            <CardDescription>
+              Notification metadata and uploaded documentary evidence remain distinct.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Achievement date" value={fmt(m.actual_achievement_date)} />
+              <Field label="Contractor notification" value={m.client_notification_ref || "—"} />
+              <Field label="Notification date" value={fmt(m.client_notification_date)} />
+            </div>
+            <EntityDocumentLinks
+              targetType="key_date_achievement"
+              targetId={`${m.id}:ach`}
+              organizationId={m.organization_id}
+              projectId={m.project_id}
+              roles={KEY_DATE_ACHIEVEMENT_RELATIONSHIP_ROLES}
+              defaultRole="contractor_notification"
+              canManage={canManageAchievementEvidence}
+            />
+          </CardContent>
+        </Card>
+      )}
 
       {workflow?.baseline_status === "frozen" && (
         <Card>

@@ -4,6 +4,7 @@ export interface DocumentItem {
   _id: string;
   name?: string;
   filename?: string;
+  subject?: string | null;
   upload_id?: string;
   organization_id?: string;
   project_id?: string | null;
@@ -28,7 +29,7 @@ export type ListDocumentsParams = {
 };
 
 export async function listDocuments(params?: ListDocumentsParams) {
-  const { data } = await api.get("/documents", { params });
+  const { data } = await api.get("/document-search", { params });
   return data as {
     documents: DocumentItem[];
     total?: number;

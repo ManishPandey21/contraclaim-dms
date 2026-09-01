@@ -161,6 +161,7 @@ class _DB:
     def __init__(self):
         self.variations = _Coll()
         self.bank_guarantees = _Coll()
+        self.bank_guarantee_events = _Coll()
         self.bg_extension_history = _Coll()
         self.bg_notifications = _Coll()
 
@@ -193,7 +194,7 @@ async def test_extend_creates_history_and_updates_expiry():
     assert extended["bg_status"] == "extended"
     assert extended["current_revision"] == 1
     assert extended["extension_required"] is False  # now expires after required
-    history = await svc.list_history(bg["_id"])
+    history = await svc.list_history(bg)
     assert len(history) == 1 and history[0]["revision_number"] == 1
     assert history[0]["previous_expiry_date"] == NOW + timedelta(days=30)
 
