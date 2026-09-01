@@ -131,6 +131,10 @@ def ipc_summary(ipcs: List[Dict[str, Any]], original_contract_value: Optional[fl
     }
 
 
+class AmbiguousLegacyIPCRelationshipError(ValueError):
+    """Legacy IPC arrays cannot identify a relationship role or child event."""
+
+
 class IPCBillService:
     def __init__(self, db: Any = None) -> None:
         self.db = db
@@ -150,7 +154,14 @@ class IPCBillService:
         from ..models.ipc_bill import IPCBill
 
         db = await self._get_db()
+        if getattr(payload, "linked_document_ids", None):
+            raise AmbiguousLegacyIPCRelationshipError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
         doc = IPCBill(**payload.model_dump()).model_dump(by_alias=True)
+        # An explicit or default empty create array carries no relationship
+        # intent. Canonical relationships own every non-empty link write.
+        doc.pop("linked_document_ids", None)
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
         if not doc.get("contract_id"):
@@ -213,6 +224,11 @@ class IPCBillService:
 
     async def update(self, ipc: Dict[str, Any], payload: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
+        payload = dict(payload)
+        if "linked_document_ids" in payload:
+            raise AmbiguousLegacyIPCRelationshipError(
+                "Legacy relationship intent is ambiguous and requires manual review"
+            )
         update = {k: v for k, v in payload.items() if v is not None}
         # Append a revision entry capturing the status + remarks change.
         revision = {
@@ -235,9 +251,15 @@ class IPCBillService:
 
     async def delete(self, ipc: Dict[str, Any], current_user: Any) -> bool:
         db = await self._get_db()
-        res = await db.ipc_bills.delete_one({"_id": ipc["_id"]})
-        await self._emit("ipc_bill.deleted", current_user, ipc, before=ipc)
-        return res.deleted_count > 0
+        from .document_relationship_service import DocumentRelationshipService
+
+        await DocumentRelationshipService(db).delete_target(
+            current_user,
+            "ipc_bill",
+            str(ipc["_id"]),
+            reason="IPC deleted",
+        )
+        return True
 
     async def summary(self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None,
                       contract_id: Optional[str] = None, original_contract_value: Optional[float] = None) -> Dict[str, Any]:

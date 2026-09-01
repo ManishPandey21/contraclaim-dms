@@ -140,11 +140,24 @@ class _Coll:
         d.update(update.get("$set", {}))
         return dict(d)
 
-    async def update_one(self, query, update):
+    async def update_one(self, query, update, upsert=False, **_kwargs):
         d = self.docs.get(query.get("_id"))
+        inserted = False
+        if not d and upsert:
+            d = {"_id": query.get("_id"), **update.get("$setOnInsert", {})}
+            self.docs[d["_id"]] = d
+            inserted = True
         if d:
             d.update(update.get("$set", {}))
-        return SimpleNamespace(modified_count=1 if d else 0)
+            for field in update.get("$unset", {}):
+                d.pop(field, None)
+            for field, amount in update.get("$inc", {}).items():
+                d[field] = int(d.get(field) or 0) + int(amount)
+        return SimpleNamespace(
+            matched_count=0 if inserted else (1 if d else 0),
+            modified_count=1 if d else 0,
+            upserted_id=d.get("_id") if inserted else None,
+        )
 
     async def replace_one(self, query, doc, upsert=False):
         self.docs[query.get("_id")] = dict(doc)
