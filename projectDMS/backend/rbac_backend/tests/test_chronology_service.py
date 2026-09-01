@@ -198,6 +198,14 @@ async def test_extract_verify_syncs_chronology_event_to_graph():
 @pytest.mark.asyncio
 async def test_pleading_context_and_attach_use_only_verified_events_by_default():
     svc = _svc()
+    await svc.db.documents.insert_one(
+        {
+            "_id": "doc-2",
+            "organization_id": "org-A",
+            "project_id": "proj-A",
+            "processing_status": "completed",
+        }
+    )
     chronology = await svc.create_chronology(
         MatterChronologyCreate(organization_id="org-A", project_id="proj-A", title="Payment chronology"),
         _user(),

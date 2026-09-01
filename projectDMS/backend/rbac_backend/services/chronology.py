@@ -57,6 +57,19 @@ def _actor_id(user: Any) -> Optional[str]:
     return getattr(user, "id", None) or getattr(user, "email", None)
 
 
+#: The chronology-event fields that carry AUTHORITY rather than metadata.
+#:
+#: `PolicyService.authorize_document` resolves a resource's authority from
+#: `organization_id` and `project_id` and nothing else, so these two — and only
+#: these two — decide which tenant an event, its `project_events` row, its
+#: `event_links` and its `audit_events` land in, and which tenant's
+#: `build_scope_query` reads them back. `contract_id` / `matter_id` / `claim_id`
+#: are list-filter metadata that no gate reads; `MatterChronologyUpdate` already
+#: lets a chronology change all three under an org/project-only gate, so they
+#: stay caller-settable.
+_EVENT_AUTHORITY_FIELDS = ("organization_id", "project_id")
+
+
 def _enum_value(value: Any) -> Any:
     return value.value if isinstance(value, Enum) else value
 
@@ -209,11 +222,42 @@ class ChronologyService:
             self.db, events, ("description", "title"), span_fields=("source_spans",)
         )
 
+    def _apply_chronology_authority_scope(self, data: Dict[str, Any], chronology: Dict[str, Any]) -> None:
+        """Anchor an event's authority scope to its already-authorized parent.
+
+        The route authorizes the PARENT CHRONOLOGY — `_load_and_authorize_chronology`
+        hands the policy the chronology row, so nothing in the request body is ever
+        authorized. Resolving scope as `payload_value or chronology_value` therefore
+        let a caller redirect the event, and everything derived from it, into a
+        tenant the request was never checked against.
+
+        Authority is the parent chronology intersected with the actor's entitlement,
+        and the route has already established the second half. A request field may
+        restate that scope but never replace it: a conflicting value is refused
+        rather than silently rewritten, so a caller that believes it is writing
+        somewhere else finds out. Actor entitlement is not parent identity — a
+        globally entitled actor is refused here too, because this API has no
+        relocation semantics.
+        """
+        for field in _EVENT_AUTHORITY_FIELDS:
+            authorized = chronology.get(field)
+            requested = data.get(field)
+            if requested is not None and str(requested) != str(authorized):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=(
+                        f"Chronology event {field} must match its chronology; "
+                        "an event cannot be created outside the authorized chronology scope."
+                    ),
+                )
+            data[field] = authorized
+
     async def create_event(self, payload: MatterChronologyEventCreate, current_user: Any) -> Dict[str, Any]:
         chronology = await self.get_chronology(payload.chronology_id)
+        if payload.source_document_id:
+            await self._require_current_document_authority(payload.source_document_id)
         data = payload.model_dump()
-        data["organization_id"] = data.get("organization_id") or chronology.get("organization_id")
-        data["project_id"] = data.get("project_id") or chronology.get("project_id")
+        self._apply_chronology_authority_scope(data, chronology)
         data["contract_id"] = data.get("contract_id") or chronology.get("contract_id")
         data["matter_id"] = data.get("matter_id") or chronology.get("matter_id")
         data["claim_id"] = data.get("claim_id") or chronology.get("claim_id")
@@ -266,6 +310,8 @@ class ChronologyService:
         decision: Optional[ChronologyDecisionRequest] = None,
     ) -> Dict[str, Any]:
         before = await self.get_event(chronology_id, event_id)
+        if before.get("source_document_id"):
+            await self._require_current_document_authority(before["source_document_id"])
         update = {
             "verification_status": ChronologyVerificationStatus.VERIFIED.value,
             "updated_at": datetime.utcnow(),
@@ -521,6 +567,8 @@ class ChronologyService:
 
     async def _extract_document_event(self, chronology: Dict[str, Any], source_doc: Dict[str, Any], current_user: Any) -> Optional[Dict[str, Any]]:
         source_id = str(source_doc.get("_id"))
+        if not await self._has_current_document_authority(source_id):
+            return None
         raw_text = self._document_text(source_doc)
         content_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
         existing = await self.db.matter_chronology_events.find_one(
@@ -581,6 +629,19 @@ class ChronologyService:
             metadata={"content_hash": content_hash, "source_type": "document"},
         )
         return await self.create_event(event, current_user)
+
+    async def _has_current_document_authority(self, document_id: str) -> bool:
+        """Resolve authority from the canonical document at the write boundary."""
+        from .publication_policy import resolve_document_authority
+
+        return (await resolve_document_authority(self.db, document_id)).consumable
+
+    async def _require_current_document_authority(self, document_id: str) -> None:
+        if not await self._has_current_document_authority(document_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Source document is not currently authoritative",
+            )
 
     def _document_text(self, source_doc: Dict[str, Any]) -> str:
         # Suggested chronology entries feed EOT and claim reasoning, so this is
@@ -698,13 +759,27 @@ class ChronologyService:
                 return None
         return None
 
+    async def _event_publication_scope(self, event: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        """The scope a verified event may publish under: its parent chronology's.
+
+        Never the stored row's own fields. `create_project_event` re-authorizes
+        nothing, so a row written before `_apply_chronology_authority_scope`
+        existed would otherwise still publish a project event, its links and its
+        audit trail into whatever tenant it happens to carry.
+        """
+        chronology = await self.get_chronology(event["chronology_id"])
+        return chronology.get("organization_id"), chronology.get("project_id")
+
     async def _sync_verified_event(self, event: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         if event.get("project_event_id"):
             return event
+        if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
+        organization_id, project_id = await self._event_publication_scope(event)
         project_event = await self.graph.create_project_event(
             ProjectEventCreate(
-                organization_id=event.get("organization_id"),
-                project_id=event.get("project_id"),
+                organization_id=organization_id,
+                project_id=project_id,
                 event_type=self._project_event_type(event),
                 event_date=event.get("event_date") or datetime.utcnow(),
                 event_end_date=event.get("event_end_date"),
@@ -733,10 +808,11 @@ class ChronologyService:
         )
         link_ids: List[str] = []
         if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
             link = await self.graph.suggest_link(
                 EventLinkCreate(
-                    organization_id=event.get("organization_id"),
-                    project_id=event.get("project_id"),
+                    organization_id=organization_id,
+                    project_id=project_id,
                     source_type=EvidenceEntityType.PROJECT_EVENT,
                     source_id=str(project_event["_id"]),
                     target_type=EvidenceEntityType.DOCUMENT,
@@ -753,10 +829,12 @@ class ChronologyService:
             )
             link_ids.append(str(link.get("link_group_id")))
         for clause in event.get("contract_clauses") or []:
+            if event.get("source_document_id"):
+                await self._require_current_document_authority(event["source_document_id"])
             link = await self.graph.suggest_link(
                 EventLinkCreate(
-                    organization_id=event.get("organization_id"),
-                    project_id=event.get("project_id"),
+                    organization_id=organization_id,
+                    project_id=project_id,
                     source_type=EvidenceEntityType.PROJECT_EVENT,
                     source_id=str(project_event["_id"]),
                     target_type=EvidenceEntityType.CLAUSE,
@@ -771,9 +849,19 @@ class ChronologyService:
                 current_user=current_user,
             )
             link_ids.append(str(link.get("link_group_id")))
+        if event.get("source_document_id"):
+            await self._require_current_document_authority(event["source_document_id"])
         updated = await self.db.matter_chronology_events.find_one_and_update(
             {"_id": event["_id"], "chronology_id": event["chronology_id"]},
-            {"$set": {"project_event_id": str(project_event["_id"]), "event_link_ids": link_ids, "updated_at": datetime.utcnow()}},
+            {
+                "$set": {
+                    "project_event_id": str(project_event["_id"]),
+                    "event_link_ids": link_ids,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "updated_at": datetime.utcnow(),
+                }
+            },
             return_document=True,
         )
         return dict(updated)

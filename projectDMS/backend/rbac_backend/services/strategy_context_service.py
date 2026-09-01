@@ -48,8 +48,33 @@ class StrategyContextService:
             logger.warning("OpenAI client unavailable for strategy contexts: %s", exc)
             self._ai_client = None
 
-    async def generate_context(self, letter_id: str) -> StrategyContextResponse:
-        conversation = await self.conversation_service.get_conversation_chain(letter_id, current_user=None)
+    async def generate_context(
+        self, letter_id: str, current_user: Any
+    ) -> StrategyContextResponse:
+        """Consolidated per-role contexts for a letter thread.
+
+        Everything this produces is PERSISTED onto the letter by the caller, so
+        the boundary here is material influence, not display: an unauthorised
+        source must be excluded before it is concatenated, before it reaches the
+        synthesis prompt, and therefore before it can be stored and read by
+        every later consumer. Filtering the answer afterwards would be too late.
+
+        Two distinct authority objects, two canonical boundaries:
+
+        * thread LETTERS - canonical row visibility via the scoped conversation
+          seam. A shared `conversation_id`, a reply edge, a matching
+          organisation, or the fact that the anchor letter is authorised are
+          association, not authority;
+        * curated DOCUMENTS - the scoped seam that applies both row visibility
+          and `is_consumable`, so a quarantined, deleted or human-review
+          document cannot contribute its extraction-derived text.
+
+        `current_user` carries no default so a caller cannot omit the identity
+        this is bounded by.
+        """
+        conversation = await self.conversation_service.get_authorized_conversation_chain(
+            letter_id, current_user
+        )
         if not conversation:
             return StrategyContextResponse(letter_id=letter_id)
 
@@ -89,8 +114,24 @@ class StrategyContextService:
             try:
                 document_ids = getattr(anchor_letter, "context_document_ids", []) or []
                 if document_ids:
-                    doc_service = DocumentService()
-                    docs = await doc_service.get_documents_by_ids(document_ids)
+                    # A curated id list is not authority: whoever stored it is
+                    # not necessarily the caller, and a document's publication
+                    # state can turn adverse after it was curated.
+                    doc_service = DocumentService(getattr(self.letter_service, "db", None))
+                    docs = await doc_service.get_documents_by_ids_in_scope(
+                        document_ids,
+                        current_user,
+                        organization_id=(
+                            str(anchor_letter.organization_id)
+                            if anchor_letter.organization_id
+                            else None
+                        ),
+                        project_id=(
+                            str(anchor_letter.project_id)
+                            if anchor_letter.project_id
+                            else None
+                        ),
+                    )
                     for doc in docs:
                         entry_text = self._format_document_entry(doc)
                         role = self._infer_role_from_text(

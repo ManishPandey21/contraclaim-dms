@@ -17,6 +17,10 @@ from ..models.ipc_bill import (
     IPCBillUpdate,
 )
 from ..services.ipc_bill_service import IPCBillService
+from ..services.document_relationship_service import (
+    DocumentRelationshipError,
+    DocumentRelationshipService,
+)
 from ..services.policy_service import PolicyService
 
 router = APIRouter()
@@ -41,6 +45,34 @@ async def _load(ipc_id: str, permission: str, db, current_user, policy) -> dict:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="IPC bill not found")
     await policy.authorize_document(current_user, permission, i, resource_type="ipc_bill")
     return i
+
+
+async def _present_ipc(ipc: dict, db, current_user: CurrentUser) -> IPCBill:
+    presented = dict(ipc)
+    presented["linked_document_ids"] = await DocumentRelationshipService(
+        db
+    ).authorized_document_ids(
+        current_user,
+        "ipc_bill",
+        str(ipc.get("_id") or ""),
+        legacy_document_ids=ipc.get("linked_document_ids") or [],
+    )
+    return IPCBill(**presented)
+
+
+async def _present_ipcs(ipcs: list[dict], db, current_user: CurrentUser) -> list[IPCBill]:
+    ids_by_ipc = await DocumentRelationshipService(db).authorized_document_ids_for_targets(
+        current_user, "ipc_bill", ipcs
+    )
+    return [
+        IPCBill(
+            **{
+                **ipc,
+                "linked_document_ids": ids_by_ipc.get(str(ipc.get("_id") or ""), []),
+            }
+        )
+        for ipc in ipcs
+    ]
 
 
 @router.get("/ipc-bills", response_model=List[IPCBill])
@@ -70,7 +102,7 @@ async def list_ipc_bills(
         payment_status=payment_status, currency=currency,
         date_from=_parse_date(date_from), date_to=_parse_date(date_to), skip=skip, limit=limit,
     )
-    return [IPCBill(**i) for i in items]
+    return await _present_ipcs(items, db, current_user)
 
 
 @router.get("/ipc-bills/summary", response_model=IPCBillSummary)
@@ -116,11 +148,12 @@ async def export_ipc_bills(
     if ipc_id:
         # Single-IPC export.
         one = await _load(ipc_id, Permissions.IPC_EXPORT, db, current_user, policy)
-        rows = [one]
+        rows = [(await _present_ipc(one, db, current_user)).model_dump(by_alias=True)]
         name = f"ipc-{one.get('ipc_number') or ipc_id}"
     else:
         scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
-        rows = await svc.list(scope, project_id=project_id, contract_id=contract_id, limit=5000)
+        raw_rows = await svc.list(scope, project_id=project_id, contract_id=contract_id, limit=5000)
+        rows = [row.model_dump(by_alias=True) for row in await _present_ipcs(raw_rows, db, current_user)]
         name = "ipc-register"
     return cx.export_response(name, cx.IPC_COLUMNS, rows, format)
 
@@ -137,8 +170,18 @@ async def create_ipc_bill(
         current_user, Permissions.IPC_CREATE, resource_type="ipc_bill",
         organization_id=org, project_id=payload.project_id,
     )
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(db, policy=policy).reject_ambiguous_legacy_write(
+                current_user,
+                "ipc_bill",
+                organization_id=org,
+                project_id=payload.project_id,
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     created = await IPCBillService(db).create(payload, current_user)
-    return IPCBill(**created)
+    return await _present_ipc(created, db, current_user)
 
 
 @router.get("/ipc-bills/{ipc_id}", response_model=IPCBill)
@@ -148,7 +191,11 @@ async def get_ipc_bill(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    return IPCBill(**await _load(ipc_id, Permissions.IPC_VIEW, db, current_user, policy))
+    return await _present_ipc(
+        await _load(ipc_id, Permissions.IPC_VIEW, db, current_user, policy),
+        db,
+        current_user,
+    )
 
 
 @router.put("/ipc-bills/{ipc_id}", response_model=IPCBill)
@@ -164,8 +211,17 @@ async def update_ipc_bill(
     if payload.status in {"approved", "paid", "partially_paid", "rejected"}:
         perm = Permissions.IPC_APPROVE
     i = await _load(ipc_id, perm, db, current_user, policy)
-    updated = await IPCBillService(db).update(i, payload.model_dump(exclude_unset=True), current_user)
-    return IPCBill(**(updated or i))
+    changes = payload.model_dump(exclude_unset=True)
+    legacy_ids = changes.pop("linked_document_ids", None)
+    if "linked_document_ids" in payload.model_fields_set:
+        try:
+            await DocumentRelationshipService(db, policy=policy).replace_legacy_document_ids(
+                current_user, "ipc_bill", ipc_id, legacy_ids or []
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    updated = await IPCBillService(db).update(i, changes, current_user)
+    return await _present_ipc(updated or i, db, current_user)
 
 
 @router.delete("/ipc-bills/{ipc_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -176,5 +232,10 @@ async def delete_ipc_bill(
     policy: PolicyService = Depends(get_policy),
 ):
     i = await _load(ipc_id, Permissions.IPC_DELETE, db, current_user, policy)
-    await IPCBillService(db).delete(i, current_user)
+    await DocumentRelationshipService(db, policy=policy).delete_target(
+        current_user,
+        "ipc_bill",
+        ipc_id,
+        reason="IPC deleted",
+    )
     return None

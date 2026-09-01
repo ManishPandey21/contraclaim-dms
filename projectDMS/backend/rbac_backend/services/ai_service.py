@@ -207,8 +207,17 @@ class AIService:
             organization_id=request.organization_id,
             project_id=request.project_id,
         )
+        # `summary` is extraction-derived, so it goes through the publication
+        # policy rather than being read raw - reading it directly is the exact
+        # short-circuit that let a blocked document's text into a draft body.
+        # `subject` is filing metadata and stays available so a blocked document
+        # remains identifiable.
+        from .publication_policy import authoritative_summary, is_consumable
+
         for doc in source_documents:
-            summary = doc.get("summary") or doc.get("subject")
+            summary = authoritative_summary(doc) or (
+                doc.get("subject") if is_consumable(doc) else None
+            )
             if summary:
                 bullet_points.append(summary.strip())
             keywords = doc.get("keywords") or []

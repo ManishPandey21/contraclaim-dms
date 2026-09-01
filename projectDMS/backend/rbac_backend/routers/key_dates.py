@@ -39,6 +39,10 @@ from ..models.key_date import (
 )
 from ..models.csv_import import CSVImportPreview, CSVImportResult
 from ..services.key_date_service import KeyDateError, KeyDateService
+from ..services.document_relationship_service import (
+    DocumentRelationshipError,
+    DocumentRelationshipService,
+)
 from ..services.key_date_revision_service import (
     DETERMINATION_TEMPLATE_HEADERS,
     SUBMISSION_TEMPLATE_HEADERS,
@@ -62,7 +66,10 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
 
 
 def _bad_request(exc: KeyDateError) -> HTTPException:
-    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return HTTPException(
+        status_code=getattr(exc, "status_code", status.HTTP_400_BAD_REQUEST),
+        detail=str(exc),
+    )
 
 
 async def _load(milestone_id: str, permission: str, db, current_user, policy) -> dict:
@@ -333,6 +340,18 @@ async def create_milestone(
         current_user, Permissions.KEYDATE_CREATE, resource_type="key_date_milestone",
         organization_id=org, project_id=payload.project_id,
     )
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "key_date",
+                organization_id=org,
+                project_id=payload.project_id,
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         created = await KeyDateService(db).create_milestone(payload, current_user)
     except KeyDateError as exc:
@@ -420,6 +439,18 @@ async def create_eot_submission_revision(
         organization_id=payload.organization_id, current_user=current_user, policy=policy,
     )
     payload.organization_id = org
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "eot_submission",
+                organization_id=org,
+                project_id=payload.project_id,
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         return EOTSubmission(**await KeyDateRevisionService(db).create_submission(payload, current_user))
     except KeyDateError as exc:
@@ -437,6 +468,18 @@ async def update_eot_submission_revision(
     submission = await _load_submission(
         submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
     )
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "eot_submission",
+                organization_id=submission.get("organization_id"),
+                project_id=submission.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         return EOTSubmission(**await KeyDateRevisionService(db).update_submission(
             submission, payload, current_user
@@ -456,9 +499,21 @@ async def lock_eot_submission_revision(
         submission_id, Permissions.KEYDATE_EOT_LOCK_SUBMISSION, db, current_user, policy
     )
     try:
-        return EOTSubmission(**await KeyDateRevisionService(db).lock_submission(
-            submission, current_user
-        ))
+        await DocumentRelationshipService(db, policy=policy).freeze(
+            current_user,
+            "eot_submission",
+            submission_id,
+            reason="EOT submission locked",
+            lifecycle_orchestrated=True,
+            allow_already_frozen=True,
+        )
+        return EOTSubmission(
+            **await KeyDateRevisionService(db).emit_submission_relationship_lock(
+                submission, current_user
+            )
+        )
+    except DocumentRelationshipError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except KeyDateError as exc:
         raise _bad_request(exc)
 
@@ -579,6 +634,18 @@ async def create_eot_determination(
         organization_id=payload.organization_id, current_user=current_user, policy=policy,
     )
     payload.organization_id = org
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "eot_determination",
+                organization_id=org,
+                project_id=payload.project_id,
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         return EOTDetermination(**await KeyDateRevisionService(db).create_determination(
             payload, current_user
@@ -598,6 +665,18 @@ async def update_eot_determination(
     determination = await _load_determination(
         determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
     )
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "eot_determination",
+                organization_id=determination.get("organization_id"),
+                project_id=determination.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         return EOTDetermination(**await KeyDateRevisionService(db).update_determination(
             determination, payload, current_user
@@ -618,9 +697,21 @@ async def freeze_eot_determination(
         db, current_user, policy,
     )
     try:
-        return EOTDetermination(**await KeyDateRevisionService(db).freeze_determination(
-            determination, current_user
-        ))
+        await DocumentRelationshipService(db, policy=policy).freeze(
+            current_user,
+            "eot_determination",
+            determination_id,
+            reason="EOT determination frozen",
+            lifecycle_orchestrated=True,
+            allow_already_frozen=True,
+        )
+        return EOTDetermination(
+            **await KeyDateRevisionService(db).emit_determination_relationship_freeze(
+                determination, current_user
+            )
+        )
+    except DocumentRelationshipError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except KeyDateError as exc:
         raise _bad_request(exc)
 
@@ -840,6 +931,18 @@ async def update_milestone(
     policy: PolicyService = Depends(get_policy),
 ):
     m = await _load(milestone_id, Permissions.KEYDATE_EDIT, db, current_user, policy)
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "key_date",
+                organization_id=m.get("organization_id"),
+                project_id=m.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         updated = await KeyDateService(db).update(m, payload.model_dump(exclude_unset=True), current_user)
     except KeyDateError as exc:
@@ -855,7 +958,10 @@ async def delete_milestone(
     policy: PolicyService = Depends(get_policy),
 ):
     m = await _load(milestone_id, Permissions.KEYDATE_DELETE, db, current_user, policy)
-    await KeyDateService(db).delete(m, current_user)
+    try:
+        await KeyDateService(db).delete(m, current_user)
+    except KeyDateError as exc:
+        raise _bad_request(exc)
     return None
 
 
@@ -872,6 +978,18 @@ async def submit_eot(
     policy: PolicyService = Depends(get_policy),
 ):
     m = await _load(milestone_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy)
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "legacy_eot",
+                organization_id=m.get("organization_id"),
+                project_id=m.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         eot = await KeyDateService(db).submit_eot(m, payload, current_user)
     except KeyDateError as exc:
@@ -886,8 +1004,17 @@ async def list_eots(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    await _load(milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy)
-    return [EOTApplication(**e) for e in await KeyDateService(db).list_eots(milestone_id)]
+    milestone = await _load(
+        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy
+    )
+    return [
+        EOTApplication(**e)
+        for e in await KeyDateService(db).list_eots(
+            milestone_id,
+            organization_id=milestone.get("organization_id"),
+            project_id=milestone.get("project_id"),
+        )
+    ]
 
 
 @router.post("/key-dates/{milestone_id}/eot/{eot_id}/review", response_model=EOTApplication,
@@ -903,8 +1030,28 @@ async def review_eot(
     m = await _load(milestone_id, Permissions.KEYDATE_EOT_APPROVE, db, current_user, policy)
     svc = KeyDateService(db)
     eot = await db.key_date_eot_applications.find_one({"_id": eot_id})
-    if not eot or str(eot.get("milestone_id")) != str(milestone_id):
+    if (
+        not eot
+        or str(eot.get("milestone_id")) != str(milestone_id)
+        or not KeyDateService._legacy_row_in_parent_scope(
+            eot,
+            organization_id=m.get("organization_id"),
+            project_id=m.get("project_id"),
+        )
+    ):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EOT application not found")
+    if "linked_document_ids" in review.model_fields_set and review.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "legacy_eot",
+                organization_id=m.get("organization_id"),
+                project_id=m.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         updated = await svc.review_eot(m, eot, review, current_user)
     except KeyDateError as exc:
@@ -919,8 +1066,17 @@ async def extension_history(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    await _load(milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy)
-    return [ExtensionHistory(**h) for h in await KeyDateService(db).list_extension_history(milestone_id)]
+    milestone = await _load(
+        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy
+    )
+    return [
+        ExtensionHistory(**h)
+        for h in await KeyDateService(db).list_extension_history(
+            milestone_id,
+            organization_id=milestone.get("organization_id"),
+            project_id=milestone.get("project_id"),
+        )
+    ]
 
 
 # --- achievement ----------------------------------------------------------
@@ -935,6 +1091,18 @@ async def record_achievement(
     policy: PolicyService = Depends(get_policy),
 ):
     m = await _load(milestone_id, Permissions.KEYDATE_ACHIEVEMENT, db, current_user, policy)
+    if "linked_document_ids" in rec.model_fields_set and rec.linked_document_ids:
+        try:
+            await DocumentRelationshipService(
+                db, policy=policy
+            ).reject_ambiguous_legacy_write(
+                current_user,
+                "key_date_achievement",
+                organization_id=m.get("organization_id"),
+                project_id=m.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     try:
         updated = await KeyDateService(db).record_achievement(m, rec, current_user)
     except KeyDateError as exc:

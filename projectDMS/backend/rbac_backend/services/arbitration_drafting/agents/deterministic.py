@@ -12,6 +12,7 @@ from ...publication_policy import (
     resolve_document_authority,
     synthetic_case_clause_id,
 )
+from ...document_relationship_service import DocumentRelationshipService
 from ..matrix_registry import MATRIX_COLLECTIONS
 from ..repository import _collect, _jsonable
 
@@ -335,8 +336,27 @@ class DeterministicArbitrationAgent:
 
     async def _quantum(self, agent_type: str) -> None:
         candidates: List[Tuple[str, Dict[str, Any]]] = []
+        authorized_ipc_documents: Dict[str, List[str]] = {}
         for collection_name in ["claims", "variations", "ipc_bills"]:
-            for row in await self._find_source_rows(collection_name, limit=int(self.options.get("quantum_limit") or 50)):
+            source_rows = await self._find_source_rows(
+                collection_name,
+                limit=int(self.options.get("quantum_limit") or 50),
+            )
+            if collection_name == "ipc_bills" and source_rows:
+                try:
+                    authorized_ipc_documents = await DocumentRelationshipService(
+                        self.db
+                    ).authorized_document_ids_for_targets(
+                        self.current_user,
+                        "ipc_bill",
+                        source_rows,
+                    )
+                except Exception:
+                    authorized_ipc_documents = {}
+                    self.warnings.append(
+                        "IPC document relationships could not be re-authorized and were omitted."
+                    )
+            for row in source_rows:
                 candidates.append((collection_name, row))
         chronology_rows = await self._matrix_rows("chronology-matrix")
         created_any = False
@@ -378,8 +398,18 @@ class DeterministicArbitrationAgent:
                 "tax_treatment": _first(source, "tax_treatment"),
                 "checked_by": _first(source, "checked_by"),
                 "cost_head": _cost_head(source, collection_name),
-                "evidence_ids": _string_list(
-                    _first(source, "evidence_ids", "supporting_document_ids", "document_ids", "linked_document_ids")
+                "evidence_ids": (
+                    authorized_ipc_documents.get(source_id, [])
+                    if collection_name == "ipc_bills"
+                    else _string_list(
+                        _first(
+                            source,
+                            "evidence_ids",
+                            "supporting_document_ids",
+                            "document_ids",
+                            "linked_document_ids",
+                        )
+                    )
                 ),
                 "delay_event_ids": delay_event_ids,
                 "delay_period_start": _iso_date(_parse_date(_first(source, "delay_start_date", "period_start"))),

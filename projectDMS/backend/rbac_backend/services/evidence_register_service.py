@@ -28,6 +28,7 @@ from ..models.evidence_registers import (
 )
 from .audit_event_service import AuditEventService
 from .evidence_graph_service import EvidenceGraphService
+from .publication_policy import is_consumable, resolve_canonical_document
 
 
 def _actor_id(user: Any) -> Optional[str]:
@@ -171,6 +172,13 @@ class EvidenceRegisterService:
         doc = _jsonable(model(**payload.model_dump()).model_dump(by_alias=True))
         if not doc.get("organization_id"):
             doc["organization_id"] = getattr(current_user, "organization_id", None)
+        if "linked_document_ids" in doc:
+            doc["linked_document_ids"] = await self._authorized_document_links(
+                db,
+                doc.get("linked_document_ids"),
+                organization_id=doc.get("organization_id"),
+                project_id=doc.get("project_id"),
+            )
         doc["created_at"] = datetime.utcnow()
         doc["created_by"] = _actor_id(current_user)
         result = await db[collection_name].insert_one(doc)
@@ -188,7 +196,9 @@ class EvidenceRegisterService:
 
     async def _get(self, collection_name: str, item_id: str) -> Optional[Dict[str, Any]]:
         db = await self._get_db()
-        return await db[collection_name].find_one({"_id": item_id})
+        return await self._current_authority_projection(
+            db, await db[collection_name].find_one({"_id": item_id})
+        )
 
     async def _list(
         self,
@@ -209,7 +219,7 @@ class EvidenceRegisterService:
             if value:
                 query[key] = value
         cursor = db[collection_name].find(query).sort(sort_field, -1).skip(skip).limit(limit)
-        return await _collect_cursor(cursor)
+        return await self._current_authority_projections(db, await _collect_cursor(cursor))
 
     async def _update(self, collection_name: str, item_id: str, payload: Dict[str, Any], current_user: Any) -> Dict[str, Any]:
         db = await self._get_db()
@@ -217,10 +227,22 @@ class EvidenceRegisterService:
         if not existing:
             raise EvidenceRegisterNotFound(item_id)
         update = {key: _jsonable(value) for key, value in payload.items() if value is not None}
+        if "linked_document_ids" in update:
+            update["linked_document_ids"] = await self._authorized_document_links(
+                db,
+                update.get("linked_document_ids"),
+                organization_id=existing.get("organization_id"),
+                project_id=existing.get("project_id"),
+            )
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = _actor_id(current_user)
         updated = await db[collection_name].find_one_and_update({"_id": item_id}, {"$set": update}, return_document=True)
         updated = updated or {**existing, **update}
+        # `after` is a claim about what the item NOW IS, so it carries the served
+        # view: an update that never mentioned `linked_document_ids` must not
+        # re-publish a supporter that lost authority in the meantime. `before` is
+        # the historical prior state and is recorded exactly as it stood.
+        updated = await self._current_authority_projection(db, updated)
         await self.audit.emit(
             action=f"{collection_name}.updated",
             actor_id=_actor_id(current_user),
@@ -232,6 +254,103 @@ class EvidenceRegisterService:
             after=updated,
         )
         return updated
+
+    async def _current_authority_projection(
+        self, db: Any, item: Optional[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """The item as it may be SERVED, not as it is stored.
+
+        `_authorized_document_links` resolved these ids when they were written,
+        and that answer expires: the supporting Document can lose publication
+        authority — human review, quarantine, deletion — or stop resolving at
+        all, long after a human linked it. A stored association is history; only
+        a currently authorized one is support, so the question is asked again
+        here rather than trusted from the row.
+
+        Storage is untouched. Destroying the stored ids would destroy the
+        register's provenance (what was linked, and when) and would make the
+        retraction irreversible; filtering at serve time keeps both, and a
+        document that regains authority is served again with no re-linking.
+
+        The primitive is the POSITIVE one the write path already uses, on
+        purpose. `publication_policy.blocked_document_ids` is subtractive and
+        fails OPEN by design — it returns only ids positively resolved AND
+        positively unusable — so an orphaned id survives subtraction. Here that
+        would serve a supporter whose document no longer exists.
+        """
+        if not item or "linked_document_ids" not in item:
+            return item
+        served = dict(item)
+        served["linked_document_ids"] = await self._authorized_document_links(
+            db,
+            item.get("linked_document_ids"),
+            organization_id=item.get("organization_id"),
+            project_id=item.get("project_id"),
+        )
+        return served
+
+    async def _current_authority_projections(
+        self, db: Any, items: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """`_current_authority_projection` across a listing.
+
+        Resolution costs one canonical document lookup per id, so identical
+        supporter sets within one page are resolved once. Register listings
+        commonly repeat them; distinct sets still cost what the write path costs.
+        """
+        cache: Dict[Any, List[str]] = {}
+        served: List[Dict[str, Any]] = []
+        for item in items:
+            if not item or "linked_document_ids" not in item:
+                served.append(item)
+                continue
+            key = (
+                tuple(str(value) for value in (item.get("linked_document_ids") or [])),
+                item.get("organization_id"),
+                item.get("project_id"),
+            )
+            if key not in cache:
+                cache[key] = await self._authorized_document_links(
+                    db,
+                    item.get("linked_document_ids"),
+                    organization_id=item.get("organization_id"),
+                    project_id=item.get("project_id"),
+                )
+            row = dict(item)
+            row["linked_document_ids"] = list(cache[key])
+            served.append(row)
+        return served
+
+    async def _authorized_document_links(
+        self,
+        db: Any,
+        document_ids: Any,
+        *,
+        organization_id: Optional[str],
+        project_id: Optional[str],
+    ) -> List[str]:
+        """Keep independently authorized, in-scope document supporters only."""
+        allowed: List[str] = []
+        seen = set()
+        for value in document_ids or []:
+            document_id = str(value or "").strip()
+            if not document_id or document_id in seen:
+                continue
+            seen.add(document_id)
+            try:
+                document = await resolve_canonical_document(db, document_id)
+            except Exception:
+                continue
+            if not document or not is_consumable(document):
+                continue
+            if organization_id and str(document.get("organization_id") or "") != str(
+                organization_id
+            ):
+                continue
+            if project_id and str(document.get("project_id") or "") != str(project_id):
+                continue
+            allowed.append(document_id)
+        return allowed
 
     async def _emit_graph_event(
         self,

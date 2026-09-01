@@ -12,14 +12,24 @@ from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.bank_guarantee import (
     BankGuarantee,
     BankGuaranteeCreate,
+    BankGuaranteeEvent,
     BankGuaranteeUpdate,
     BGExtendRequest,
     BGExtensionHistory,
     BGReleaseRequest,
+    BGStatusTransitionRequest,
     BGSummary,
 )
 from ..models.csv_import import CSVImportPreview, CSVImportResult
-from ..services.bank_guarantee_service import BankGuaranteeService
+from ..services.bank_guarantee_service import (
+    BankGuaranteeLifecycleError,
+    BankGuaranteeService,
+)
+from ..services.bank_guarantee_evidence_service import BankGuaranteeEvidenceService
+from ..services.document_relationship_service import (
+    DocumentRelationshipError,
+    DocumentRelationshipService,
+)
 from ..services.policy_service import PolicyService
 from ..services.register_csv_import import (
     BG_SAMPLE_ROW,
@@ -43,6 +53,29 @@ async def _load(bg_id: str, permission: str, db, current_user, policy) -> dict:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bank guarantee not found")
     await policy.authorize_document(current_user, permission, bg, resource_type="bank_guarantee")
     return bg
+
+
+async def _present_bgs(
+    rows: List[dict], db: Any, current_user: Any, policy: PolicyService
+) -> List[BankGuarantee]:
+    ids_by_bg = await BankGuaranteeEvidenceService(
+        db, policy=policy
+    ).authorized_document_ids(current_user, rows)
+    return [
+        BankGuarantee(
+            **{
+                **row,
+                "linked_document_ids": ids_by_bg.get(str(row.get("_id") or ""), []),
+            }
+        )
+        for row in rows
+    ]
+
+
+async def _present_bg(
+    row: dict, db: Any, current_user: Any, policy: PolicyService
+) -> BankGuarantee:
+    return (await _present_bgs([row], db, current_user, policy))[0]
 
 
 async def _read_csv(file: UploadFile) -> bytes:
@@ -77,7 +110,7 @@ async def list_bgs(
     items = await BankGuaranteeService(db).list(
         scope, project_id=project_id, contract_id=contract_id, status=status_filter, bg_type=bg_type, skip=skip, limit=limit,
     )
-    return [BankGuarantee(**b) for b in items]
+    return await _present_bgs(items, db, current_user, policy)
 
 
 @router.get("/bank-guarantees/summary", response_model=BGSummary)
@@ -111,7 +144,9 @@ async def bg_alerts(
         project_id=project_id, audit=False,
     )
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
-    return [BankGuarantee(**b) for b in await BankGuaranteeService(db).alerts(scope)]
+    return await _present_bgs(
+        await BankGuaranteeService(db).alerts(scope), db, current_user, policy
+    )
 
 
 @router.get("/bank-guarantees/export")
@@ -132,7 +167,13 @@ async def export_bgs(
 
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     rows = await BankGuaranteeService(db).list(scope, project_id=project_id, limit=5000)
-    return cx.export_response("bank-guarantee-register", cx.BG_COLUMNS, rows, format)
+    presented = await _present_bgs(rows, db, current_user, policy)
+    return cx.export_response(
+        "bank-guarantee-register",
+        cx.BG_COLUMNS,
+        [row.model_dump(by_alias=True) for row in presented],
+        format,
+    )
 
 
 @router.get("/bank-guarantees/import/template")
@@ -241,8 +282,21 @@ async def create_bg(
         current_user, Permissions.BG_CREATE, resource_type="bank_guarantee",
         organization_id=org, project_id=payload.project_id,
     )
-    created = await BankGuaranteeService(db).create(payload, current_user)
-    return BankGuarantee(**created)
+    if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
+        try:
+            await DocumentRelationshipService(db, policy=policy).reject_ambiguous_legacy_write(
+                current_user,
+                "bank_guarantee",
+                organization_id=org,
+                project_id=payload.project_id,
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    try:
+        created = await BankGuaranteeService(db).create(payload, current_user)
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _present_bg(created, db, current_user, policy)
 
 
 @router.get("/bank-guarantees/{bg_id}", response_model=BankGuarantee)
@@ -252,7 +306,12 @@ async def get_bg(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    return BankGuarantee(**await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy))
+    return await _present_bg(
+        await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy),
+        db,
+        current_user,
+        policy,
+    )
 
 
 @router.put("/bank-guarantees/{bg_id}", response_model=BankGuarantee)
@@ -264,8 +323,23 @@ async def update_bg(
     policy: PolicyService = Depends(get_policy),
 ):
     bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy)
-    updated = await BankGuaranteeService(db).update(bg, payload.model_dump(exclude_unset=True), current_user)
-    return BankGuarantee(**(updated or bg))
+    changes = payload.model_dump(exclude_unset=True)
+    legacy_ids = changes.pop("linked_document_ids", None)
+    if "linked_document_ids" in payload.model_fields_set and legacy_ids:
+        try:
+            await DocumentRelationshipService(db, policy=policy).reject_ambiguous_legacy_write(
+                current_user,
+                "bank_guarantee",
+                organization_id=bg.get("organization_id"),
+                project_id=bg.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    try:
+        updated = await BankGuaranteeService(db).update(bg, changes, current_user)
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _present_bg(updated or bg, db, current_user, policy)
 
 
 @router.delete("/bank-guarantees/{bg_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -276,8 +350,29 @@ async def delete_bg(
     policy: PolicyService = Depends(get_policy),
 ):
     bg = await _load(bg_id, Permissions.BG_DELETE, db, current_user, policy)
-    await BankGuaranteeService(db).delete(bg, current_user)
+    try:
+        await BankGuaranteeService(db).delete(bg, current_user)
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return None
+
+
+@router.post("/bank-guarantees/{bg_id}/status", response_model=BankGuarantee)
+async def transition_bg_status(
+    bg_id: str,
+    req: BGStatusTransitionRequest,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy)
+    try:
+        transitioned = await BankGuaranteeService(db).transition_status(
+            bg, req, current_user
+        )
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _present_bg(transitioned, db, current_user, policy)
 
 
 @router.post("/bank-guarantees/{bg_id}/extend", response_model=BankGuarantee)
@@ -289,7 +384,21 @@ async def extend_bg(
     policy: PolicyService = Depends(get_policy),
 ):
     bg = await _load(bg_id, Permissions.BG_EXTEND, db, current_user, policy)
-    return BankGuarantee(**await BankGuaranteeService(db).extend(bg, req, current_user))
+    if "linked_document_ids" in req.model_fields_set and req.linked_document_ids:
+        try:
+            await DocumentRelationshipService(db, policy=policy).reject_ambiguous_legacy_write(
+                current_user,
+                "bank_guarantee_event",
+                organization_id=bg.get("organization_id"),
+                project_id=bg.get("project_id"),
+            )
+        except DocumentRelationshipError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    try:
+        extended = await BankGuaranteeService(db).extend(bg, req, current_user)
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _present_bg(extended, db, current_user, policy)
 
 
 @router.post("/bank-guarantees/{bg_id}/release", response_model=BankGuarantee)
@@ -301,7 +410,11 @@ async def release_bg(
     policy: PolicyService = Depends(get_policy),
 ):
     bg = await _load(bg_id, Permissions.BG_RELEASE, db, current_user, policy)
-    return BankGuarantee(**await BankGuaranteeService(db).release(bg, current_user, remarks=req.remarks))
+    try:
+        released = await BankGuaranteeService(db).release(bg, current_user, req)
+    except BankGuaranteeLifecycleError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _present_bg(released, db, current_user, policy)
 
 
 @router.get("/bank-guarantees/{bg_id}/history", response_model=List[BGExtensionHistory])
@@ -311,5 +424,19 @@ async def bg_history(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy)
-    return [BGExtensionHistory(**h) for h in await BankGuaranteeService(db).list_history(bg_id)]
+    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy)
+    return [BGExtensionHistory(**h) for h in await BankGuaranteeService(db).list_history(bg)]
+
+
+@router.get("/bank-guarantees/{bg_id}/events", response_model=List[BankGuaranteeEvent])
+async def bg_events(
+    bg_id: str,
+    db=Depends(get_db),
+    current_user: CurrentUser = Depends(get_current_user),
+    policy: PolicyService = Depends(get_policy),
+):
+    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy)
+    return [
+        BankGuaranteeEvent(**event)
+        for event in await BankGuaranteeService(db).list_events(bg)
+    ]

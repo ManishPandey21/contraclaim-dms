@@ -39,6 +39,7 @@ from ..observability import observability_registry
 from ..task_sync_service import TaskSyncService
 from .agents import agent_run_metadata, run_arbitration_agent
 from .exporter import ArbitrationDraftExporter
+from .matrix_evidence_authority import matrix_clause_fence
 from .matrix_registry import MATRIX_COLLECTIONS
 from .repository import ArbitrationDraftingRepository, _collect, _jsonable
 from .approval_policy import (
@@ -1116,7 +1117,9 @@ class ArbitrationCaseWorkspaceService:
         ]
         clause_rows = [row for row in await self.list_matrix_rows(str(case_id), "clause-matrix") if _is_ready_row(row)]
         claim_rows = [row for row in await self.list_matrix_rows(str(case_id), "claim-matrix") if _is_ready_row(row)]
-        references = await self._references_from_case_rows(draft_id, document_rows, clause_rows, current_user)
+        references = await self._references_from_case_rows(
+            draft_id, document_rows, clause_rows, current_user, draft=draft
+        )
         claim_heads = self._claim_heads_from_case_rows(draft_id, claim_rows)
         await self.draft_repo.replace_references(draft_id, references)
         if claim_heads:
@@ -2698,8 +2701,21 @@ class ArbitrationCaseWorkspaceService:
         document_rows: List[Dict[str, Any]],
         clause_rows: List[Dict[str, Any]],
         current_user: Any,
+        *,
+        draft: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
+        """Turn approved case rows into the draft's standing selected references.
+
+        `draft` is keyword-only and defaults to None so that a caller which
+        omits it resolves every document-governed clause row inside an EMPTY
+        canonical universe - i.e. persists none of them. An approved matrix row
+        is a curation verdict; it cannot make an instrument applicable, and a
+        selection written here becomes the draft's standing evidence and is
+        rebuilt into every sealed version, so it must be lawful before it is
+        stored rather than only when it is read back.
+        """
         references: List[Dict[str, Any]] = []
+        matrix_fence = matrix_clause_fence(self.db, draft, current_user)
         for row in document_rows:
             references.append(
                 ArbitrationSelectedReference(
@@ -2730,6 +2746,11 @@ class ArbitrationCaseWorkspaceService:
             )
         for row in clause_rows:
             if not row.get("clause_number") and not row.get("clause_text_excerpt"):
+                continue
+            if not await matrix_fence.admits_clause_row(row):
+                # Approved, and not currently eligible. The row stays in the
+                # case matrix as history; it just does not become this draft's
+                # evidence. See matrix_evidence_authority.
                 continue
             references.append(
                 ArbitrationSelectedReference(

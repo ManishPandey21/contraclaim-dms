@@ -138,11 +138,25 @@ def immutable_version_hash(version: Dict[str, Any]) -> str:
     ).hexdigest()
 
 
+from ...models.contract_document import CurrentState
+from ..contract_scope_resolver import (
+    ContractScopeResolutionError,
+    resolve_authorized_project_universe,
+)
 from ..publication_policy import (
     authoritative_summary,
     authoritative_text,
+    is_consumable,
     resolve_document_authority,
 )
+
+#: How many correspondence candidates the suggestion search reads before the
+#: publication gate runs. The gate is a per-document decision that no Mongo
+#: predicate can express without restating the publication rules in a second
+#: place, so the path over-fetches and filters instead of cutting to the
+#: caller's limit first. Cutting first is how a page of quarantined duplicates
+#: silently starves the lawful letter the user was looking for.
+SUGGESTION_DOCUMENT_CANDIDATE_LIMIT = 60
 
 
 class ArbitrationDraftingService:
@@ -167,6 +181,7 @@ class ArbitrationDraftingService:
         trusted_refs = await self.context_builder.rehydrate_selected_references(
             draft,
             [ref.model_dump() for ref in payload.selected_references],
+            current_user=current_user,
         )
         await self.repo.create_draft(draft)
         refs = [
@@ -231,7 +246,7 @@ class ArbitrationDraftingService:
         query_text = payload.query or draft.get("title") or ""
         results: List[ArbitrationSelectedReferenceCreate] = []
         results.extend(await self._search_documents(draft, query_text, payload.limit))
-        results.extend(await self._search_clauses(draft, query_text, payload.limit))
+        results.extend(await self._search_clauses(draft, query_text, payload.limit, current_user))
         return {"results": [item.model_dump() for item in results[: payload.limit]]}
 
     async def refresh_source_ledger(
@@ -259,6 +274,7 @@ class ArbitrationDraftingService:
         trusted_refs = await self.context_builder.rehydrate_selected_references(
             draft,
             [payload.model_dump() for payload in payloads],
+            current_user=current_user,
         )
         rows = []
         for payload in trusted_refs:
@@ -366,6 +382,7 @@ class ArbitrationDraftingService:
             ledger = await self.context_builder.rehydrate_selected_references(
                 draft,
                 [row for row in selected if str(row.get("source_id")) in supporting_ids],
+                current_user=current_user,
             )
             if {str(row.get("source_id")) for row in ledger} != set(supporting_ids):
                 raise HTTPException(status_code=400, detail="One or more paragraph response sources are not authoritative and scoped")
@@ -914,8 +931,27 @@ class ArbitrationDraftingService:
         }
         out: List[ArbitrationSelectedReferenceCreate] = []
         try:
-            cursor = self.db.documents.find(query).limit(limit)
+            cursor = self.db.documents.find(query).limit(
+                max(int(limit), SUGGESTION_DOCUMENT_CANDIDATE_LIMIT)
+            )
             async for doc in cursor:
+                # A SUGGESTION IS A DISCLOSURE. This gate used to withhold only
+                # the `snippet`, and then fall back to `subject` - which had
+                # already been published as the `label`. So a confirmed
+                # duplicate, a deleted document and one sent to human review
+                # were each offered as selectable evidence with their subject,
+                # letter number, filename and identifier intact. Publication
+                # authority decides whether the candidate EXISTS for this
+                # caller, not merely how much of its text is shown.
+                #
+                # Applicability deliberately does NOT apply here: a letter is
+                # not a contract instrument and has no applicability aggregate,
+                # so fencing correspondence on the contract universe would
+                # delete lawful letters from every pleading.
+                if not is_consumable(doc):
+                    continue
+                if len(out) >= limit:
+                    break
                 out.append(
                     ArbitrationSelectedReferenceCreate(
                         source_type="document",
@@ -938,12 +974,90 @@ class ArbitrationDraftingService:
             return []
         return out
 
-    async def _search_clauses(self, draft: Dict[str, Any], query_text: str, limit: int) -> List[ArbitrationSelectedReferenceCreate]:
+    async def _search_clauses(
+        self,
+        draft: Dict[str, Any],
+        query_text: str,
+        limit: int,
+        current_user: Any = None,
+    ) -> List[ArbitrationSelectedReferenceCreate]:
+        """Clause suggestions, fenced by the canonical eligible universe.
+
+        A SUGGESTION IS A DISCLOSURE. This search used to resolve candidates
+        from the draft's own workspace stamp and then gate only the ``snippet``
+        on publication authority - so the response still told the caller that
+        clause 8.4 of an instrument they have no authority over exists, what it
+        is called and which document it belongs to. "The selection path will
+        reject it later" is not a defence: a later rejection cannot un-disclose
+        what has already been returned.
+
+        A derived ``document_vectors`` row's ``organization_id`` /
+        ``project_id`` / ``document_id`` are INGEST PROVENANCE - they record
+        where the chunk was FILED, never that the instrument legally governs
+        anything. They narrow the query; they do not authorise it. So the answer
+        comes from the same canonical boundary the automatic ledger (G-A9) and
+        the selected-reference hydrator (G-A11) already consume, resolved for
+        THIS ACTOR rather than for the draft's stamp.
+
+        ``document_id: {"$in": eligible}`` is part of the QUERY, ahead of
+        ``.limit()``, and that placement is load-bearing. Filtering a broad
+        top-K afterwards produces a response that looks clean while ineligible
+        candidates silently eat the caller's capacity - the one clause they
+        could lawfully have used is simply missing, with nothing to say so.
+
+        ``CurrentState`` is chosen rather than defaulted: a user searching for
+        evidence now is asking what governs now, and an implicit "as at" would
+        offer instruments for a date nobody named.
+
+        Scope, carried unchanged from G-A7/G-A8/G-A9/G-A11: the arbitration
+        draft's ``contract_id`` is free text that nothing validates or joins
+        against ``contract_document_applicability``, so this is PROJECT-EVIDENCE
+        containment - the union over the contracts with applicability in the
+        authorised project. Sibling contracts inside one project are not
+        separable until that identity is made canonical, which is an owner
+        decision.
+        """
         if not query_text:
             return []
+        organization_id = str(draft.get("organization_id") or "")
+        project_id = str(draft.get("project_id") or "")
+        if not organization_id or not project_id:
+            return []
+
+        try:
+            universe = await resolve_authorized_project_universe(
+                self.db,
+                current_user,
+                organization_id=organization_id,
+                project_id=project_id,
+                mode=CurrentState(),
+            )
+        except ContractScopeResolutionError as exc:
+            # "I could not tell" is not "nothing applies", and it is not a
+            # reason to answer from a broader query. A degraded suggestion list
+            # is the worst outcome available: it looks like a lawful answer.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "message": (
+                        "Contract evidence eligibility could not be resolved; "
+                        "no clause suggestions can be offered"
+                    ),
+                    "reason": str(exc),
+                },
+            ) from exc
+
+        eligible = sorted(universe.eligible_document_ids)
+        if not eligible:
+            # Valid empty. Nothing applicable governs this project for this
+            # actor - an answer, never a reason to search wider. No clause
+            # query is issued at all.
+            return []
+
         query = {
-            "organization_id": draft.get("organization_id"),
-            "project_id": draft.get("project_id"),
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "document_id": {"$in": eligible},
             "$or": [
                 {"clause_number": {"$regex": query_text, "$options": "i"}},
                 {"clause_title": {"$regex": query_text, "$options": "i"}},
