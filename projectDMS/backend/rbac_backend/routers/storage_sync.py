@@ -24,6 +24,7 @@ from ..services.falkor_graph_service import FalkorGraphService, FalkorGraphError
 from ..services.langchain_vector_service import LangChainVectorService
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
+from ..services.publication_policy import is_consumable
 
 try:
     from qdrant_client import QdrantClient
@@ -335,6 +336,28 @@ async def _count_missing_backlinks(db) -> int:
 
 
 async def _fetch_falkor_stats(db=None) -> Dict[str, Any]:
+    """Graph size, and deliberately NOT a per-tenant breakdown of it.
+
+    This used to group `(:Letter)` nodes and their edges by `n.organization_id`
+    / `n.project_id`, resolve those ids to organisation and project names out of
+    Mongo, and render the result as a per-tenant table on the health page.
+
+    G32 removed both properties from the shared Letter node: it is keyed on
+    `normCode` alone and shared by every document, in every tenant, citing that
+    code, so no tenant owns it and `GLOBAL_LETTER_PROPERTIES` is exactly
+    `{normCode, createdAt, lastUpdated}`. Every node the current writer produces
+    therefore reads NULL, and every node an OLDER writer produced carries
+    whichever tenant happened to write it last. The table was not slightly
+    stale - it was attribution invented from a property nothing maintains, which
+    is the same class as the tenant filter that became a tautology when the
+    writes stopped (`test_graph_letter_reader_properties.py`).
+
+    There is no correct replacement available here. Attribution would have to be
+    resolved per code through Mongo - `graph_codes_denied`'s supporter rule - and
+    a health endpoint has no business running that over the whole graph. So the
+    breakdown is reported as UNAVAILABLE with its reason rather than fabricated:
+    a missing panel is honest, a wrong one is not.
+    """
     svc = FalkorGraphService()
     if not svc.enabled:
         return {"enabled": False, "available": False, "reason": "disabled"}
@@ -342,10 +365,9 @@ async def _fetch_falkor_stats(db=None) -> Dict[str, Any]:
     try:
         overall_nodes = 0
         overall_edges = 0
-        per_org: Dict[tuple[str, str], Dict[str, Any]] = {}
 
         def _run_counts() -> None:
-            nonlocal overall_nodes, overall_edges, per_org
+            nonlocal overall_nodes, overall_edges
             try:
                 resp_nodes = svc._execute("MATCH (n) RETURN count(n) as nodes")
                 rows_nodes = svc._parse_rows(resp_nodes)
@@ -358,69 +380,8 @@ async def _fetch_falkor_stats(db=None) -> Dict[str, Any]:
                 overall_edges = int(rows_edges[0].get("edges", 0)) if rows_edges else 0
             except Exception:
                 overall_edges = 0
-            try:
-                resp = svc._execute(
-                    "MATCH (n:Letter) RETURN n.organization_id as org, n.project_id as project, count(n) as nodes"
-                )
-                rows = svc._parse_rows(resp)
-                for row in rows:
-                    key = (str(row.get("org") or ""), str(row.get("project") or ""))
-                    per_org[key] = {"nodes": int(row.get("nodes", 0)), "edges": 0}
-            except Exception:
-                per_org = {}
-            try:
-                resp_e = svc._execute(
-                    "MATCH (a:Letter)-[r]->(b:Letter) RETURN a.organization_id as org, a.project_id as project, count(r) as edges"
-                )
-                rows_e = svc._parse_rows(resp_e)
-                for row in rows_e:
-                    key = (str(row.get("org") or ""), str(row.get("project") or ""))
-                    entry = per_org.get(key) or {"nodes": 0}
-                    entry["edges"] = int(row.get("edges", 0))
-                    per_org[key] = entry
-            except Exception:
-                pass
 
         await asyncio.to_thread(_run_counts)
-
-        per_org_list = []
-        for (org, project), val in per_org.items():
-            nodes = val.get("nodes", 0) or 0
-            edges = val.get("edges", 0) or 0
-            avg_degree = (edges * 2 / nodes) if nodes else 0.0
-            per_org_list.append(
-                {
-                    "org": org or None,
-                    "project": project or None,
-                    "nodes": nodes,
-                    "edges": edges,
-                    "avg_degree": avg_degree,
-                }
-            )
-
-        # Attach organization/project names if the database handle was provided
-        if db is not None and per_org_list:
-            org_ids = {row["org"] for row in per_org_list if row.get("org")}
-            project_ids = {row["project"] for row in per_org_list if row.get("project")}
-
-            org_names: Dict[str, str] = {}
-            project_names: Dict[str, str] = {}
-
-            if org_ids:
-                cursor = db.organizations.find({"_id": {"$in": list(org_ids)}}, {"name": 1})
-                async for org in cursor:
-                    org_names[str(org["_id"])] = org.get("name") or str(org["_id"])
-
-            if project_ids:
-                cursor_p = db.projects.find({"_id": {"$in": list(project_ids)}}, {"name": 1})
-                async for proj in cursor_p:
-                    project_names[str(proj["_id"])] = proj.get("name") or str(proj["_id"])
-
-            for row in per_org_list:
-                if row.get("org"):
-                    row["org_name"] = org_names.get(str(row["org"]))
-                if row.get("project"):
-                    row["project_name"] = project_names.get(str(row["project"]))
 
     except FalkorGraphError as exc:
         return {"enabled": True, "available": False, "reason": str(exc)}
@@ -434,7 +395,17 @@ async def _fetch_falkor_stats(db=None) -> Dict[str, Any]:
         "nodes": overall_nodes,
         "edges": overall_edges,
         "avg_degree": overall_avg,
-        "per_org": per_org_list,
+        # Empty, not omitted: the health page renders the panel only when this
+        # is non-empty, so an empty list removes the invented attribution
+        # without a client change, and the two keys below say why rather than
+        # letting "no rows" read as "no graph".
+        "per_org": [],
+        "per_org_available": False,
+        "per_org_reason": (
+            "the shared (:Letter) node carries no tenant attribution after G32; "
+            "graph nodes are global and per-tenant counts would have to be "
+            "resolved per code through the canonical Mongo documents"
+        ),
     }
 
 
@@ -484,6 +455,24 @@ async def _resync_document_vectors(
     doc = await _find_document_by_id(db, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Repair is a publication writer: use the full canonical Mongo row already
+    # resolved above before reading chunks or constructing any vector client.
+    # This preserves Model B (`failed` is consumable) while withholding adverse
+    # quality verdicts and quarantined/deleted lifecycle states through the one
+    # certified publication policy.
+    if not is_consumable(doc):
+        logger.info(
+            "Skipping vector resync for %s: canonical document is not consumable",
+            document_id,
+        )
+        return {
+            "document_id": document_id,
+            "mongo_chunks": 0,
+            "qdrant_chunks": 0,
+            "status": "skipped",
+            "reason": "document_not_consumable",
+        }
 
     document_ref_query = _candidate_field_query("document_id", document_id)
     chunks = [c async for c in db.chunks.find(document_ref_query)]
@@ -819,8 +808,22 @@ async def resync_bulk_vectors(
     if project_id:
         doc_filter["project_id"] = project_id
 
+    # Containment: this backfill RE-UPSERTS vectors, so it can undo the
+    # publication barrier's purge for a blocked or quarantined document. The
+    # projection must carry the authority fields - gating on a projection that
+    # lacks them is a vacuous guard, since `is_consumable` treats an absent
+    # state as allowed.
     cursor = (
-        db.documents.find(doc_filter, {"_id": 1, "updatedAt": 1})
+        db.documents.find(
+            doc_filter,
+            {
+                "_id": 1,
+                "updatedAt": 1,
+                "processing_status": 1,
+                "duplicate_status": 1,
+                "lifecycle_state": 1,
+            },
+        )
         .sort("updatedAt", -1)
         .limit(max(limit * 3, limit))
     )
@@ -832,6 +835,11 @@ async def resync_bulk_vectors(
     async for doc in cursor:
         doc_id = str(doc.get("_id"))
         if not doc_id:
+            continue
+        # A blocked/quarantined document must not have its vectors rebuilt: the
+        # publication barrier purged them deliberately, and a backfill that
+        # re-upserts them silently undoes containment.
+        if not is_consumable(doc):
             continue
 
         status = await db.vector_sync_status.find_one({"document_id": doc_id})
@@ -934,7 +942,17 @@ async def reconcile_vectors(
         doc_filter["project_id"] = project_id
 
     cursor = (
-        db.documents.find(doc_filter, {"_id": 1, "organization_id": 1, "project_id": 1})
+        db.documents.find(
+            doc_filter,
+            {
+                "_id": 1,
+                "organization_id": 1,
+                "project_id": 1,
+                "processing_status": 1,
+                "duplicate_status": 1,
+                "lifecycle_state": 1,
+            },
+        )
         .sort("updatedAt", -1)
         .limit(limit)
     )
@@ -948,6 +966,9 @@ async def reconcile_vectors(
     async for doc in cursor:
         doc_id = str(doc.get("_id") or "")
         if not doc_id:
+            continue
+        # Same containment rule as the resync path above.
+        if not is_consumable(doc):
             continue
         scanned += 1
 

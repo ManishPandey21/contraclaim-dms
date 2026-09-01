@@ -381,12 +381,30 @@ class GraphIngestionService:
     ) -> None:
         if not self.falkor.enabled:
             return
+        # G31: the graph must not (re-)create support for a document that may not
+        # be published. Without this, containment was undone by the next sync -
+        # the physical purge removed the contribution and the writer put it back.
+        # The canonical document is already in hand, so authority resolves through
+        # the certified predicate; the graph never gets its own policy.
+        from ..services.publication_policy import is_consumable
+
+        if not is_consumable(document):
+            logger.info(
+                "Skipping FalkorDB sync for %s: source is not currently publishable",
+                document_id,
+            )
+            return
         try:
             payload = self._build_falkor_payload(document_id, document, metadata, upload_type)
             if not payload:
                 return
             letter, references = payload
-            self.falkor.upsert_letter_with_refs(letter, references, cleanup=True)
+            # Attribute the edges to this document so the cleanup pass reconciles
+            # only ITS OWN references - the shared node is cited by many
+            # documents across tenants, and an unscoped cleanup deleted theirs.
+            self.falkor.upsert_letter_with_refs(
+                letter, references, cleanup=True, owner_document_id=str(document_id)
+            )
         except Exception:
             logger.exception("Failed to sync document %s with FalkorDB", document_id)
             if raise_on_error:

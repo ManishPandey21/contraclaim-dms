@@ -416,7 +416,133 @@ async def blocked_document_ids(db: Any, document_ids: Any) -> set:
     return blocked
 
 
-async def resolve_canonical_document(db: Any, document_id: Any):
+async def resolvable_document_ids(db: Any, document_ids: Any) -> set:
+    """The subset whose canonical Mongo document actually EXISTS.
+
+    The companion to :func:`blocked_document_ids`, and deliberately a separate
+    predicate rather than a widening of it. `blocked_document_ids` returns only
+    ids it positively resolved and positively judged unusable, because for a
+    lexical or vector hit an id absent from Mongo is an orphaned store row -
+    a different problem, and dropping those silently would change unrelated
+    behaviour.
+
+    A GRAPH candidate is not that. The node outlives its document: nothing
+    deletes a `(:Clause)` node and a `(:Letter)` node is shared identity keyed
+    on `normCode` alone, so graph residue with no canonical support is the
+    NORMAL state, not an anomaly. Absence of provenance is not absence of
+    restriction, so every graph-derived consumer fences on this and fails
+    CLOSED - including on a lookup error, which cannot be read as "everything
+    resolves".
+
+    One implementation, so the retrieval stack and the contract stack cannot
+    drift apart the way they did before they shared `blocked_document_ids`.
+    """
+    ids = [str(doc_id) for doc_id in (document_ids or []) if doc_id]
+    if not ids or _collection(db, "documents") is None:
+        return set()
+
+    query_ids: list = []
+    for doc_id in ids:
+        query_ids.extend(document_id_candidates(doc_id))
+
+    found: set = set()
+    try:
+        cursor = db.documents.find({"_id": {"$in": query_ids}}, {"_id": 1})
+        async for doc in cursor:
+            resolved = str(doc.get("_id") or "")
+            if resolved:
+                found.add(resolved)
+    except Exception:
+        return set()  # cannot resolve -> nothing is provably resolvable
+    return found
+
+
+async def graph_codes_denied(db: Any, codes: Any) -> set:
+    """Normalized letter codes whose graph support may NOT be consumed.
+
+    A FalkorDB `(:Letter {normCode})` node is GLOBAL - it is shared by every
+    document, in every tenant, that cites the same code (G32). So the node
+    itself carries no authority; the question "may this graph fact be used?"
+    can only be answered by the documents that support that code in Mongo.
+
+    A code is consumable while at least one supporting document is currently
+    consumable - the same last-known-good supporter rule the letter-deletion
+    cascade already uses. A code with NO resolvable supporter is DENIED: graph
+    provenance that cannot be resolved to an authoritative source must not
+    influence legal output (fail closed on serving uncertainty).
+
+    Returns the denied subset, so callers filter rather than re-implement.
+    """
+    from .falkor_graph_service import normalize_letter_code
+
+    wanted = [str(code) for code in (codes or []) if code]
+    if not wanted:
+        return set()
+
+    denied: set = set()
+    for code in wanted:
+        try:
+            # ALL supporters, not one. `find_one` returns an arbitrary document in
+            # Mongo natural order, so "is any supporter consumable?" became
+            # order-dependent: a blocked supporter listed first denied a code that
+            # a clean supporter legitimately supports. Iterate instead.
+            #
+            # `letters` stores the RAW `letter_no` - `letterNoNormalized` is only
+            # ever written to `documents` - so that side is normalized in Python,
+            # the same trap `has_consumable_supporter` documents and avoids.
+            consumable_supporter = False
+            saw_supporter = False
+
+            documents = _collection(db, "documents")
+            if documents is not None:
+                cursor = documents.find({"letterNoNormalized": code})
+                async for row in cursor:
+                    saw_supporter = True
+                    if is_consumable(row):
+                        consumable_supporter = True
+                        break
+
+            if not consumable_supporter:
+                letters = _collection(db, "letters")
+                if letters is not None:
+                    async for row in letters.find({}):
+                        raw = row.get("letterNoNormalized") or row.get("letter_no") or row.get("letterNo")
+                        if not raw or normalize_letter_code(str(raw)) != code:
+                            continue
+                        saw_supporter = True
+                        # The `letters` register is an INDEX, not an authority
+                        # source. Its rows carry no processing_status /
+                        # duplicate_status / lifecycle_state, so is_consumable()
+                        # takes its "absent state is allowed (legacy rows)"
+                        # branch and returns True for EVERY live register row -
+                        # a self-authorising supporter that silently overrode a
+                        # blocked document, including one owned by another
+                        # tenant. Authority must resolve to a backing document.
+                        backing_id = (
+                            row.get("document_id")
+                            or row.get("documentId")
+                            or row.get("source_document_id")
+                        )
+                        if not backing_id:
+                            continue  # no resolvable authority -> not a supporter
+                        backing = await _find_by_id(db, "documents", backing_id)
+                        if backing is not None and is_consumable(backing):
+                            consumable_supporter = True
+                            break
+        except Exception:
+            denied.add(code)  # resolution error -> fail closed
+            continue
+        if not saw_supporter or not consumable_supporter:
+            denied.add(code)
+    return denied
+
+
+async def resolve_canonical_document(
+    db: Any,
+    document_id: Any,
+    *,
+    session: Any = None,
+):
     """The one place that turns an identifier into the canonical document.
 
     Every authority decision resolves through here so identifier handling is
@@ -426,9 +552,13 @@ async def resolve_canonical_document(db: Any, document_id: Any):
     """
     if not document_id:
         return None
+    session_kwargs = {"session": session} if session is not None else {}
     for key in document_id_candidates(document_id):
         try:
-            found = await _collection(db, "documents").find_one({"_id": key})
+            found = await _collection(db, "documents").find_one(
+                {"_id": key},
+                **session_kwargs,
+            )
         except Exception:
             raise
         if found:

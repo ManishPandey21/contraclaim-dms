@@ -33,6 +33,11 @@ import pytest
 FALKOR_HOST = os.environ.get("FALKOR_TEST_HOST", "localhost")
 FALKOR_PORT = int(os.environ.get("FALKOR_TEST_PORT", "6380"))
 
+from rbac_backend.tests.authority_band_graph import (
+    disposable_graph_name,
+    drop_disposable_graph,
+)
+
 pytestmark = pytest.mark.integration
 
 
@@ -50,7 +55,15 @@ def _client():
 def graph():
     """An isolated graph per test, dropped afterwards."""
     client = _client()
-    name = f"g29_{uuid.uuid4().hex[:10]}"
+    # G-A21 / GRAPH-GATES U9. This suite is REQUIRED evidence for the G29
+    # umbrella, and it used to mint its own `g29_*` namespace and tear down with a
+    # swallowed `GRAPH.DELETE`. That is exactly the pattern that left
+    # `g31_letterdraft_d0fdb2ac7c` on a shared instance: a failed delete was
+    # silent, so a crashed run looked like a clean one. It now mints through the
+    # sanctioned helper, which names the graph after THIS run, refuses to delete
+    # anything it did not create, verifies the deletion against `GRAPH.LIST`, and
+    # raises rather than leaving residue. No assertion in this file changed.
+    name = disposable_graph_name("invalidation")
 
     def query(cypher: str, params: Optional[Dict[str, Any]] = None):
         if params:
@@ -62,10 +75,7 @@ def graph():
 
     yield query
 
-    try:
-        client.execute_command("GRAPH.DELETE", name)
-    except Exception:
-        pass
+    drop_disposable_graph(client, name)
 
 
 def _literal(value: Any) -> str:

@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover - optional dependency
         def __init__(self, *args, **kwargs):
             raise ImportError("llama_index is not installed; enable it or switch to LangChain vector service.")
 from .langchain_vector_service import LangChainVectorService
+from .publication_policy import is_publication_blocked, resolve_canonical_document
 from .reference_parser import parse_legacy_reference_text
 from ..utils.pipeline_logging import configure_pipeline_logger
 from ..ingestion.chunk_ids import deterministic_chunk_id
@@ -245,6 +246,13 @@ class DatabaseService:
             logger.warning("Cannot create deferred embeddings; document %s not found", document_id)
             return 0
 
+        if is_publication_blocked(doc):
+            logger.info(
+                "Deferred embeddings withheld by canonical publication authority for %s",
+                document_id,
+            )
+            return 0
+
         text = doc.get("full_text") or doc.get("ocrText") or ""
         if not str(text).strip():
             logger.warning("Cannot create deferred embeddings; document %s has no text", document_id)
@@ -360,6 +368,15 @@ class DatabaseService:
     ) -> int:
         """Create embeddings via LlamaIndex and store bookkeeping records."""
         document_id = str(doc.get("_id"))
+
+        canonical_doc = await resolve_canonical_document(db, doc.get("_id"))
+        if is_publication_blocked(canonical_doc):
+            logger.info(
+                "Document embeddings withheld by current canonical publication authority for %s",
+                document_id,
+            )
+            return 0
+        doc = canonical_doc
 
         if not getattr(self.config, "vector_store_enabled", True):
             logger.info("Vector store disabled; skipping embedding creation")
