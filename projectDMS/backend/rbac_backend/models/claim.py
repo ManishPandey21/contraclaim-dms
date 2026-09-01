@@ -98,6 +98,9 @@ class Claim(ClaimBase):
     created_by: Optional[str] = None
     updated_at: Optional[datetime] = None
     updated_by: Optional[str] = None
+    evidence_frozen_at: Optional[datetime] = None
+    evidence_frozen_by: Optional[str] = None
+    evidence_freeze_reason: Optional[str] = None
 
     model_config = ConfigDict(populate_by_name=True)
 

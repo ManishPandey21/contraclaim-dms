@@ -119,6 +119,16 @@ class Document(BaseModel):
     sha256: Optional[str] = Field(default=None)
     page_count: Optional[int] = Field(default=None)
     duplicate_status: Optional[str] = Field(default=None)
+    # `lifecycle_state` is an AUTHORITY field: publication_policy treats
+    # "duplicate"/"deleted" as quarantine. It must be declared here, because
+    # this model has no `extra="allow"` and therefore silently DROPS undeclared
+    # Mongo fields - every `Document(**row).__dict__` / `.model_dump()` /
+    # `getattr(doc, "lifecycle_state", None)` consumer then reads None and the
+    # authority decision INVERTS across this boundary: is_consumable() returns
+    # False on the raw record and True on the model. A guard that runs but
+    # reads an object the field was stripped from is equivalent to no guard.
+    lifecycle_state: Optional[str] = Field(default=None)
+    deletedAt: Optional[datetime] = Field(default=None)
     duplicate_of: Optional[str] = Field(default=None)
     revision_of: Optional[str] = Field(default=None)
     duplicate_review: Optional[Dict[str, Any]] = Field(default=None)

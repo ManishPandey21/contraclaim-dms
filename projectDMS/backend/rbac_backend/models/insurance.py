@@ -15,6 +15,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .document_relationship import DocumentRelationshipInput
+
 
 class InsuranceStatus(str, Enum):
     ACTIVE = "active"
@@ -65,6 +67,13 @@ class InsuranceCreate(InsuranceBase):
     project_id: str = Field(..., min_length=1)
     insurance_type: str = Field(..., min_length=1)
     policy_number: str = Field(..., min_length=1)
+    # Create-only command: attach Documents that already exist in the library
+    # instead of re-uploading their bytes. Never persisted on the policy — the
+    # relationship is the record. Scope is derived from the created policy, so
+    # a caller cannot widen authority through this field.
+    existing_document_links: List[DocumentRelationshipInput] = Field(
+        default_factory=list, max_length=20
+    )
 
 
 class InsuranceUpdate(BaseModel):
