@@ -306,6 +306,14 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   // Contract Master (backend dms.contract.master.view aliased to projects:read).
   // Explicit so it wins over the /contracts prefix mapping.
   "/contracts/master": ["dms.contract.master.view", "dms.document.view"],
+  // The Contract Master workspace and the HITL layout prototype are the same
+  // domain surface as /contracts/master and carry the same audience. The
+  // workspace reads /api/contract-master/* on every instrument open; the
+  // prototype renders fixtures. Neither is a public page, so both are mapped
+  // rather than left unclassified — an unmapped route is a route no reviewer
+  // has decided about.
+  "/contract-master/workspace": ["dms.contract.master.view", "dms.document.view"],
+  "/contract-master/prototype": ["dms.contract.master.view", "dms.document.view"],
   // C3: no `dms.folder.view` permission exists on the backend; folders organize
   // documents, so gate on `dms.document.view` (matches /documents and /contracts).
   "/folders": ["dms.document.view"],

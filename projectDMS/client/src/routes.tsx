@@ -509,10 +509,38 @@ const AppRoutes = () => (
         />
       </Route>
 
-      {/* HITL layout prototype: fixture data only, no server calls, so it is
-          reviewable without a session. Not a T26-T30 surface. */}
-      <Route path="/contract-master/workspace" element={<ContractMasterWorkspacePage />} />
-      <Route path="/contract-master/prototype" element={<ContractMasterPrototypePage />} />
+      {/* Contract Master surfaces. Both sit behind the session boundary and
+          carry the same permission mapping as /contracts/master.
+
+          The workspace is a T26-T30 product surface: it reads
+          /api/contract-master/* on every instrument open. The prototype is
+          fixture-driven and makes no server calls, but "renders no server data"
+          is not a reason to serve a page anonymously — a route is public only
+          when PUBLIC_ROUTES says so. Both therefore fail closed.
+
+          They are declared here rather than inside MainLayout because each page
+          renders its own full-page chrome; ProtectedRoute + RoleGuard is the
+          same authorisation pair the layout applies, without the layout. */}
+      <Route
+        path="/contract-master/workspace"
+        element={
+          <ProtectedRoute>
+            <RoleGuard path="/contract-master/workspace" fallback="/overview">
+              <ContractMasterWorkspacePage />
+            </RoleGuard>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/contract-master/prototype"
+        element={
+          <ProtectedRoute>
+            <RoleGuard path="/contract-master/prototype" fallback="/overview">
+              <ContractMasterPrototypePage />
+            </RoleGuard>
+          </ProtectedRoute>
+        }
+      />
       <Route path="/login" element={<LoginPage />} />
       <Route path="*" element={<NotFound />} />
     </Routes>

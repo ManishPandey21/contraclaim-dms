@@ -73,6 +73,31 @@ async function json(route: Route, body: unknown) {
   });
 }
 
+/**
+ * The workspace is behind ProtectedRoute, so the browser has to arrive with a
+ * session and the Contract Master audience permission before any of the rules
+ * below are reachable. Both are answered at the network boundary, in the shape
+ * the real endpoints return.
+ *
+ * Capability flags still decide what is rendered — this only gets the actor
+ * through the front door, which is exactly what a real authorised user does.
+ */
+async function mockSession(page: Page) {
+  await page.route("**/api/me", (route) =>
+    json(route, {
+      id: "user-1",
+      email: "contract.master@example.test",
+      organization_id: ORG,
+      project_id: PROJECT,
+      roles: ["contractmgr_org"],
+      permissions: ["dms.contract.master.view", "dms.document.view"],
+    }),
+  );
+  await page.route("**/api/security-terms/status", (route) =>
+    json(route, { requires_acceptance: false }),
+  );
+}
+
 async function mockContractMaster(
   page: Page,
   options: {
@@ -86,6 +111,7 @@ async function mockContractMaster(
   const sequence = options.instrumentSequence ?? [instrument()];
   let readCount = 0;
 
+  await mockSession(page);
   await page.route("**/api/contract-master/capabilities**", (route) => json(route, capabilities));
   await page.route("**/api/contract-master/catalogue**", (route) =>
     json(route, { items: [instrument()] }),
