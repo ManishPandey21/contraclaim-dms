@@ -969,13 +969,39 @@ class RetrievalService:
 
         try:
             from ..services.contract_graph_service import ContractGraphService
+            from ..services.graph_expansion_scope import resolve_graph_expansion_scope
 
             graph = ContractGraphService()
+            # FENCE THE CANDIDATES, NOT THE ANSWER.
+            #
+            # The gates further down drop a graph row whose document does not
+            # resolve or may not be published, which stops any of it being
+            # DISCLOSED. It cannot put back a legitimate clause that never
+            # entered the window: `find_related_clauses` bounds its traversal
+            # with `LIMIT`, nothing ever deletes or deactivates a `(:Clause)`
+            # node, and a real engine showed twelve dead clauses filling a
+            # three-row window while the live contract's clause never arrived.
+            # Suppression is material influence (G29), so eligibility is
+            # resolved first and carried into the query as a predicate - the
+            # same shape the contract evidence path has used since ticket 12.
+            eligible_document_ids = await resolve_graph_expansion_scope(
+                self.db,
+                graph,
+                organization_id=request.filters.org_id,
+                project_id=request.filters.project_id,
+                seed_clause_numbers=seed_clause_numbers,
+                seed_document_ids=seed_document_ids,
+            )
+            if not eligible_document_ids:
+                # Nothing canonical to expand toward. Deliberately not "expand
+                # without the fence": that is the widening this exists to stop.
+                return results
             rows = graph.find_related_clauses(
                 organization_id=request.filters.org_id,
                 project_id=request.filters.project_id,
                 seed_clause_numbers=seed_clause_numbers,
                 seed_document_ids=seed_document_ids,
+                eligible_document_ids=eligible_document_ids,
                 limit=max(limit * 3, 10),
             )
         except Exception as exc:
@@ -1015,9 +1041,16 @@ class RetrievalService:
         *,
         base_score: float,
     ) -> List[SearchResult]:
-        blocked_graph_documents = await self._blocked_document_ids(
-            [str(row.get("document_id")) for row in rows if row.get("document_id")]
-        )
+        candidate_ids = [str(row.get("document_id")) for row in rows if row.get("document_id")]
+        blocked_graph_documents = await self._blocked_document_ids(candidate_ids)
+        # `blocked_document_ids` deliberately returns only documents it POSITIVELY
+        # resolved and judged unusable - an id absent from Mongo is an orphaned
+        # point, and for ordinary search dropping those would change unrelated
+        # behaviour. A GRAPH expansion is different: the clause text lives on the
+        # graph node and nothing ever deletes Clause nodes, so a hard-deleted
+        # contract's text stays permanently servable. Absence of provenance is
+        # not absence of restriction, so this path fails CLOSED.
+        resolvable_ids = await self._resolvable_document_ids(candidate_ids)
         filters = [
             {"uploadType": "contract", "document_id": str(row.get("document_id")), "clause_number": str(row.get("clause_number"))}
             for row in rows
@@ -1044,58 +1077,83 @@ class RetrievalService:
             # resolves back to the source document here, before the prompt.
             if document_id and document_id in blocked_graph_documents:
                 continue
+            if not document_id or document_id not in resolvable_ids:
+                continue
             clause_number = str(row.get("clause_number") or "")
             key = (document_id, clause_number.lower())
             chunks = chunks_by_key.get(key) or []
             chunks.sort(key=lambda item: item.get("chunk_index") or 0)
-            if chunks:
-                first = chunks[0]
-                text = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks if chunk.get("text")).strip()
-                page_numbers = sorted(
-                    {
-                        int(page)
-                        for chunk in chunks
-                        for page in (chunk.get("page_numbers") or ([chunk.get("page_number")] if chunk.get("page_number") else []))
-                        if isinstance(page, (int, float)) or str(page).isdigit()
-                    }
+            if not chunks:
+                # FAIL CLOSED ON CONTENT, not just on provenance.
+                #
+                # This branch used to build the payload from the graph row:
+                # `"text": row.get("text")`, which is `related.text_content`
+                # read straight off the FalkorDB `(:Clause)` node. The gates
+                # above it answer a different question - "does a canonical
+                # document exist, and may it be consumed?" - and a document can
+                # be resolvable and consumable while the words on the node are a
+                # superseded generation: nothing deletes a `(:Clause)` node and
+                # nothing reprojects one when a classification is corrected, so
+                # both generations survive and both answer queries (T11).
+                #
+                # A graph node supplies identity, topology and relevance. The
+                # clause TEXT is canonical Mongo content or it is not served.
+                # Emitting the row with an empty body would be worse than
+                # dropping it: a real clause number and title over an empty
+                # `full_clause_text` reads as "this clause says nothing".
+                logger.debug(
+                    "Graph-expanded clause %s/%s dropped: no canonical chunk to "
+                    "substantiate it",
+                    document_id,
+                    clause_number,
                 )
-                payload = {
-                    "document_id": document_id,
-                    "chunk_id": first.get("chunk_id") or f"graph:{document_id}:{clause_number}",
-                    "uploadType": "contract",
-                    "document_type": "contract",
-                    "text": text or row.get("text") or "",
-                    "full_clause_text": text or row.get("text") or "",
-                    "clause_id": first.get("clause_id") or row.get("clause_id"),
-                    "clause_number": clause_number,
-                    "clause_title": first.get("clause_title") or row.get("clause_title"),
-                    "section_heading": first.get("section_heading") or row.get("section_type"),
-                    "page_numbers": page_numbers,
-                    "page": page_numbers[0] if page_numbers else row.get("page_number"),
-                    "page_number": page_numbers[0] if page_numbers else row.get("page_number"),
-                    "file_name": first.get("file_name") or first.get("filename"),
-                    "source_filename": first.get("source_filename") or first.get("filename"),
-                    "graph_expanded": True,
-                    "graph_relation": row.get("graph_relation"),
+                continue
+            first = chunks[0]
+            text = "\n\n".join(str(chunk.get("text") or "") for chunk in chunks if chunk.get("text")).strip()
+            if not text:
+                logger.debug(
+                    "Graph-expanded clause %s/%s dropped: canonical chunks carry "
+                    "no text",
+                    document_id,
+                    clause_number,
+                )
+                continue
+            page_numbers = sorted(
+                {
+                    int(page)
+                    for chunk in chunks
+                    for page in (chunk.get("page_numbers") or ([chunk.get("page_number")] if chunk.get("page_number") else []))
+                    if isinstance(page, (int, float)) or str(page).isdigit()
                 }
-            else:
-                payload = {
-                    "document_id": document_id,
-                    "chunk_id": f"graph:{document_id}:{clause_number}:{row.get('clause_id') or ''}",
-                    "uploadType": "contract",
-                    "document_type": "contract",
-                    "text": row.get("text") or "",
-                    "full_clause_text": row.get("text") or "",
-                    "clause_id": row.get("clause_id"),
-                    "clause_number": clause_number,
-                    "clause_title": row.get("clause_title"),
-                    "section_heading": row.get("section_type"),
-                    "page": row.get("page_number"),
-                    "page_number": row.get("page_number"),
-                    "page_numbers": [row.get("page_number")] if row.get("page_number") else [],
-                    "graph_expanded": True,
-                    "graph_relation": row.get("graph_relation"),
-                }
+            )
+            payload = {
+                "document_id": document_id,
+                "chunk_id": first.get("chunk_id") or f"graph:{document_id}:{clause_number}",
+                "uploadType": "contract",
+                "document_type": "contract",
+                "text": text,
+                "full_clause_text": text,
+                # Identity only from the row. `clause_title` and `section_type`
+                # are node properties: the second is filename-derived and is on
+                # the contract-evidence seam's NON_AUTHORITATIVE_GRAPH_FIELDS
+                # list precisely so no consumer can display or order by it, and
+                # this reader calls `find_related_clauses` directly rather than
+                # through that seam, so nothing else strips it. (The seam is
+                # named descriptively rather than by module here: an accepted
+                # regression pins that this stack does not reach it, and does so
+                # by searching this file for the module's name.)
+                "clause_id": first.get("clause_id") or row.get("clause_id"),
+                "clause_number": clause_number,
+                "clause_title": first.get("clause_title"),
+                "section_heading": first.get("section_heading"),
+                "page_numbers": page_numbers,
+                "page": page_numbers[0] if page_numbers else None,
+                "page_number": page_numbers[0] if page_numbers else None,
+                "file_name": first.get("file_name") or first.get("filename"),
+                "source_filename": first.get("source_filename") or first.get("filename"),
+                "graph_expanded": True,
+                "graph_relation": row.get("graph_relation"),
+            }
             snippet = str(payload.get("text") or "")[:6000]
             out.append(
                 SearchResult(
@@ -1644,6 +1702,23 @@ class RetrievalService:
         from ..services.publication_policy import blocked_document_ids
 
         return await blocked_document_ids(getattr(self, "db", None), document_ids)
+
+    async def _resolvable_document_ids(self, document_ids: List[str]) -> set:
+        """Ids whose canonical document actually exists in Mongo.
+
+        Used only where absent provenance must fail closed (graph expansion).
+        Kept separate from `_blocked_document_ids` so that predicate keeps its
+        "positively judged unusable" contract for ordinary search.
+
+        The body moved to `publication_policy.resolvable_document_ids` when
+        `ContractService._assemble_results` needed the same fence for its own
+        graph candidates. Two stacks with two copies of one containment rule is
+        the defect `blocked_document_ids` exists to record; this is a delegation
+        so it cannot happen again.
+        """
+        from ..services.publication_policy import resolvable_document_ids
+
+        return await resolvable_document_ids(getattr(self, "db", None), document_ids)
 
     async def _fetch_documents_meta(self, document_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         ids = [doc_id for doc_id in document_ids if doc_id]

@@ -29,6 +29,10 @@ from ..models.document import Document
 from ..models.storage_architecture import ContractAggregate, ContractVersion
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
+from .contract_graph_containment import contained_related_clauses
+from .graph_expansion_scope import resolve_graph_expansion_scope
+from .contract_lexical_containment import lexical_candidates_for_evidence
+from .contract_vector_containment import vector_candidates_for_evidence
 from ..utils.error_handler import ContractError
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
@@ -40,6 +44,17 @@ from .contract_graph_service import ContractGraphService
 logger = logging.getLogger(__name__)
 
 CONTRACT_ALLOWED_EXTENSIONS = [".pdf", ".docx"]
+
+
+class ContractEvidenceAuthorityFailure(Exception):
+    """Canonical eligibility could not be resolved for an evidence request.
+
+    Deliberately not a retrieval degradation and deliberately not an empty
+    result: both of those are answers a consumer may act on, and neither is
+    true here. Nothing has been queried and nothing is known, so the request
+    fails rather than returning something a caller could mistake for
+    "nothing applies".
+    """
 
 
 class ContractService:
@@ -738,6 +753,200 @@ class ContractService:
             )
         return regex
 
+    @property
+    def _graph_service(self):
+        """Lazily constructed so a test can substitute a bounded evaluator."""
+        if getattr(self, "_graph_service_instance", None) is None:
+            self._graph_service_instance = ContractGraphService()
+        return self._graph_service_instance
+
+    @_graph_service.setter
+    def _graph_service(self, value) -> None:
+        self._graph_service_instance = value
+
+    async def _evidence_eligible_documents(self, scope, mode, resolver):
+        """The one canonical universe for this request.
+
+        Resolved once and shared, so lexical, vector and graph cannot end up
+        searching three different populations. Any failure here is an authority
+        failure: there is no partial answer to give and no legacy path to fall
+        back to, because falling back is exactly how a broad search would
+        re-enter through the door this ticket closes.
+        """
+        try:
+            resolved = await resolver.resolve(scope, mode)
+        except Exception as exc:
+            raise ContractEvidenceAuthorityFailure(
+                "canonical contract eligibility could not be resolved; the request "
+                "fails rather than returning something a caller could mistake for "
+                "an answer: {0}".format(exc)
+            ) from exc
+        return sorted(str(item) for item in resolved.eligible_document_ids)
+
+    def _evidence_match_stage(self, request, effective_org, effective_project):
+        """The lexical match stage for evidence mode.
+
+        Assembled separately from `search_contracts` on purpose: generic search
+        keeps its own semantics, and threading a mode flag through it would put
+        an evidence concern inside the path that must stay unbounded for global
+        browsing.
+        """
+        match_stage = {"uploadType": "contract"}
+        if effective_org:
+            match_stage["organization_id"] = effective_org
+        if effective_project:
+            match_stage["project_id"] = effective_project
+        if request.document_id:
+            match_stage["$or"] = [
+                {"document_id": request.document_id},
+                {"upload_id": request.document_id},
+            ]
+        if request.tags:
+            match_stage["tags"] = {"$all": request.tags}
+        self._build_structured_search_filters(match_stage, request)
+        regex = self._build_regex(
+            match_stage, (request.query or "").strip(), exact_phrase=request.exact_phrase
+        )
+        return match_stage, regex
+
+    async def _evidence_candidates(self, request, *, scope, mode, resolver, candidate_limit):
+        """All three sources over one eligible universe, each fenced before its own limit."""
+        effective_org = scope.organization_id
+        effective_project = scope.project_id
+
+        eligible = await self._evidence_eligible_documents(scope, mode, resolver)
+        collection = await self._get_vectors()
+        match_stage, regex = self._evidence_match_stage(request, effective_org, effective_project)
+        source_status = {}
+
+        try:
+            lexical = await lexical_candidates_for_evidence(
+                collection,
+                match_stage=match_stage,
+                regex=regex,
+                candidate_limit=candidate_limit,
+                eligible_document_ids=eligible,
+                category_regex=self._build_category_regex(request.category_terms or []),
+            )
+            source_status["lexical"] = "success"
+        except Exception as exc:
+            # A store failure is not "no matching clauses". It is recorded as
+            # degraded, and the fence is never dropped to retry more broadly.
+            logger.warning("Contract evidence lexical source degraded: %s", exc)
+            lexical = []
+            source_status["lexical"] = "degraded"
+
+        query_vector = []
+        if eligible:
+            vector_query = " ".join(
+                [(request.query or "").strip()]
+                + [term.strip() for term in (request.category_terms or [])[:20] if term.strip()]
+            )
+            embeddings = await self._embedding_client.embed([vector_query])
+            query_vector = embeddings[0] if embeddings else []
+
+        vector_result = await vector_candidates_for_evidence(
+            self._vector_client,
+            query_vector=query_vector,
+            filters={
+                "org_id": effective_org,
+                "project_id": effective_project,
+                "document_id": [request.document_id] if request.document_id else None,
+                "tags": request.tags or None,
+                "uploadType": "contract",
+            },
+            candidate_limit=candidate_limit,
+            eligible_document_ids=eligible,
+            namespace=getattr(collection, "name", None),
+        )
+        source_status["vector"] = "degraded" if vector_result.degraded else "success"
+
+        graph_rows = []
+        source_status["graph"] = "success"
+        seed_clause_numbers = self._extract_clause_numbers_for_graph(request)
+        if effective_org and effective_project and seed_clause_numbers:
+            graph_result = contained_related_clauses(
+                self._graph_service,
+                organization_id=effective_org,
+                project_id=effective_project,
+                seed_clause_numbers=seed_clause_numbers,
+                eligible_document_ids=eligible,
+                caller_document_ids=[request.document_id] if request.document_id else None,
+                limit=candidate_limit,
+            )
+            graph_rows = [
+                {
+                    "document_id": self._coerce_id(row.get("document_id")),
+                    "clause_number": row.get("clause_number"),
+                    "clause_start_position": row.get("clause_start_position"),
+                    "score": 0.75 if row.get("graph_relation") == "same_clause_number" else 0.45,
+                    "graph_relation": row.get("graph_relation"),
+                }
+                for row in graph_result.matches
+                if row.get("document_id") and row.get("clause_number")
+            ]
+            source_status["graph"] = "degraded" if graph_result.degraded else "success"
+
+        return lexical, vector_result.matches, graph_rows, source_status
+
+    async def evidence_source_report(self, request, *, scope, mode, resolver):
+        """Per-source outcome for one evidence request.
+
+        Exposed rather than presented: a consumer-facing degraded state belongs
+        to a later ticket, but collapsing an outage into an empty list here
+        would destroy the distinction before anyone could surface it.
+        """
+        page_size, skip_count = request.limit, request.skip
+        candidate_limit = max(page_size * 5, page_size + skip_count + 10)
+        _, _, _, source_status = await self._evidence_candidates(
+            request, scope=scope, mode=mode, resolver=resolver, candidate_limit=candidate_limit
+        )
+        return source_status
+
+    async def search_contract_evidence(self, request, *, scope, mode, resolver):
+        """Contract evidence: one eligible universe, three sources, one fusion.
+
+        Publication authority still runs before fusion, `total_count` and
+        pagination, and that ordering is untouched - it was already correct. The
+        defect closed here is earlier: each source spent its candidate limit
+        before applicability existed, so high-scoring inapplicable clauses could
+        starve an applicable one. `_assemble_results` is reused unchanged, which
+        also keeps the canonical join-back key identical across sources.
+        """
+        query_text = (request.query or "").strip()
+        if not query_text:
+            raise ContractError("Search query is required", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        start_time = time.perf_counter()
+        page_size, skip_count = request.limit, request.skip
+        candidate_limit = max(page_size * 5, page_size + skip_count + 10)
+
+        lexical, vector, graph, source_status = await self._evidence_candidates(
+            request, scope=scope, mode=mode, resolver=resolver, candidate_limit=candidate_limit
+        )
+        degraded = sorted(name for name, state in source_status.items() if state == "degraded")
+        if degraded:
+            logger.warning("Contract evidence degraded sources: %s", ", ".join(degraded))
+
+        collection = await self._get_vectors()
+        normalized, total_count, has_more = await self._assemble_results(
+            collection, lexical, vector, graph, page_size, skip_count
+        )
+        normalized = self._rerank_contract_chunks(normalized, request)
+        summary, summary_title = self._build_summary(normalized) if request.summarize else (None, None)
+        return ContractSearchResponse(
+            results=[ContractClauseChunk(**item) for item in normalized],
+            summary=summary,
+            ai_summary_title=summary_title,
+            took_ms=int((time.perf_counter() - start_time) * 1000),
+            total_count=total_count,
+            has_more=has_more,
+            current_page=skip_count // page_size + 1,
+            page_size=page_size,
+            sources=[ContractSource(**item) for item in self._build_sources(normalized)],
+        )
+
+
     async def search_contracts(self, request: ContractSearchRequest, current_user: CurrentUser) -> ContractSearchResponse:
         query_text = (request.query or "").strip()
         if not query_text:
@@ -855,12 +1064,35 @@ class ContractService:
         clause_numbers = self._extract_clause_numbers_for_graph(request)
         if not clause_numbers:
             return []
+        seed_document_ids = [request.document_id] if request.document_id else None
         try:
-            rows = ContractGraphService().find_related_clauses(
+            graph = ContractGraphService()
+            # FENCE THE CANDIDATES, NOT THE PAGE.
+            #
+            # `_assemble_results` already removes an unresolvable or blocked
+            # graph candidate before RRF, so none of them reaches a row or
+            # `total_count`. That protects the ANSWER and cannot recover a
+            # legitimate clause that never became a candidate: nothing deletes
+            # a `(:Clause)` node, so dead residue keeps matching the traversal
+            # and spends the engine `LIMIT` ahead of the live contract. G29
+            # counts that suppression as material influence, so eligibility is
+            # resolved before the window is chosen.
+            eligible_document_ids = await resolve_graph_expansion_scope(
+                await self._get_db(),
+                graph,
                 organization_id=effective_org,
                 project_id=effective_project,
                 seed_clause_numbers=clause_numbers,
-                seed_document_ids=[request.document_id] if request.document_id else None,
+                seed_document_ids=seed_document_ids,
+            )
+            if not eligible_document_ids:
+                return []
+            rows = graph.find_related_clauses(
+                organization_id=effective_org,
+                project_id=effective_project,
+                seed_clause_numbers=clause_numbers,
+                seed_document_ids=seed_document_ids,
+                eligible_document_ids=eligible_document_ids,
                 limit=candidate_limit,
             )
         except Exception as exc:
@@ -988,6 +1220,76 @@ class ContractService:
                 scores[item["key"]] = scores.get(item["key"], 0.0) + 1.0 / (60 + rank)
             return scores
 
+        # Publication containment must happen on the CANDIDATE set, before
+        # fusion. Filtering after the page window is chosen leaves blocked
+        # clauses influencing legal output without disclosing a word of their
+        # text: they inflate `total_count`, set `has_more`, take part in RRF
+        # ordering, and - because the drafting callers request a single small
+        # page (limit=5/6) - they consume the top-K slots and evict every
+        # legitimate clause. A reviewer reproduced 6 blocked clauses + 1 clean
+        # governing clause at page_size=6 yielding total_count=7 and ZERO rows
+        # in the drafting prompt, with no warning and no degraded marking.
+        # The post-hydration filter below stays as defence in depth.
+        from .publication_policy import blocked_document_ids, resolvable_document_ids
+
+        # Explicit None check: Motor Database objects refuse bool(), so the
+        # former `or` raised as soon as a real collection was passed in.
+        db_obj = getattr(collection, "database", None)
+        if db_obj is None:
+            db_obj = self._db
+        candidate_doc_ids = [
+            meta.get("document_id") for meta in key_meta.values() if meta.get("document_id")
+        ]
+
+        # A GRAPH candidate must also RESOLVE, and it is the only source here
+        # that has to. `blocked_document_ids` returns ids it positively judged
+        # unusable and deliberately not ids absent from Mongo - correct for a
+        # lexical or vector hit, which exists only because a store row exists.
+        # A `(:Clause)` node is different: nothing deletes one, so residue with
+        # no canonical document behind it is the normal state. Such a candidate
+        # discloses nothing (hydration below finds no chunk) and still spends a
+        # page slot, joins the RRF ordering, and is counted in `total_count` and
+        # `has_more` - influence without disclosure, the class G-A17 pinned for
+        # the linked-chain report. Fence it here, on the CANDIDATE set, for the
+        # same reason the publication block is on the candidate set and not on
+        # the page window.
+        graph_only_ids = {
+            str(item.get("document_id"))
+            for item in graph_candidates or []
+            if item.get("document_id")
+        } - {
+            str(item.get("document_id"))
+            for item in lexical_candidates
+            if item.get("document_id")
+        } - {
+            str((item.get("payload") or {}).get("document_id"))
+            for item in vector_candidates
+            if (item.get("payload") or {}).get("document_id")
+        }
+        if graph_only_ids:
+            resolvable = await resolvable_document_ids(db_obj, sorted(graph_only_ids))
+            unresolvable = {
+                doc_id for doc_id in graph_only_ids if str(doc_id) not in resolvable
+            }
+            if unresolvable:
+                key_meta = {
+                    key: meta
+                    for key, meta in key_meta.items()
+                    if str(meta.get("document_id")) not in unresolvable
+                }
+                graph_ranked = [item for item in graph_ranked if item["key"] in key_meta]
+
+        blocked_candidates = await blocked_document_ids(db_obj, candidate_doc_ids)
+        if blocked_candidates:
+            key_meta = {
+                key: meta
+                for key, meta in key_meta.items()
+                if meta.get("document_id") not in blocked_candidates
+            }
+            lexical_ranked = [item for item in lexical_ranked if item["key"] in key_meta]
+            vector_ranked = [item for item in vector_ranked if item["key"] in key_meta]
+            graph_ranked = [item for item in graph_ranked if item["key"] in key_meta]
+
         combined_scores: Dict[str, float] = {}
         for key, score in rrf(lexical_ranked).items():
             combined_scores[key] = combined_scores.get(key, 0.0) + score
@@ -1019,14 +1321,9 @@ class ContractService:
         # Drop the RESULT, not just its metadata - the earlier mistake in the
         # sibling RetrievalService was computing the block and still letting the
         # payload through. One shared filter so the two stacks cannot drift.
-        from .publication_policy import blocked_document_ids
-
-        # Resolve the documents collection from the SAME database the vectors
-        # collection belongs to (Motor exposes `.database`), falling back to the
-        # cached handle. Never open a fresh connection here - the caller already
-        # holds one, and reaching for `_get_db()` would make the join depend on
-        # live Mongo even in unit tests of the pure ranking logic.
-        db_obj = getattr(collection, "database", None) or self._db
+        # `db_obj` and `blocked_document_ids` were resolved above, before fusion.
+        # This second pass is defence in depth: it re-checks the hydrated rows in
+        # case a chunk carries a document_id the candidate metadata did not.
         blocked = await blocked_document_ids(
             db_obj, [self._coerce_id(doc.get("document_id")) for doc in docs]
         )
