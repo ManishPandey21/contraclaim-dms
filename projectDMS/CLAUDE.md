@@ -46,11 +46,17 @@ cd client && npm run test && npm run test:e2e
 ```
 
 After adding or changing any route or its authorization, regenerate the route
-contract or `test_route_authz_gate_evidence.py` / `test_route_control_manifest.py` fail:
+inventory and diff it — `test_route_inventory.py` is the gate that fails:
 
 ```bash
-backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format contract-json --output backend/rbac_backend/route_control_manifest.json
+backend/.venv/Scripts/python.exe scripts/rbac_phase0_route_inventory.py --format json
 ```
+
+The generator supports `--format {summary,json,markdown}` and **no `--output`** — redirect
+to a file yourself. There is no `contract-json` format, no
+`route_control_manifest.json`, and no `test_route_authz_gate_evidence.py` or
+`test_route_control_manifest.py`; that instruction described tooling this repo does
+not have. Verified 2026-08-26 against `--help` and the tests directory.
 
 Migrations (dry run first, always, before any deploy):
 
@@ -187,9 +193,8 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
 
 - Client consumes neither `selection_required` nor `context_forbidden` (no scope-selection
   prompt exists yet).
-- `test_route_control_manifest` can fail on clean HEAD: the checked-in manifest claims an
-  `authorize()` gate on `/api/notifications` that the live route lacks — notifications has no
-  permission dependency at all.
+- `/api/notifications` has no permission dependency at all. (The note that a checked-in
+  route manifest disagreed is obsolete: no manifest and no manifest test exist.)
 - Deferred from the AI-harness work: Learning Update persistence, OTel workflow spans, v3
   domain-adapter double-run, claim-support verification via NLI/LLM-judge.
 - Arbitration acceptance is unproven in production (zero cases/runs), plus outstanding
