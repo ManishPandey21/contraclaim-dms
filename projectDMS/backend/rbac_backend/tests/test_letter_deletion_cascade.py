@@ -136,6 +136,9 @@ class FakeCollection:
         self.docs = keep
         return SimpleNamespace(deleted_count=removed)
 
+    async def count_documents(self, query: Dict[str, Any], **_kw) -> int:
+        return sum(1 for doc in self.docs if _matches(doc, query))
+
     def get(self, doc_id: Any) -> Dict[str, Any]:
         for doc in self.docs:
             if _norm_id(doc.get("_id")) == _norm_id(doc_id):
@@ -238,6 +241,8 @@ def _build_world():
         documents=documents,
         reference_sync_queue=queue,
         document_vectors=vectors,
+        entity_document_links=FakeCollection(),
+        claims=FakeCollection(),
         letters=FakeCollection(),
     )
     return db, {

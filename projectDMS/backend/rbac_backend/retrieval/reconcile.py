@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Set
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from ..services.publication_policy import is_consumable, resolve_canonical_document
 from .embeddings import EmbeddingClient
 from .vector_client import VectorClient
 
@@ -26,6 +27,17 @@ class VectorReconciler:
         project_id: str,
         namespace: Optional[str] = None,
     ) -> Dict[str, int]:
+        document = await resolve_canonical_document(self.db, document_id)
+        if not is_consumable(document):
+            return {
+                "missing_in_qdrant": 0,
+                "missing_in_mongo": 0,
+                "repaired": 0,
+                "removed": 0,
+                "qdrant_ids": 0,
+                "mongo_chunks": 0,
+            }
+
         chunks = [doc async for doc in self.db.chunks.find({"document_id": document_id, "org_id": org_id, "project_id": project_id})]
         chunk_ids: Set[str] = {str(c.get("chunk_id")) for c in chunks}
         qdrant_ids = set(
@@ -79,4 +91,3 @@ class VectorReconciler:
             "qdrant_ids": len(qdrant_ids),
             "mongo_chunks": len(chunk_ids),
         }
-

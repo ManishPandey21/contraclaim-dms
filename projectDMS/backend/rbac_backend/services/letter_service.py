@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import List, Optional, Dict, Any, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Set, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from pymongo.database import Database
@@ -156,6 +156,52 @@ class LetterService:
         except Exception as e:
             logger.error(f"Failed to retrieve letters: {e}")
             raise LetterServiceError(f"Letter retrieval failed: {str(e)}")
+
+    async def authorized_letter_ids(
+        self,
+        letter_ids: List[str],
+        current_user: Any,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Set[str]:
+        """Of these letter ids, the ones the ACTOR may actually see.
+
+        `get_letters` takes no actor. It filters on whatever `organization_id` /
+        `project_id` the caller hands it and DROPS a falsy value entirely, so a
+        letter with no project silently widens a "related correspondence" lookup
+        to the whole organisation - and a caller that passes neither gets every
+        tenant's letters.
+
+        This answers row visibility the one canonical way, through
+        `build_scope_query`, and returns ids rather than rows so a caller can
+        filter a list it already holds without a second parse. Any supplied
+        organisation/project NARROWS inside the actor's entitlement - a value
+        outside it denies every row - and is never the authority source. No
+        role name is read here.
+
+        `current_user` carries no default: a helper over an unbounded list must
+        fail closed by construction, not by each caller remembering to pass one.
+        """
+        if not letter_ids or current_user is None:
+            return set()
+
+        from ..core.security import build_scope_query, _expand_object_ids
+
+        scope = build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        identifiers = [str(letter_id) for letter_id in letter_ids if letter_id]
+        if not identifiers:
+            return set()
+
+        id_clause: Dict[str, Any] = {"_id": {"$in": _expand_object_ids(identifiers)}}
+        query = {"$and": [id_clause, scope]} if scope else id_clause
+
+        rows = await self.db.letters.find(query, {"_id": 1}).to_list(length=None)
+        return {str(row.get("_id")) for row in rows}
 
     async def get_letter(self, letter_id: str) -> Optional[Letter]:
         """
@@ -498,15 +544,49 @@ class LetterService:
             logger.error(f"Failed to update letter {letter_id}: {exc}")
             raise LetterServiceError(f"Letter update failed: {str(exc)}")
 
-    async def get_context_documents(self, letter_id: str) -> Dict[str, Any]:
-        """Return stored context documents and associated metadata for a letter."""
+    async def get_context_documents(
+        self,
+        letter_id: str,
+        current_user: Any,
+    ) -> Dict[str, Any]:
+        """Return stored context documents and associated metadata for a letter.
+
+        Authorisation to view the LETTER does not authorise the documents.
+        Letter numbers are global strings that collide across projects and
+        organisations, a curated id list is not authority, and a document's
+        publication state can turn adverse after it was curated. Every row
+        served here therefore has to clear two INDEPENDENT gates before it is
+        serialized:
+
+        * the actor's canonical row visibility (`build_scope_query`), narrowed
+          - not authorised - by this letter's own organisation and project;
+        * canonical publication authority (`is_consumable`).
+
+        `current_user` carries no default so a caller cannot omit the identity
+        the result is bounded by.
+        """
         letter = await self.get_letter(letter_id)
         if not letter:
             raise LetterNotFoundError(f"Letter not found: {letter_id}")
 
+        # The letter's own scope narrows INSIDE entitlement. It is passed to
+        # the canonical helper as a request-style filter, so a value outside
+        # the actor's entitlement denies every row rather than granting one.
+        letter_org = str(letter.organization_id) if letter.organization_id else None
+        letter_project = str(letter.project_id) if letter.project_id else None
+
         context_ids = list(getattr(letter, "context_document_ids", []) or [])
         document_service = DocumentService(self.db)
-        documents = await document_service.get_documents_by_ids(context_ids)
+        documents = await document_service.get_documents_by_ids_in_scope(
+            context_ids,
+            current_user,
+            organization_id=letter_org,
+            project_id=letter_project,
+        )
+        # `document_ids` echoes the stored selection, so it is narrowed to the
+        # documents that survived both gates. An id alone still discloses that
+        # a document exists.
+        authorized_ids = [str(doc.id) for doc in documents]
 
         def _serialize(doc: Document) -> Dict[str, Any]:
             return {
@@ -525,7 +605,10 @@ class LetterService:
         if getattr(letter, "letter_no", None):
             candidates = await document_service.list_documents_by_letter_no(
                 letter.letter_no,
+                current_user,
                 limit=12,
+                organization_id=letter_org,
+                project_id=letter_project,
             )
             for candidate in candidates:
                 candidate_id = str(candidate.id)
@@ -534,7 +617,7 @@ class LetterService:
                 suggested_documents.append(_serialize(candidate))
 
         return {
-            "document_ids": context_ids,
+            "document_ids": authorized_ids,
             "documents": [_serialize(doc) for doc in documents],
             "suggested_documents": suggested_documents,
         }
@@ -596,7 +679,7 @@ class LetterService:
                 }
             },
         )
-        return await self.get_context_documents(letter_id)
+        return await self.get_context_documents(letter_id, current_user)
 
     async def add_comment(self, letter_id: str, comment: str, user_id: Optional[str] = None) -> bool:
         """

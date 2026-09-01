@@ -20,10 +20,12 @@ from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from .contract_categorizer import create_contract_categorizer
 from .contract_graph_service import (
+    ContractGraphIdentityError,
     ClauseGraphPayload,
     ContractGraphService,
     DocumentGraphPayload,
 )
+from .publication_policy import is_publication_blocked, resolve_canonical_document
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.generator import LLMGenerator
 from ..retrieval.source_metadata import normalize_source_payload
@@ -1476,6 +1478,8 @@ class ContractIngestor:
             except OSError:
                 pass
 
+            await self._assert_current_publication_authority(document_id)
+
             logger.info(f"Starting ingestion for {filename} (upload_id: {upload_id})")
 
             # Update job status to processing
@@ -1655,7 +1659,11 @@ class ContractIngestor:
                 # Fallback: create records without embeddings
                 records = self._payloads_to_records(payloads)
 
-            qdrant_chunks = await self._index_clause_vectors(payloads, vector_results)
+            qdrant_chunks = await self._index_clause_vectors(
+                payloads,
+                vector_results,
+                document_id=document_id,
+            )
             await self.db_service.upsert_job_status(
                 upload_id,
                 str(file_path_obj),
@@ -1674,6 +1682,7 @@ class ContractIngestor:
             )
 
             # Graph sync (FalkorDB) - organization/project scoped
+            graph_skipped_reason: Optional[str] = None
             if self.contract_graph.enabled:
                 try:
                     section_type, priority = self._detect_section_type(filename)
@@ -1688,11 +1697,25 @@ class ContractIngestor:
                         priority=priority,
                     )
                     if clause_nodes:
+                        await self._assert_current_publication_authority(document_id)
                         self.contract_graph.upsert_contract_graph(doc_payload, clause_nodes)
+                    else:
+                        graph_skipped_reason = "no_clause_nodes"
+                except ContractGraphIdentityError as exc:
+                    # Expected domain state, NOT an outage: the contract graph is
+                    # project-scoped and this document has no project. Recorded
+                    # so "completed" never implies "present in the graph" - the
+                    # previous code logged this at the same level as a transport
+                    # failure, so an entire class of documents was silently
+                    # absent from every graph-backed feature.
+                    graph_skipped_reason = "not_representable: missing project scope"
+                    logger.info("Contract graph skipped for %s: %s", filename, exc)
                 except Exception as exc:
+                    graph_skipped_reason = f"graph_error: {type(exc).__name__}"
                     logger.warning("Contract graph ingestion skipped for %s: %s", filename, exc)
 
             # Insert into database
+            await self._assert_current_publication_authority(document_id)
             await self.db_service.insert_document_vectors(records)
 
             # Guard against silently completing a contract whose semantic
@@ -1723,6 +1746,8 @@ class ContractIngestor:
                 file_size=file_size,
                 extra={
                     "qdrant_chunks": qdrant_chunks,
+                    "graph_indexed": graph_skipped_reason is None,
+                    "graph_skipped_reason": graph_skipped_reason,
                     "processing_stage": "completed",
                     "stage_label": "Processing complete",
                     "progress": 100,
@@ -2200,6 +2225,8 @@ class ContractIngestor:
         self,
         payloads: List[Dict[str, Any]],
         vector_results: Optional[List[Dict[str, Any]]] = None,
+        *,
+        document_id: Optional[str] = None,
     ) -> int:
         if not payloads or not self.processing_config.qdrant_enabled or not self.vector_client.enabled:
             return 0
@@ -2230,9 +2257,20 @@ class ContractIngestor:
                 self._build_qdrant_chunk(item.get("metadata") or {}, item.get("text") or "", len(vector))
                 for item, vector in zip(batch, batch_vectors)
             ]
+            await self._assert_current_publication_authority(document_id)
             total += await self.vector_client.upsert(batch_vectors, chunks)
 
         return total
+
+    async def _assert_current_publication_authority(
+        self,
+        document_id: Optional[str],
+    ) -> None:
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if is_publication_blocked(document):
+            raise IngestionError(
+                f"Document {document_id or '<missing>'} is not authoritative for contract publication"
+            )
 
     def _payloads_to_records(
         self,

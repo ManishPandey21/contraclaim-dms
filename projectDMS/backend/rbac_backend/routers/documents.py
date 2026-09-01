@@ -28,6 +28,7 @@ from ..config.document_processing_config import DocumentProcessingConfig
 from ..services.archive_policy import ArchiveIntakePolicy
 from ..services.document_service import (
     DocumentConflictError,
+    DocumentDependencyError,
     DocumentService,
     DocumentServiceError,
 )
@@ -257,6 +258,109 @@ class DocumentController:
             storage_settings=self.storage_settings,
         )
         self.audit_service = DocumentAuditService()
+
+    async def compensate_failed_creation(
+        self,
+        document_id: str,
+        *,
+        current_user: Optional[CurrentUser] = None,
+        reason: str,
+    ) -> None:
+        """Remove an unlinked failed Document identity while retaining its bytes.
+
+        The immutable FileObject remains available for hash-deduplicated retry;
+        only the newly created Document and its version ownership are removed.
+        """
+        db = await self.document_service._get_db()
+        candidates: list[Any] = [document_id]
+        try:
+            candidates.append(ObjectId(document_id))
+        except Exception:
+            pass
+
+        async def cleanup(session: Any = None) -> bool:
+            session_kwargs = {"session": session} if session is not None else {}
+            document = await db.documents.find_one(
+                {"_id": {"$in": candidates}}, **session_kwargs
+            )
+            if document is None:
+                return True
+            active_links = await db.entity_document_links.count_documents(
+                {"document_id": str(document.get("_id")), "removed_at": None},
+                **session_kwargs,
+            )
+            if active_links:
+                raise RuntimeError(
+                    "Cannot compensate a Document with an active relationship"
+                )
+            versions = [
+                row
+                async for row in db.document_versions.find(
+                    {"document_id": str(document.get("_id"))},
+                    **session_kwargs,
+                )
+            ]
+            file_object_ids = {
+                str(value)
+                for value in [
+                    document.get("file_object_id"),
+                    *(row.get("file_object_id") for row in versions),
+                ]
+                if value
+            }
+            await db.document_versions.delete_many(
+                {"document_id": str(document.get("_id"))}, **session_kwargs
+            )
+            deleted = await db.documents.delete_one(
+                {"_id": document.get("_id")}, **session_kwargs
+            )
+            if not getattr(deleted, "deleted_count", 0):
+                raise RuntimeError("Failed to compensate newly created Document")
+            for file_object_id in file_object_ids:
+                file_object = await db.file_objects.find_one(
+                    {"_id": file_object_id}, **session_kwargs
+                )
+                if not file_object:
+                    continue
+                remaining_ids = [
+                    value
+                    for value in file_object.get("document_ids") or []
+                    if str(value) != str(document.get("_id"))
+                ]
+                update: Dict[str, Any] = {"$set": {"document_ids": remaining_ids}}
+                if str(file_object.get("document_id") or "") == str(
+                    document.get("_id")
+                ):
+                    update["$unset"] = {"document_id": ""}
+                await db.file_objects.update_one(
+                    {"_id": file_object_id}, update, **session_kwargs
+                )
+            return True
+
+        client = getattr(db, "client", None)
+        start_session = getattr(client, "start_session", None)
+        if callable(start_session):
+            session = await start_session()
+            async with session:
+                with_transaction = getattr(session, "with_transaction", None)
+                if callable(with_transaction):
+                    await with_transaction(cleanup)
+                else:
+                    async with session.start_transaction():
+                        await cleanup(session)
+        else:
+            await cleanup(None)
+        await self.audit_service.emit(
+            resource_type="document",
+            resource_id=document_id,
+            event_type="document.creation_compensated",
+            actor_id=getattr(current_user, "id", None),
+            metadata={
+                "reason": reason,
+                "document_identity_removed": True,
+                "file_object_bytes_retained": True,
+            },
+        )
 
     async def _write_to_providers(
         self,
@@ -569,6 +673,17 @@ class DocumentController:
         **kwargs
     ) -> Document:
         """Create document with comprehensive validation and security."""
+        document: Optional[Document] = None
+
+        async def compensate_returned_document() -> None:
+            if document is None:
+                return
+            await self.compensate_failed_creation(
+                str(document.id),
+                current_user=current_user,
+                reason="canonical_document_creation_failed_after_insert",
+            )
+
         try:
             await self.policy_service.authorize(
                 current_user,
@@ -795,9 +910,38 @@ class DocumentController:
             return document
 
         except (DocumentError, HTTPException):
+            try:
+                await compensate_returned_document()
+            except HTTPException:
+                raise
+            except Exception as cleanup_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        "Document creation failed and compensation requires "
+                        "manual review"
+                    ),
+                ) from cleanup_exc
             raise
         except Exception as e:
             logger.error(f"Document creation failed: {str(e)}")
+            try:
+                await compensate_returned_document()
+            except HTTPException:
+                raise
+            except Exception as cleanup_exc:
+                logger.error(
+                    "Document creation compensation failed for %s: %s",
+                    getattr(document, "id", None),
+                    cleanup_exc,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=(
+                        "Document creation failed and compensation requires "
+                        "manual review"
+                    ),
+                ) from cleanup_exc
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Document creation service temporarily unavailable"
@@ -1508,6 +1652,8 @@ async def controller_list_documents(
         authorized_query = await self.auth_service.build_document_query(
             current_user, filters
         )
+        if filters.get("linkable_only"):
+            authorized_query = _apply_linkable_document_constraints(authorized_query)
 
         documents, total_count = await self.document_service.list_documents(
             authorized_query, pagination
@@ -1666,6 +1812,14 @@ async def controller_delete_document(
             error="ConflictError",
             code="document_conflict",
             details={"current_revision": exc.current_revision},
+        ) from exc
+    except DocumentDependencyError as exc:
+        raise DocumentError(
+            str(exc),
+            status.HTTP_409_CONFLICT,
+            error="DocumentDependencyError",
+            code="document_has_active_relationships",
+            details={"active_relationship_count": exc.active_relationship_count},
         ) from exc
     except Exception as e:
         logger.error(f"Document deletion failed: {str(e)}")
@@ -2598,15 +2752,42 @@ async def download_document(
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not available for download")
 
 
+def _resolve_document_search_term(
+    q: Optional[str], search: Optional[str]
+) -> Optional[str]:
+    normalized_q = q.strip() if q and q.strip() else None
+    normalized_search = search.strip() if search and search.strip() else None
+    if normalized_q and normalized_search and normalized_q != normalized_search:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="q and search must match when both are supplied",
+        )
+    return normalized_q or normalized_search
+
+
+def _apply_linkable_document_constraints(query: Dict[str, Any]) -> Dict[str, Any]:
+    constrained = dict(query or {})
+    constrained.setdefault("project_id", {"$nin": [None, ""]})
+    constrained["duplicate_status"] = {"$ne": "duplicate"}
+    constrained["lifecycle_state"] = {
+        "$nin": ["deleted", "duplicate_review", "duplicate"]
+    }
+    constrained["processing_status"] = {"$nin": ["human_review_required"]}
+    return constrained
+
+
+@router.get("/document-search", response_model=DocumentListResponse)
 @router.get("/documents", response_model=DocumentListResponse)
 @handle_exceptions
 async def list_documents(
+    request: Request,
     organization_id: Optional[str] = Query(None),
     project_id: Optional[str] = Query(None),
     tags: Optional[List[str]] = Query(None),
     subTags: Optional[List[str]] = Query(None),
     uploadType: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
@@ -2625,11 +2806,12 @@ async def list_documents(
         "subTags": subTags,
         "uploadType": uploadType,
         "status": status,
-        "search": search,
+        "search": _resolve_document_search_term(q, search),
         "date_from": date_from,
         "date_to": date_to,
         "letterNo": letterNo,
         "subject": subject,
+        "linkable_only": request.url.path.rstrip("/").endswith("/document-search"),
     }
     pagination = {"skip": skip, "limit": limit}
 

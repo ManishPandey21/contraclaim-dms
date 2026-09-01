@@ -16,6 +16,7 @@ from ..models.evidence_graph import (
     ProjectEventType,
 )
 from .evidence_graph_service import EvidenceGraphService
+from .publication_policy import resolve_document_authority
 
 
 async def _collect_cursor(cursor: Any) -> List[Dict[str, Any]]:
@@ -131,6 +132,7 @@ class EvidenceGraphBackfillService:
             cursor = db[collection_name].find(query).limit(limit_per_collection)
             rows = await _collect_cursor(cursor)
             missing = []
+            authority_blocked = 0
             for row in rows:
                 entity_id = str(row.get("_id"))
                 existing = await db.project_events.find_one(
@@ -138,6 +140,11 @@ class EvidenceGraphBackfillService:
                 )
                 if existing:
                     continue
+                if collection_name == "documents":
+                    authority = await resolve_document_authority(db, entity_id)
+                    if not authority.consumable:
+                        authority_blocked += 1
+                        continue
                 missing.append(row)
                 if dry_run:
                     continue
@@ -190,6 +197,7 @@ class EvidenceGraphBackfillService:
             report["sources"][collection_name] = {
                 "scanned": len(rows),
                 "missing_project_events": len(missing),
+                "authority_blocked": authority_blocked,
                 "limited": len(rows) >= limit_per_collection,
             }
         return report

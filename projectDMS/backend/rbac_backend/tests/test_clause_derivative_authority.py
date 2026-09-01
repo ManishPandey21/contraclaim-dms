@@ -24,6 +24,7 @@ all four read sites, plus the over-block that a careless fix would create.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from rbac_backend.services.arbitration_drafting.case_workspace import (
@@ -77,6 +78,56 @@ class _DB:
 
 CLAUSE = {"_id": "clause-21-2", "document_id": "doc-contract-1", "text": EXCERPT}
 
+#: G-A13/R24 added the second half of the clause-matrix gate: an approved row
+#: contributes only where the canonical Contract Master universe currently
+#: admits its instrument. These fixtures therefore have to describe a REAL
+#: applicable instrument, or every case here would fail for the wrong reason.
+#: The publication axis this file was written for is unchanged; what changed is
+#: that a row the canonical universe rejects is dropped ENTIRELY rather than
+#: kept with its text blanked, so the blocked cases below assert ABSENCE of the
+#: row - strictly stronger than "the excerpt was withheld".
+DRAFT = {
+    "_id": "draft-1",
+    "case_id": "case-1",
+    "organization_id": "org-1",
+    "project_id": "proj-1",
+}
+
+ACTOR = SimpleNamespace(
+    id="user-1",
+    roles=["projectuser"],
+    organization_id="org-1",
+    organizations=["org-1"],
+    projects=["proj-1"],
+)
+
+CONTRACT_DOCUMENT = {
+    "_id": "cdoc-1",
+    "organization_id": "org-1",
+    "document_id": "doc-contract-1",
+    "document_version_id": "doc-contract-1-v1",
+    "contract_document_type": "general_conditions",
+    "classification_revision": 3,
+    "projection_revision": 3,
+    "projection_status": "CURRENT",
+}
+
+APPLICABILITY = {
+    "_id": "appl-1",
+    "organization_id": "org-1",
+    "project_id": "proj-1",
+    "contract_id": "MAIN",
+    "contract_document_id": "cdoc-1",
+}
+
+APPLICABILITY_EVENT = {
+    "_id": "evt-1",
+    "event_id": "event-1",
+    "applicability_id": "appl-1",
+    "kind": "APPLIED",
+    "effective_at": "2026-01-01",
+}
+
 
 def _matrix_row(**extra: Any) -> Dict[str, Any]:
     row = {
@@ -94,21 +145,52 @@ def _matrix_row(**extra: Any) -> Dict[str, Any]:
     return row
 
 
-def _db(status: Optional[str], row: Optional[Dict[str, Any]] = None) -> _DB:
-    documents = [{"_id": "doc-contract-1", "processing_status": status}] if status else []
+def _db(
+    status: Optional[str],
+    row: Optional[Dict[str, Any]] = None,
+    documents: Optional[List[Dict[str, Any]]] = None,
+) -> _DB:
+    if documents is None:
+        documents = (
+            [
+                {
+                    "_id": "doc-contract-1",
+                    "organization_id": "org-1",
+                    "project_id": "proj-1",
+                    "processing_status": status,
+                }
+            ]
+            if status
+            else []
+        )
     return _DB(
         documents=documents,
         contract_clauses=[dict(CLAUSE)],
         arbitration_clause_matrix=[row or _matrix_row()],
+        contract_documents=[dict(CONTRACT_DOCUMENT)],
+        contract_document_applicability=[dict(APPLICABILITY)],
+        contract_document_applicability_events=[dict(APPLICABILITY_EVENT)],
     )
 
 
 # --- site 1: the arbitration source ledger (reaches the drafting LLM) ----------
 
 
+def _ledger_rows(
+    status: Optional[str],
+    row: Optional[Dict[str, Any]] = None,
+    documents: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    builder = ArbitrationContextBuilder(_db(status, row, documents))
+    return asyncio.run(
+        builder._clause_matrix_sources(
+            "case-1", 0, False, [], draft=DRAFT, current_user=ACTOR
+        )
+    )
+
+
 def _ledger_snippet(status: Optional[str], row: Optional[Dict[str, Any]] = None) -> str:
-    builder = ArbitrationContextBuilder(_db(status, row))
-    rows = asyncio.run(builder._clause_matrix_sources("case-1", 0, False, []))
+    rows = _ledger_rows(status, row)
     assert rows, "the approved clause row should still produce a ledger entry"
     return str(rows[0]["snippet"])
 
@@ -118,17 +200,32 @@ def test_a_clean_parent_document_still_supplies_the_clause_excerpt() -> None:
 
 
 def test_a_blocked_parent_document_withdraws_the_clause_excerpt() -> None:
-    snippet = _ledger_snippet("human_review_required")
+    rows = _ledger_rows("human_review_required")
 
-    assert EXCERPT not in snippet, (
+    assert EXCERPT not in repr(rows), (
         "900 characters of a rejected document's extracted text still reached "
         "the arbitration source ledger, reported as approved and strong"
     )
+    assert not rows, (
+        "a document under human review is not in the canonical eligible "
+        "universe, so its approved clause row must not appear in the ledger at "
+        "all - keeping the row identifier and clause number would still cite a "
+        "blocked instrument in a sealed pleading (G-A13/R24)"
+    )
 
 
-def test_the_in_app_fallback_survives_when_the_excerpt_is_withdrawn() -> None:
-    """`obligation_or_right` is authored in the matrix, not extracted."""
-    assert FALLBACK in _ledger_snippet("human_review_required")
+def test_the_in_app_fallback_survives_for_an_eligible_row() -> None:
+    """`obligation_or_right` is authored in the matrix, not extracted.
+
+    The anti-over-block guard, kept where it still has a subject: a row whose
+    instrument IS eligible but which carries no excerpt must still surrender
+    counsel own text. A row with no resolvable clause source keeps the same
+    guarantee - see the test below.
+    """
+    row = _matrix_row()
+    row.pop("clause_text_excerpt")
+
+    assert FALLBACK in _ledger_snippet("metadata_extracted", row)
 
 
 def test_an_operational_failure_keeps_the_excerpt() -> None:
@@ -136,26 +233,25 @@ def test_an_operational_failure_keeps_the_excerpt() -> None:
 
 
 def test_a_quarantined_parent_document_withdraws_the_excerpt() -> None:
-    db = _DB(
+    rows = _ledger_rows(
+        "metadata_extracted",
         documents=[
             {
                 "_id": "doc-contract-1",
+                "organization_id": "org-1",
+                "project_id": "proj-1",
                 "processing_status": "metadata_extracted",
                 "duplicate_status": "duplicate",
             }
         ],
-        contract_clauses=[dict(CLAUSE)],
-        arbitration_clause_matrix=[_matrix_row()],
-    )
-    rows = asyncio.run(
-        ArbitrationContextBuilder(db)._clause_matrix_sources("case-1", 0, False, [])
     )
 
-    assert EXCERPT not in str(rows[0]["snippet"])
+    assert EXCERPT not in repr(rows)
+    assert not rows
 
 
 def test_a_missing_parent_document_denies() -> None:
-    assert EXCERPT not in _ledger_snippet(None)
+    assert EXCERPT not in repr(_ledger_rows(None))
 
 
 # --- the over-block a careless fix would create --------------------------------
@@ -174,6 +270,7 @@ def test_a_clause_row_with_no_source_id_does_not_lose_its_in_app_text() -> None:
     snippet = _ledger_snippet("metadata_extracted", row)
 
     assert FALLBACK in snippet
+    assert EXCERPT not in snippet
 
 
 # --- site 2: selected references built from case rows --------------------------
@@ -183,11 +280,13 @@ def _reference_snippet(status: Optional[str]) -> str:
     service = ArbitrationCaseWorkspaceService(_db(status))
     references = asyncio.run(
         service._references_from_case_rows(
-            "draft-1", [], [_matrix_row()], {"id": "user-1"}
+            "draft-1", [], [_matrix_row()], ACTOR, draft=DRAFT
         )
     )
     clause_refs = [r for r in references if r.get("source_type") == "clause"]
-    assert clause_refs, "the clause row should still produce a reference"
+    if not clause_refs:
+        # R24: an ineligible instrument produces no standing selection at all.
+        return ""
     return str(clause_refs[0].get("snippet") or "")
 
 
@@ -206,12 +305,12 @@ def _rehydrated_snippet(status: Optional[str]) -> str:
     builder = ArbitrationContextBuilder(_db(status))
     result = asyncio.run(
         builder._rehydrate_matrix_reference(
-            {"case_id": "case-1", "organization_id": None, "project_id": None},
-            "cm-1",
-            "clause",
+            dict(DRAFT), "cm-1", "clause", current_user=ACTOR
         )
     )
-    assert result, "the approved matrix row should rehydrate"
+    if not result:
+        # R24: an ineligible instrument does not rehydrate at all.
+        return ""
     return str(result.get("snippet") or "")
 
 

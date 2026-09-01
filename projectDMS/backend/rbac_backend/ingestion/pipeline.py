@@ -178,6 +178,13 @@ class IngestionPipeline:
 
             index_started_at = datetime.utcnow()
             index_start = time.perf_counter()
+            from ..services.publication_policy import is_publication_blocked
+
+            current_document = await self._load_document(job.document_id)
+            if is_publication_blocked(current_document):
+                raise ValueError(
+                    f"Document {job.document_id} is no longer authoritative for publication"
+                )
             await self._persist_chunks(chunks, job.content_hash, job.options)
 
             changed_chunks = [chunks[i] for i in embed_indices]

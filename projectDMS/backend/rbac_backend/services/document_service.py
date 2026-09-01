@@ -74,6 +74,16 @@ class DocumentConflictError(DocumentServiceError):
         self.current_revision = current_revision
 
 
+class DocumentDependencyError(DocumentServiceError):
+    """Raised when deletion would orphan active entity-document relationships."""
+
+    def __init__(self, active_relationship_count: int) -> None:
+        super().__init__(
+            f"Document has {active_relationship_count} active entity relationship(s)"
+        )
+        self.active_relationship_count = active_relationship_count
+
+
 class DocumentDeletionResult:
     """Outcome of a document deletion plus its cascading cleanup.
 
@@ -107,6 +117,85 @@ class DocumentService:
         # Lazy import to avoid circulars
         from ..core.database import get_database
         return await get_database()
+
+    async def _current_publication_payload(
+        self,
+        document_id: str,
+        extracted_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Merge extracted fields with the current canonical authority axes."""
+        from .publication_policy import is_consumable, resolve_canonical_document
+
+        db = await self._get_db()
+        current = await resolve_canonical_document(db, document_id)
+        if not is_consumable(current):
+            logger.info(
+                "[document_pipeline] Withholding derived publication for %s: "
+                "current canonical source is not consumable",
+                document_id,
+            )
+            return None
+
+        # The extraction payload contains fields not persisted until later in
+        # this method.  Keep those fields, but authority must come exclusively
+        # from the full current Mongo row rather than the earlier Pydantic dump.
+        payload = dict(current)
+        payload.update(extracted_payload)
+        for field in ("processing_status", "duplicate_status", "lifecycle_state"):
+            if field in current:
+                payload[field] = current[field]
+            else:
+                payload.pop(field, None)
+        return payload
+
+    async def _publish_graph_and_evidence_from_current(
+        self,
+        *,
+        document_id: str,
+        extracted_payload: Dict[str, Any],
+        metadata: Any,
+        metadata_source: str,
+        upload_type: Optional[str],
+    ) -> bool:
+        """Publish only while each independent store has current authority."""
+        graph_payload = await self._current_publication_payload(
+            document_id, extracted_payload
+        )
+        if graph_payload is None:
+            return False
+
+        try:
+            await self.graph_ingestion.ingest_document(
+                document_id=document_id,
+                document_data=graph_payload,
+                metadata=metadata,
+                metadata_source=metadata_source,
+                upload_type=upload_type,
+            )
+        except Exception:
+            logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
+
+        # Falkor and Mongo evidence are sequential, independent stores.  A
+        # decision made before the first write cannot authorize the second.
+        evidence_payload = await self._current_publication_payload(
+            document_id, extracted_payload
+        )
+        if evidence_payload is None:
+            return False
+
+        try:
+            await self.evidence_graph.ingest_document_metadata(
+                document_id=document_id,
+                document_data=evidence_payload,
+                metadata=metadata,
+                metadata_source=metadata_source,
+                upload_type=upload_type,
+            )
+        except Exception:
+            logger.debug(
+                "Evidence graph extraction failed for %s", document_id, exc_info=True
+            )
+        return True
 
     async def _sync_current_document_to_falkor(
         self,
@@ -1515,6 +1604,9 @@ class DocumentService:
         metadata = None
         metadata_source: Optional[str] = None
         metadata_references: List[Dict[str, Any]] = []
+        derived_publication_authorized = False
+        initial_publication_source: Optional[Dict[str, Any]] = None
+        initial_publication_authorized = False
         db: Optional[Database] = None
         doc_oid: Optional[ObjectId] = None
         try:
@@ -1559,6 +1651,11 @@ class DocumentService:
                     },
                 )
                 return False
+
+            from .publication_policy import is_consumable
+
+            initial_publication_source = stored
+            initial_publication_authorized = is_consumable(stored)
 
             document = Document(**stored)
             org_id = organization_id or document.organization_id
@@ -1772,28 +1869,20 @@ class DocumentService:
                         "unresolved extraction-quality findings",
                         document_id,
                     )
-                if not duplicate_pending and publishable:
-                    try:
-                        await self.graph_ingestion.ingest_document(
+                if (
+                    not duplicate_pending
+                    and publishable
+                    and initial_publication_authorized
+                ):
+                    derived_publication_authorized = (
+                        await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
-                            document_data=graph_document_payload,
+                            extracted_payload=graph_document_payload,
                             metadata=metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
-                    except Exception:
-                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
-
-                    try:
-                        await self.evidence_graph.ingest_document_metadata(
-                            document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
-                            metadata_source=metadata_source,
-                            upload_type=upload,
-                        )
-                    except Exception:
-                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
+                    )
 
                 if getattr(result, "processed_path", None):
                     update_fields["processed_path"] = result.processed_path
@@ -1803,6 +1892,34 @@ class DocumentService:
                     "message": getattr(result, "error", "Document processing failed"),
                     "timestamp": datetime.utcnow(),
                 }
+
+            if metadata is not None and publishable and not derived_publication_authorized:
+                # A terminal authority decision may have arrived after the
+                # extractor's earlier snapshot.  Do not overwrite that current
+                # decision with the stale successful-run status, or the later
+                # reference/Falkor refresh would re-authorize the blocked source.
+                from .publication_policy import is_consumable, resolve_canonical_document
+
+                current = await resolve_canonical_document(db, document_id)
+                authority_source = (
+                    current
+                    if current is not None and not is_consumable(current)
+                    else initial_publication_source
+                    if initial_publication_source is not None
+                    and not initial_publication_authorized
+                    else None
+                )
+                if authority_source is not None:
+                    for field in (
+                        "processing_status",
+                        "duplicate_status",
+                        "lifecycle_state",
+                        "processing_error",
+                    ):
+                        if field in authority_source:
+                            update_fields[field] = authority_source[field]
+                        else:
+                            update_fields.pop(field, None)
 
             await db.documents.update_one({"_id": doc_oid}, {"$set": update_fields})
             logger.info("[document_pipeline] Database record updated for %s", document_id)
@@ -1854,28 +1971,17 @@ class DocumentService:
                 except Exception:
                     logger.exception("Deferred embedding creation failed for %s", document_id)
                 if metadata:
-                    try:
-                        await self.graph_ingestion.ingest_document(
+                    derived_publication_authorized = (
+                        await self._publish_graph_and_evidence_from_current(
                             document_id=document_id,
-                            document_data=graph_document_payload,
+                            extracted_payload=graph_document_payload,
                             metadata=metadata,
                             metadata_source=metadata_source,
                             upload_type=upload,
                         )
-                    except Exception:
-                        logger.debug("Graph ingestion failed for %s", document_id, exc_info=True)
-                    try:
-                        await self.evidence_graph.ingest_document_metadata(
-                            document_id=document_id,
-                            document_data=graph_document_payload,
-                            metadata=metadata,
-                            metadata_source=metadata_source,
-                            upload_type=upload,
-                        )
-                    except Exception:
-                        logger.debug("Evidence graph extraction failed for %s", document_id, exc_info=True)
+                    )
 
-            if metadata is not None:
+            if metadata is not None and derived_publication_authorized:
                 try:
                     if job_id:
                         await db.document_processing_jobs.update_one(
@@ -2201,15 +2307,16 @@ class DocumentService:
         references = await self.list_references(document_id)
         return list(references.get("linked", []))
 
-    async def get_documents_by_ids(self, document_ids: List[str]) -> List[Document]:
-        """Fetch documents for the provided identifiers preserving the requested order."""
-        if not document_ids:
-            return []
+    def _id_match_query(self, document_ids: List[str]) -> Optional[Dict[str, Any]]:
+        """Build the `_id` clause for a list of identifiers, or None if empty.
 
-        db = await self._get_db()
+        Mongo stores document ids in two shapes here, so both are matched. Kept
+        as one helper because the scoped and unscoped readers must agree on
+        which rows an id list means; two copies would drift.
+        """
         normalized_ids: List[ObjectId] = []
         string_ids: List[str] = []
-        for raw_id in document_ids:
+        for raw_id in document_ids or []:
             if not raw_id:
                 continue
             try:
@@ -2224,9 +2331,153 @@ class DocumentService:
             filters.append({"_id": {"$in": string_ids}})
 
         if not filters:
+            return None
+        return {"$or": filters} if len(filters) > 1 else filters[0]
+
+    def _actor_scope_filter(
+        self,
+        current_user: Any,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Canonical row visibility for `documents`, or None meaning deny all.
+
+        Authority comes from the ACTOR's entitlement through
+        `core.security.build_scope_query`, the single row-visibility primitive.
+        `organization_id` / `project_id` are narrowing INSIDE that entitlement -
+        a value outside it denies every row - and are never the authority
+        source. No role name is read here.
+        """
+        if current_user is None:
+            return None
+
+        from ..core.security import build_scope_query
+
+        return build_scope_query(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+    async def _authorized_documents(
+        self,
+        match: Dict[str, Any],
+        current_user: Any,
+        *,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        sort_field: Optional[str] = None,
+        sort_direction: int = -1,
+        limit: Optional[int] = None,
+    ) -> List[Document]:
+        """Rows matching `match` that the actor may see AND may consume.
+
+        Two INDEPENDENT gates, neither a substitute for the other:
+
+        * scope - canonical entitlement, applied in the query itself;
+        * publication authority - canonical `is_consumable`, applied to the raw
+          Mongo row before anything is parsed or serialized.
+
+        `is_consumable` reads the CANONICAL `documents` row here, so it is the
+        correct positive primitive; `resolve_document_authority` exists for
+        derived records that carry only a `document_id` and would otherwise
+        make the guard vacuous.
+
+        Filtering happens before serialization, deliberately. Stripping fields
+        from an unauthorised row still discloses its id, filename and
+        existence.
+        """
+        from .publication_policy import is_consumable
+
+        scope = self._actor_scope_filter(
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+        if scope is None:
             return []
 
-        query = {"$or": filters} if len(filters) > 1 else filters[0]
+        query: Dict[str, Any] = {"$and": [match, scope]} if scope else dict(match)
+
+        db = await self._get_db()
+        cursor = db.documents.find(query)
+        if sort_field:
+            cursor = cursor.sort(sort_field, sort_direction)
+        # Over-fetch: the publication gate runs after the query, so a blocked
+        # row must not consume one of the caller's slots.
+        fetch = None if limit is None else max(limit * 4, limit)
+        if fetch is not None:
+            cursor = cursor.limit(fetch)
+        raw_documents = await cursor.to_list(length=fetch)
+
+        documents: List[Document] = []
+        for raw in raw_documents:
+            if not is_consumable(raw):
+                continue
+            try:
+                documents.append(Document(**raw))
+            except Exception:
+                continue
+            if limit is not None and len(documents) >= limit:
+                break
+        return documents
+
+    async def get_documents_by_ids_in_scope(
+        self,
+        document_ids: List[str],
+        current_user: Any,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Document]:
+        """`get_documents_by_ids` bounded by actor scope and publication authority.
+
+        A curated id list is not authority: whoever stored it is not
+        necessarily the caller reading it, and a document's publication state
+        can turn adverse after it was curated. Ids that resolve to no
+        authorised row simply vanish - fail closed, no placeholder.
+        """
+        if not document_ids:
+            return []
+
+        id_query = self._id_match_query(document_ids)
+        if id_query is None:
+            return []
+
+        documents = await self._authorized_documents(
+            id_query,
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+        )
+
+        by_id: Dict[str, Document] = {str(doc.id): doc for doc in documents}
+        ordered: List[Document] = []
+        for identifier in document_ids:
+            doc = by_id.get(str(identifier))
+            if doc:
+                ordered.append(doc)
+        return ordered
+
+    async def get_documents_by_ids(self, document_ids: List[str]) -> List[Document]:
+        """Fetch documents for the provided identifiers preserving the requested order.
+
+        NOT scope-bounded. Callers that serve the result to a human must use
+        `get_documents_by_ids_in_scope` instead.
+        """
+        if not document_ids:
+            return []
+
+        db = await self._get_db()
+        id_query = self._id_match_query(document_ids)
+        if id_query is None:
+            return []
+
+        # Exclude soft-deleted rows, for parity with `get_document`. Without
+        # this, a stored `context_document_ids` list kept resurrecting deleted
+        # documents into downstream consumers long after the deletion cascade
+        # purged them.
+        query = {"$and": [id_query, {"lifecycle_state": {"$ne": "deleted"}}]}
         cursor = db.documents.find(query)
         raw_documents = await cursor.to_list(length=None)
 
@@ -2248,26 +2499,35 @@ class DocumentService:
     async def list_documents_by_letter_no(
         self,
         letter_no: str,
+        current_user: Any,
         limit: int = 10,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> List[Document]:
-        """Return recent documents that share the given letter number."""
+        """Recent AUTHORISED documents that share the given letter number.
+
+        `letterNo` is a global string. It collides across projects and across
+        organisations, so matching it is an association, never tenant
+        authority: this used to be `db.documents.find({"letterNo": letter_no})`
+        with no actor at all, and a caller authorised for one letter received
+        every colliding document in every tenant, summaries included.
+
+        `current_user` therefore carries NO DEFAULT. A generic reader over a
+        global key must fail closed by construction rather than by each caller
+        remembering to pass a filter.
+        """
         if not letter_no:
             return []
 
-        db = await self._get_db()
-        cursor = (
-            db.documents.find({"letterNo": letter_no})
-            .sort("createdAt", -1)
-            .limit(limit)
+        return await self._authorized_documents(
+            {"letterNo": letter_no},
+            current_user,
+            organization_id=organization_id,
+            project_id=project_id,
+            sort_field="createdAt",
+            sort_direction=-1,
+            limit=limit,
         )
-        raw_documents = await cursor.to_list(length=limit)
-        documents: List[Document] = []
-        for raw in raw_documents:
-            try:
-                documents.append(Document(**raw))
-            except Exception:
-                continue
-        return documents
 
     # ---------------------------------------------
     # Comments support for documents (used by FE)
@@ -2569,22 +2829,98 @@ class DocumentService:
             logger.info(f"Deleting document: {document_id}")
 
             db = await self._get_db()
-            query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
-            if expected_revision is not None:
-                query["_revision"] = int(expected_revision)
-            result = await db.documents.update_one(
-                query,
-                {
-                    "$set": {
-                        "lifecycle_state": "deleted",
-                        "deletedAt": datetime.utcnow(),
-                        "updatedAt": datetime.utcnow(),
-                    },
-                    "$inc": {"_revision": 1},
-                },
-            )
+            from .entity_adapter_registry import EntityAdapterRegistry
+            from .publication_policy import is_consumable, resolve_canonical_document
 
-            success = result.matched_count > 0
+            async def relationship_count(
+                current_document: Optional[Dict[str, Any]],
+                *,
+                session: Any = None,
+            ) -> int:
+                session_kwargs = {"session": session} if session is not None else {}
+                count = await db.entity_document_links.count_documents(
+                    {"document_id": str(doc_oid), "removed_at": None},
+                    **session_kwargs,
+                )
+                if count:
+                    return count
+                organization_id = str((current_document or {}).get("organization_id") or "")
+                project_id = str((current_document or {}).get("project_id") or "")
+                if (
+                    current_document
+                    and is_consumable(current_document)
+                    and organization_id
+                    and project_id
+                ):
+                    for adapter in EntityAdapterRegistry().adapters():
+                        count += len(
+                            await adapter.legacy_targets_for_document(
+                                db,
+                                document_id=str(doc_oid),
+                                organization_id=organization_id,
+                                project_id=project_id,
+                                session=session,
+                            )
+                        )
+                return count
+
+            current_document = await resolve_canonical_document(db, str(doc_oid))
+            active_relationship_count = await relationship_count(current_document)
+            if active_relationship_count:
+                raise DocumentDependencyError(active_relationship_count)
+
+            async def persist_delete(session: Any) -> bool:
+                session_kwargs = {"session": session} if session is not None else {}
+                transactional_document = await resolve_canonical_document(
+                    db,
+                    str(doc_oid),
+                    session=session,
+                )
+                if not transactional_document:
+                    return False
+                query: Dict[str, Any] = {
+                    "_id": doc_oid,
+                    "lifecycle_state": {"$ne": "deleted"},
+                }
+                if expected_revision is not None:
+                    query["_revision"] = int(expected_revision)
+                now = datetime.utcnow()
+                result = await db.documents.update_one(
+                    query,
+                    {
+                        "$set": {
+                            "lifecycle_state": "deleted",
+                            "deletedAt": now,
+                            "updatedAt": now,
+                        },
+                        "$inc": {"_revision": 1},
+                    },
+                    **session_kwargs,
+                )
+                if not result.matched_count:
+                    return False
+                active_count = await relationship_count(
+                    transactional_document,
+                    session=session,
+                )
+                if active_count:
+                    raise DocumentDependencyError(active_count)
+                return True
+
+            client = getattr(db, "client", None)
+            start_session = getattr(client, "start_session", None)
+            if callable(start_session):
+                session = await start_session()
+                async with session:
+                    with_transaction = getattr(session, "with_transaction", None)
+                    if callable(with_transaction):
+                        success = await with_transaction(persist_delete)
+                    else:
+                        async with session.start_transaction():
+                            success = await persist_delete(session)
+            else:
+                success = await persist_delete(None)
+
             if not success and expected_revision is not None:
                 current_revision = await self.get_document_revision(document_id)
                 if current_revision is not None:
@@ -2604,6 +2940,8 @@ class DocumentService:
         except InvalidDocumentIdError:
             raise
         except DocumentConflictError:
+            raise
+        except DocumentDependencyError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete document {document_id}: {e}")
