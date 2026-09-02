@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 38/100 after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Python dependency scan, live-integration, E2E, backup/restore, and sign-off blockers remain.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 40/100 after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Python dependency scan, live-integration, E2E, backup/restore, and sign-off blockers remain.
 
 Current verdict: Not Ready for production.
 
@@ -31,10 +31,17 @@ Production promotion is blocked until all gates are checked.
 
 - [x] `python -m pytest backend/rbac_backend/tests -q` passes with 0 failures.
 - [x] Backend tests do not require live OpenAI, MongoDB Atlas Vector Search, Qdrant, FalkorDB, Redis, or network access unless explicitly marked as live integration tests.
-- [x] `npm run lint` passes in `client`.
+- [ ] `npm run lint` passes in `client`.
 - [x] `npm test -- --run` passes in `client`.
 - [x] `npm run build` passes in `client`.
 - [ ] GitHub Actions passes for backend, frontend, dependency scans, and Docker image scans.
+
+Correction (release programme R-A4): the lint box was ticked and is not true.
+`npm run lint` runs `eslint . --max-warnings=0` and **exits 1** on two
+`react-refresh/only-export-components` warnings in
+`client/src/pages/PermissionsPage.tsx`, which are present at the base commit
+and are not release-introduced. Nothing about the code changed here; the
+checkbox was recording an outcome the command does not produce.
 
 Current known baseline:
 
@@ -141,11 +148,31 @@ Required production env groups:
 - [ ] MongoDB logical backup succeeds.
 - [ ] Backend uploads backup succeeds.
 - [ ] Qdrant backup or rebuild plan is verified.
-- [ ] FalkorDB backup or Mongo-derived reconciliation/rebuild is verified.
+- [x] FalkorDB backup or Mongo-derived reconciliation/rebuild is verified.
 - [ ] Redis backup requirement is explicitly accepted or tested.
 - [ ] Full restore drill into staging/isolated environment succeeds.
 - [ ] RPO and RTO are recorded.
 - [ ] Rollback steps are documented and tested.
+
+Evidence for the FalkorDB bullet, and only that bullet:
+`scripts/falkordb_recovery_drill.sh` seeds a graph on the pinned production
+image with production's `REDIS_ARGS` and mount, runs the production backup,
+**destroys the container and the volume**, restores with
+`scripts/production_restore_volumes.sh`, starts a fresh container, and diffs a
+semantic snapshot — graph names, nodes, edges, properties, counts and index
+schema all match. Missing, corrupted and stateless-volume archives are each
+refused. The drill is repeatable on any host with Docker; re-run it rather than
+trusting this checkbox. Adopting the fix on a host that has been running the
+previous configuration requires the one-time data move in
+`docs/DOCKER_INSTALL_RUNBOOK.md` §15.1.
+
+The other seven bullets are deliberately unticked. Backend-uploads and Qdrant
+restores have not been drilled; a *full* restore drill needs every store in one
+exercise; the Redis requirement and the RPO/RTO targets are decisions rather
+than measurements (local figures: backup 1 s, restore 3 s on a three-node
+graph, and a 75-document Mongo restore in under a second — floor numbers from a
+developer machine, not production RTOs); and deployment rollback, as opposed to
+migration rollback, has never been tested.
 
 ### Gate 9: Final Production Readiness Review
 
@@ -179,7 +206,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **38/100** against a target of
+The current production launch-readiness score is **40/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -200,7 +227,7 @@ Current gate score summary:
 | Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
 | Gate 7: Deployment And Environment | 0.00 / 10 | 0 / 7 |
-| Gate 8: Backup, Restore, And Rollback | 0.00 / 10 | 0 / 8 |
+| Gate 8: Backup, Restore, And Rollback | 1.25 / 10 | 1 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
 
 ## Pending Blockers By Phase
