@@ -1,7 +1,9 @@
 # Current Letter Drafting, Agent, and LangGraph Flow
 
-**Recorded:** 2026-08-13  
-**Scope:** Current `projectDMS` checkout, active client routes, registered backend routes, drafting Modules, persistence, and production Compose wiring.  
+**Recorded:** 2026-08-13
+
+**Scope:** Current `projectDMS` checkout, active client routes, registered backend routes, drafting Modules, persistence, and production Compose wiring.
+
 **Meaning of “current”:** This records the implementation presently in source. It does not claim that a particular production deployment has overridden the environment defaults unless that runtime was inspected separately.
 
 ## 1. Executive summary

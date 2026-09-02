@@ -75,4 +75,3 @@ describe("KeyDateDetailPage achievement evidence", () => {
     expect(screen.queryByText("legacy-must-not-render")).not.toBeInTheDocument();
   });
 });
-

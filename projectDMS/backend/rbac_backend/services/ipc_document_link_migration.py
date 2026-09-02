@@ -105,4 +105,3 @@ async def classify_legacy_ipc_links(db: Any) -> dict[str, Any]:
         "counts": counts,
         "candidates": candidates,
     }
-

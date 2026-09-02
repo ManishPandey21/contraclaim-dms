@@ -1,7 +1,9 @@
 # ContraClaim DMS Cross-Register Document Linking Audit
 
-**Audit date:** 17 August 2026  
-**Scope:** Current checked-in frontend, backend, MongoDB models/index wiring, APIs, document metadata/search, RBAC/scope enforcement, deletion behavior, audit history, and tests for Claims, IPC/Payments, Insurance, Bank Guarantees, Key Dates/Milestones, and Contract Master.  
+**Audit date:** 17 August 2026
+
+**Scope:** Current checked-in frontend, backend, MongoDB models/index wiring, APIs, document metadata/search, RBAC/scope enforcement, deletion behavior, audit history, and tests for Claims, IPC/Payments, Insurance, Bank Guarantees, Key Dates/Milestones, and Contract Master.
+
 **Boundary:** Repository audit only. No source implementation, migration, graph rebuild, deployment, or production-data inspection was performed.
 
 ## 1. Executive conclusion

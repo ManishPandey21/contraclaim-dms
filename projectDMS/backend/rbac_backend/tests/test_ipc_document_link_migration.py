@@ -104,4 +104,3 @@ async def test_ipc_migration_never_guesses_role_or_embedded_event_identity() -> 
     assert candidate["parent_id"] is None
     assert "ambiguous_role" in candidate["findings"]
     assert "ambiguous_event" not in candidate["findings"]
-

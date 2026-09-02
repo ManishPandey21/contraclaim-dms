@@ -168,4 +168,3 @@ def contained_related_clauses(
 
     matches = [_strip_non_authoritative(dict(row)) for row in rows or []]
     return GraphContainmentResult(matches=matches, valid_empty=not matches)
-
