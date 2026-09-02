@@ -389,6 +389,40 @@ print("ok")
   fi
 fi
 
+# 10b. Permission seeding is best effort inside application startup: it logs a
+#      warning and continues when it fails, so the application comes up healthy
+#      with an incomplete catalogue and every route gated on a missing
+#      permission denies. Assert the catalogue rather than trusting the log.
+if [[ -n "$backend_cid" ]]; then
+  if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false backend \
+    python -c '
+import os, sys
+from pymongo import MongoClient
+# The catalogue ensure_permission_catalog_and_superadmin() seeds from, so the
+# assertion cannot drift from the seeder.
+from rbac_backend.models.permission import DEFAULT_PERMISSIONS
+
+expected = {p["name"] for p in DEFAULT_PERMISSIONS if p.get("name")}
+c = MongoClient(os.environ["DATABASE_URL"], serverSelectionTimeoutMS=8000)
+db = c.get_default_database()
+seeded = {d.get("name") for d in db["permissions"].find({}, {"name": 1})}
+missing = sorted(expected - seeded)
+if missing:
+    print(f"MISSING {len(missing)} of {len(expected)} permissions: " + ", ".join(missing[:10]))
+    sys.exit(1)
+superadmin = db["roles"].find_one({"_id": "superadmin"}) or {}
+ungranted = sorted(expected - set(superadmin.get("permissions") or []))
+if ungranted:
+    print(f"superadmin is missing {len(ungranted)}: " + ", ".join(ungranted[:10]))
+    sys.exit(1)
+print(f"ok {len(seeded)} permissions seeded, superadmin holds all {len(expected)}")
+' >/tmp/permission_seed.out 2>&1; then
+    pass "Permission catalogue seeded: $(tail -n 1 /tmp/permission_seed.out 2>/dev/null)"
+  else
+    fail "Permission seeding check failed: $(cat /tmp/permission_seed.out 2>/dev/null | tail -n 3)"
+  fi
+fi
+
 # 11. Archive MIME configuration. ZIP is stored intact and never unpacked; RAR
 #     stays disabled until clamd is proven to scan inside a .rar (Task 0.4).
 if [[ -n "$worker_cid" ]]; then

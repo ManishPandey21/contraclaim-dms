@@ -399,14 +399,92 @@ Take a fresh Mongo dump before any deploy that includes a migration.
 
 ## 15. Restore drill (do this once before go-live)
 
+Restore one volume at a time; the script takes a volume name and one archive,
+not a backup directory. Stop the affected service first — restoring under a
+running container leaves it serving the pre-restore state from memory and
+overwriting your archive on its next save.
+
 ```bash
-# volumes
-sudo bash scripts/production_restore_volumes.sh /var/backups/contractdms/<STAMP>
-# mongo
-bash scripts/mongo_restore.sh /var/backups/contractdms/<mongo-dump>
+docker compose $COMPOSE_FILES stop falkordb
+sudo bash scripts/production_restore_volumes.sh --apply \
+  contraclaim_falkordb_data /var/backups/contractdms/volumes/falkordb-data-<STAMP>.tar.gz
+docker compose $COMPOSE_FILES up -d falkordb
+```
+
+The volume name is `<COMPOSE_PROJECT_NAME>_<volume>`; confirm it with
+`docker volume ls` rather than guessing the project prefix.
+
+Mongo, on a database suffering *partial* corruption, must be dropped first:
+`mongorestore` runs without `--drop`, so it restores deleted documents, skips
+every diverged one with a duplicate-key error, and still exits 0.
+
+```bash
+# total loss: restore directly
+bash scripts/mongo_restore.sh /var/backups/contractdms/mongo/<dump>.archive.gz
+# corruption: drop the database first, then restore
 ```
 
 Practise on a throwaway VPS. A backup you have never restored is not a backup.
+
+### 15.1 FalkorDB — verifying recovery, and the one-time move
+
+`scripts/falkordb_recovery_drill.sh` performs the whole cycle against
+disposable containers and volumes: it reads the image, `REDIS_ARGS` and the
+volume mount out of `docker-compose.prod.yml`, seeds a graph, backs it up,
+**destroys the container and the volume**, restores, and diffs a semantic
+snapshot (graph names, nodes, edges, properties, counts, indexes). It also
+checks that a missing archive, a corrupted archive and a volume holding no
+persisted state each fail visibly.
+
+```bash
+bash scripts/falkordb_recovery_drill.sh
+```
+
+It touches nothing that already exists: every container, volume and graph it
+creates carries an `ra4drill_` prefix and is removed on exit. Run it after any
+change to the falkordb service definition or to the backup scripts.
+
+**One-time move when adopting this release.** Before this release the FalkorDB
+service had no `--dir`, so the engine persisted to the image's working
+directory (`/FalkorDB`) inside the container's writable layer while the backup
+archived the volume mounted at `/data` — which was empty. On a host that has
+been running the old configuration the graph is still in the old container's
+layer, and the new configuration will come up with an empty `/data`. Move the
+state across **before** recreating the container:
+
+```bash
+# 1. flush to disk, then stop writers
+docker compose $COMPOSE_FILES exec -T falkordb \
+  sh -c 'redis-cli -a "$FALKORDB_PASSWORD" BGSAVE'
+docker compose $COMPOSE_FILES exec -T falkordb \
+  sh -c 'redis-cli -a "$FALKORDB_PASSWORD" INFO persistence | grep rdb_bgsave_in_progress'
+docker compose $COMPOSE_FILES stop falkordb
+
+# 2. copy the real persistence file into the mounted volume
+docker compose $COMPOSE_FILES cp falkordb:/FalkorDB/dump.rdb /tmp/falkor-dump.rdb
+docker run --rm -v contraclaim_falkordb_data:/data -v /tmp:/in busybox \
+  sh -c 'cp /in/falkor-dump.rdb /data/dump.rdb && ls -la /data'
+
+# 3. bring up the new configuration and confirm the graphs are there
+docker compose $COMPOSE_FILES up -d falkordb
+docker compose $COMPOSE_FILES exec -T falkordb \
+  sh -c 'redis-cli -a "$FALKORDB_PASSWORD" GRAPH.LIST'
+```
+
+Copy `dump.rdb` rather than `appendonlydir/`: the AOF manifest names its files
+by sequence, and an AOF copied out of step with its manifest will not load.
+With `appendonly yes` the engine rewrites the AOF from the loaded dataset once
+it starts, so the RDB carries the state across on its own.
+
+**GRAPH.LIST must show the same graphs as before the move.** If it is empty,
+stop: the old container still holds the data in its writable layer, and that
+data is lost only when the container is removed.
+
+The graph is derived state — Mongo is canonical — so
+`scripts/backfill_falkordb.py` remains the fallback if a restore is ever
+unavailable. That path has not been rehearsed and its runtime against a
+production-sized corpus is unmeasured; it is not a substitute for a verified
+backup.
 
 ---
 
