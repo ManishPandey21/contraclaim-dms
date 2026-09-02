@@ -21,7 +21,9 @@ const relationshipApi = vi.hoisted(() => ({
     { value: "supporting_document", label: "Supporting document" },
   ],
 }));
-const permission = vi.hoisted(() => ({ can: vi.fn(() => true) }));
+// The permission gate is called with a permission name; declare the
+// parameter so mockImplementation((name) => ...) type-checks.
+const permission = vi.hoisted(() => ({ can: vi.fn((_name: string) => true) }));
 
 vi.mock("@/services/insurance-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/insurance-api")>()),

@@ -368,7 +368,7 @@ const KeyDateDetailPage: React.FC = () => {
                 <div key={h.id} className="rounded-md border p-2 text-sm">
                   <div className="flex items-center justify-between">
                     <span className="font-medium">Revision {h.revision_number}</span>
-                    <Badge variant={h.status === "approved" ? "default" : "destructive"}>{h.status}</Badge>
+                    <Badge variant={h.status === "approved" ? "success" : "danger"}>{h.status}</Badge>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     {fmt(h.previous_key_date)} → {fmt(h.approved_revised_key_date || h.requested_revised_key_date)}

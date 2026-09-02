@@ -30,7 +30,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 
 import type { InstrumentDetail } from "@/services/contract-master-v1-api";
-import { StateBadge, STATE_EXPLANATION } from "./StateBadge";
+import { StateBadge } from "./StateBadge";
+import { STATE_EXPLANATION } from "./stateVocabulary";
 
 export interface ClassificationSuggestion {
   contract_document_type: string;

@@ -2,6 +2,12 @@ import { api } from "./api";
 
 export interface DocumentItem {
   _id: string;
+  /**
+   * Some list endpoints still serialise the Mongo id as `id`. Callers read
+   * `_id || id`, so the type has to admit the alias or the fallback is a
+   * type error on a chain that resolves correctly at runtime.
+   */
+  id?: string;
   name?: string;
   filename?: string;
   subject?: string | null;
