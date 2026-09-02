@@ -374,7 +374,16 @@ services:
       FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
       # The FalkorDB image entrypoint loads the graph module, then appends
       # REDIS_ARGS. Overriding `command` starts plain Redis without FalkorDB.
+      #
+      # --dir is load-bearing. The image's WORKDIR is /FalkorDB and Redis
+      # defaults `dir` to the working directory, so without this the RDB and
+      # the AOF are written to the container's writable layer instead of the
+      # mounted volume below. The backup then archives an empty /data, every
+      # run reports success, and the graph does not survive the container
+      # being replaced. Keep this path equal to the falkordb_data mount;
+      # test_deployment_config.py fails when they diverge.
       REDIS_ARGS: >-
+        --dir /data
         --save 900 1
         --save 300 10
         --appendonly yes

@@ -67,10 +67,10 @@ docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T falkordb \
   sh -c 'redis-cli -a "$FALKORDB_PASSWORD" BGSAVE' || true
 
 backup_volume "${project_name}_backend_uploads" "backend-uploads"
-backup_volume "${project_name}_qdrant_data" "qdrant-data"
+backup_volume "${project_name}_qdrant_data" "qdrant-data" "*/collections/*" "*raft_state*"
 backup_volume "${project_name}_qdrant_snapshots" "qdrant-snapshots"
-backup_volume "${project_name}_falkordb_data" "falkordb-data"
-backup_volume "${project_name}_redis_data" "redis-data"
+backup_volume "${project_name}_falkordb_data" "falkordb-data" "*dump.rdb" "*appendonlydir*"
+backup_volume "${project_name}_redis_data" "redis-data" "*dump.rdb" "*appendonlydir*"
 
 echo "Writing backup checksums and completion manifest..."
 checksum_file="$BACKUP_ROOT/manifests/checksums-$STAMP.sha256"

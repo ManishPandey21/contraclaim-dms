@@ -4,7 +4,6 @@ set -euo pipefail
 ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 # shellcheck source=scripts/lib/docker_paths.sh
 . "$ROOT_DIR/scripts/lib/docker_paths.sh"
-ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
 APPLY=false
 
 usage() {
@@ -41,13 +40,6 @@ fi
 if ! tar -tzf "$archive" >/dev/null; then
   echo "Archive is not a readable gzip tarball: $archive" >&2
   exit 1
-fi
-
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
 fi
 
 echo "Restoring $archive into Docker volume $volume"
