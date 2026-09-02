@@ -193,7 +193,7 @@ pydantic-graph==1.1.0
 pydantic-settings==2.11.0
 pydantic_core==2.41.4
 Pygments==2.19.2
-PyJWT==2.10.1
+PyJWT==2.13.0
 pylatexenc==2.10
 pymongo==4.11.2
 pypdf==6.1.1
