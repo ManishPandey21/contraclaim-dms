@@ -55,12 +55,9 @@ project_name=${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR" | tr '[:upper:]' '[:
 backup_volume() {
   local volume=$1
   local label=$2
+  shift 2
   local archive="$BACKUP_ROOT/volumes/${label}-${STAMP}.tar.gz"
-  echo "Backing up Docker volume $volume to $archive"
-  docker run --rm \
-    -v "${volume}:/source:ro" \
-    -v "$BACKUP_ROOT/volumes:/backup" \
-    busybox sh -c "cd /source && tar -czf /backup/$(basename "$archive") ."
+  bash "$ROOT_DIR/scripts/backup_volume.sh" "$volume" "$archive" "$@"
 }
 
 echo "Flushing Redis/FalkorDB persistence where available..."
