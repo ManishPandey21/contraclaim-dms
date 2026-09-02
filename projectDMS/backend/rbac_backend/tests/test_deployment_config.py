@@ -34,6 +34,7 @@ COMPOSE_PROD = REPO_ROOT / "docker-compose.prod.yml"
 COMPOSE_MONGO_REPLICA = REPO_ROOT / "docker-compose.mongo-replicaset.yml"
 PRODUCTION_BACKUP = REPO_ROOT / "scripts" / "production_backup.sh"
 BACKUP_VOLUME = REPO_ROOT / "scripts" / "backup_volume.sh"
+LEGACY_BACKUP = REPO_ROOT / "scripts" / "backup.sh"
 
 
 def test_uvicorn_trusts_proxy_headers() -> None:
@@ -151,23 +152,25 @@ def test_production_backup_requires_real_persistence_files_in_each_state_archive
     must contain, so a volume that holds nothing fails the backup loudly
     instead of producing a 89-byte archive that restores an empty database.
     """
-    text = PRODUCTION_BACKUP.read_text(encoding="utf-8")
-    calls = {
-        line.split('"')[1]: line
-        for line in text.splitlines()
-        if line.startswith("backup_volume ")
-    }
+    for script in (PRODUCTION_BACKUP, LEGACY_BACKUP):
+        calls = [
+            line
+            for line in script.read_text(encoding="utf-8").splitlines()
+            if line.startswith("backup_volume ")
+        ]
+        assert calls, f"{script.name} no longer backs up any volume"
 
-    for volume_suffix in ("falkordb_data", "redis_data", "qdrant_data"):
-        call = next(
-            (line for name, line in calls.items() if name.endswith(volume_suffix)),
-            None,
-        )
-        assert call, f"production_backup.sh no longer backs up {volume_suffix}"
-        assert call.count('"') > 4, (
-            f"the {volume_suffix} backup must declare the entries its archive has "
-            f"to contain, or an empty volume is archived as a successful backup"
-        )
+        for volume_suffix in ("falkordb_data", "redis_data", "qdrant_data"):
+            call = next(
+                (line for line in calls if line.split('"')[1].endswith(volume_suffix)),
+                None,
+            )
+            assert call, f"{script.name} no longer backs up {volume_suffix}"
+            assert call.count('"') > 4, (
+                f"{script.name}'s {volume_suffix} backup must declare the entries "
+                f"its archive has to contain, or an empty volume is archived as a "
+                f"successful backup"
+            )
 
 
 def _working_bash() -> str | None:
