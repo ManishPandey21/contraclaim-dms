@@ -9,3 +9,11 @@ dist/
 **/*.pem
 **/*.key
 coverage/
+# Test and lint output. Regenerated locally, uploaded to the daemon on every
+# build, and of no use to any stage.
+test-results/
+playwright-report/
+lint-report.json
+# Agent working directories, if a developer has them here.
+.claude/
+.codex/

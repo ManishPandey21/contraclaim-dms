@@ -35,6 +35,8 @@ COMPOSE_MONGO_REPLICA = REPO_ROOT / "docker-compose.mongo-replicaset.yml"
 PRODUCTION_BACKUP = REPO_ROOT / "scripts" / "production_backup.sh"
 BACKUP_VOLUME = REPO_ROOT / "scripts" / "backup_volume.sh"
 LEGACY_BACKUP = REPO_ROOT / "scripts" / "backup.sh"
+CLIENT_DOCKERFILE = REPO_ROOT / "client" / "Dockerfile"
+CLIENT_DOCKERIGNORE = REPO_ROOT / "client" / ".dockerignore"
 
 
 def test_uvicorn_trusts_proxy_headers() -> None:
@@ -269,6 +271,79 @@ def test_volume_restore_does_not_depend_on_a_parseable_env_file() -> None:
         "production_restore_volumes.sh must not source .env: it reads nothing "
         "from it, and a malformed line there aborts the restore"
     )
+
+
+def _client_runtime_stage() -> str:
+    """The last FROM block of client/Dockerfile — what actually ships."""
+    text = CLIENT_DOCKERFILE.read_text(encoding="utf-8")
+    return "FROM" + text.split("\nFROM")[-1]
+
+
+def test_the_client_runtime_stage_carries_no_package_manager() -> None:
+    """The image that serves the SPA runs `node scripts/serve-dist.mjs`.
+
+    `node:*-slim` bundles the npm CLI, corepack and yarn. Nothing at runtime
+    invokes any of them, and their vendored dependency trees under
+    /usr/local/lib/node_modules were the source of every Node-side finding in
+    the image scan — 1 CRITICAL (tar) and 19 HIGH — none of which came from
+    this application's own dependencies. Serving static files does not need a
+    package manager.
+    """
+    runtime = _client_runtime_stage()
+
+    for removed in (
+        "/usr/local/lib/node_modules/npm",
+        "/usr/local/lib/node_modules/corepack",
+        "/usr/local/bin/npm",
+        "/usr/local/bin/npx",
+        "/usr/local/bin/corepack",
+        "/usr/local/bin/yarn",
+    ):
+        assert removed in runtime, (
+            f"the client runtime stage must remove {removed}; a package manager "
+            f"in a static-asset image is attack surface with no runtime purpose"
+        )
+
+
+def test_the_client_runtime_stage_copies_only_built_output() -> None:
+    """No builder artefact may cross into the runtime stage.
+
+    The scan showed the COPY boundary was already correct; this keeps it that
+    way, because the cheapest way to reintroduce the whole builder tree is one
+    careless `COPY --from=builder /app .`.
+    """
+    runtime = _client_runtime_stage()
+    copies = [line.strip() for line in runtime.splitlines() if line.strip().startswith("COPY")]
+    assert copies, "the runtime stage must copy the built client in"
+
+    allowed_sources = {"/app/dist", "/app/scripts/serve-dist.mjs"}
+    for copy in copies:
+        parts = copy.split()
+        assert parts[1].startswith("--from="), f"runtime COPY must come from a build stage: {copy}"
+        source = parts[2]
+        assert source in allowed_sources, (
+            f"the client runtime stage may only copy {sorted(allowed_sources)}; "
+            f"{source!r} would carry builder content (node_modules, sources, "
+            f"package metadata) into the shipped image"
+        )
+
+
+def test_the_client_build_context_excludes_developer_and_test_output() -> None:
+    """Everything here is either large, secret, or irrelevant to the build."""
+    ignored = {
+        line.strip()
+        for line in CLIENT_DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+
+    for pattern in ("node_modules/", "dist/", ".git", "coverage/", ".env*"):
+        assert pattern in ignored, f"client/.dockerignore must exclude {pattern}"
+
+    for pattern in ("test-results/", "playwright-report/", ".claude/"):
+        assert pattern in ignored, (
+            f"client/.dockerignore must exclude {pattern}: it is uploaded to the "
+            f"Docker daemon on every build and belongs in no image"
+        )
 
 
 def test_mongo_replica_services_have_restore_safe_limits_and_replication_health() -> None:

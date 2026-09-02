@@ -131,6 +131,40 @@ jobs:
           docker build -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
           docker build -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
           docker build -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
+      - name: Client runtime image carries no package manager
+        # The client image serves static files with `node scripts/serve-dist.mjs`.
+        # node:*-slim bundles npm, corepack and yarn, and npm's vendored
+        # dependency tree was the source of every Node-side finding in this
+        # image - one CRITICAL and nineteen HIGH, none of them from the
+        # application's own dependencies. Trivy gates on severity; this gates on
+        # the class, so the finding cannot come back the moment an advisory is
+        # re-scored or a fix is published.
+        run: |
+          set -euo pipefail
+          image=projectdms-client:${{ github.sha }}
+          for binary in npm npx corepack yarn yarnpkg; do
+            if docker run --rm --user 0 --entrypoint sh "$image" \
+                 -c "command -v $binary" >/dev/null 2>&1; then
+              echo "FAIL: $binary is present in the client runtime image" >&2
+              exit 1
+            fi
+          done
+          remaining=$(docker run --rm --user 0 --entrypoint sh "$image" \
+            -c 'ls -A /usr/local/lib/node_modules 2>/dev/null | wc -l')
+          if [ "$remaining" != "0" ]; then
+            echo "FAIL: /usr/local/lib/node_modules is not empty ($remaining entries)" >&2
+            docker run --rm --user 0 --entrypoint sh "$image" -c 'ls -A /usr/local/lib/node_modules' >&2
+            exit 1
+          fi
+          for leaked in /app/node_modules /app/src /app/package.json /app/package-lock.json; do
+            if docker run --rm --user 0 --entrypoint sh "$image" \
+                 -c "test -e $leaked" >/dev/null 2>&1; then
+              echo "FAIL: builder artefact $leaked reached the runtime image" >&2
+              exit 1
+            fi
+          done
+          docker run --rm --entrypoint node "$image" --version
+          echo "OK: runtime image has node, no package manager, no builder artefacts"
       - name: Scan images
         uses: aquasecurity/trivy-action@0.24.0
         with:
