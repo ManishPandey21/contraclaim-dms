@@ -410,10 +410,18 @@ missing = sorted(expected - seeded)
 if missing:
     print(f"MISSING {len(missing)} of {len(expected)} permissions: " + ", ".join(missing[:10]))
     sys.exit(1)
-superadmin = db["roles"].find_one({"_id": "superadmin"}) or {}
-ungranted = sorted(expected - set(superadmin.get("permissions") or []))
+superadmin = db["roles"].find_one({"_id": "superadmin"})
+if superadmin is None:
+    # Startup seeds the catalogue and unions it onto an existing superadmin
+    # role; it never creates the role. On a database where the setup flow has
+    # not run there is nothing to union onto, which is a setup question rather
+    # than a seeding regression.
+    print(f"ok {len(seeded)} permissions seeded; WARN no superadmin role document to grant them to")
+    sys.exit(0)
+granted = set(superadmin.get("permissions") or [])
+ungranted = set() if "*" in granted else (expected - granted)
 if ungranted:
-    print(f"superadmin is missing {len(ungranted)}: " + ", ".join(ungranted[:10]))
+    print(f"superadmin is missing {len(ungranted)}: " + ", ".join(sorted(ungranted)[:10]))
     sys.exit(1)
 print(f"ok {len(seeded)} permissions seeded, superadmin holds all {len(expected)}")
 ' >/tmp/permission_seed.out 2>&1; then
