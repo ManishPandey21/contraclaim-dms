@@ -38,9 +38,9 @@ class DraftingAgentService:
     ) -> AgentResponse:
         start = time.perf_counter()
         conversation_id = request.conversation_id or str(uuid.uuid4())
-        conversation = await self._ensure_conversation(
-            conversation_id, request, current_user
-        )
+        # Called for the insert, not for the value: _ensure_conversation writes
+        # the conversation row when it does not exist yet.
+        await self._ensure_conversation(conversation_id, request, current_user)
 
         incoming_text = request.incoming_text or await self._load_letter_text(
             request.incoming_letter_id,

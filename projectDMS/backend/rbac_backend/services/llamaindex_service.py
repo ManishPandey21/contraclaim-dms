@@ -110,17 +110,21 @@ class LlamaIndexVectorService:
                     logger.warning("Failed to create indexes (may already exist): %s", idx_exc)
 
                 # UPDATED COMMENT: For local MongoDB 8.0+, pre-create Search index via mongosh:
+                # Keys are quoted below because mypy reads `#<space>type:` as a
+                # PEP 484 type comment and fails the whole file on `invalid
+                # syntax`, which stops it checking anything that imports this
+                # module. mongosh accepts quoted keys unchanged.
                 # db.runCommand({
-                #   createSearchIndexes: "<collection_name>",
-                #   indexes: [{
-                #     name: "vector_index",
-                #     definition: {
-                #       type: "vectorSearch",
-                #       fields: [{
-                #         type: "vector",
-                #         path: "embedding",
-                #         numDimensions: 1536, // for text-embedding-3-small
-                #         similarity: "cosine"
+                #   "createSearchIndexes": "<collection_name>",
+                #   "indexes": [{
+                #     "name": "vector_index",
+                #     "definition": {
+                #       "type": "vectorSearch",
+                #       "fields": [{
+                #         "type": "vector",
+                #         "path": "embedding",
+                #         "numDimensions": 1536, // for text-embedding-3-small
+                #         "similarity": "cosine"
                 #       }]
                 #     }
                 #   }]

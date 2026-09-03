@@ -123,7 +123,9 @@ class ObservabilityService:
         for group in grouped:
             key = f"{group['_id'].get('run_type')}/{group['_id'].get('strategy')}"
             latencies = [
-                l for l in group.get("latencies", []) if isinstance(l, (int, float))
+                value
+                for value in group.get("latencies", [])
+                if isinstance(value, (int, float))
             ]
             if latencies:
                 latencies_sorted = sorted(latencies)

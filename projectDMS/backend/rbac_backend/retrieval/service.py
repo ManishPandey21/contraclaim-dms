@@ -172,12 +172,18 @@ class RetrievalService:
 
         fused = self._fuse_results(retrievals, request.limit, request.strategy)
         candidate_ids = [str(item["payload"].get("document_id")) for item in fused]
-        doc_meta = await self._fetch_documents_meta(candidate_ids)
         # Drop the RESULT, not just its title. An earlier revision filtered only
-        # `doc_meta` and left `snippet` flowing from the raw payload, so a
-        # blocked document's text still reached the caller with its title
+        # the document metadata and left `snippet` flowing from the raw payload,
+        # so a blocked document's text still reached the caller with its title
         # stripped - containment that looked right in a log line and did
         # nothing. The snippet is the content; it has to be the thing dropped.
+        #
+        # That earlier revision is also why this method used to fetch the
+        # metadata itself. Nothing has read it since the filter moved to
+        # `_blocked_document_ids`, which resolves the documents it needs, so the
+        # fetch was a second Mongo round trip per search whose result was
+        # discarded. `test_retrieval_search_no_redundant_meta_fetch.py` keeps it
+        # gone.
         blocked = await self._blocked_document_ids(candidate_ids)
         search_results = []
         for item in fused:
