@@ -30,7 +30,7 @@ router = APIRouter(
 
 class PartyController:
     """Secure party controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         party_service: PartyService,
@@ -52,34 +52,34 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:create")
-            
+
             # Validate and sanitize input
             validated_data = await self._validate_party_input(party_data)
-            
+
             # Business rule validation
-            if (validated_data.type == PartyType.INDIVIDUAL and 
+            if (validated_data.type == PartyType.INDIVIDUAL and
                 validated_data.organization_id):
                 raise PartyError(
                     "Individual parties cannot be directly associated with organizations",
                     status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Validate organization/project context if specified
             await self._validate_party_context(validated_data, current_user)
-            
+
             # Create party
             party = await self.party_service.create_party(validated_data, current_user)
-            
+
             # Audit log
             await self.audit_logger.log_party_created(
                 current_user.id, party.id, party.name, party.type.value
             )
-            
+
             return party
-            
+
         except (PartyError, HTTPException):
             raise
         except Exception as e:
@@ -99,27 +99,27 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:read")
-            
+
             # Build authorized query based on user scope
             authorized_query = await self.auth_service.build_party_query(
                 current_user, filters
             )
-            
+
             # Get parties with pagination
             parties, total_count = await self.party_service.get_parties_paginated(
                 authorized_query, pagination
             )
-            
+
             return PartyListResponse(
                 parties=parties,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -136,13 +136,13 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:read")
-            
+
             # Validate party ID
             validated_party_id = validate_object_id(party_id)
-            
+
             # Get party
             party = await self.party_service.get_party_by_id(validated_party_id)
             if not party:
@@ -150,12 +150,12 @@ class PartyController:
                     f"Party with id {party_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific party
             await self.auth_service.check_party_access(current_user, party, "read")
-            
+
             return party
-            
+
         except (PartyError, HTTPException):
             raise
         except Exception as e:
@@ -172,13 +172,13 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:update")
-            
+
             # Validate party ID
             validated_party_id = validate_object_id(party_id)
-            
+
             # Get existing party
             existing_party = await self.party_service.get_party_by_id(validated_party_id)
             if not existing_party:
@@ -186,28 +186,28 @@ class PartyController:
                     f"Party with id {party_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific party
             await self.auth_service.check_party_access(
                 current_user, existing_party, "update"
             )
-            
+
             # Validate update data
             validated_update = await self._validate_party_update(update_data)
-            
+
             # Update party
             updated_party = await self.party_service.update_party(
                 validated_party_id, validated_update, current_user
             )
-            
+
             # Audit log
             changed_fields = list(validated_update.dict(exclude_unset=True).keys())
             await self.audit_logger.log_party_updated(
                 current_user.id, validated_party_id, changed_fields
             )
-            
+
             return updated_party
-            
+
         except (PartyError, HTTPException):
             raise
         except Exception as e:
@@ -224,13 +224,13 @@ class PartyController:
         try:
             # Rate limiting for destructive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=10)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:delete")
-            
+
             # Validate party ID
             validated_party_id = validate_object_id(party_id)
-            
+
             # Get party for validation
             party = await self.party_service.get_party_by_id(validated_party_id)
             if not party:
@@ -238,10 +238,10 @@ class PartyController:
                     f"Party with id {party_id} not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Check authorization for this specific party
             await self.auth_service.check_party_access(current_user, party, "delete")
-            
+
             # Check for dependencies
             dependencies = await self.party_service.check_party_dependencies(validated_party_id)
             if dependencies:
@@ -249,19 +249,19 @@ class PartyController:
                     f"Cannot delete party with active dependencies: {', '.join(dependencies)}",
                     status.HTTP_409_CONFLICT
                 )
-            
+
             # Delete party with cascading
             await self.party_service.delete_party_with_cascade(
                 validated_party_id, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_party_deleted(
                 current_user.id, validated_party_id, party.name
             )
-            
+
             return {"message": "Party deleted successfully"}
-            
+
         except (PartyError, HTTPException):
             raise
         except Exception as e:
@@ -278,41 +278,41 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:update")
-            
+
             # Validate IDs
             validated_party_id = validate_object_id(party_id)
             validated_project_id = validate_object_id(project_id)
-            
+
             # Verify party and project exist
             party = await self.party_service.get_party_by_id(validated_party_id)
             if not party:
                 raise PartyError("Party not found", status.HTTP_404_NOT_FOUND)
-            
+
             project = await self.project_service.get_project_by_id(validated_project_id)
             if not project:
                 raise PartyError("Project not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Check authorization for both party and project
             await self.auth_service.check_party_access(current_user, party, "update")
             await self.auth_service.check_project_access(current_user, project, "associate_party")
-            
+
             # Associate party with project
             await self.party_service.associate_with_project(
                 validated_party_id, validated_project_id, current_user
             )
-            
+
             # Audit log
             await self.audit_logger.log_party_project_associated(
                 current_user.id, validated_party_id, validated_project_id
             )
-            
+
             return {
                 "message": f"Party {party_id} successfully associated with project {project_id}"
             }
-            
+
         except (PartyError, HTTPException):
             raise
         except Exception as e:
@@ -332,27 +332,27 @@ class PartyController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "parties:read")
-            
+
             # Build query for external parties
             external_query = await self.auth_service.build_external_party_query(
                 current_user, filters
             )
-            
+
             # Get external parties
             parties, total_count = await self.party_service.get_external_parties_paginated(
                 external_query, pagination
             )
-            
+
             return PartyListResponse(
                 parties=parties,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -386,32 +386,32 @@ class PartyController:
     async def _validate_party_update(self, update_data: PartyUpdate) -> PartyUpdate:
         """Validate party update data."""
         validated_fields = {}
-        
+
         if update_data.name is not None:
             validated_fields['name'] = sanitize_text(
                 validate_input(update_data.name, max_length=200, required=True)
             )
-        
+
         if update_data.contact_email is not None:
             validated_fields['contact_email'] = sanitize_text(
                 validate_input(update_data.contact_email, max_length=255)
             )
-        
+
         if update_data.contact_phone is not None:
             validated_fields['contact_phone'] = sanitize_text(
                 validate_input(update_data.contact_phone, max_length=50)
             )
-        
+
         if update_data.address is not None:
             validated_fields['address'] = sanitize_text(
                 validate_input(update_data.address, max_length=500)
             )
-        
+
         if update_data.projects is not None:
             validated_fields['projects'] = [
                 validate_object_id(pid) for pid in update_data.projects
             ]
-        
+
         return PartyUpdate(**validated_fields)
 
     async def _validate_party_context(
@@ -422,7 +422,7 @@ class PartyController:
             await self.auth_service.check_organization_access(
                 current_user, party_data.organization_id, "create_party"
             )
-        
+
         if party_data.projects:
             for project_id in party_data.projects:
                 project = await self.project_service.get_project_by_id(project_id)
@@ -440,7 +440,7 @@ async def get_party_controller() -> PartyController:
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(scope="parties")
     audit_logger = AuditLogger()
-    
+
     return PartyController(
         party_service, project_service, auth_service,
         rate_limiter, audit_logger
@@ -477,7 +477,7 @@ async def get_parties(
         "search": search
     }
     pagination = {"skip": skip, "limit": limit}
-    
+
     return await controller.get_parties(pagination, filters, current_user)
 
 

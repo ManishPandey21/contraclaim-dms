@@ -29,9 +29,10 @@ class IngestionService:
 
     async def create_job(self, payload: IngestionJobCreate) -> IngestionJob:
         job = await self.pipeline.create_job(payload)
-        await submit_background_job("ingestion-pipeline", self.pipeline.process_job, job.id)
+        await submit_background_job(
+            "ingestion-pipeline", self.pipeline.process_job, job.id
+        )
         return job
 
     async def get_job(self, job_id: str) -> Optional[IngestionJob]:
         return await self.pipeline.get_job(job_id)
-

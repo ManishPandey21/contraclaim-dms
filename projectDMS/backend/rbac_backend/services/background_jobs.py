@@ -41,7 +41,7 @@ class BackgroundJobProcessor:
     Note: Job priority is not enforced due to use of simple asyncio.Queue.
     Consider a PriorityQueue or external queue like Celery for real priority support.
     """
-    
+
     def __init__(self, max_workers: int = 5):
         self.max_workers = max_workers
         self.jobs: Dict[str, Job] = {}
@@ -58,10 +58,10 @@ class BackgroundJobProcessor:
     async def start(self):
         if self.running:
             return
-        
+
         self.running = True
         logger.info(f"Starting background job processor with {self.max_workers} workers")
-        
+
         for i in range(self.max_workers):
             worker = asyncio.create_task(self._worker(f"worker-{i}"))
             self.workers.append(worker)
@@ -69,63 +69,63 @@ class BackgroundJobProcessor:
     async def stop(self):
         if not self.running:
             return
-        
+
         logger.info("Stopping background job processor")
         self.running = False
-        
+
         for worker in self.workers:
             worker.cancel()
-        
+
         # Await worker shutdown with timeout to avoid indefinite waits
         try:
             await asyncio.wait_for(asyncio.gather(*self.workers, return_exceptions=True), timeout=10)
         except asyncio.TimeoutError:
             logger.warning("Timeout waiting for workers to stop")
-        
+
         self.workers.clear()
 
     async def _worker(self, worker_name: str):
         logger.info(f"Worker {worker_name} started")
-        
+
         while self.running:
             try:
                 job: Job = await asyncio.wait_for(self.job_queue.get(), timeout=1.0)
-                
+
                 if job.status == JobStatus.CANCELLED:
                     continue
-                
+
                 logger.info(f"Worker {worker_name} processing job {job.id}: {job.name}")
                 await self._execute_job(job)
-                
+
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 logger.error(f"Worker {worker_name} error: {e}")
                 logger.debug(traceback.format_exc())
                 continue
-        
+
         logger.info(f"Worker {worker_name} stopped")
 
     async def _execute_job(self, job: Job):
         job.status = JobStatus.RUNNING
         job.started_at = datetime.utcnow()
-        
+
         try:
             if asyncio.iscoroutinefunction(job.func):
                 result = await job.func(*job.args, **job.kwargs)
             else:
                 result = job.func(*job.args, **job.kwargs)
-            
+
             job.result = result
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.utcnow()
             self._stats['completed_jobs'] += 1
             logger.info(f"Job {job.id} completed successfully")
-            
+
         except Exception as e:
             job.error = str(e)
             job.retry_count += 1
-            
+
             if job.retry_count <= job.max_retries:
                 job.status = JobStatus.PENDING
                 await self.job_queue.put(job)
@@ -152,7 +152,7 @@ class BackgroundJobProcessor:
             priority=priority,
             max_retries=max_retries,
         )
-        
+
         self.jobs[job_id] = job
         await self.job_queue.put(job)
         self._stats['total_jobs'] += 1
@@ -192,10 +192,10 @@ class BackgroundJobProcessor:
             if job.status in [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED]
             and job.completed_at and job.completed_at < cutoff_time
         ]
-        
+
         for job_id in old_job_ids:
             del self.jobs[job_id]
-        
+
         if old_job_ids:
             logger.info(f"Cleaned up {len(old_job_ids)} old jobs")
 
@@ -219,13 +219,13 @@ async def scan_and_alert_assignments(db):
     from email.message import EmailMessage
     from datetime import datetime, timezone
     from bson import ObjectId
-    
+
     email_service = EmailService(db)
     if not email_service._smtp_enabled:
         return
-        
+
     now = datetime.now(timezone.utc)
-        
+
     # Phase 1: Scan for new/reassigned drafters in 'letters' collection
     try:
         cursor = db.letters.find({})
@@ -242,7 +242,7 @@ async def scan_and_alert_assignments(db):
                     msg["Subject"] = f"Assignment Alert: You have been assigned to draft letter: {letter.get('title') or letter.get('subject')}"
                     msg["From"] = email_service.from_email
                     msg["To"] = user.get("email")
-                    
+
                     body = (
                         f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                         f"You have been assigned to draft a contractual reply letter.\n\n"
@@ -270,7 +270,7 @@ async def scan_and_alert_assignments(db):
         assignments = await cursor.to_list(length=None)
         for assignment in assignments:
             reviewer_id = assignment.get("reviewer_user_id")
-            
+
             # Scenario 2a: Send reviewer assignment alert
             if not assignment.get("notified"):
                 user = await db.users.find_one({"_id": ObjectId(reviewer_id) if ObjectId.is_valid(reviewer_id) else reviewer_id})
@@ -279,10 +279,10 @@ async def scan_and_alert_assignments(db):
                     msg["Subject"] = f"Review Assignment: You have been assigned to review draft run"
                     msg["From"] = email_service.from_email
                     msg["To"] = user.get("email")
-                    
+
                     note_str = f"Note from assigner: {assignment.get('note')}\n\n" if assignment.get("note") else ""
                     due_str = f"Due Date: {assignment.get('due_at').strftime('%Y-%m-%d %H:%M')}\n\n" if assignment.get("due_at") else ""
-                    
+
                     body = (
                         f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                         f"You have been assigned to review a generated draft run.\n\n"
@@ -300,7 +300,7 @@ async def scan_and_alert_assignments(db):
                             {"_id": assignment["_id"]},
                             {"$set": {"notified": True, "updated_at": now}}
                         )
-            
+
             # Scenario 2b: Overdue assignments alert
             due_at = assignment.get("due_at")
             if due_at and not assignment.get("overdue_notified"):
@@ -313,7 +313,7 @@ async def scan_and_alert_assignments(db):
                         msg["Subject"] = f"URGENT: Review Assignment OVERDUE"
                         msg["From"] = email_service.from_email
                         msg["To"] = user.get("email")
-                        
+
                         body = (
                             f"Hello {user.get('first_name') or user.get('username') or 'there'},\n\n"
                             f"Your review assignment is OVERDUE.\n\n"
@@ -338,11 +338,11 @@ async def start_background_services():
     """Start background services."""
     try:
         logger.info("Starting background services...")
-        
+
         # Start the background job processor
         processor = get_background_processor()
         await processor.start()
-        
+
         # Schedule periodic cleanup
         async def periodic_cleanup():
             while processor.running:
@@ -353,7 +353,7 @@ async def start_background_services():
                     break
                 except Exception as e:
                     logger.error(f"Error in periodic cleanup: {e}")
-                    
+
         # Schedule periodic assignment alerts
         async def periodic_assignment_alerts():
             from ..core.database import get_database
@@ -367,7 +367,7 @@ async def start_background_services():
                     break
                 except Exception as e:
                     logger.error(f"Error in periodic assignment alerts: {e}")
-        
+
         # Schedule periodic subscription lifecycle management
         async def periodic_subscription_lifecycle():
             from .subscription_lifecycle_service import SubscriptionLifecycleService
@@ -408,7 +408,7 @@ async def start_background_services():
         # dedicated worker container. See start_document_extraction_workers.
 
         logger.info("Background services started successfully")
-        
+
     except Exception as e:
         logger.error(f"Failed to start background services: {e}")
         raise
@@ -417,13 +417,13 @@ async def stop_background_services():
     """Stop background services."""
     try:
         logger.info("Stopping background services...")
-        
+
         # Stop the background job processor
         processor = get_background_processor()
         await processor.stop()
-        
+
         logger.info("Background services stopped successfully")
-        
+
     except Exception as e:
         logger.error(f"Failed to stop background services: {e}")
         raise
@@ -515,11 +515,11 @@ async def stop_document_extraction_workers() -> None:
 # Additional utility functions for job management
 
 async def submit_background_job(
-    name: str, 
-    func: Callable, 
-    *args, 
-    priority: int = 0, 
-    max_retries: int = 3, 
+    name: str,
+    func: Callable,
+    *args,
+    priority: int = 0,
+    max_retries: int = 3,
     **kwargs
 ) -> str:
     """Submit a job to the background processor."""
@@ -577,7 +577,7 @@ def get_background_services_info() -> Dict[str, Any]:
     try:
         processor = get_background_processor()
         stats = processor.get_stats()
-        
+
         return {
             "status": "running" if processor.running else "stopped",
             "workers_count": len(processor.workers),

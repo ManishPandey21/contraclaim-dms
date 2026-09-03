@@ -231,4 +231,3 @@ If immutable images are used, redeploy the previous image tag instead of rebuild
 - Run after deployment: `scripts/post_deploy_verify.sh`
 - Run before production update: `scripts/mongo_backup.sh`
 - Run for full service volume backup where applicable: `scripts/backup.sh`
-

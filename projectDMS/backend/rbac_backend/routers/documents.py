@@ -1008,7 +1008,7 @@ class DocumentController:
 
             # Create bulk upload job
             job_id = str(uuid.uuid4())
-            
+
             # Initialize bulk upload tracking
             bulk_status = BulkUploadStatus(
                 job_id=job_id,
@@ -1102,11 +1102,11 @@ class DocumentController:
 
             # Normalize column names to avoid NBSP and case issues (common with Excel exports)
             df = self.bulk_upload_service.normalize_csv_dataframe(df)
-            
+
             # Validate CSV structure
             required_columns = ['filename', 'upload_type', 'letter_no', 'date', 'ocr_enabled']
             missing_columns = [col for col in required_columns if col not in df.columns]
-            
+
             if missing_columns:
                 raise DocumentError(
                     f"Missing required columns: {', '.join(missing_columns)}",
@@ -1115,7 +1115,7 @@ class DocumentController:
 
             # Convert to list of dictionaries
             csv_data = df.to_dict('records')
-            
+
             # Validate each row
             validated_data = []
             for idx, row in enumerate(csv_data, 1):
@@ -1130,7 +1130,7 @@ class DocumentController:
                         '_validation_error': str(e),
                         '_row_number': idx
                     })
-            
+
             return validated_data
 
         except pd.errors.EmptyDataError:
@@ -1146,7 +1146,7 @@ class DocumentController:
         filename = str(row.get('filename', '')).strip()
         if not filename:
             raise ValueError(f"Row {row_number}: filename is required")
-        
+
         # Validate upload type
         upload_type_value = (
             row.get('upload_type')
@@ -1156,21 +1156,21 @@ class DocumentController:
         upload_type = str(upload_type_value or '').strip().lower()
         if upload_type not in ['incoming', 'outgoing']:
             raise ValueError(f"Row {row_number}: upload_type must be 'incoming' or 'outgoing'")
-        
+
         # Validate letter number
         letter_no = str(row.get('letter_no') or row.get('letterNo') or '').strip()
         if not letter_no:
             raise ValueError(f"Row {row_number}: letter_no is required")
-        
+
         # Validate and parse date
         date_str = str(row.get('date', '')).strip()
         if not date_str:
             raise ValueError(f"Row {row_number}: date is required")
-        
+
         parsed_date = parse_date_safely(date_str)
         if not parsed_date:
             raise ValueError(f"Row {row_number}: invalid date format '{date_str}'")
-        
+
         # Subject is optional for bulk upload; default to empty string
         subject = str(row.get('subject', '') or '').strip()
 
@@ -1209,23 +1209,23 @@ class DocumentController:
         """Parse comma-separated string into list."""
         if not value or pd.isna(value):
             return []
-        
+
         if isinstance(value, str):
             return [item.strip() for item in value.split(',') if item.strip()]
-        
+
         return []
 
     def _parse_boolean_field(self, value: Any) -> bool:
         """Parse boolean field from various formats."""
         if pd.isna(value):
             return False
-        
+
         if isinstance(value, bool):
             return value
-        
+
         if isinstance(value, str):
             return value.lower() in ['true', '1', 't', 'y', 'yes', 'on']
-        
+
         return bool(value)
 
     async def _emit_bulk_upload_notification(
@@ -1302,7 +1302,7 @@ class DocumentController:
 
             # Create filename to file mapping
             file_mapping = self._build_bulk_file_lookup(temp_uploads)
-            
+
             results = []
             successful_uploads = 0
             failed_uploads = 0
@@ -1313,14 +1313,14 @@ class DocumentController:
                     result = await self._process_single_file(
                         row_data, file_mapping, organization_id, project_id, current_user
                     )
-                    
+
                     if result.success:
                         successful_uploads += 1
                     else:
                         failed_uploads += 1
-                    
+
                     results.append(result)
-                    
+
                     # Update progress
                     await self.bulk_upload_service.update_progress(
                         job_id, len(results), successful_uploads, failed_uploads, results
@@ -1328,17 +1328,17 @@ class DocumentController:
 
                 except Exception as e:
                     logger.error(f"Failed to process file {row_data.get('filename')}: {str(e)}")
-                    
+
                     failed_result = DocumentProcessingResult(
                         filename=row_data.get('filename', 'unknown'),
                         success=False,
                         error=str(e),
                         row_number=row_data.get('_row_number', 0)
                     )
-                    
+
                     results.append(failed_result)
                     failed_uploads += 1
-                    
+
                     # Update progress
                     await self.bulk_upload_service.update_progress(
                         job_id, len(results), successful_uploads, failed_uploads, results
@@ -1371,7 +1371,7 @@ class DocumentController:
 
         except Exception as e:
             logger.error(f"Bulk upload {job_id} failed: {str(e)}")
-            
+
             # Mark job as failed
             await self.bulk_upload_service.fail_job(job_id, str(e))
         finally:
@@ -1401,7 +1401,7 @@ class DocumentController:
         """Process a single file from bulk upload."""
         filename = row_data['filename']
         row_number = row_data.get('_row_number', 0)
-        
+
         try:
             # Check for validation errors
             if '_validation_error' in row_data:
@@ -1411,7 +1411,7 @@ class DocumentController:
                     error=row_data['_validation_error'],
                     row_number=row_number
                 )
-            
+
             # Find corresponding file
             lookup_key = self._normalize_bulk_filename(filename)
             file = (
@@ -1452,7 +1452,7 @@ class DocumentController:
                 pathStructure1=row_data.get('path_structure1'),
                 emit_upload_notification=False,
             )
-            
+
             return DocumentProcessingResult(
                 filename=filename,
                 success=True,
@@ -1615,7 +1615,7 @@ class DocumentController:
             return job_status
 
     # ... (keep all existing methods from the original file)
-    
+
 async def controller_get_document(
     self, document_id: str, current_user: CurrentUser
 ) -> Document:
@@ -1640,7 +1640,7 @@ async def controller_get_document(
             detail="Document service temporarily unavailable",
         )
 
-    
+
 async def controller_list_documents(
     self,
     filters: Dict[str, Any],
@@ -1698,7 +1698,7 @@ async def controller_list_documents(
             detail="Document listing service temporarily unavailable",
         )
 
-    
+
 async def controller_update_document(
     self,
     document_id: str,
@@ -1765,7 +1765,7 @@ async def controller_update_document(
             detail="Document update service temporarily unavailable",
         )
 
-    
+
 async def controller_delete_document(
     self,
     document_id: str,
@@ -1828,7 +1828,7 @@ async def controller_delete_document(
             detail="Document deletion service temporarily unavailable",
         )
 
-    
+
 async def controller_add_enclosure(
     self,
     document_id: str,
@@ -2241,7 +2241,7 @@ async def get_document_controller() -> DocumentController:
     export_service = ExportService()
     auth_service = AuthorizationService()
     bulk_upload_service = BulkUploadService()
-    
+
     return DocumentController(
         document_service, file_service, export_service, auth_service, bulk_upload_service
     )
@@ -3122,7 +3122,7 @@ async def bulk_upload_documents(
 ):
     """
     Bulk upload documents with CSV metadata.
-    
+
     The CSV file should contain metadata for each document file.
     File names in CSV must match the uploaded file names.
     """
@@ -3199,7 +3199,7 @@ async def download_bulk_upload_template(
         organization_id=scope_org,
         project_id=scope_project,
     )
-    
+
     csv_template = """filename,uploadType,letterNo,date,ocrEnabled
 sample-letter-001.pdf,incoming,LTR-2024-001,2024-01-15,true
 sample-letter-002.pdf,outgoing,LTR-2024-002,2024-01-16,true

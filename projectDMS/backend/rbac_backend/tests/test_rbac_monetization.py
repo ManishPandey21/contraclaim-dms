@@ -247,7 +247,7 @@ async def test_update_plan_settings_scope_rejects_invalid_scope_and_plan() -> No
 async def test_process_trial_expirations() -> None:
     db = FakeDB()
     now = datetime.utcnow()
-    
+
     # Setup standard trial subscription that has already expired
     expired_trial = {
         "_id": "sub_trial_expired_1",
@@ -259,16 +259,16 @@ async def test_process_trial_expirations() -> None:
         "plan_code": "premium",
     }
     db.subscriptions.data = [expired_trial]
-    
+
     service = SubscriptionLifecycleService(db)
     expired_ids = await service.process_trial_expirations()
-    
+
     assert expired_ids == ["sub_trial_expired_1"]
     assert len(db.subscriptions.updates) == 1
     assert db.subscriptions.updates[0][0]["_id"] == "sub_trial_expired_1"
     assert db.subscriptions.updates[0][1]["$set"]["status"] == "cancelled"
     assert db.subscriptions.updates[0][1]["$set"]["trial"] is False
-    
+
     assert len(db.subscription_history.inserted) == 1
     history = db.subscription_history.inserted[0]
     assert history["subscription_id"] == "sub_trial_expired_1"
@@ -281,7 +281,7 @@ async def test_process_trial_expirations() -> None:
 async def test_execute_renewals() -> None:
     db = FakeDB()
     now = datetime.utcnow()
-    
+
     # Setup active subscription that is due for renewal
     renewing_sub = {
         "_id": "sub_renew_1",
@@ -294,16 +294,16 @@ async def test_execute_renewals() -> None:
         "plan_code": "professional",
     }
     db.subscriptions.data = [renewing_sub]
-    
+
     service = SubscriptionLifecycleService(db)
     renewed_ids = await service.execute_renewals()
-    
+
     assert renewed_ids == ["sub_renew_1"]
     assert len(db.subscriptions.updates) == 1
     assert db.subscriptions.updates[0][0]["_id"] == "sub_renew_1"
     assert "current_period_start" in db.subscriptions.updates[0][1]["$set"]
     assert "current_period_end" in db.subscriptions.updates[0][1]["$set"]
-    
+
     assert len(db.subscription_history.inserted) == 1
     history = db.subscription_history.inserted[0]
     assert history["subscription_id"] == "sub_renew_1"
@@ -493,7 +493,7 @@ async def test_reset_monthly_usage_counters() -> None:
     db = FakeDB()
     now = datetime.utcnow()
     last_month = now.replace(day=1) - timedelta(days=2)
-    
+
     # Setup old usage counters
     old_counter = {
         "_id": "counter_1",
@@ -502,10 +502,10 @@ async def test_reset_monthly_usage_counters() -> None:
         "drafting_requests_count": 12,
     }
     db.usage_counters.data = [old_counter]
-    
+
     service = SubscriptionLifecycleService(db)
     archived_count = await service.reset_monthly_usage_counters()
-    
+
     assert archived_count == 1
     assert len(db.usage_counters_archive.inserted) == 1
     assert db.usage_counters_archive.inserted[0]["drafting_requests_count"] == 12

@@ -177,7 +177,7 @@ class FalkorGraphService:
         # Prepare letter payload with proper null handling
         current_time = datetime.now().isoformat()
         formatted_date = self._format_date(letter.get("date"))
-        
+
         # Build payload with explicit None handling for FalkorDB
         payload = {
             "normCode": norm_code,
@@ -245,7 +245,7 @@ class FalkorGraphService:
                             "createdAt": current_time,
                             "lastUpdated": current_time
                         }
-                        
+
                         # Target Letter node: identity + write metadata only (G32).
                         # The cited letter's own code/direction/subject belong to
                         # whatever document authored it, not to this citation.
@@ -268,7 +268,7 @@ class FalkorGraphService:
                             "createdAt": current_time,
                             "updatedAt": current_time
                         }
-                        
+
                         if ref["type"] == "REPLIES_TO":
                             rel_query = """
                             MATCH (src:Letter {normCode: $srcNorm}), (dst:Letter {normCode: $dstNorm})
@@ -283,7 +283,7 @@ class FalkorGraphService:
                             ON CREATE SET e.source = $source, e.createdAt = $createdAt
                             SET e.updatedAt = $updatedAt
                             """
-                        
+
                         self._execute(rel_query, rel_payload)
                     except FalkorGraphError as e:
                         logger.warning("Failed to process reference %s: %s", ref["normCode"], str(e))
@@ -436,7 +436,7 @@ class FalkorGraphService:
         whichever document (in whichever tenant) last wrote it. Callers resolve
         those fields from the canonical Mongo document; `ORDER BY` uses
         `createdAt`, which the node does carry, rather than the removed `date`.
-        
+
         FIXED: Handle depth=0 case separately to avoid invalid path expressions.
         FalkorDB requires: minimum_hops <= maximum_hops in path expressions.
         When depth=0, we only want the root node with no neighbors.
@@ -449,7 +449,7 @@ class FalkorGraphService:
             return []
 
         depth = max(depth, 0)
-        
+
         # FIXED: Special case for depth=0 - only return the root node
         if depth == 0:
             result = self._execute(
@@ -511,7 +511,7 @@ class FalkorGraphService:
         rows = self._parse_rows(result)
         if not rows:
             return None
-        
+
         row = rows[0]
         if "letter" in row:
             return row["letter"]
@@ -569,7 +569,7 @@ class FalkorGraphService:
     ) -> Any:
         """
         Execute a Cypher query against FalkorDB.
-        
+
         CRITICAL CONSTRAINTS:
         - Only ONE Cypher statement per call (no multiple statements with ;)
         - FalkorDB does not support parameterized variable-length paths

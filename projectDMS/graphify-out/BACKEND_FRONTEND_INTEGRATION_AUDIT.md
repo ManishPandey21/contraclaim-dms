@@ -1,8 +1,8 @@
 # Backend, Frontend Integration, and Razorpay Audit
 
-Repository: `ManishPandey21/contraclaim-dms`  
-Branch audited: `main`  
-Audit date: 2026-06-18  
+Repository: `ManishPandey21/contraclaim-dms`
+Branch audited: `main`
+Audit date: 2026-06-18
 Scope: backend architecture, API contracts, database usage, auth, RBAC, file handling, document processing, AI/RAG, Razorpay payments, frontend integration, testing, security, and deployment readiness.
 
 ## Executive Summary

@@ -15,14 +15,14 @@ interface LetterApprovalComponentProps {
   onCancel: () => void;
 }
 
-const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({ 
-  letter, 
-  onApproval, 
-  onCancel 
+const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
+  letter,
+  onApproval,
+  onCancel
 }) => {
   const [comment, setComment] = useState('');
   const [isSendingBack, setIsSendingBack] = useState(false);
-  
+
   // Toasts are owned by the parent page, which awaits the API call and reports
   // real success/failure. Firing them here would show false success before the
   // request resolves (and even when it errors).
@@ -45,7 +45,7 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
       updatedAt: now
     });
   };
-  
+
   const handleSendBack = () => {
     if (!comment.trim()) {
       toast.error("Comments required", {
@@ -53,10 +53,10 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
       });
       return;
     }
-    
+
     const now = new Date().toISOString();
     const updatedComments = [...(letter.comments || []), comment];
-    
+
     onApproval({
       ...letter,
       status: 'Review',
@@ -64,7 +64,7 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
       updatedAt: now
     });
   };
-  
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between mb-4">
@@ -72,15 +72,15 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
           <Badge className="bg-purple-500">Final Approval Stage</Badge>
           {letter.statusStartDate && (
             <div className="ml-4">
-              <PendencyIndicator 
-                date={letter.statusStartDate} 
-                status={letter.status} 
+              <PendencyIndicator
+                date={letter.statusStartDate}
+                status={letter.status}
               />
             </div>
           )}
         </div>
       </div>
-      
+
       <div className="rounded-md border p-4">
         <div className="grid grid-cols-2 gap-4 mb-4">
           <div>
@@ -92,19 +92,19 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
             <div className="font-medium">{letter.recipient}</div>
           </div>
         </div>
-        
+
         <div className="mb-4">
           <Label className="text-muted-foreground text-sm">Subject</Label>
           <div className="font-medium">{letter.subject}</div>
         </div>
-        
+
         <div className="p-4 border rounded-md bg-gray-50 mb-4">
           <Label className="text-muted-foreground text-sm block mb-2">Letter Content</Label>
           <div className="whitespace-pre-wrap font-mono">
             {letter.content}
           </div>
         </div>
-        
+
         {isSendingBack ? (
           <div className="mb-4">
             <Label htmlFor="approval-comment" className="block mb-2">
@@ -121,12 +121,12 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
           </div>
         ) : null}
       </div>
-      
+
       <div className="flex justify-end gap-2">
         <Button variant="outline" onClick={onCancel}>
           Cancel
         </Button>
-        
+
         {isSendingBack ? (
           <>
             <Button variant="outline" onClick={() => setIsSendingBack(false)}>
@@ -138,23 +138,23 @@ const LetterApprovalComponent: React.FC<LetterApprovalComponentProps> = ({
           </>
         ) : (
           <>
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => setIsSendingBack(true)}
               className="gap-2"
             >
               <ArrowLeft className="h-4 w-4" />
               Send Back
             </Button>
-            <Button 
-              variant="destructive" 
+            <Button
+              variant="destructive"
               onClick={handleReject}
               className="gap-2"
             >
               <ThumbsDown className="h-4 w-4" />
               Reject
             </Button>
-            <Button 
+            <Button
               onClick={handleApprove}
               className="gap-2"
             >

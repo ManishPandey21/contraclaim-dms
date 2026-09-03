@@ -80,16 +80,28 @@ class VectorClient:
         If an existing collection has a mismatched dimension, fall back to a
         suffix-based collection name to avoid repeated 400 errors.
         """
-        base_collection = namespace or self.collection_name or self.config.qdrant_collection
+        base_collection = (
+            namespace or self.collection_name or self.config.qdrant_collection
+        )
         desired_size = self.config.qdrant_vector_size
-        desired_distance = getattr(self._qmodels.Distance, str(self.config.qdrant_distance).upper(), None) if self._qmodels else None
-        desired_distance = desired_distance or (self._qmodels.Distance.COSINE if self._qmodels else None)
+        desired_distance = (
+            getattr(
+                self._qmodels.Distance, str(self.config.qdrant_distance).upper(), None
+            )
+            if self._qmodels
+            else None
+        )
+        desired_distance = desired_distance or (
+            self._qmodels.Distance.COSINE if self._qmodels else None
+        )
 
         if not (self.enabled and self._client and self._qmodels):
             self.collection_name = base_collection
             return base_collection
 
-        def _extract_vectors(info: Any) -> tuple[Optional[int], Optional[str], list[str]]:
+        def _extract_vectors(
+            info: Any,
+        ) -> tuple[Optional[int], Optional[str], list[str]]:
             """
             Extract vector size and available vector names from a Qdrant collection info response.
             Handles both legacy and newer response shapes.
@@ -127,7 +139,11 @@ class VectorClient:
                 else:
                     chosen_name = chosen_name or (available[0] if available else None)
                     params_obj = vectors_conf.get(chosen_name) if chosen_name else None
-                    size = _size_from_params(params_obj) if params_obj is not None else None
+                    size = (
+                        _size_from_params(params_obj)
+                        if params_obj is not None
+                        else None
+                    )
                 return size, chosen_name, available
 
             # Single unnamed vector
@@ -135,8 +151,14 @@ class VectorClient:
             return size, chosen_name, available
 
         def _create_collection(name: str) -> None:
-            vec_params = self._qmodels.VectorParams(size=desired_size, distance=desired_distance)
-            vectors_config = {self.config.qdrant_vector_name: vec_params} if self.config.qdrant_vector_name else vec_params
+            vec_params = self._qmodels.VectorParams(
+                size=desired_size, distance=desired_distance
+            )
+            vectors_config = (
+                {self.config.qdrant_vector_name: vec_params}
+                if self.config.qdrant_vector_name
+                else vec_params
+            )
             try:
                 self._client.create_collection(
                     collection_name=name,
@@ -152,7 +174,11 @@ class VectorClient:
             size, detected_name, available = _extract_vectors(info)
             if detected_name and not self.config.qdrant_vector_name:
                 self.config.qdrant_vector_name = detected_name
-            elif self.config.qdrant_vector_name and available and self.config.qdrant_vector_name not in available:
+            elif (
+                self.config.qdrant_vector_name
+                and available
+                and self.config.qdrant_vector_name not in available
+            ):
                 logger.warning(
                     "Vector '%s' not found in collection '%s'; available=%s. Falling back to first vector.",
                     self.config.qdrant_vector_name,
@@ -237,7 +263,11 @@ class VectorClient:
             payload = normalize_source_payload(payload)
             payloads.append(payload)
             self._memory_index.append(
-                {"vector": vector, "payload": payload, "namespace": namespace or self.config.qdrant_collection}
+                {
+                    "vector": vector,
+                    "payload": payload,
+                    "namespace": namespace or self.config.qdrant_collection,
+                }
             )
 
         if self.enabled and self._client and self._qmodels:
@@ -260,7 +290,9 @@ class VectorClient:
             )
         return len(payloads)
 
-    async def delete(self, chunk_ids: List[str], namespace: Optional[str] = None) -> int:
+    async def delete(
+        self, chunk_ids: List[str], namespace: Optional[str] = None
+    ) -> int:
         if not chunk_ids:
             return 0
         collection = namespace or self.collection_name or self.config.qdrant_collection
@@ -281,7 +313,11 @@ class VectorClient:
                 await self._record_failure("delete", collection)
 
         before = len(self._memory_index)
-        self._memory_index = [entry for entry in self._memory_index if entry["payload"].get("chunk_id") not in chunk_ids]
+        self._memory_index = [
+            entry
+            for entry in self._memory_index
+            if entry["payload"].get("chunk_id") not in chunk_ids
+        ]
         removed = max(removed, before - len(self._memory_index))
         return removed
 
@@ -347,13 +383,17 @@ class VectorClient:
                 # Enabled-but-failing is an outage: a silent empty list here
                 # would make reconciliation believe every vector is missing.
                 await self._record_failure("list_chunk_ids", collection)
-                raise VectorStoreUnavailableError(f"Qdrant scroll failed: {exc}") from exc
+                raise VectorStoreUnavailableError(
+                    f"Qdrant scroll failed: {exc}"
+                ) from exc
         ids: List[str] = []
         for entry in self._memory_index:
             if entry.get("namespace") != collection:
                 continue
             payload = entry.get("payload", {})
-            if payload.get("org_id") != filters.get("org_id") or payload.get("project_id") != filters.get("project_id"):
+            if payload.get("org_id") != filters.get("org_id") or payload.get(
+                "project_id"
+            ) != filters.get("project_id"):
                 continue
             ids.append(str(payload.get("chunk_id")))
         return ids
@@ -375,7 +415,9 @@ class VectorClient:
             try:
                 # Qdrant 1.x ships `search_points`; older releases expose `search`.
                 # Prefer the new API when available to avoid AttributeErrors.
-                search_fn = getattr(self._client, "search_points", None) or getattr(self._client, "search", None)
+                search_fn = getattr(self._client, "search_points", None) or getattr(
+                    self._client, "search", None
+                )
                 if not search_fn:
                     raise AttributeError("Qdrant client missing search/search_points")
                 results = await asyncio.to_thread(
@@ -401,7 +443,9 @@ class VectorClient:
                 # retrieval service engage its Mongo failsafe instead of showing
                 # users a confident empty result set.
                 await self._record_failure("search", collection)
-                raise VectorStoreUnavailableError(f"Qdrant search failed: {exc}") from exc
+                raise VectorStoreUnavailableError(
+                    f"Qdrant search failed: {exc}"
+                ) from exc
 
         candidates = [
             entry
@@ -462,15 +506,31 @@ class VectorClient:
             field = f"{field_prefix}{key}"
             if key == "tags":
                 if isinstance(value, list) and value:
-                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchAny(any=value)))
+                    must.append(
+                        self._qmodels.FieldCondition(
+                            key=field, match=self._qmodels.MatchAny(any=value)
+                        )
+                    )
                 elif value:
-                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchValue(value=value)))
+                    must.append(
+                        self._qmodels.FieldCondition(
+                            key=field, match=self._qmodels.MatchValue(value=value)
+                        )
+                    )
                 continue
             if isinstance(value, list):
                 if value:
-                    must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchAny(any=value)))
+                    must.append(
+                        self._qmodels.FieldCondition(
+                            key=field, match=self._qmodels.MatchAny(any=value)
+                        )
+                    )
                 continue
-            must.append(self._qmodels.FieldCondition(key=field, match=self._qmodels.MatchValue(value=value)))
+            must.append(
+                self._qmodels.FieldCondition(
+                    key=field, match=self._qmodels.MatchValue(value=value)
+                )
+            )
         if not must:
             return None
         return self._qmodels.Filter(must=must)

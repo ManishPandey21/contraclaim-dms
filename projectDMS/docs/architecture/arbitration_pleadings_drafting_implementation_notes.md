@@ -78,4 +78,3 @@ Frontend:
 - `npm test -- --run src/config/__tests__/routeInventory.test.ts src/config/__tests__/rolePermissions.sidebar.test.ts`
 
 Full frontend `tsc` still fails on unrelated pre-existing issues in legacy files. No remaining TypeScript errors are reported for `ArbitrationDraftingPage.tsx`.
-

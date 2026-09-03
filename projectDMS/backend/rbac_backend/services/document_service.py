@@ -101,7 +101,7 @@ class DocumentDeletionResult:
 
 class DocumentService:
     """Async service for document CRUD operations with proper error handling"""
-    
+
     def __init__(self, db: Optional[Database] = None, notification_service: Optional[NotificationService] = None):
         # Allow None for routers that do not pass DB; resolve lazily
         self.db = db
@@ -242,28 +242,28 @@ class DocumentService:
             document_id,
             raise_on_error=True,
         )
-    
+
     def _validate_document_id(self, document_id: str) -> ObjectId:
         """
         Validate and convert document ID to ObjectId.
-        
+
         Args:
             document_id: Document ID string to validate
-            
+
         Returns:
             ObjectId instance
-            
+
         Raises:
             InvalidDocumentIdError: If ID format is invalid
         """
         if not document_id or not isinstance(document_id, str):
             raise InvalidDocumentIdError(f"Invalid document ID: {document_id}")
-        
+
         try:
             return ObjectId(document_id)
         except InvalidId as e:
             raise InvalidDocumentIdError(f"Invalid ObjectId format: {document_id}") from e
-    
+
     def _coerce_reference_entry(self, value: Any) -> Optional[Dict[str, Any]]:
         """Normalize raw reference payloads into a consistent dictionary."""
         if value is None:
@@ -371,14 +371,14 @@ class DocumentService:
     async def get_documents(self, skip: int = 0, limit: int = 50) -> List[Optional[Document]]:
         """
         Retrieve multiple documents with pagination.
-        
+
         Args:
             skip: Number of documents to skip (default: 0)
             limit: Maximum number of documents to return (default: 50)
-            
+
         Returns:
             List of Document instances
-            
+
         Raises:
             DocumentServiceError: If retrieval fails
         """
@@ -406,16 +406,16 @@ class DocumentService:
                         e,
                     )
                     documents.append(None)  # Keep position but mark as failed
-            
+
             logger.info(f"Retrieved {len(documents)} documents")
             return documents
-            
+
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve documents: {e}")
             raise DocumentServiceError(f"Document retrieval failed: {str(e)}")
-    
+
     async def get_document(self, document_id: str) -> Optional[Document]:
         """
         Retrieve a single document by ID.
@@ -478,7 +478,7 @@ class DocumentService:
             "organization_id": getattr(document, "organization_id", None),
             "project_id": getattr(document, "project_id", None),
         }
-    
+
     async def create_document(
         self,
         document: Optional[Document] = None,
@@ -666,7 +666,7 @@ class DocumentService:
             logger.error(f"Failed to create document: {e}")
             raise DocumentServiceError(f"Document creation failed: {str(e)}")
 
-    
+
     async def get_document_by_id(self, document_id: str) -> Optional[Document]:
         return await self.get_document(document_id)
 
@@ -2676,26 +2676,26 @@ class DocumentService:
     ) -> Optional[Document]:
         """
         Update an existing document.
-        
+
         Args:
             document_id: Document ID string
             updated_document: Document with updated data
-            
+
         Returns:
             Updated document if successful, None if document not found
-            
+
         Raises:
             DocumentServiceError: If update fails
             InvalidDocumentIdError: If document ID is invalid
         """
         try:
             doc_oid = self._validate_document_id(document_id)
-            
+
             if not isinstance(updated_document, Document):
                 raise ValueError("updated_document must be a Document instance")
-            
+
             logger.info(f"Updating document: {document_id}")
-            
+
             # Convert to dict and exclude unset values
             update_dict = updated_document.model_dump(
                 by_alias=True,
@@ -2712,11 +2712,11 @@ class DocumentService:
                 update_dict["letterNoNormalized"] = (
                     normalize_letter_code(str(letter_value)) if letter_value else None
                 )
-            
+
             if not update_dict:
                 logger.warning(f"No fields to update for document: {document_id}")
                 return await self.get_document(document_id)
-            
+
             db = await self._get_db()
             update_dict["updatedAt"] = datetime.utcnow()
             query: Dict[str, Any] = {"_id": doc_oid, "lifecycle_state": {"$ne": "deleted"}}
@@ -2726,7 +2726,7 @@ class DocumentService:
                 query,
                 {"$set": update_dict, "$inc": {"_revision": 1}}
             )
-            
+
             if result.matched_count == 0:
                 if expected_revision is not None:
                     current_revision = await self.get_document_revision(document_id)
@@ -2737,15 +2737,15 @@ class DocumentService:
                         )
                 logger.info(f"Document not found for update: {document_id}")
                 return None
-            
+
             if result.modified_count == 0:
                 logger.info(f"Document not modified (no changes): {document_id}")
             else:
                 logger.info(f"Updated document: {document_id}")
-            
+
             # Return the updated document
             return await self.get_document(document_id)
-            
+
         except InvalidDocumentIdError:
             raise
         except ValueError:
@@ -2797,7 +2797,7 @@ class DocumentService:
         except Exception as e:
             logger.error("Failed to update summary metadata for document %s: %s", document_id, e)
             raise DocumentServiceError(f"Document summary metadata update failed: {str(e)}")
-    
+
     async def delete_document(
         self,
         document_id: str,
@@ -3136,34 +3136,34 @@ class DocumentService:
             organization_id=str(organization_id) if organization_id else None,
             project_id=str(project_id) if project_id else None,
         )
-    
+
     async def document_exists(self, document_id: str) -> bool:
         """
         Check if a document exists.
-        
+
         Args:
             document_id: Document ID string
-            
+
         Returns:
             True if document exists, False otherwise
-            
+
         Raises:
             DocumentServiceError: If check fails
             InvalidDocumentIdError: If document ID is invalid
         """
         try:
             doc_oid = self._validate_document_id(document_id)
-            
+
             db = await self._get_db()
             count = await db.documents.count_documents({"_id": doc_oid}, limit=1)
             return count > 0
-            
+
         except InvalidDocumentIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to check document existence {document_id}: {e}")
             raise DocumentServiceError(f"Document existence check failed: {str(e)}")
-    
+
     def _normalize_metadata_references(self, references: Any) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
         if not references:
@@ -3210,13 +3210,13 @@ class DocumentService:
     async def get_documents_count(self, filter_dict: Optional[Dict[str, Any]] = None) -> int:
         """
         Get count of documents matching filter.
-        
+
         Args:
             filter_dict: Optional filter dictionary
-            
+
         Returns:
             Number of matching documents
-            
+
         Raises:
             DocumentServiceError: If count fails
         """
@@ -3226,34 +3226,34 @@ class DocumentService:
             count = await db.documents.count_documents(filter_dict)
             logger.debug(f"Document count: {count}")
             return count
-            
+
         except Exception as e:
             logger.error(f"Failed to count documents: {e}")
             raise DocumentServiceError(f"Document count failed: {str(e)}")
-    
+
     async def search_documents(self, query: Dict[str, Any], skip: int = 0, limit: int = 50) -> List[Optional[Document]]:
         """
         Search documents with a query.
-        
+
         Args:
             query: MongoDB query dictionary
             skip: Number of documents to skip
             limit: Maximum number of documents to return
-            
+
         Returns:
             List of matching Document instances
-            
+
         Raises:
             DocumentServiceError: If search fails
         """
         try:
             skip, limit = validate_pagination(skip, limit)
-            
+
             if not isinstance(query, dict):
                 raise ValueError("Query must be a dictionary")
-            
+
             logger.info(f"Searching documents with query: skip={skip}, limit={limit}")
-            
+
             db = await self._get_db()
             raw_documents, _ = await fetch_paginated(
                 db.documents,
@@ -3274,10 +3274,10 @@ class DocumentService:
                         e,
                     )
                     documents.append(None)
-            
+
             logger.info(f"Found {len(documents)} documents")
             return documents
-            
+
         except ValueError:
             raise
         except Exception as e:

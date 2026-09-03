@@ -55,7 +55,7 @@ def _require_platform_admin(current_user: CurrentUser) -> None:
 
 class AIAssistantController:
     """Clean controller with proper dependency injection."""
-    
+
     def __init__(
         self,
         ai_service: AIService,
@@ -118,7 +118,7 @@ class AIAssistantController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Input validation and sanitization
             query = sanitize_text(validate_input(request.query, max_length=1000))
             org_id, project_id = await self._authorize_ai_action(
@@ -130,7 +130,7 @@ class AIAssistantController:
                 meter_metadata={"operation": "search_similar_letters"},
                 audit=False,
             )
-            
+
             # Check cache first. hashlib, not hash(): Python's hash() is
             # randomized per process (PYTHONHASHSEED), so keys built with it
             # never match across workers or restarts and the cache was
@@ -141,11 +141,11 @@ class AIAssistantController:
                 f"{project_id or 'global'}:{query_digest}:{request.limit}"
             )
             cached_result = await self.cache_service.get(cache_key)
-            
+
             if cached_result:
                 logger.info(f"Cache hit for search query: {query[:50]}...")
                 return VectorSearchResponse(**cached_result, cached_results=True)
-            
+
             # Perform search
             result = await self.ai_service.search_similar_letters(
                 query,
@@ -154,14 +154,14 @@ class AIAssistantController:
                 organization_id=org_id,
                 project_id=project_id,
             )
-            
+
             # Cache result
             await self.cache_service.set(
                 cache_key, result.model_dump(), ttl=1800
             )
-            
+
             return result
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -180,7 +180,7 @@ class AIAssistantController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             org_id, project_id = await self._authorize_ai_action(
                 request,
                 current_user,
@@ -190,25 +190,25 @@ class AIAssistantController:
                 meter_event_type=UsageEventType.DRAFTED_LETTER,
                 meter_metadata={"operation": "generate_letter_draft"},
             )
-            
+
             # Input validation and sanitization
             sanitized_request = await self._sanitize_draft_request(request)
             sanitized_request = sanitized_request.model_copy(
                 update={"organization_id": org_id, "project_id": project_id}
             )
-            
+
             # Generate draft
             result = await self.ai_service.generate_draft(
                 sanitized_request, current_user
             )
-            
+
             logger.info(
                 f"Draft generated for user {current_user.id}, "
                 f"subject: {request.subject[:50]}..."
             )
-            
+
             return result
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -519,20 +519,20 @@ async def get_prompts(
 ):
     """List letter drafting prompt keys and metadata (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import (
         PromptRegistry,
         STRATEGY_PROMPT_KEY,
         DRAFT_PROMPT_KEY,
     )
     from ..core.database import get_database
-    
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     strategy = await registry.get_enabled(STRATEGY_PROMPT_KEY)
     draft = await registry.get_enabled(DRAFT_PROMPT_KEY)
-    
+
     return [
         {
             "prompt_key": STRATEGY_PROMPT_KEY,
@@ -561,13 +561,13 @@ async def get_prompt_by_key(
 ):
     """Fetch the latest enabled prompt template configuration (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import PromptRegistry
     from ..core.database import get_database
-    
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     record = await registry.get_enabled(prompt_key)
     return record
 
@@ -581,14 +581,14 @@ async def update_prompt_template(
 ):
     """Modify/create a new enabled version of a prompt template (superadmin only)."""
     _require_platform_admin(current_user)
-    
+
     from ..services.letter_drafting.prompts import (
         PromptRegistry,
         STRATEGY_PROMPT_KEY,
         DRAFT_PROMPT_KEY,
     )
     from ..core.database import get_database
-    
+
     required_variables = set()
     if prompt_key == STRATEGY_PROMPT_KEY:
         required_variables = {"active_workspace", "role", "recipient", "subject", "recipient_focus", "current_materials", "sources"}
@@ -599,17 +599,17 @@ async def update_prompt_template(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid prompt key: {prompt_key}"
         )
-        
+
     missing = PromptRegistry.validate_template(payload.template, required_variables)
     if missing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Missing required template placeholder variables: {', '.join(missing)}"
         )
-        
+
     db = await get_database()
     registry = PromptRegistry(db)
-    
+
     user_id = getattr(current_user, "id", None) or getattr(current_user, "email", None) or "superadmin"
     record = await registry.update_prompt(prompt_key, payload.template, user_id)
     return record

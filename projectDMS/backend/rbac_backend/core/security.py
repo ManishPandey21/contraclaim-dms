@@ -283,7 +283,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                 user = await db.users.find_one({"email": email})
                 if user:
                     user_id_str = str(user["_id"])
-                    
+
                     # JWT Invalidation Check (Phase 3)
                     from ..services.runtime_state import get_runtime_state
                     runtime = get_runtime_state()
@@ -396,7 +396,7 @@ async def get_current_user(request: Request, db = Depends(get_db)):
 
     # No valid auth found
     raise credentials_exception
-    
+
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)

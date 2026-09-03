@@ -145,4 +145,3 @@ async def test_rbac_resolves_scoped_recipients():
         NotificationContext.PROJECT,
     )
     assert set(recipients) == {"u1", "u2"}
-

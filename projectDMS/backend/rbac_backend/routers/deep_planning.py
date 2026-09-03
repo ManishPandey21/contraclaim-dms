@@ -254,13 +254,13 @@ def _format_vector_chunks_for_prompt(chunks: List[Dict[str, Any]]) -> str:
     """
     if not chunks:
         return ""
-    
+
     def score_key(c: Dict[str, Any]) -> float:
         try:
             return float(c.get("score") or 0.0)
         except Exception:
             return 0.0
-    
+
     try:
         chunks = sorted(chunks, key=score_key, reverse=True)
     except Exception:
@@ -303,7 +303,7 @@ async def get_text_embedding(text: str) -> List[float]:
     try:
         rate_limited_openai_call()
         logger.info("Getting text embedding from OpenAI")
-        
+
         response = client.embeddings.create(
             model=OPENAI_MODELS["embedding"],
             input=text
@@ -358,25 +358,25 @@ def _effective_project_id(current_user) -> Optional[str]:
 async def validate_document_ids(db, document_ids: List[str], current_user: CurrentUser) -> None:
     """Validate document IDs and check user access permissions."""
     logger.info(f"Validating document IDs: {document_ids}")
-    
+
     for doc_id in document_ids:
         try:
             # Validate ObjectId format
             if not ObjectId.is_valid(doc_id):
                 raise HTTPException(status_code=400, detail=f"Invalid document ID format: {doc_id}")
-            
+
             # Check if document exists
             document = await db.documents.find_one({"_id": ObjectId(doc_id)})
             if not document:
                 raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
-            
+
             # Check user access permissions
             doc_org_id = document.get('organization_id')
             user_org_id = getattr(current_user, 'organization_id', None)
-            
+
             if doc_org_id != user_org_id:
                 raise HTTPException(status_code=403, detail=f"Access denied to document: {doc_id}")
-                
+
         except HTTPException:
             raise
         except Exception as e:
@@ -389,7 +389,7 @@ async def validate_document_ids(db, document_ids: List[str], current_user: Curre
 async def extract_document_content(db, document_ids: List[str]) -> str:
     """Extract content from multiple documents for context, including OCR text and summary."""
     content_parts = []
-    
+
     for doc_id in document_ids:
         try:
             logger.info(f"Extracting content from document: {doc_id}")
@@ -401,14 +401,14 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                 doc_info += f"Date: {document.get('date', 'No date')}\n"
                 doc_info += f"From: {document.get('from_', document.get('from', 'Unknown'))}\n"
                 doc_info += f"To: {document.get('to', 'Unknown')}\n"
-                
+
                 # Add summary if available. Gated: the summary is derived
                 # from the same extracted text, so serving it for a blocked
                 # document withholds nothing.
                 summary = authoritative_summary(document)
                 if summary:
                     doc_info += f"Summary: {summary}\n"
-                
+
                 # Add OCR text if available (truncate if too long).
                 # Read through the publication policy: a document with
                 # unresolved extraction-quality findings must not reach the
@@ -420,19 +420,19 @@ async def extract_document_content(db, document_ids: List[str]) -> str:
                     if len(ocr_text) > max_ocr_length:
                         ocr_text = ocr_text[:max_ocr_length] + "... [truncated]"
                     doc_info += f"OCR Text: {ocr_text}\n"
-                
+
                 # Add references if available
                 if document.get('references'):
                     doc_info += "References:\n"
                     for ref in document.get('references', []):
                         doc_info += f"  - {ref}\n"
-                
+
                 content_parts.append(doc_info)
                 logger.debug(f"Successfully extracted content from document: {doc_id}")
         except Exception as e:
             logger.warning(f"Error extracting content from document {doc_id}: {e}")
             continue
-    
+
     return "\n\n".join(content_parts)
 
 async def get_vector_store_context(db, query: str, organization_id: str, project_id: Optional[str] = None) -> Optional[str]:
@@ -440,11 +440,11 @@ async def get_vector_store_context(db, query: str, organization_id: str, project
     if not VECTOR_STORE_ENABLED:
         logger.info("Vector store support is disabled")
         return None
-    
+
     try:
         logger.info("Querying vector store for relevant context")
         query_embedding = await get_text_embedding(query)
-        
+
         # Fetch top chunks from document_vectors collection
         top_chunks = await _fetch_vector_chunks_for_query(
             db=db,
@@ -455,31 +455,31 @@ async def get_vector_store_context(db, query: str, organization_id: str, project
             top_docs=5,
             chunks_per_doc=2,
         )
-        
+
         # Format the chunks for inclusion in the prompt
         vector_context = _format_vector_chunks_for_prompt(top_chunks)
-        
+
         if vector_context:
             logger.info(f"Retrieved {len(top_chunks)} vector chunks for context")
             return vector_context
         else:
             logger.info("No relevant vector chunks found")
             return None
-        
+
     except Exception as e:
         logger.error(f"Error querying vector store: {str(e)}")
         return None
 
-async def find_similar_letters(db, subject: str, organization_id: Optional[str] = None, 
+async def find_similar_letters(db, subject: str, organization_id: Optional[str] = None,
                               project_id: Optional[str] = None, current_user: CurrentUser = None) -> List[dict]:
     """Find similar letters based on subject similarity with proper authorization."""
     try:
         logger.info(f"Finding similar letters for subject: {subject}")
         query_embedding = await get_text_embedding(subject)
-        
+
         # Build filter based on organization and project with authorization
         query_filter = {}
-        
+
         # Authorization check
         if "superadmin" not in current_user.roles:
             if "orgadmin" in current_user.roles or "orguser" in current_user.roles:
@@ -490,18 +490,18 @@ async def find_similar_letters(db, subject: str, organization_id: Optional[str] 
                 else:
                     # No project assignments -> no results
                     query_filter["project_id"] = "__none__"
-        
+
         # Add organization and project filters if provided
         if organization_id:
             query_filter["organization_id"] = organization_id
         if project_id:
             query_filter["project_id"] = project_id
-        
+
         letters_cursor = db.letters.find(query_filter)
         letters = await letters_cursor.to_list(length=None)
-        
+
         similar_letters = []
-        
+
         for letter in letters:
             # Check/generate embedding
             if "embedding" not in letter or not letter["embedding"]:
@@ -527,12 +527,12 @@ async def find_similar_letters(db, subject: str, organization_id: Optional[str] 
                     "similarity_score": similarity,
                     "created_at": (letter.get("created_at") or datetime.now()).isoformat()
                 })
-        
+
         # Sort by similarity score and limit results
         similar_letters.sort(key=lambda x: x["similarity_score"], reverse=True)
         logger.info(f"Found {len(similar_letters)} similar letters")
         return similar_letters[:5]  # Return top 5 similar letters
-        
+
     except Exception as e:
         logger.error(f"Error finding similar letters: {str(e)}")
         return []
@@ -550,7 +550,7 @@ async def generate_draft_with_ai(
     """Generate a letter draft using OpenAI with document context, OCR text, and summary."""
     try:
         logger.info("Generating draft with AI")
-        
+
         # Prepare structured sections per protocol
         key_facts_bullets = ""
         if user_context:
@@ -585,7 +585,7 @@ async def generate_draft_with_ai(
                 target_info_block = "\nTarget Letter Intelligence (for reply context):\n" + target_letter_info.strip()
         except Exception:
             target_info_block = ""
-            
+
         # Add vector store context if available
         vector_context_block = ""
         if vector_store_context:
@@ -617,7 +617,7 @@ async def generate_draft_with_ai(
 
         logger.info("Successfully generated draft using Chat Completions API")
         return response.choices[0].message.content.strip()
-        
+
     except RateLimitError as e:
         logger.warning(f"OpenAI rate limit exceeded during draft generation: {str(e)}")
         raise HTTPException(status_code=429, detail="OpenAI rate limit exceeded. Please try again later.")
@@ -631,7 +631,7 @@ async def extract_key_points_and_clauses(content: str) -> tuple:
     """Extract key points and quoted clauses from document content using JSON mode."""
     try:
         logger.info("Extracting key points and clauses from document content using JSON mode")
-        
+
         # JSON schema for structured output
         json_schema = {
             "name": "extract_key_points_and_clauses",
@@ -661,7 +661,7 @@ async def extract_key_points_and_clauses(content: str) -> tuple:
                 "required": ["key_points", "quoted_clauses"]
             }
         }
-        
+
         prompt = f"""
 Analyze the following document content and extract key points and quoted clauses.
 Return the response as a JSON object with the following schema:
@@ -670,7 +670,7 @@ Return the response as a JSON object with the following schema:
 CONTENT:
 {content}
 """
-        
+
         rate_limited_openai_call()
         request_payload = {
             "model": OPENAI_MODELS["chat"],
@@ -691,14 +691,14 @@ CONTENT:
             )
         except TypeError:
             response = client.chat.completions.create(**request_payload)
-        
+
         result = response.choices[0].message.content.strip()
-        
+
         # Parse the JSON response
         try:
             parsed = json.loads(result)
             key_points = "\n".join([f"- {point}" for point in parsed.get("key_points", [])])
-            
+
             # Convert to QuotedClause objects
             quoted_clauses = []
             for clause in parsed.get("quoted_clauses", []):
@@ -708,10 +708,10 @@ CONTENT:
                     "line_numbers": clause.get("line_numbers"),
                     "content": clause.get("content", "")
                 })
-            
+
             logger.info("Successfully extracted key points and clauses using JSON mode")
             return key_points, quoted_clauses
-            
+
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON response, falling back to plaintext parsing: {str(e)}")
 
@@ -767,7 +767,7 @@ CONTENT:
 
             logger.error("Plaintext fallback parsing also failed for key points/clauses extraction")
             return "Unable to extract key points", []
-        
+
     except Exception as e:
         logger.error(f"Error extracting key points and clauses: {str(e)}")
         return "Unable to extract key points", []
@@ -781,7 +781,7 @@ async def get_enhanced_context(db, letter_id: str, current_user: CurrentUser) ->
     """
     try:
         logger.info(f"Getting enhanced context for letter: {letter_id}")
-        
+
         # Target letter
         letter = await db.letters.find_one({"_id": ObjectId(letter_id)}) or await db.letters.find_one({"_id": letter_id})
         if not letter:
@@ -838,7 +838,7 @@ async def generate_deep_planning_draft(
     """Generate a comprehensive letter draft with deep planning capabilities."""
     try:
         logger.info(f"Generating deep planning draft for subject: {request.subject}")
-        
+
         # Authorization check
         org_id = request.organization_id or getattr(current_user, "organization_id", None)
         proj_id = request.project_id or (getattr(current_user, "projects", []) or [None])[0]
@@ -850,35 +850,35 @@ async def generate_deep_planning_draft(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
+
         # Validate document IDs
         await validate_document_ids(db, request.document_ids, current_user)
-        
+
         # Extract content from driving documents (including OCR text and summary)
         document_context = await extract_document_content(db, request.document_ids)
-        
+
         # Get vector store context if enabled and requested
         vector_store_context = None
         if request.use_vector_store and VECTOR_STORE_ENABLED:
             vector_store_context = await get_vector_store_context(
-                db, 
+                db,
                 f"{request.subject} {request.context or ''}",
                 request.organization_id or current_user.organization_id,
                 request.project_id
             )
-        
+
         # Find similar letters for reference
         similar_letters = await find_similar_letters(
-            db, 
-            request.subject, 
-            request.organization_id, 
+            db,
+            request.subject,
+            request.organization_id,
             request.project_id,
             current_user
         )
-        
+
         # Extract key points and quoted clauses from document context
         key_points, quoted_clauses = await extract_key_points_and_clauses(document_context)
-        
+
         # Enrich with target letter intelligence if a reply is being drafted
         target_letter_info = ""
         try:
@@ -950,12 +950,12 @@ async def generate_deep_planning_draft(
             target_letter_info=target_letter_info,
             vector_store_context=vector_store_context
         )
-        
+
         # Generate structure summary
         structure_summary = f"Generated draft based on {len(request.document_ids)} driving documents and {len(similar_letters)} similar letters."
         if vector_store_context:
             structure_summary += " Enhanced with vector store context."
-        
+
         # Store the generated draft in the database for future reference.
         # This is best-effort and must not block draft delivery.
         effective_org_id = request.organization_id or getattr(current_user, "organization_id", None)
@@ -994,7 +994,7 @@ async def generate_deep_planning_draft(
             similar_letters=similar_letters,
             structure_summary=structure_summary
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -1021,7 +1021,7 @@ async def get_deep_planning_history(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
+
         query_filter: Dict[str, Any] = {"generated_by": current_user.id}
 
         # Authorization check
@@ -1064,21 +1064,21 @@ async def analyze_document(
             organization_id=org_id,
             project_id=proj_id,
         )
-        
+
         # Read file content
         content = await file.read()
         text_content = content.decode('utf-8', errors='ignore')
-        
+
         # Extract key points and clauses
         key_points, quoted_clauses = await extract_key_points_and_clauses(text_content)
-        
+
         logger.info("Successfully analyzed document")
         return {
             "filename": file.filename,
             "key_points": key_points,
             "quoted_clauses": quoted_clauses
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:

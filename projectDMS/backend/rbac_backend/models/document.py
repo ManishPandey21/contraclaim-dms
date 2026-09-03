@@ -292,12 +292,12 @@ class BulkUploadStatus(BaseModel):
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     results: List[DocumentProcessingResult] = Field(default_factory=list)
-    
+
     # Progress metrics
     progress_percentage: Optional[float] = Field(default=None)
     estimated_completion: Optional[datetime] = Field(default=None)
     processing_rate: Optional[float] = Field(default=None)  # files per minute
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
 
     @model_validator(mode="after")
@@ -315,7 +315,7 @@ class BulkUploadResponse(BaseModel):
     total_files: int = Field(...)
     status: str = Field(...)
     created_at: datetime = Field(default_factory=now_utc)
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})
 
 class DocumentListResponse(BaseModel):
@@ -366,7 +366,7 @@ class CSVTemplateRow(BaseModel):
     sub_tags: Optional[str] = Field(None, description="Comma-separated sub-tags")
     status: Optional[str] = Field(default="draft", description="Document status")
     ocr_enabled: Optional[str] = Field(default="true", description="Enable OCR processing (true/false)")
-    
+
     model_config = ConfigDict(
         populate_by_name=True,
         json_schema_extra={
@@ -420,5 +420,5 @@ class DocumentProcessingTask(BaseModel):
     completed_at: Optional[datetime] = Field(default=None)
     error_message: Optional[str] = Field(default=None)
     result: Optional[Dict[str, Any]] = Field(default=None)
-    
+
     model_config = ConfigDict(json_encoders={datetime: isoformat_z})

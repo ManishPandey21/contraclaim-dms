@@ -33,7 +33,9 @@ class ChunkEnricher:
 
         if use_semantic and not embeddings:
             try:
-                embeddings = await self.embedding_client.embed([c.text_original for c in chunks])
+                embeddings = await self.embedding_client.embed(
+                    [c.text_original for c in chunks]
+                )
             except Exception as exc:
                 logger.warning("Semantic enrichment embedding failed: %s", exc)
                 use_semantic = False
@@ -75,7 +77,9 @@ class ChunkEnricher:
 
         return chunks
 
-    def _top_k_similar(self, idx: int, embeddings: List[List[float]], k: int) -> List[int]:
+    def _top_k_similar(
+        self, idx: int, embeddings: List[List[float]], k: int
+    ) -> List[int]:
         anchor = embeddings[idx]
         scored = []
         for i, emb in enumerate(embeddings):
@@ -84,4 +88,3 @@ class ChunkEnricher:
             scored.append((i, _cosine(anchor, emb)))
         scored.sort(key=lambda pair: pair[1], reverse=True)
         return [i for i, _ in scored[:k]]
-

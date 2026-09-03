@@ -29,80 +29,80 @@ class InvalidUserIdError(UserServiceError):
 
 class UserService:
     """Async service for user CRUD operations with proper error handling"""
-    
+
     def __init__(self, db: Database):
         if db is None:
             raise ValueError("Database connection cannot be None")
         self.db = db
-    
+
     def _validate_user_id(self, user_id: str) -> ObjectId:
         """
         Validate and convert user ID to ObjectId.
-        
+
         Args:
             user_id: User ID string to validate
-            
+
         Returns:
             ObjectId instance
-            
+
         Raises:
             InvalidUserIdError: If ID format is invalid
         """
         if not user_id or not isinstance(user_id, str):
             raise InvalidUserIdError(f"Invalid user ID: {user_id}")
-        
+
         try:
             return ObjectId(user_id)
         except InvalidId as e:
             raise InvalidUserIdError(f"Invalid ObjectId format: {user_id}") from e
-    
+
     def _validate_pagination(self, skip: int, limit: int) -> None:
         """Validate pagination parameters"""
         if not isinstance(skip, int) or skip < 0:
             raise ValueError("Skip must be a non-negative integer")
-        
+
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("Limit must be a positive integer")
-        
+
         if limit > 1000:  # Prevent excessive loads
             raise ValueError("Limit cannot exceed 1000")
-    
+
     def _validate_email(self, email: str) -> None:
         """Basic email validation"""
         if not email or not isinstance(email, str):
             raise ValueError("Email must be a non-empty string")
-        
+
         if "@" not in email or "." not in email:
             raise ValueError("Invalid email format")
-    
+
     def _hash_password(self, password: str) -> str:
         """
         Hash password using bcrypt.
-        
+
         Args:
             password: Plain text password
-            
+
         Returns:
             Hashed password string
         """
         if not password or not isinstance(password, str):
             raise ValueError("Password must be a non-empty string")
-        
+
         if len(password) < 8:
             raise ValueError("Password must be at least 8 characters long")
-        
+
         salt = gensalt()
         hashed = hashpw(password.encode('utf-8'), salt)
         return hashed.decode('utf-8')
-    
+
     def _verify_password(self, password: str, hashed_password: str) -> bool:
         """
         Verify password against hash.
-        
+
         Args:
             password: Plain text password
             hashed_password: Hashed password from database
-            
+
         Returns:
             True if password matches, False otherwise
         """
@@ -111,34 +111,34 @@ class UserService:
                 hashed_bytes = hashed_password.encode('utf-8')
             else:
                 hashed_bytes = hashed_password
-            
+
             return checkpw(password.encode('utf-8'), hashed_bytes)
         except Exception as e:
             logger.error(f"Password verification failed: {e}")
             return False
-    
+
     async def get_users(self, skip: int = 0, limit: int = 50) -> List[Optional[User]]:
         """
         Retrieve multiple users with pagination.
-        
+
         Args:
             skip: Number of users to skip
             limit: Maximum number of users to return
-            
+
         Returns:
             List of User instances
-            
+
         Raises:
             UserServiceError: If retrieval fails
         """
         try:
             self._validate_pagination(skip, limit)
-            
+
             logger.info(f"Retrieving users: skip={skip}, limit={limit}")
-            
+
             cursor = self.db.users.find().skip(skip).limit(limit)
             users = []
-            
+
             async for user_data in cursor:
                 try:
                     if user_data:
@@ -149,100 +149,100 @@ class UserService:
                 except Exception as e:
                     logger.warning(f"Failed to parse user {user_data.get('_id', 'unknown')}: {e}")
                     users.append(None)  # Keep position but mark as failed
-            
+
             logger.info(f"Retrieved {len(users)} users")
             return users
-            
+
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve users: {e}")
             raise UserServiceError(f"User retrieval failed: {str(e)}")
-    
+
     async def get_user(self, user_id: str) -> Optional[User]:
         """
         Retrieve a single user by ID.
-        
+
         Args:
             user_id: User ID string
-            
+
         Returns:
             User instance if found, None otherwise
-            
+
         Raises:
             UserServiceError: If retrieval fails
             InvalidUserIdError: If user ID is invalid
         """
         try:
             user_oid = self._validate_user_id(user_id)
-            
+
             logger.debug(f"Retrieving user: {user_id}")
-            
+
             user_data = await self.db.users.find_one({"_id": user_oid})
-            
+
             if not user_data:
                 logger.info(f"User not found: {user_id}")
                 return None
-            
+
             # Remove sensitive fields
             safe_user_data = {k: v for k, v in user_data.items() if k != 'passwordHash'}
             user = User(**safe_user_data)
             logger.info(f"Retrieved user: {user_id}")
             return user
-            
+
         except InvalidUserIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve user {user_id}: {e}")
             raise UserServiceError(f"User retrieval failed: {str(e)}")
-    
+
     async def get_user_by_email(self, email: str) -> Optional[User]:
         """
         Retrieve a user by email address.
-        
+
         Args:
             email: Email address
-            
+
         Returns:
             User instance if found, None otherwise
-            
+
         Raises:
             UserServiceError: If retrieval fails
         """
         try:
             self._validate_email(email)
-            
+
             logger.debug(f"Retrieving user by email: {email}")
-            
+
             user_data = await self.db.users.find_one({"email": email})
-            
+
             if not user_data:
                 logger.info(f"User not found by email: {email}")
                 return None
-            
+
             # Remove sensitive fields
             safe_user_data = {k: v for k, v in user_data.items() if k != 'passwordHash'}
             user = User(**safe_user_data)
             logger.info(f"Retrieved user by email: {email}")
             return user
-            
+
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"Failed to retrieve user by email {email}: {e}")
             raise UserServiceError(f"User retrieval by email failed: {str(e)}")
-    
+
     async def create_user(self, user: Any, password: str) -> User:
         """
         Create a new user.
-        
+
         Args:
             user: User instance to create
             password: Plain text password
-            
+
         Returns:
             Created user without sensitive fields
-            
+
         Raises:
             UserServiceError: If creation fails
             UserAlreadyExistsError: If user already exists
@@ -315,7 +315,7 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to create user: {e}")
             raise UserServiceError(f"User creation failed: {str(e)}")
-    
+
     async def update_user(self, user_id: str, updated_user) -> Optional[User]:
         """
         Update an existing user.
@@ -323,14 +323,14 @@ class UserService:
         Accepts either:
           - a full/partial Pydantic model with model_dump()
           - a plain dict of fields to update
-        
+
         Args:
             user_id: User ID string
             updated_user: Partial user data (Pydantic model or dict)
-            
+
         Returns:
             Updated user if successful, None if user not found
-            
+
         Raises:
             UserServiceError: If update fails
             InvalidUserIdError: If user ID is invalid
@@ -392,7 +392,7 @@ class UserService:
                 logger.info(f"User not modified (no changes): {user_id}")
             else:
                 logger.info(f"Updated user: {user_id}")
-                
+
                 # If roles were modified, invalidate permission cache and force JWT refresh
                 if "roles" in update_dict:
                     try:
@@ -419,61 +419,61 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {e}")
             raise UserServiceError(f"User update failed: {str(e)}")
-    
+
     async def change_password(self, user_id: str, old_password: str, new_password: str) -> bool:
         """
         Change user password after verifying old password.
-        
+
         Args:
             user_id: User ID string
             old_password: Current password
             new_password: New password
-            
+
         Returns:
             True if password was changed successfully
-            
+
         Raises:
             UserServiceError: If password change fails
             InvalidUserIdError: If user ID is invalid
         """
         try:
             user_oid = self._validate_user_id(user_id)
-            
+
             if not old_password or not new_password:
                 raise ValueError("Both old and new passwords are required")
-            
+
             logger.info(f"Changing password for user: {user_id}")
-            
+
             # Get user with password hash
             user_data = await self.db.users.find_one({"_id": user_oid})
             if not user_data:
                 raise UserNotFoundError(f"User not found: {user_id}")
-            
+
             # Verify old password
             stored_hash = user_data.get('passwordHash')
             if not stored_hash:
                 raise UserServiceError("User has no password set")
-            
+
             if not self._verify_password(old_password, stored_hash):
                 raise ValueError("Current password is incorrect")
-            
+
             # Hash new password
             new_hashed_password = self._hash_password(new_password)
-            
+
             # Update password
             result = await self.db.users.update_one(
                 {"_id": user_oid},
                 {"$set": {"passwordHash": new_hashed_password}}
             )
-            
+
             success = result.modified_count > 0
             if success:
                 logger.info(f"Password changed successfully for user: {user_id}")
             else:
                 logger.warning(f"Password change failed for user: {user_id}")
-            
+
             return success
-            
+
         except InvalidUserIdError:
             raise
         except (ValueError, UserNotFoundError):
@@ -481,7 +481,7 @@ class UserService:
         except Exception as e:
             logger.error(f"Failed to change password for user {user_id}: {e}")
             raise UserServiceError(f"Password change failed: {str(e)}")
-    
+
     async def check_user_dependencies(self, user_id: str) -> List[str]:
         """
         Check whether a user has dependent records that should block deletion.
@@ -520,119 +520,119 @@ class UserService:
         except Exception as e:
             logger.warning(f"check_user_dependencies failed for {user_id}: {e}")
             return []
-    
+
     async def delete_user(self, user_id: str) -> bool:
         """
         Delete a user by ID.
-        
+
         Args:
             user_id: User ID string
-            
+
         Returns:
             True if user was deleted, False if not found
-            
+
         Raises:
             UserServiceError: If deletion fails
             InvalidUserIdError: If user ID is invalid
         """
         try:
             user_oid = self._validate_user_id(user_id)
-            
+
             logger.info(f"Deleting user: {user_id}")
-            
+
             result = await self.db.users.delete_one({"_id": user_oid})
-            
+
             success = result.deleted_count > 0
             if success:
                 logger.info(f"Deleted user: {user_id}")
             else:
                 logger.info(f"User not found for deletion: {user_id}")
-            
+
             return success
-            
+
         except InvalidUserIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete user {user_id}: {e}")
             raise UserServiceError(f"User deletion failed: {str(e)}")
-    
+
     async def authenticate_user(self, email: str, password: str) -> Optional[User]:
         """
         Authenticate user with email and password.
-        
+
         Args:
             email: User email
             password: Plain text password
-            
+
         Returns:
             User instance if authentication successful, None otherwise
-            
+
         Raises:
             UserServiceError: If authentication process fails
         """
         try:
             self._validate_email(email)
-            
+
             if not password:
                 raise ValueError("Password is required")
-            
+
             logger.debug(f"Authenticating user: {email}")
-            
+
             # Get user with password hash
             user_data = await self.db.users.find_one({"email": email})
             if not user_data:
                 logger.info(f"Authentication failed - user not found: {email}")
                 return None
-            
+
             # Verify password
             stored_hash = user_data.get('passwordHash')
             if not stored_hash:
                 logger.warning(f"User {email} has no password set")
                 return None
-            
+
             if not self._verify_password(password, stored_hash):
                 logger.info(f"Authentication failed - invalid password: {email}")
                 return None
-            
+
             # Remove sensitive fields
             safe_user_data = {k: v for k, v in user_data.items() if k != 'passwordHash'}
             user = User(**safe_user_data)
-            
+
             logger.info(f"Authentication successful: {email}")
             return user
-            
+
         except ValueError:
             raise
         except Exception as e:
             logger.error(f"Authentication failed for {email}: {e}")
             raise UserServiceError(f"Authentication failed: {str(e)}")
-    
+
     async def user_exists(self, user_id: str) -> bool:
         """
         Check if a user exists.
-        
+
         Args:
             user_id: User ID string
-            
+
         Returns:
             True if user exists, False otherwise
-            
+
         Raises:
             UserServiceError: If check fails
             InvalidUserIdError: If user ID is invalid
         """
         try:
             user_oid = self._validate_user_id(user_id)
-            
+
             count = await self.db.users.count_documents({"_id": user_oid}, limit=1)
             return count > 0
-            
+
         except InvalidUserIdError:
             raise
         except Exception as e:
             logger.error(f"Failed to check user existence {user_id}: {e}")
             raise UserServiceError(f"User existence check failed: {str(e)}")
-    
+
     def _to_light_user(self, doc: Dict[str, Any]):
         """
         Build a lightweight user-like object with attributes expected by routers.
@@ -797,13 +797,13 @@ class UserService:
     async def get_users_count(self, filter_dict: Optional[Dict[str, Any]] = None) -> int:
         """
         Get count of users matching filter.
-        
+
         Args:
             filter_dict: Optional filter dictionary
-            
+
         Returns:
             Number of matching users
-            
+
         Raises:
             UserServiceError: If count fails
         """
@@ -812,7 +812,7 @@ class UserService:
             count = await self.db.users.count_documents(filter_dict)
             logger.debug(f"User count: {count}")
             return count
-            
+
         except Exception as e:
             logger.error(f"Failed to count users: {e}")
             raise UserServiceError(f"User count failed: {str(e)}")

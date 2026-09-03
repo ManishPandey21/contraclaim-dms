@@ -34,7 +34,11 @@ class ObservabilityService:
         if breakdown_ms:
             total_latency = breakdown_ms.get("total_ms") or sum(breakdown_ms.values())
 
-        safe_query = query if settings.OBSERVABILITY_STORE_RAW_QUERIES else self._redact_query(query)
+        safe_query = (
+            query
+            if settings.OBSERVABILITY_STORE_RAW_QUERIES
+            else self._redact_query(query)
+        )
 
         log = RagRunLog(
             run_id=str(datetime.utcnow().timestamp()),
@@ -52,7 +56,9 @@ class ObservabilityService:
             error=error,
             extra={"counts": counts or {}},
         )
-        await self.db.rag_runs.insert_one(log.model_dump(by_alias=True, exclude_none=True))
+        await self.db.rag_runs.insert_one(
+            log.model_dump(by_alias=True, exclude_none=True)
+        )
 
     @staticmethod
     def _redact_query(query: Optional[str]) -> Optional[str]:
@@ -101,7 +107,9 @@ class ObservabilityService:
                 "$group": {
                     "_id": {"run_type": "$run_type", "strategy": "$strategy"},
                     "latencies": {"$push": "$latency_ms"},
-                    "errors": {"$sum": {"$cond": [{"$ifNull": ["$error", False]}, 1, 0]}},
+                    "errors": {
+                        "$sum": {"$cond": [{"$ifNull": ["$error", False]}, 1, 0]}
+                    },
                     "count": {"$sum": 1},
                     "queries": {"$push": "$query"},
                 }
@@ -114,7 +122,9 @@ class ObservabilityService:
 
         for group in grouped:
             key = f"{group['_id'].get('run_type')}/{group['_id'].get('strategy')}"
-            latencies = [l for l in group.get("latencies", []) if isinstance(l, (int, float))]
+            latencies = [
+                l for l in group.get("latencies", []) if isinstance(l, (int, float))
+            ]
             if latencies:
                 latencies_sorted = sorted(latencies)
                 p50 = latencies_sorted[int(0.5 * (len(latencies_sorted) - 1))]
@@ -123,10 +133,14 @@ class ObservabilityService:
             error_counts[key] = group.get("errors", 0)
             for q in group.get("queries", [])[:5]:
                 if q:
-                    top_queries.append({"query": q, "run_type": group["_id"].get("run_type")})
+                    top_queries.append(
+                        {"query": q, "run_type": group["_id"].get("run_type")}
+                    )
 
         total_runs = sum(stat.get("count", 0) for stat in latency_stats.values())
-        empty_results = await self.db.rag_runs.count_documents({**match, "retrieved": {"$size": 0}})
+        empty_results = await self.db.rag_runs.count_documents(
+            {**match, "retrieved": {"$size": 0}}
+        )
         no_answer_rate = (empty_results / total_runs) if total_runs else 0.0
 
         return AnalyticsResponse(

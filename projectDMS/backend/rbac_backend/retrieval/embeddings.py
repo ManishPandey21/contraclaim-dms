@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 from typing import List, Optional
@@ -26,22 +25,31 @@ class EmbeddingClient:
         try:
             from openai import AsyncOpenAI  # type: ignore
 
-            self._client = AsyncOpenAI(api_key=self.config.openai_api_key, timeout=self.config.openai_timeout)
+            self._client = AsyncOpenAI(
+                api_key=self.config.openai_api_key, timeout=self.config.openai_timeout
+            )
         except Exception as exc:  # pragma: no cover - best-effort import
             logger.warning("Failed to initialize AsyncOpenAI client: %s", exc)
             self._client = None
 
-    async def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+    async def embed(
+        self, texts: List[str], model: Optional[str] = None
+    ) -> List[List[float]]:
         if not texts:
             return []
 
         chosen_model = model or self._model
         if self._client:
             try:
-                response = await self._client.embeddings.create(model=chosen_model, input=texts)
+                response = await self._client.embeddings.create(
+                    model=chosen_model, input=texts
+                )
                 return [item.embedding for item in response.data]
             except Exception as exc:  # pragma: no cover - external service
-                logger.warning("Embedding call failed, falling back to deterministic embedding: %s", exc)
+                logger.warning(
+                    "Embedding call failed, falling back to deterministic embedding: %s",
+                    exc,
+                )
 
         # Deterministic fallback to keep tests/local dev working without network
         return [self._fake_embedding(text) for text in texts]
@@ -51,4 +59,3 @@ class EmbeddingClient:
         values = list(digest[:dims])
         # map to [-1, 1]
         return [((v - 128) / 128.0) for v in values]
-

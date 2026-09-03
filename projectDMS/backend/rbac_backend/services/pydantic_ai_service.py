@@ -290,7 +290,7 @@ class PydanticAIService:
         """Convert PydanticAI result to ParsedDocumentMetadata with proper serialization."""
         summary_lines = getattr(data, "summary_points", None) or []
         summary = None
-        
+
         if summary_lines:
             bullet_lines = [line.strip() for line in summary_lines if line and line.strip()]
             summary = "\n".join(f"- {line}" for line in bullet_lines)
@@ -299,11 +299,11 @@ class PydanticAIService:
 
         keywords = getattr(data, "keywords", None) or []
         additional_keywords = getattr(data, "additional_keywords", None) or []
-        
+
         # FIXED: Convert LetterRef objects to dictionaries for MongoDB compatibility
         references = getattr(data, "references", None) or []
         serialized_references = []
-        
+
         if references:
             for ref in references:
                 if hasattr(ref, 'model_dump'):
@@ -325,7 +325,7 @@ class PydanticAIService:
                     except Exception as e:
                         logger.warning(f"Failed to serialize reference {ref}: {e}")
                         continue
-        
+
         clauses = getattr(data, "contractual_clauses", None) or []
         key_reply_points = getattr(data, "key_reply_points", None) or []
         full_content = getattr(data, "full_content", None) or fallback_text

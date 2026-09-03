@@ -455,4 +455,3 @@ async def get_job(job_id: str) -> JobResult:
             processed_files=job["processed_files"],
             results=[DocumentResult(**res) for res in job["results"]],
         )
-

@@ -25,7 +25,7 @@ router = APIRouter(prefix="/performance", tags=["performance"])
 
 class PerformanceController:
     """Secure performance controller with comprehensive monitoring and authorization."""
-    
+
     def __init__(
         self,
         performance_service: PerformanceService,
@@ -46,12 +46,12 @@ class PerformanceController:
             await self.rate_limiter.check_client_limit(
                 client_ip, cost=1, window_seconds=60, max_requests=30
             )
-            
+
             # Get cached health status (cache for 30 seconds)
             health_data = await self._get_cached_health_status()
-            
+
             return HealthStatus(**health_data)
-            
+
         except Exception as e:
             logger.error(f"Health check error: {str(e)}")
             # Return degraded health status instead of failing completely
@@ -70,27 +70,27 @@ class PerformanceController:
         try:
             # Rate limiting for expensive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=10)
-            
+
             # Authorization check - admin only
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Validate hours parameter
             if hours < 1 or hours > 168:  # Max 1 week
                 raise PerformanceError(
                     "Hours parameter must be between 1 and 168",
                     status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Get cached metrics (cache for 5 minutes for expensive operations)
             metrics = await self._get_cached_performance_metrics(hours)
-            
+
             # Audit log for admin access
             await self.audit_logger.log_performance_metrics_accessed(
                 current_user.id, hours
             )
-            
+
             return PerformanceMetrics(**metrics)
-            
+
         except (PerformanceError, HTTPException):
             raise
         except Exception as e:
@@ -107,18 +107,18 @@ class PerformanceController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Validate limit
             limit = min(max(1, limit), 100)  # Between 1 and 100
-            
+
             # Get cached endpoint stats
             stats = await self._get_cached_endpoint_stats(limit)
-            
+
             return [EndpointStats(**stat) for stat in stats]
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -135,18 +135,18 @@ class PerformanceController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Validate limit
             limit = min(max(1, limit), 200)  # Between 1 and 200
-            
+
             # Get slow queries (cached for 2 minutes)
             slow_queries = await self._get_cached_slow_queries(limit)
-            
+
             return slow_queries
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -161,15 +161,15 @@ class PerformanceController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Get cache statistics
             cache_stats = await self.performance_service.get_cache_statistics()
-            
+
             return cache_stats
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -184,20 +184,20 @@ class PerformanceController:
         try:
             # Rate limiting for destructive operations
             await self.rate_limiter.check_user_limit(current_user.id, cost=20)
-            
+
             # Authorization check - require superadmin for cache clearing
             await self.auth_service.require_permission(current_user, "performance:superadmin")
-            
+
             # Clear cache
             cleared_entries = await self.performance_service.clear_all_caches()
-            
+
             # Audit log for security
             await self.audit_logger.log_cache_cleared(current_user.id, cleared_entries)
-            
+
             return {
                 "message": f"Cache cleared successfully. {cleared_entries} entries removed."
             }
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -212,15 +212,15 @@ class PerformanceController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Get job statistics
             job_stats = await self.performance_service.get_background_job_stats()
-            
+
             return JobStats(**job_stats)
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -237,31 +237,31 @@ class PerformanceController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Authorization check
             await self.auth_service.require_permission(current_user, "performance:admin")
-            
+
             # Validate job ID
             if not job_id or len(job_id) > 100:
                 raise PerformanceError(
                     "Invalid job ID",
                     status.HTTP_400_BAD_REQUEST
                 )
-            
+
             # Cancel job
             success = await self.performance_service.cancel_background_job(job_id)
-            
+
             if not success:
                 raise PerformanceError(
                     "Job not found or cannot be cancelled",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Audit log
             await self.audit_logger.log_job_cancelled(current_user.id, job_id)
-            
+
             return {"message": f"Job {job_id} cancelled successfully"}
-            
+
         except (PerformanceError, HTTPException):
             raise
         except Exception as e:
@@ -299,7 +299,7 @@ async def get_performance_controller() -> PerformanceController:
     auth_service = AuthorizationService()
     rate_limiter = RateLimiter(scope="performance")
     audit_logger = AuditLogger()
-    
+
     return PerformanceController(
         performance_service, auth_service, rate_limiter, audit_logger
     )

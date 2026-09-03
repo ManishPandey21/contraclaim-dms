@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 class BaseAppError(Exception):
     """Base application error class."""
-    
+
     def __init__(
-        self, 
-        message: str, 
+        self,
+        message: str,
         status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR,
         error_code: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None
@@ -49,28 +49,28 @@ class AIServiceError(BaseAppError):
 
 class AuthorizationError(BaseAppError):
     """Authorization-related errors."""
-    
+
     def __init__(self, message: str = "Access denied", **kwargs):
         super().__init__(message, status.HTTP_403_FORBIDDEN, **kwargs)
 
 
 class ValidationError(BaseAppError):
     """Input validation errors."""
-    
+
     def __init__(self, message: str = "Invalid input", **kwargs):
         super().__init__(message, status.HTTP_400_BAD_REQUEST, **kwargs)
 
 
 class RateLimitError(BaseAppError):
     """Rate limiting errors."""
-    
+
     def __init__(self, message: str = "Rate limit exceeded", **kwargs):
         super().__init__(message, status.HTTP_429_TOO_MANY_REQUESTS, **kwargs)
 
 
 class ServiceUnavailableError(BaseAppError):
     """Service unavailable errors."""
-    
+
     def __init__(self, message: str = "Service temporarily unavailable", **kwargs):
         super().__init__(message, status.HTTP_503_SERVICE_UNAVAILABLE, **kwargs)
 
@@ -144,7 +144,7 @@ def handle_exceptions(func):
                     "error_id": error_id
                 }
             )
-    
+
     @wraps(func)
     def sync_wrapper(*args, **kwargs):
         try:
@@ -197,7 +197,7 @@ def handle_exceptions(func):
                     "error_id": error_id
                 }
             )
-    
+
     # Return appropriate wrapper based on function type
     if asyncio.iscoroutinefunction(func):
         return async_wrapper
@@ -207,12 +207,12 @@ def handle_exceptions(func):
 
 class ErrorHandler:
     """Centralized error handling service."""
-    
+
     @staticmethod
     def handle_database_error(error: Exception, operation: str) -> BaseAppError:
         """Handle database-related errors consistently."""
         error_msg = str(error).lower()
-        
+
         if "timeout" in error_msg:
             return ServiceUnavailableError(
                 "Database connection timeout",
@@ -234,16 +234,16 @@ class ErrorHandler:
                 "Database operation failed",
                 details={"operation": operation}
             )
-    
+
     @staticmethod
     def handle_external_api_error(
-        error: Exception, 
-        service: str, 
+        error: Exception,
+        service: str,
         operation: str
     ) -> BaseAppError:
         """Handle external API errors consistently."""
         error_msg = str(error).lower()
-        
+
         if "rate limit" in error_msg or "429" in error_msg:
             return RateLimitError(
                 f"{service} rate limit exceeded",
@@ -265,12 +265,12 @@ class ErrorHandler:
                 f"{service} service error",
                 details={"service": service, "operation": operation}
             )
-    
+
     @staticmethod
     def handle_file_operation_error(error: Exception, operation: str) -> BaseAppError:
         """Handle file operation errors consistently."""
         error_msg = str(error).lower()
-        
+
         if "permission" in error_msg:
             return ServiceUnavailableError(
                 "File system permission denied",
@@ -298,7 +298,7 @@ class ErrorHandler:
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Global exception handler for unhandled exceptions."""
     error_id = id(exc)
-    
+
     # Log the error with context
     logger.error(
         f"Unhandled exception (ID: {error_id}): {str(exc)}",
@@ -309,7 +309,7 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
             "traceback": traceback.format_exc()
         }
     )
-    
+
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={

@@ -63,7 +63,7 @@ from ..dependencies import get_notification_service
 
 
 
-from ..services.conversation_service import ConversationService  
+from ..services.conversation_service import ConversationService
 from ..services.strategy_context_service import StrategyContextService
 
 
@@ -80,7 +80,7 @@ from ..models.letter import (
 
 
 
-    Letter, LetterCreate, LetterUpdate, ConversationTree, 
+    Letter, LetterCreate, LetterUpdate, ConversationTree,
 
 
 
@@ -172,7 +172,7 @@ class LetterController:
 
 
 
-    
+
 
 
 
@@ -264,7 +264,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -284,7 +284,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -392,7 +392,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -412,7 +412,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -420,7 +420,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -496,7 +496,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -508,7 +508,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -528,7 +528,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -556,7 +556,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -576,7 +576,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -584,7 +584,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -672,7 +672,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -692,7 +692,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -704,7 +704,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -724,7 +724,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -732,7 +732,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -800,7 +800,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -820,7 +820,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -828,7 +828,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -848,7 +848,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -856,7 +856,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -924,7 +924,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -944,7 +944,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -952,7 +952,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -972,7 +972,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -980,7 +980,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1060,7 +1060,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1076,7 +1076,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1088,7 +1088,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1104,7 +1104,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1116,7 +1116,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1136,7 +1136,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1144,7 +1144,7 @@ class LetterController:
 
 
 
-            
+
 
 
 
@@ -1272,7 +1272,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1292,7 +1292,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1312,7 +1312,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1616,7 +1616,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1644,7 +1644,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1684,7 +1684,7 @@ class LetterController:
 
 
 
-                "Previous letter not found", 
+                "Previous letter not found",
 
 
 
@@ -1696,7 +1696,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1708,7 +1708,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1724,7 +1724,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1752,7 +1752,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1824,7 +1824,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -1852,7 +1852,7 @@ class LetterController:
 
 
 
-        
+
 
 
 
@@ -2020,7 +2020,7 @@ async def get_letters(
 
 
 
-    
+
 
 
 
@@ -2390,7 +2390,7 @@ async def reparent_letter(
 
 
 
-    
+
 
 
 
@@ -2781,4 +2781,3 @@ async def complete_letter(
 
 
     )
-

@@ -16,40 +16,40 @@ logger = logging.getLogger(__name__)
 
 class OpenAIService:
     """Service for OpenAI API interactions"""
-    
+
     def __init__(self, config: DocumentProcessingConfig):
         self.config = config
         self._client = self._initialize_client()
-    
+
     def _initialize_client(self) -> AsyncOpenAI:
         """Initialize OpenAI client"""
         try:
             api_key = self._get_api_key()
             if not api_key:
                 raise DocumentProcessingError("OpenAI API key not configured")
-            
+
             return AsyncOpenAI(api_key=api_key, timeout=self.config.openai_timeout)
-            
+
         except ImportError:
             raise DocumentProcessingError("OpenAI library not available")
         except Exception as e:
             raise DocumentProcessingError(f"Failed to initialize OpenAI client: {e}")
-    
+
     def _get_api_key(self) -> Optional[str]:
         """Get OpenAI API key from settings or environment"""
         return self.config.openai_api_key
-    
+
     async def upload_file(self, file_path: str, max_retries: int = 3) -> str:
         """
         Upload file to OpenAI and return file ID.
-        
+
         Args:
             file_path: Path to file to upload
             max_retries: Maximum number of retry attempts
-            
+
         Returns:
             OpenAI file ID
-            
+
         Raises:
             DocumentProcessingError: If upload fails
         """
@@ -78,29 +78,29 @@ class OpenAIService:
                     await loop.run_in_executor(None, file_handle.close)
 
                 return response.id
-                
+
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise DocumentProcessingError(f"File upload failed after {max_retries} retries: {e}")
-                
+
                 await asyncio.sleep(2 ** attempt)  # Exponential backoff
-    
+
     async def process_document(self, file_id: str) -> str:
         """
         Process document using OpenAI and return extracted content.
-        
+
         Args:
             file_id: OpenAI file ID
-            
+
         Returns:
             Extracted content from document
-            
+
         Raises:
             DocumentProcessingError: If processing fails
         """
         try:
             extraction_prompt = self._get_extraction_prompt()
-            
+
             response = await self._client.responses.create(
                 model=self._get_model_name(),
                 input=[
@@ -126,7 +126,7 @@ class OpenAIService:
                 raise DocumentProcessingError("No textual content extracted from document")
 
             return normalized_content
-            
+
         except Exception as e:
             # Log the detailed error for debugging
             logger.error(f"OpenAI API call failed with file_id {file_id}: {str(e)}")
@@ -232,13 +232,13 @@ class OpenAIService:
                 model=self.config.openai_embedding_model,
                 input=texts
             )
-            
+
             embeddings = [data.embedding for data in response.data]
             return embeddings
-            
+
         except Exception as e:
             raise DocumentProcessingError(f"Embedding creation failed: {e}")
-    
+
     async def cleanup_file(self, file_id: str) -> None:
         """Clean up uploaded file from OpenAI"""
         try:
@@ -246,7 +246,7 @@ class OpenAIService:
         except Exception as e:
             # Log but don't raise - cleanup is best-effort
             pass
-    
+
     def _get_extraction_prompt(self) -> str:
         """Get extraction prompt for document processing"""
         return self._expanded_extraction_prompt()
@@ -291,7 +291,7 @@ class OpenAIService:
             f"26) extracted_tags: [select one or more from: {tag_options}; write 'null' if none]\n"
             f"27) extracted_subTags: [select one or more from: {subtag_options}; write 'null' if none]\n"
         )
-    
+
     def _get_model_name(self) -> str:
         """Get model name from config or default"""
         return getattr(self.config, 'openai_model', 'gpt-4o')

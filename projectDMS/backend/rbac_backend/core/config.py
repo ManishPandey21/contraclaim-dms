@@ -31,7 +31,7 @@ class Settings(BaseSettings):
         "SMTP_USERNAME",
         "SMTP_PASSWORD",
     )
-    
+
     # FIX: Use ClassVar for LOGGING_CONFIG since it's not a model field
     LOGGING_CONFIG: ClassVar[Dict[str, Any]] = {
         'version': 1,
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
             'handlers': ['console'],
         }
     }
-    
+
     DATABASE_URL: str = Field(
         default="mongodb://localhost:27017/contraclaim",
         validation_alias="DATABASE_URL",
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     LOCAL_MONGODB_URI: Optional[str] = Field(default=None, validation_alias="LOCAL_MONGODB_URI")
     APP_REDIS_URL: Optional[str] = Field(default=None, validation_alias="APP_REDIS_URL")
     RUNTIME_STATE_REDIS_URL: Optional[str] = Field(default=None, validation_alias="RUNTIME_STATE_REDIS_URL")
-    
+
     # Authentication
     ENVIRONMENT: str = Field(default="development", validation_alias="ENVIRONMENT")
     ENABLE_API_DOCS: bool = Field(default=True, validation_alias="ENABLE_API_DOCS")
@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     # Setting this false is an explicit availability-over-revocation tradeoff;
     # deployments without a Redis URL configured are unaffected either way.
     AUTH_SESSION_FAIL_CLOSED: bool = Field(default=True, validation_alias="AUTH_SESSION_FAIL_CLOSED")
-    
+
     # CORS Configuration
     CORS_ORIGINS: list[str] = Field(
         default=[
@@ -130,22 +130,22 @@ class Settings(BaseSettings):
             "https://127.0.0.1:5173",
         ]
     )
-    
+
     # Raw env override to avoid JSON decoding at source layer for list[str]
     CORS_ORIGINS_RAW: str | None = Field(default=None, validation_alias="CORS_ORIGINS")
-    
+
     # AWS Configuration
     AWS_ACCESS_KEY_ID: str = Field(default="", validation_alias="AWS_ACCESS_KEY_ID")
     AWS_SECRET_ACCESS_KEY: str = Field(default="", validation_alias="AWS_SECRET_ACCESS_KEY")
     AWS_REGION: str = Field(default="ap-south-1", validation_alias="AWS_REGION")
     AWS_BUCKET_NAME: str = Field(default="", validation_alias="AWS_BUCKET_NAME")
-    
+
     # Local uploads directory (absolute path in production recommended)
     UPLOADS_DIR: str = Field(default="uploads", validation_alias="UPLOADS_DIR")
-    
+
     # Secure uploads directory used by file service
     SECURE_UPLOADS_DIR: str = Field(default="backend/uploads", validation_alias="SECURE_UPLOADS_DIR")
-    
+
     # Bulk upload configuration
     BULK_UPLOAD_MAX_FILES: int = Field(default=100, validation_alias="BULK_UPLOAD_MAX_FILES")
     BULK_UPLOAD_MAX_SIZE_MB: int = Field(default=500, validation_alias="BULK_UPLOAD_MAX_SIZE_MB")
@@ -193,7 +193,7 @@ class Settings(BaseSettings):
     )
     UPLOAD_MAX_CONCURRENT_PER_USER: int = Field(default=3, validation_alias="UPLOAD_MAX_CONCURRENT_PER_USER")
     UPLOAD_MAX_CONCURRENT_PER_ORG: int = Field(default=20, validation_alias="UPLOAD_MAX_CONCURRENT_PER_ORG")
-    
+
     # Allowed MIME types for documents and enclosures
     # Set true only when the deployed clamd has been shown to scan *inside* a
     # RAR - an EICAR-in-RAR detection, not a config line or a linked library.
@@ -210,14 +210,14 @@ class Settings(BaseSettings):
             "application/zip",
         }
     )
-    
+
     ALLOWED_CONTRACT_MIMES: set[str] = Field(
         default={
             "application/pdf",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         }
     )
-    
+
     ALLOWED_ENCLOSURE_MIMES: set[str] = Field(
         default={
             "application/pdf",
@@ -227,7 +227,7 @@ class Settings(BaseSettings):
             "application/zip",
         }
     )
-    
+
     # Antivirus Configuration
     ANTIVIRUS_ENABLED: bool = Field(default=False, validation_alias="ANTIVIRUS_ENABLED")
     # P0-005: production launch requires upload antivirus to be enabled and
@@ -240,11 +240,11 @@ class Settings(BaseSettings):
     CLAMAV_PORT: int = Field(default=3310, validation_alias="CLAMAV_PORT")
     CLAMAV_TIMEOUT: int = Field(default=30, validation_alias="CLAMAV_TIMEOUT")
     CLAMAV_FAIL_OPEN: bool = Field(default=True, validation_alias="CLAMAV_FAIL_OPEN")
-    
+
     # Vector storage toggles
     VECTOR_DUAL_WRITE_ENABLED: bool = Field(default=True, validation_alias="VECTOR_DUAL_WRITE_ENABLED")
     VECTOR_VERIFY_AFTER_WRITE: bool = Field(default=False, validation_alias="VECTOR_VERIFY_AFTER_WRITE")
-    
+
     # OpenAI Configuration for AI Assistant
     OPENAI_API_KEY: str = Field(default="", validation_alias="OPENAI_API_KEY")
     ASSISTANT_ID: str = Field(default="", validation_alias="ASSISTANT_ID")
@@ -333,7 +333,7 @@ class Settings(BaseSettings):
     ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT: float = Field(default=5.0, ge=0, le=100, validation_alias="ARBITRATION_ENGINE_MAX_FALLBACK_RATE_PERCENT")
     ARBITRATION_ENGINE_MAX_PAUSE_HOURS: float = Field(default=72.0, ge=1, le=8760, validation_alias="ARBITRATION_ENGINE_MAX_PAUSE_HOURS")
     ARBITRATION_REVIEWER_ROLE_MATRIX: str = Field(default="", validation_alias="ARBITRATION_REVIEWER_ROLE_MATRIX")
-    
+
     # FalkorDB / RedisGraph configuration
     FALKORDB_URL: str = Field(default="redis://localhost:6380", validation_alias="FALKORDB_URL")
     FALKORDB_ENABLED: bool = Field(default=True, validation_alias="FALKORDB_ENABLED")
@@ -353,7 +353,7 @@ class Settings(BaseSettings):
     GRAPHITI_BASE_URL: Optional[str] = Field(default=None, validation_alias="GRAPHITI_BASE_URL")
     GRAPHITI_API_KEY: Optional[str] = Field(default=None, validation_alias="GRAPHITI_API_KEY")
     GRAPHITI_WORKSPACE: Optional[str] = Field(default="ContraClaim", validation_alias="GRAPHITI_WORKSPACE")
-    
+
     # SMTP Configuration for Email Sharing
     SMTP_HOST: str = Field(default="smtp.gmail.com", validation_alias="SMTP_HOST")
     SMTP_PORT: int = Field(default=587, validation_alias="SMTP_PORT")
@@ -364,7 +364,7 @@ class Settings(BaseSettings):
         default="",
         validation_alias="CONTACT_RECIPIENT_EMAIL",
     )
-    
+
     # Payment gateway configuration
     PAYMENT_PROVIDER: str = Field(default="noop", validation_alias="PAYMENT_PROVIDER")
     RAZORPAY_KEY_ID: str = Field(default="", validation_alias="RAZORPAY_KEY_ID")
@@ -526,7 +526,7 @@ class Settings(BaseSettings):
     )
     BACKUP_S3_BUCKET: str = Field(default="", validation_alias="BACKUP_S3_BUCKET")
     BACKUP_S3_PREFIX: str = Field(default="contraclaim/backups", validation_alias="BACKUP_S3_PREFIX")
-    
+
     @field_validator('CORS_ORIGINS', 'ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='before')
     @classmethod
     def parse_json_strings(cls, v):
@@ -545,7 +545,7 @@ class Settings(BaseSettings):
                     return [s.strip().strip('"\'')]
                 return []
         return v
-    
+
     @field_validator('ALLOWED_DOCUMENT_MIMES', 'ALLOWED_CONTRACT_MIMES', 'ALLOWED_ENCLOSURE_MIMES', mode='after')
     @classmethod
     def convert_to_set(cls, v):
@@ -553,7 +553,7 @@ class Settings(BaseSettings):
         if isinstance(v, list):
             return set(v)
         return v
-    
+
     @field_validator(*CRITICAL_FIELDS, mode="before")
     @classmethod
     def _ensure_not_blank(cls, value: str, info: ValidationInfo) -> str:
@@ -562,10 +562,10 @@ class Settings(BaseSettings):
             if stripped:
                 return stripped
         raise ValueError(f"{info.field_name} cannot be empty")
-    
+
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
-        
+
         # Apply env override for CORS_ORIGINS via string to avoid JSON decode in settings source
         raw = getattr(self, "CORS_ORIGINS_RAW", None)
         if isinstance(raw, str):
@@ -618,7 +618,7 @@ class Settings(BaseSettings):
         if self.RAR_UPLOAD_ENABLED:
             self.ALLOWED_DOCUMENT_MIMES.add(rar_mime)
             self.ALLOWED_ENCLOSURE_MIMES.add(rar_mime)
-    
+
     def _log_default_usage(self) -> None:
         missing = [field for field in self.CRITICAL_FIELDS if field not in self.model_fields_set]
         if missing:
@@ -852,7 +852,7 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "Invalid production configuration: " + "; ".join(production_errors)
                 )
-    
+
     # Pydantic v2 configuration
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -870,12 +870,12 @@ settings = Settings()
 def configure_logging():
     """Configure logging using the LOGGING_CONFIG from settings."""
     import logging.config
-    
+
     # Create logs directory if it doesn't exist
     log_dir = os.path.dirname(Settings.LOGGING_CONFIG['handlers']['file']['filename'])
     if log_dir and not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    
+
     # LOG_LEVEL is set in every deployed environment; honour it instead of
     # leaving it as a setting that looks configured but is never read.
     requested_level = str(os.getenv("LOG_LEVEL", "INFO")).upper()

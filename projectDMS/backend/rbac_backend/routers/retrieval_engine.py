@@ -17,8 +17,19 @@ from ..ingestion.models import IngestionJob, IngestionJobCreate
 from ..ingestion.service import IngestionService
 from ..observability.models import AnalyticsRequest
 from ..observability.service import ObservabilityService
-from ..retrieval.dependencies import get_embedding_client, get_llm_generator, get_vector_client
-from ..retrieval.models import ContractQARequest, ContractQAResponse, RagRequest, RagResponse, SearchRequest, SearchResponse
+from ..retrieval.dependencies import (
+    get_embedding_client,
+    get_llm_generator,
+    get_vector_client,
+)
+from ..retrieval.models import (
+    ContractQARequest,
+    ContractQAResponse,
+    RagRequest,
+    RagResponse,
+    SearchRequest,
+    SearchResponse,
+)
 from ..retrieval.reranker import RerankerService
 from ..retrieval.service import RetrievalService
 from ..retrieval.reconcile import VectorReconciler
@@ -33,7 +44,9 @@ async def get_observability(db=Depends(get_db)) -> ObservabilityService:
     return ObservabilityService(db)
 
 
-async def get_retrieval_service(db=Depends(get_db), observability: ObservabilityService = Depends(get_observability)) -> RetrievalService:
+async def get_retrieval_service(
+    db=Depends(get_db), observability: ObservabilityService = Depends(get_observability)
+) -> RetrievalService:
     llm_generator = get_llm_generator()
     return RetrievalService(
         db=db,
@@ -46,7 +59,9 @@ async def get_retrieval_service(db=Depends(get_db), observability: Observability
     )
 
 
-async def get_ingestion_service(db=Depends(get_db), observability: ObservabilityService = Depends(get_observability)) -> IngestionService:
+async def get_ingestion_service(
+    db=Depends(get_db), observability: ObservabilityService = Depends(get_observability)
+) -> IngestionService:
     return IngestionService(db=db, observability=observability)
 
 
@@ -68,14 +83,18 @@ async def get_reconciler(
     embedding_client=Depends(get_embedding_client),
     vector_client=Depends(get_vector_client),
 ) -> VectorReconciler:
-    return VectorReconciler(db=db, embedding_client=embedding_client, vector_client=vector_client)
+    return VectorReconciler(
+        db=db, embedding_client=embedding_client, vector_client=vector_client
+    )
 
 
 async def get_policy_service(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-def _require_scope_values(org_id: Optional[str], project_id: Optional[str]) -> tuple[str, str]:
+def _require_scope_values(
+    org_id: Optional[str], project_id: Optional[str]
+) -> tuple[str, str]:
     """Reject blank/missing scope before it reaches the deny-by-default policy.
 
     SearchFilters types ``org_id``/``project_id`` as required strings, but empty
@@ -129,7 +148,11 @@ async def create_ingestion_job(
     policy: PolicyService = Depends(get_policy_service),
 ) -> IngestionJob:
     await _authorize_scope(
-        current_user, payload.org_id, payload.project_id, permission=Permissions.DOCUMENT_UPLOAD, policy=policy
+        current_user,
+        payload.org_id,
+        payload.project_id,
+        permission=Permissions.DOCUMENT_UPLOAD,
+        policy=policy,
     )
     job = await ingestion_service.create_job(payload)
     return job
@@ -144,7 +167,9 @@ async def get_ingestion_job(
 ) -> IngestionJob:
     job = await ingestion_service.get_job(job_id)
     if not job:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Job not found"
+        )
     await _authorize_scope(current_user, job.org_id, job.project_id, policy=policy)
     return job
 
@@ -156,7 +181,9 @@ async def search(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ) -> SearchResponse:
-    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
+    await _authorize_scope(
+        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+    )
     return await retrieval_service.search(request, current_user)
 
 
@@ -167,7 +194,9 @@ async def rag(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ) -> RagResponse:
-    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
+    await _authorize_scope(
+        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+    )
     return await retrieval_service.rag(request, current_user)
 
 
@@ -182,18 +211,36 @@ async def contract_qa(
     request.filters.metadata["document_type"] = "contract"
     # Authorize the claimed scope up front so a foreign document_id cannot be
     # probed via the lookup below before tenant membership is verified.
-    await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
+    await _authorize_scope(
+        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+    )
     contract_service = ContractService()
     if request.filters.document_id:
-        document = await contract_service.get_contract_document(request.filters.document_id, current_user)
+        document = await contract_service.get_contract_document(
+            request.filters.document_id, current_user
+        )
         if str(document.get("status") or "").lower() != "completed":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Contract is not ready for QA")
-        request.filters.org_id = str(document.get("organization_id") or request.filters.org_id)
-        request.filters.project_id = str(document.get("project_id") or request.filters.project_id)
-        request.filters.document_id = str(document.get("_id") or request.filters.document_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Contract is not ready for QA",
+            )
+        request.filters.org_id = str(
+            document.get("organization_id") or request.filters.org_id
+        )
+        request.filters.project_id = str(
+            document.get("project_id") or request.filters.project_id
+        )
+        request.filters.document_id = str(
+            document.get("_id") or request.filters.document_id
+        )
         # Re-authorize against the document's actual scope: the resolved
         # org/project may differ from the claimed filters.
-        await _authorize_scope(current_user, request.filters.org_id, request.filters.project_id, policy=policy)
+        await _authorize_scope(
+            current_user,
+            request.filters.org_id,
+            request.filters.project_id,
+            policy=policy,
+        )
     return await retrieval_service.contract_iterative_qa(request, current_user)
 
 
@@ -204,7 +251,9 @@ async def agent(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
 ) -> AgentResponse:
-    await _authorize_scope(current_user, request.org_id, request.project_id, policy=policy)
+    await _authorize_scope(
+        current_user, request.org_id, request.project_id, policy=policy
+    )
     return await agent_service.run(request, current_user)
 
 
@@ -222,16 +271,26 @@ async def list_logs(
     # Only superadmins can fetch unscoped logs
     if org_id and project_id:
         await _authorize_scope(
-            current_user, org_id, project_id, permission=Permissions.REPORT_VIEW, policy=policy
+            current_user,
+            org_id,
+            project_id,
+            permission=Permissions.REPORT_VIEW,
+            policy=policy,
         )
     elif "superadmin" not in (current_user.roles or []):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require scope")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require scope"
+        )
     try:
         start = datetime.fromisoformat(from_ts) if from_ts else None
         end = datetime.fromisoformat(to_ts) if to_ts else None
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid datetime format") from exc
-    return await observability.get_logs(org_id=org_id, project_id=project_id, run_type=run_type, start=start, end=end)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid datetime format"
+        ) from exc
+    return await observability.get_logs(
+        org_id=org_id, project_id=project_id, run_type=run_type, start=start, end=end
+    )
 
 
 @router.post("/observability/analytics")
@@ -243,10 +302,17 @@ async def analytics(
 ):
     if request.org_id and request.project_id:
         await _authorize_scope(
-            current_user, request.org_id, request.project_id, permission=Permissions.REPORT_VIEW, policy=policy
+            current_user,
+            request.org_id,
+            request.project_id,
+            permission=Permissions.REPORT_VIEW,
+            policy=policy,
         )
     elif "superadmin" not in (current_user.roles or []):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Analytics require org_id and project_id")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Analytics require org_id and project_id",
+        )
     return await observability.analytics(request)
 
 
@@ -260,5 +326,13 @@ async def reconcile_vectors(
     current_user: CurrentUser = Depends(get_current_user),
 ):
     if "superadmin" not in (current_user.roles or []):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin required for reconciliation")
-    return await reconciler.reconcile_document(document_id=document_id, org_id=org_id, project_id=project_id, namespace=namespace)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Superadmin required for reconciliation",
+        )
+    return await reconciler.reconcile_document(
+        document_id=document_id,
+        org_id=org_id,
+        project_id=project_id,
+        namespace=namespace,
+    )

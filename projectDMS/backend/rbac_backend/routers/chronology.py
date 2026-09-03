@@ -402,4 +402,3 @@ async def export_chronology_evidence_index(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="chronology-evidence-index.csv"'},
     )
-

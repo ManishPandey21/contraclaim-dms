@@ -48,34 +48,34 @@ class InvalidLetterTransitionError(LetterServiceError):
 
 class LetterService:
     """Async service for letter CRUD operations with proper error handling"""
-    
+
     def __init__(self, db: Database, notification_service: Optional[NotificationService] = None):
         if db is None:
             raise ValueError("Database connection cannot be None")
         self.db = db
         self.notification_service = notification_service
-    
+
     def _validate_letter_id(self, letter_id: str) -> ObjectId:
         """
         Validate and convert letter ID to ObjectId.
-        
+
         Args:
             letter_id: Letter ID string to validate
-            
+
         Returns:
             ObjectId instance
-            
+
         Raises:
             InvalidLetterIdError: If ID format is invalid
         """
         if not letter_id or not isinstance(letter_id, str):
             raise InvalidLetterIdError(f"Invalid letter ID: {letter_id}")
-        
+
         try:
             return ObjectId(letter_id)
         except InvalidId as e:
             raise InvalidLetterIdError(f"Invalid ObjectId format: {letter_id}") from e
-    
+
     async def get_letters(
         self,
         skip: int = 0,
@@ -684,39 +684,39 @@ class LetterService:
     async def add_comment(self, letter_id: str, comment: str, user_id: Optional[str] = None) -> bool:
         """
         Add a comment to a letter.
-        
+
         Args:
             letter_id: Letter ID string
             comment: Comment text to add
             user_id: Optional user ID who added the comment
-            
+
         Returns:
             True if comment was added successfully
-            
+
         Raises:
             LetterServiceError: If adding comment fails
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
-            
+
             if not comment or not isinstance(comment, str):
                 raise ValueError("Comment must be a non-empty string")
-            
+
             # Create comment object with metadata
             comment_obj = {
                 "text": comment.strip(),
                 "timestamp": datetime.now(timezone.utc),
                 "user_id": user_id
             }
-            
+
             logger.info(f"Adding comment to letter: {letter_id}")
-            
+
             result = await self.db.letters.update_one(
                 {"_id": letter_oid},
                 {"$push": {"comments": comment_obj}}
             )
-            
+
             success = result.matched_count > 0
             if success:
                 logger.info(f"Added comment to letter: {letter_id}")
@@ -730,9 +730,9 @@ class LetterService:
                 )
             else:
                 logger.warning(f"Letter not found when adding comment: {letter_id}")
-            
+
             return success
-            
+
         except InvalidLetterIdError:
             raise
         except ValueError:
@@ -740,7 +740,7 @@ class LetterService:
         except Exception as e:
             logger.error(f"Failed to add comment to letter {letter_id}: {e}")
             raise LetterServiceError(f"Add comment failed: {str(e)}")
-    
+
     async def delete_letter(self, letter_id: str) -> bool:
         """
         Delete a letter by ID, including its FalkorDB graph node.
@@ -834,7 +834,7 @@ class LetterService:
                 letter_oid,
                 exc,
             )
-    
+
     async def change_status(
         self,
         letter_id: str,
@@ -967,24 +967,24 @@ class LetterService:
             raise LetterServiceError(f"Status change failed: {str(e)}")
 
     async def request_input(
-        self, 
-        letter_id: str, 
-        requested_from: str, 
+        self,
+        letter_id: str,
+        requested_from: str,
         message: str,
         user_id: Optional[str] = None
     ) -> bool:
         """
         Request input from a user for a letter.
-        
+
         Args:
             letter_id: Letter ID string
             requested_from: User ID or name to request input from
             message: Input request message
             user_id: Optional user ID who requested the input
-            
+
         Returns:
             True if input request was recorded successfully
-            
+
         Raises:
             LetterServiceError: If request fails
             InvalidLetterIdError: If letter ID is invalid
@@ -992,54 +992,54 @@ class LetterService:
         try:
             if not requested_from or not isinstance(requested_from, str):
                 raise ValueError("requested_from must be a non-empty string")
-            
+
             if not message or not isinstance(message, str):
                 raise ValueError("message must be a non-empty string")
-            
+
             # Create input request comment
             request_comment = f"Input requested from {requested_from}: {message}"
-            
+
             logger.info(f"Recording input request for letter {letter_id}")
-            
+
             # Add as special comment with metadata
             success = await self.add_comment(letter_id, request_comment, user_id)
-            
+
             # TODO: In a real application, you might want to:
             # 1. Add this request to a separate "requests" collection
             # 2. Send notification to the requested user
             # 3. Track request status and responses
-            
+
             if success:
                 logger.info(f"Input request recorded for letter {letter_id}")
-            
+
             return success
-            
+
         except (InvalidLetterIdError, ValueError):
             raise
         except Exception as e:
             logger.error(f"Failed to request input for letter {letter_id}: {e}")
             raise LetterServiceError(f"Input request failed: {str(e)}")
-    
+
     async def letter_exists(self, letter_id: str) -> bool:
         """
         Check if a letter exists.
-        
+
         Args:
             letter_id: Letter ID string
-            
+
         Returns:
             True if letter exists, False otherwise
-            
+
         Raises:
             LetterServiceError: If check fails
             InvalidLetterIdError: If letter ID is invalid
         """
         try:
             letter_oid = self._validate_letter_id(letter_id)
-            
+
             count = await self.db.letters.count_documents({"_id": letter_oid}, limit=1)
             return count > 0
-            
+
         except InvalidLetterIdError:
             raise
         except Exception as e:

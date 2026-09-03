@@ -100,10 +100,10 @@ async def get_roles(
         elif "projectadmin" in role_names:
             filters["scope"] = "project"
         pagination = {'skip': skip, 'limit': limit}
-        
+
         roles, total_count = await role_service.get_roles_paginated(filters, pagination)
         return await role_service.filter_roles_for_user(current_user, roles)
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -131,7 +131,7 @@ async def get_role(
         if not await role_service.can_view_role(current_user, role):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         return role
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -171,7 +171,7 @@ async def create_role(
             after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except HTTPException:
@@ -219,7 +219,7 @@ async def update_role(
             after=role.model_dump(mode="json") if hasattr(role, "model_dump") else None,
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except HTTPException:
@@ -270,7 +270,7 @@ async def delete_role(
             before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
         )
         return {"message": "Role deleted successfully"}
-        
+
     except HTTPException:
         raise
     except RoleServiceError as e:
@@ -301,7 +301,7 @@ async def get_role_permissions(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this role")
         permissions = await role_service.get_role_permissions(role_id)
         return permissions
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -348,7 +348,7 @@ async def add_role_permission(
             metadata={"permission_id": permission_id},
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except HTTPException:
@@ -397,7 +397,7 @@ async def remove_role_permission(
             metadata={"permission_id": permission_id},
         )
         return role
-        
+
     except RoleServiceError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e))
     except HTTPException:

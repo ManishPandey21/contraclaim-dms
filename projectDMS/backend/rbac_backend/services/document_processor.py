@@ -445,7 +445,7 @@ class DocumentProcessor:
             f"({input_path.name})"
         )
 
-    
+
     async def process_document(
         self,
         pdf_path: str,
@@ -478,7 +478,7 @@ class DocumentProcessor:
             DocumentProcessingError: If processing fails
         """
         start_time = time.time()
-        
+
         logger.info("[document_pipeline] Starting document processing for %s", pdf_path)
 
         processed_path: Optional[Path] = None
@@ -620,7 +620,7 @@ class DocumentProcessor:
                 # A failed extraction is never publishable.
                 publishable=False,
             )
-            
+
         finally:
             # Single owner of the database connection, so it is closed exactly
             # once per document and on every path - including a failure that
@@ -741,7 +741,7 @@ class DocumentProcessor:
             if len(keywords) >= 20:
                 break
         return keywords
-    
+
     async def _save_results(
         self,
         extracted_content: str,
@@ -773,9 +773,9 @@ class DocumentProcessor:
                 embedding_text=text_for_embedding,
                 skip_embeddings=skip_embeddings,
             )
-            
+
             return chunks_created
-            
+
         except Exception as e:
             logger.error(f"Failed to save results: {e}")
             raise DocumentProcessingError(f"Failed to save results: {str(e)}")
@@ -979,7 +979,3 @@ async def process_document(
 
 
 __all__ = ["DocumentProcessor", "create_document_processor", "process_document", "DocumentProcessorError"]
-
-
-
-

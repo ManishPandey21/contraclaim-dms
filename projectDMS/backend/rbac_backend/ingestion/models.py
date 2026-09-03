@@ -92,9 +92,18 @@ class Chunk(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     @classmethod
-    def deterministic_id(cls, document_id: str, idx: int, page_start: Optional[int] = None, text: Optional[str] = None) -> str:
+    def deterministic_id(
+        cls,
+        document_id: str,
+        idx: int,
+        page_start: Optional[int] = None,
+        text: Optional[str] = None,
+    ) -> str:
         from .chunk_ids import deterministic_chunk_id
-        return deterministic_chunk_id(document_id, idx, page_start=page_start, text=text)
+
+        return deterministic_chunk_id(
+            document_id, idx, page_start=page_start, text=text
+        )
 
 
 def compute_content_hash(raw: bytes | str) -> str:

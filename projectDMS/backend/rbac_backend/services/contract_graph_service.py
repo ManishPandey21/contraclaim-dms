@@ -192,7 +192,7 @@ class ContractGraphService:
                 self.falkor._execute(
                     """
                     MERGE (c:Clause {clause_node_id: $clause_node_id, doc_id: $doc_id, organization_id: $organization_id, project_id: $project_id})
-                    ON CREATE SET 
+                    ON CREATE SET
                         c.clause_id = $clause_id,
                         c.clause_number = $clause_number,
                         c.title = $title,

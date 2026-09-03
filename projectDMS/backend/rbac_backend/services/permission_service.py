@@ -121,7 +121,7 @@ class PermissionService:
         "administer": PermissionLevel.ADMIN.value,
         "manage": PermissionLevel.ADMIN.value,
     }
-    
+
     def __init__(self):
         self.db = None
         self.audit_logger = AuditLogger()
@@ -141,53 +141,53 @@ class PermissionService:
         for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
             for alias in aliases:
                 self._permission_aliases.setdefault(alias, []).append(canonical)
-        
+
     async def _get_db(self):
         """Get database connection."""
         if self.db is None:
             self.db = await get_database()
         return self.db
-    
+
     async def get_permission_by_id(self, permission_id: str) -> Optional[Permission]:
         """Get permission by ID."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             permission_doc = await db.permissions.find_one({"_id": query_id})
-            
+
             if not permission_doc:
                 return None
-            
+
             # Convert ObjectId to string
             return self._build_permission_from_doc(permission_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get permission {permission_id}: {str(e)}")
             return None
-    
+
     async def get_permission_by_name(self, name: str) -> Optional[Permission]:
         """Get permission by name."""
         try:
             db = await self._get_db()
-            
+
             permission_doc = await db.permissions.find_one({"name": name})
-            
+
             if not permission_doc:
                 return None
-            
+
             # Convert ObjectId to string
             return self._build_permission_from_doc(permission_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get permission by name {name}: {str(e)}")
             return None
-    
+
     async def get_permissions_paginated(
         self,
         filters: Dict[str, Any],
@@ -196,46 +196,46 @@ class PermissionService:
         """Get permissions with pagination and filtering."""
         try:
             db = await self._get_db()
-            
+
             # Build query
             query = {}
-            
+
             # Search filter
             if filters.get("search"):
                 query["$or"] = [
                     {"name": {"$regex": filters["search"], "$options": "i"}},
                     {"description": {"$regex": filters["search"], "$options": "i"}}
                 ]
-            
+
             # Category filter
             if filters.get("category"):
                 query["category"] = filters["category"]
-            
+
             # System permission filter
             if filters.get("is_system") is not None:
                 query["is_system"] = filters["is_system"]
-            
+
             # Active filter (treat documents without the flag as active)
             query["is_active"] = {"$ne": False}
-            
+
             # Get total count
             total_count = await db.permissions.count_documents(query)
-            
+
             # Get paginated results
             cursor = db.permissions.find(query).skip(pagination["skip"]).limit(pagination["limit"])
             permission_docs = await cursor.to_list(length=pagination["limit"])
-            
+
             # Convert to Permission objects
             permissions = []
             for doc in permission_docs:
                 permissions.append(self._build_permission_from_doc(doc))
-            
+
             return permissions, total_count
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions: {str(e)}")
             return [], 0
-    
+
     async def create_permission(
         self,
         permission_data: PermissionCreate,
@@ -244,14 +244,14 @@ class PermissionService:
         """Create a new permission."""
         try:
             db = await self._get_db()
-            
+
             # Check for duplicate permission name
             existing = await self.get_permission_by_name(permission_data.name)
             if existing:
                 raise PermissionServiceError(
                     f"Permission '{permission_data.name}' already exists", 409
                 )
-            
+
             # Create permission document
             permission_doc = {
                 "name": permission_data.name,
@@ -265,20 +265,20 @@ class PermissionService:
                 "updated_at": datetime.utcnow(),
                 "created_by": getattr(created_by, 'id', str(created_by))
             }
-            
+
             # Insert permission
             result = await db.permissions.insert_one(permission_doc)
             permission_id = str(result.inserted_id)
-            
+
             # Return created permission
             return self._build_permission_from_doc(permission_doc)
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to create permission: {str(e)}")
             raise PermissionServiceError("Permission creation failed")
-    
+
     async def update_permission(
         self,
         permission_id: str,
@@ -288,19 +288,19 @@ class PermissionService:
         """Update permission."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             # Build update document
             update_doc = {
                 "updated_at": datetime.utcnow(),
                 "updated_by": getattr(updated_by, 'id', str(updated_by))
             }
-            
+
             # Add fields that are being updated
             if update_data.description is not None:
                 update_doc["description"] = update_data.description
@@ -308,41 +308,41 @@ class PermissionService:
                 update_doc["category"] = update_data.category.value
             if update_data.is_active is not None:
                 update_doc["is_active"] = update_data.is_active
-            
+
             # Update permission
             result = await db.permissions.update_one(
                 {"_id": query_id},
                 {"$set": update_doc}
             )
-            
+
             if result.matched_count == 0:
                 raise PermissionServiceError("Permission not found", 404)
-            
+
             # Return updated permission
             return await self.get_permission_by_id(permission_id)
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to update permission {permission_id}: {str(e)}")
             raise PermissionServiceError("Permission update failed")
-    
+
     async def delete_permission(self, permission_id: str, deleted_by: Any) -> bool:
         """Soft delete permission."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(permission_id)
             except:
                 query_id = permission_id
-            
+
             # Check if permission is system permission
             permission = await self.get_permission_by_id(permission_id)
             if permission and permission.is_system:
                 raise PermissionServiceError("Cannot delete system permission", 400)
-            
+
             # Soft delete (mark as inactive)
             result = await db.permissions.update_one(
                 {"_id": query_id},
@@ -354,34 +354,34 @@ class PermissionService:
                     }
                 }
             )
-            
+
             return result.modified_count > 0
-            
+
         except PermissionServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete permission {permission_id}: {str(e)}")
             return False
-    
+
     async def get_permissions_by_category(self) -> List[PermissionGroup]:
         """Get permissions grouped by category."""
         try:
             db = await self._get_db()
-            
+
             # Get all active permissions
             cursor = db.permissions.find({"is_active": {"$ne": False}})
             permission_docs = await cursor.to_list(length=None)
-            
+
             # Group by category
             category_groups = {}
             for doc in permission_docs:
                 permission = self._build_permission_from_doc(doc)
-                
+
                 category = permission.category
                 if category not in category_groups:
                     category_groups[category] = []
                 category_groups[category].append(permission)
-            
+
             # Create permission groups
             groups = []
             for category, permissions in category_groups.items():
@@ -390,18 +390,18 @@ class PermissionService:
                     permissions=permissions,
                     count=len(permissions)
                 ))
-            
+
             return groups
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions by category: {str(e)}")
             return []
-    
+
     async def get_permissions_by_ids(self, permission_ids: List[str]) -> List[Permission]:
         """Get multiple permissions by their IDs."""
         try:
             db = await self._get_db()
-            
+
             # Convert to ObjectIds if needed
             query_ids = []
             for pid in permission_ids:
@@ -409,37 +409,37 @@ class PermissionService:
                     query_ids.append(ObjectId(pid))
                 except:
                     query_ids.append(pid)
-            
+
             # Query permissions
             cursor = db.permissions.find({"_id": {"$in": query_ids}})
             permission_docs = await cursor.to_list(length=None)
-            
+
             # Convert to Permission objects
             permissions = []
             for doc in permission_docs:
                 permissions.append(self._build_permission_from_doc(doc))
-            
+
             return permissions
-            
+
         except Exception as e:
             logger.error(f"Failed to get permissions by IDs: {str(e)}")
             return []
-    
+
     async def create_default_permissions(self) -> bool:
         """Create default system permissions if they don't exist."""
         try:
             created_count = 0
-            
+
             for perm_data in DEFAULT_PERMISSIONS:
                 existing = await self.get_permission_by_name(perm_data["name"])
                 if not existing:
                     permission_create = PermissionCreate(**perm_data)
                     await self.create_permission(permission_create, "system")
                     created_count += 1
-            
+
             logger.info(f"Created {created_count} default permissions")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to create default permissions: {str(e)}")
             return False
@@ -601,17 +601,17 @@ class PermissionService:
             # Fallback minimal structure
             from ..models.permission import PermissionMatrix  # type: ignore
             return PermissionMatrix(resources=[], actions=[], roles=[], matrix={})
-    
+
     async def check_permission_exists(self, permission_name: str) -> bool:
         """Check if a permission exists by name."""
         try:
             permission = await self.get_permission_by_name(permission_name)
             return permission is not None
-            
+
         except Exception as e:
             logger.error(f"Failed to check permission existence: {str(e)}")
             return False
-    
+
     async def get_permissions_for_role(self, role_id: str) -> List[Permission]:
         """Get all permissions assigned to a specific role. Supports wildcard '*' and name/ID mix."""
         try:
@@ -706,7 +706,7 @@ class PermissionService:
         granted = False
         redis = None
         cache_key = f"user_perms:{user_id}"
-        
+
         try:
             runtime = get_runtime_state()
             redis = await runtime.get_redis()
@@ -717,7 +717,7 @@ class PermissionService:
                     raw_permissions = cache_parsed.get("raw_permissions", [])
                     role_names = set(cache_parsed.get("role_names", []))
                     perm_names = set(cache_parsed.get("perm_names", []))
-                    
+
                     if "*" in raw_permissions or permission_key in raw_permissions:
                         granted = True
                     elif lookup_keys and set(raw_permissions) & lookup_keys:
@@ -734,7 +734,7 @@ class PermissionService:
                     if not granted and permission_key == "users:read":
                         if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                             granted = True
-                    
+
                     if log:
                         try:
                             await self.audit_logger.log_permission_check(
@@ -802,7 +802,7 @@ class PermissionService:
                 if not granted and permission_key == "users:read":
                     if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                         granted = True
-                        
+
                 if redis is not None:
                     try:
                         await redis.set(cache_key, json.dumps({

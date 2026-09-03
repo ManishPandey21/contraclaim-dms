@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Set
+from typing import Dict, Optional, Set
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -15,7 +15,12 @@ logger = logging.getLogger(__name__)
 class VectorReconciler:
     """Repairs divergence between Mongo chunk records and Qdrant vectors using deterministic chunk IDs."""
 
-    def __init__(self, db: AsyncIOMotorDatabase, embedding_client: EmbeddingClient, vector_client: VectorClient):
+    def __init__(
+        self,
+        db: AsyncIOMotorDatabase,
+        embedding_client: EmbeddingClient,
+        vector_client: VectorClient,
+    ):
         self.db = db
         self.embedding_client = embedding_client
         self.vector_client = vector_client
@@ -38,11 +43,20 @@ class VectorReconciler:
                 "mongo_chunks": 0,
             }
 
-        chunks = [doc async for doc in self.db.chunks.find({"document_id": document_id, "org_id": org_id, "project_id": project_id})]
+        chunks = [
+            doc
+            async for doc in self.db.chunks.find(
+                {"document_id": document_id, "org_id": org_id, "project_id": project_id}
+            )
+        ]
         chunk_ids: Set[str] = {str(c.get("chunk_id")) for c in chunks}
         qdrant_ids = set(
             await self.vector_client.list_chunk_ids(
-                {"org_id": org_id, "project_id": project_id, "document_id": document_id},
+                {
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "document_id": document_id,
+                },
                 namespace=namespace,
             )
         )
@@ -52,9 +66,13 @@ class VectorReconciler:
 
         repaired = 0
         if missing_in_qdrant:
-            to_write = [c for c in chunks if str(c.get("chunk_id")) in missing_in_qdrant]
+            to_write = [
+                c for c in chunks if str(c.get("chunk_id")) in missing_in_qdrant
+            ]
             if to_write:
-                vectors = await self.embedding_client.embed([c.get("text_original") or "" for c in to_write])
+                vectors = await self.embedding_client.embed(
+                    [c.get("text_original") or "" for c in to_write]
+                )
                 await self.vector_client.upsert(
                     vectors,
                     [
@@ -81,7 +99,9 @@ class VectorReconciler:
 
         removed = 0
         if missing_in_mongo:
-            removed = await self.vector_client.delete(list(missing_in_mongo), namespace=namespace)
+            removed = await self.vector_client.delete(
+                list(missing_in_mongo), namespace=namespace
+            )
 
         return {
             "missing_in_qdrant": len(missing_in_qdrant),

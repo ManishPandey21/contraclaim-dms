@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
-import pytest
 from pymongo import ReplaceOne
 
 from rbac_backend.ingestion.pipeline import IngestionPipeline
@@ -37,7 +36,9 @@ def _matches(doc: Dict[str, Any], criteria: Dict[str, Any]) -> bool:
 
 
 class FakeCursor:
-    def __init__(self, docs: Iterable[Dict[str, Any]], criteria: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self, docs: Iterable[Dict[str, Any]], criteria: Optional[Dict[str, Any]] = None
+    ) -> None:
         self._docs = list(docs)
         self._criteria = criteria or {}
         self._limit: Optional[int] = None
@@ -95,7 +96,9 @@ class FakeCollection:
                 return dict(doc)
         return None
 
-    async def update_one(self, criteria: Dict[str, Any], update: Dict[str, Any], upsert: bool = False):
+    async def update_one(
+        self, criteria: Dict[str, Any], update: Dict[str, Any], upsert: bool = False
+    ):
         for doc in self.docs:
             if _matches(doc, criteria):
                 if "$set" in update:
@@ -106,7 +109,9 @@ class FakeCollection:
                 if "$setOnInsert" in update:
                     for key, value in update["$setOnInsert"].items():
                         doc.setdefault(key, value)
-                return SimpleNamespace(matched_count=1, modified_count=1, upserted_id=None)
+                return SimpleNamespace(
+                    matched_count=1, modified_count=1, upserted_id=None
+                )
 
         if upsert:
             new_doc = dict(criteria)
@@ -115,7 +120,9 @@ class FakeCollection:
             if "$set" in update:
                 new_doc.update(update["$set"])
             self.docs.append(new_doc)
-            return SimpleNamespace(matched_count=0, modified_count=0, upserted_id=new_doc.get("_id"))
+            return SimpleNamespace(
+                matched_count=0, modified_count=0, upserted_id=new_doc.get("_id")
+            )
 
         return SimpleNamespace(matched_count=0, modified_count=0, upserted_id=None)
 
@@ -160,7 +167,9 @@ class FakeDB:
 
 
 class StubEmbedding:
-    async def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+    async def embed(
+        self, texts: List[str], model: Optional[str] = None
+    ) -> List[List[float]]:
         return [[float(len(text))] for text in texts]
 
 
@@ -170,27 +179,53 @@ class StubVector:
         self.config = SimpleNamespace(qdrant_vector_size=64)
         self.enabled = True
 
-    async def upsert(self, vectors: List[List[float]], chunks: List[Dict[str, Any]], namespace: Optional[str] = None) -> int:
+    async def upsert(
+        self,
+        vectors: List[List[float]],
+        chunks: List[Dict[str, Any]],
+        namespace: Optional[str] = None,
+    ) -> int:
         for vector, chunk in zip(vectors, chunks):
             self.writes.append({"vector": vector, "chunk": chunk})
         return len(chunks)
 
-    async def list_chunk_ids(self, filters: Dict[str, Any], namespace: Optional[str] = None, limit: int = 1000):
+    async def list_chunk_ids(
+        self,
+        filters: Dict[str, Any],
+        namespace: Optional[str] = None,
+        limit: int = 1000,
+    ):
         return [
             entry["chunk"]["chunk_id"]
             for entry in self.writes
-            if all(entry["chunk"].get(key) == value for key, value in filters.items() if value is not None)
+            if all(
+                entry["chunk"].get(key) == value
+                for key, value in filters.items()
+                if value is not None
+            )
         ]
 
-    async def delete(self, chunk_ids: List[str], namespace: Optional[str] = None) -> int:
+    async def delete(
+        self, chunk_ids: List[str], namespace: Optional[str] = None
+    ) -> int:
         before = len(self.writes)
-        self.writes = [entry for entry in self.writes if entry["chunk"]["chunk_id"] not in chunk_ids]
+        self.writes = [
+            entry
+            for entry in self.writes
+            if entry["chunk"]["chunk_id"] not in chunk_ids
+        ]
         return before - len(self.writes)
 
     def is_healthy(self) -> bool:
         return self.enabled
 
-    async def search(self, query_vector: List[float], filters: Dict[str, Any], limit: int = 5, namespace: Optional[str] = None):
+    async def search(
+        self,
+        query_vector: List[float],
+        filters: Dict[str, Any],
+        limit: int = 5,
+        namespace: Optional[str] = None,
+    ):
         base_score = query_vector[0] if query_vector else 0.0
         payload = {
             "document_id": "doc-1",
@@ -204,7 +239,9 @@ class StubVector:
 
 
 class StubLLM:
-    async def generate(self, prompt: str, max_tokens: int = 512, model: Optional[str] = None) -> str:
+    async def generate(
+        self, prompt: str, max_tokens: int = 512, model: Optional[str] = None
+    ) -> str:
         return f"draft:{prompt[:40]}"
 
 
@@ -218,16 +255,28 @@ async def test_ingestion_pipeline_deduplication():
         observability_service=observability,
     )  # type: ignore[arg-type]
 
-    fake_db.documents.docs.append({"_id": "doc-123", "full_text": "Alpha Beta Gamma" * 5})
+    fake_db.documents.docs.append(
+        {"_id": "doc-123", "full_text": "Alpha Beta Gamma" * 5}
+    )
 
     job = await pipeline.create_job(
-        IngestionJobCreate(org_id="org-1", project_id="proj-1", document_id="doc-123", options=IngestionOptions())
+        IngestionJobCreate(
+            org_id="org-1",
+            project_id="proj-1",
+            document_id="doc-123",
+            options=IngestionOptions(),
+        )
     )
     await pipeline.process_job(job.id)
     assert fake_db.chunks.docs, "Chunks should be created on first ingestion"
 
     job2 = await pipeline.create_job(
-        IngestionJobCreate(org_id="org-1", project_id="proj-1", document_id="doc-123", options=IngestionOptions())
+        IngestionJobCreate(
+            org_id="org-1",
+            project_id="proj-1",
+            document_id="doc-123",
+            options=IngestionOptions(),
+        )
     )
     await pipeline.process_job(job2.id)
     stored_job = await pipeline.get_job(job2.id)
@@ -248,8 +297,12 @@ async def test_search_response_shape():
     )
 
     filters = SearchFilters(org_id="org-1", project_id="proj-1")
-    request = SearchRequest(query="timeline", strategy=SearchStrategy.VANILLA, limit=3, filters=filters)
-    fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})
+    request = SearchRequest(
+        query="timeline", strategy=SearchStrategy.VANILLA, limit=3, filters=filters
+    )
+    fake_db.documents.docs.append(
+        {"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"}
+    )
     response = await retrieval.search(request, current_user=None)
 
     assert response.results, "Search should return at least one result"
@@ -260,7 +313,9 @@ async def test_search_response_shape():
 
 async def test_search_backend_fallback_to_mongo_when_qdrant_unhealthy():
     fake_db = FakeDB()
-    fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})
+    fake_db.documents.docs.append(
+        {"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"}
+    )
     fake_db.chunks.docs.append(
         {
             "chunk_id": "chunk-1",
@@ -304,7 +359,9 @@ class RaisingVector(StubVector):
 
 
 def _seed_one_chunk(fake_db: "FakeDB") -> None:
-    fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})
+    fake_db.documents.docs.append(
+        {"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"}
+    )
     fake_db.chunks.docs.append(
         {
             "chunk_id": "chunk-1",
@@ -356,14 +413,18 @@ async def test_rag_survives_qdrant_midquery_failure():
         observability=observability,
     )
     filters = SearchFilters(org_id="org-1", project_id="proj-1")
-    request = RagRequest(query="timeline", strategy=SearchStrategy.VANILLA, limit=1, filters=filters)
+    request = RagRequest(
+        query="timeline", strategy=SearchStrategy.VANILLA, limit=1, filters=filters
+    )
     resp = await retrieval.rag(request, current_user=None)  # must not raise
     assert resp.answer, "RAG should produce an answer via the Mongo failsafe"
 
 
 async def test_rag_citations_include_doc_meta():
     fake_db = FakeDB()
-    fake_db.documents.docs.append({"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"})
+    fake_db.documents.docs.append(
+        {"_id": "doc-1", "subject": "Doc Subject", "letterNo": "L-1"}
+    )
     observability = ObservabilityService(fake_db)  # type: ignore[arg-type]
     retrieval = RetrievalService(
         db=fake_db,  # type: ignore[arg-type]
@@ -373,7 +434,9 @@ async def test_rag_citations_include_doc_meta():
         observability=observability,
     )
     filters = SearchFilters(org_id="org-1", project_id="proj-1")
-    request = RagRequest(query="timeline", strategy=SearchStrategy.VANILLA, limit=1, filters=filters)
+    request = RagRequest(
+        query="timeline", strategy=SearchStrategy.VANILLA, limit=1, filters=filters
+    )
     resp = await retrieval.rag(request, current_user=None)
     assert resp.citations, "RAG should return citations"
     assert resp.citations[0].document_title == "Doc Subject"

@@ -12,24 +12,24 @@ logger = logging.getLogger(__name__)
 
 class TextProcessingService:
     """Service for text processing and metadata parsing"""
-    
+
     def __init__(self, config):
         self.config = config
-    
+
     def chunk_text(self, text: str) -> List[str]:
         """
         Split text into chunks with overlap.
-        
+
         Args:
             text: Text to chunk
-            
+
         Returns:
             List of text chunks
         """
         text = text.strip()
         if not text:
             return []
-        
+
         try:
             from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -54,18 +54,18 @@ class TextProcessingService:
         chunks = []
         start = 0
         text_length = len(text)
-        
+
         while start < text_length:
             end = min(text_length, start + self.config.chunk_size)
             chunk = text[start:end]
             chunks.append(chunk)
-            
+
             if end == text_length:
                 break
-            
+
             # Move start position with overlap
             start = max(start + self.config.chunk_size - self.config.chunk_overlap, start + 1)
-        
+
         logger.info(f"Split text into {len(chunks)} chunks")
         return chunks
 
@@ -136,14 +136,14 @@ class TextProcessingService:
             if cleaned:
                 lines_clean.append(f"- {cleaned}")
         return "\n".join(lines_clean) if lines_clean else self._null_if_placeholder(block)
-    
+
     def parse_extraction_report(self, report: str) -> ParsedDocumentMetadata:
         """
         Parse structured extraction report into metadata object.
-        
+
         Args:
             report: Structured text report from LLM
-            
+
         Returns:
             ParsedDocumentMetadata object
         """
@@ -158,7 +158,7 @@ class TextProcessingService:
             # Normalize text for parsing
             lines = (report or "").splitlines()
             text = "\n".join(line.strip() for line in lines if line.strip())
-            
+
             numbered_blocks = self._parse_numbered_blocks(text)
 
             # Extract individual fields. Prefer exact numbered blocks for the
@@ -170,24 +170,24 @@ class TextProcessingService:
                 r"^\s*Dated?\s*[:\-]\s*(.+)$",
             ])
             date_str = format_date_ddmmyyyy(date_str)
-            
+
             subject = self._first_block(numbered_blocks, [(5, r"Subject")], r"Subject") or self._extract_field(text, [
                 r"^\s*(?:5\)|-)?.*?Subject\s*[:\-]\s*(.+)$",
                 r"^\s*Re\s*[:\-]\s*(.+)$",
             ])
-            
+
             letter_no = self._first_block(numbered_blocks, [(2, r"Letter\s*No")], r"Letter\s*(No|Number)") or self._extract_field(text, [
                 r"^\s*(?:2\)|-)?.*?Letter\s*No\.?\s*[:\-]\s*(.+)$",
                 r"^\s*Letter\s*Number\s*[:\-]\s*(.+)$",
                 r"^\s*Ref(?:erence)?\s*No\.?\s*[:\-]\s*(.+)$",
             ])
-            
+
             from_company = self._first_block(numbered_blocks, [(3, r"From")], r"^From") or self._extract_field(text, [
                 r"^\s*(?:3\)|-)?.*?From\s*(?:\(Company\))?\s*[:\-]\s*(.+)$",
                 r"^\s*Sender\s*[:\-]\s*(.+)$",
                 r"^\s*From\s*[:\-]\s*(.+)$",
             ])
-            
+
             to_company = self._first_block(numbered_blocks, [(4, r"To")], r"^To") or self._extract_field(text, [
                 r"^\s*(?:4\)|-)?.*?To\s*(?:\(Company\))?\s*[:\-]\s*(.+)$",
                 r"^\s*Recipient\s*[:\-]\s*(.+)$",
@@ -206,7 +206,7 @@ class TextProcessingService:
             priority = self._first_block(numbered_blocks, [(17, r"Priority")])
             linked_event_suggested = self._first_block(numbered_blocks, [(19, r"Linked\s*Event\s*Suggested")])
             reference_chain = self._first_block(numbered_blocks, [(20, r"Reference\s*Chain")])
-            
+
             # Extract list fields
             references = self._list_from_block(
                 self._first_block(numbered_blocks, [(6, r"References?")], r"References?")
@@ -215,11 +215,11 @@ class TextProcessingService:
                 references = self._extract_list_field(text, [
                     r"(?ims)^\s*(?:6\)|-)?.*?References?\s*(?:\(Ref\.?\))?\s*[:\-]?\s*(.+?)(?=\n\s*(?:\d+\)\s*[A-Z]|Summary|Key\s*Words|Contractual\s*Clauses|Full\s*content|$))"
                 ])
-            
+
             summary = self._summary_from_block(
                 self._first_block(numbered_blocks, [(22, r"Summary"), (7, r"Summary")])
             ) or self._extract_summary(text)
-            
+
             keywords = self._list_from_block(
                 self._first_block(numbered_blocks, [(18, r"Key\s*Words"), (8, r"Key\s*Words")])
             )
@@ -232,7 +232,7 @@ class TextProcessingService:
             additional_keywords = self._list_from_block(
                 self._first_block(numbered_blocks, [(21, r"Key\s*Words|Additional\s*Keywords")])
             )
-            
+
             contractual_clauses = self._list_from_block(
                 self._first_block(numbered_blocks, [(23, r"Contractual\s*Clauses"), (9, r"Contractual\s*Clauses")])
             )
@@ -308,15 +308,15 @@ class TextProcessingService:
                 tags=tags or [],
                 sub_tags=sub_tags or [],
             )
-            
+
             logger.info("Successfully parsed document metadata")
             return metadata
-            
+
         except Exception as e:
             logger.error(f"Failed to parse extraction report: {e}")
             # Return empty metadata object on parsing failure
             return ParsedDocumentMetadata()
-    
+
     def _extract_field(self, text: str, patterns: List[str]) -> Optional[str]:
         """Extract single field using regex patterns"""
         for pattern in patterns:
@@ -325,7 +325,7 @@ class TextProcessingService:
                 value = match.group(1).strip().rstrip(":")
                 return value if value else None
         return None
-    
+
     def _extract_list_field(self, text: str, patterns: List[str]) -> List[Any]:
         """Extract list field using regex patterns
         Note: Search against (text + "\
@@ -336,25 +336,25 @@ End:") so '$' can match properly without forcing End: immediately after."""
                 block = match.group(1).strip()
                 return self._parse_list_block(block)
         return []
-    
+
     def _parse_list_block(self, block: str) -> List[Any]:
         """Parse block of text into list items"""
         if not block:
             return []
-        
+
         items = []
         for line in block.splitlines():
             # Remove bullet prefixes and clean up
             cleaned = re.sub(r"^[\-\u2013\u2022\*\d\.\)\s]+", "", line).strip()
             if cleaned:
                 items.append(parse_legacy_reference_text(cleaned) or cleaned)
-        
+
         # Handle comma-separated single line
         if len(items) == 1 and isinstance(items[0], str) and "," in items[0]:
             comma_items = [item.strip() for item in items[0].split(",") if item.strip()]
             if len(comma_items) > 1:
                 items = [parse_legacy_reference_text(item) or item for item in comma_items]
-        
+
         # Clean up punctuation
         cleaned_items = []
         for item in items:
@@ -364,35 +364,35 @@ End:") so '$' can match properly without forcing End: immediately after."""
                     cleaned_items.append(parse_legacy_reference_text(cleaned) or cleaned)
             elif item:
                 cleaned_items.append(item)
-        
+
         return cleaned_items
-    
+
     def _extract_summary(self, text: str) -> Optional[str]:
         """Extract summary with special formatting.
         Note: Search against (text + "\
 End:") so '$' can match the artificial end marker."""
         pattern = r"(?ims)^\s*(?:7\)|-)?.*?Summary\s*[:\-]?\s*(.+?)(?=\n\s*(?:\d+\)|Key Words|Contractual Clauses|Full content|$))"
         match = re.search(pattern, text + "\nEnd:")
-        
+
         if match:
             raw_summary = match.group(1).strip()
-            
+
             # Format as bullet points
             lines_clean = []
             for line in raw_summary.splitlines():
                 cleaned = re.sub(r"^[\-\*\d\.\)\s]+", "", line).strip()
                 if cleaned:
                     lines_clean.append(f"- {cleaned}")
-            
+
             return "\n".join(lines_clean) if lines_clean else raw_summary
-        
+
         return None
-    
+
     def parse_date_safe(self, date_str: Optional[str]) -> Optional[datetime]:
         """Safely parse date string to datetime object"""
         if not date_str:
             return None
-        
+
         cleaned = date_str.strip()
         cleaned = re.sub(r"(\d{1,2})(st|nd|rd|th)", r"\1", cleaned, flags=re.IGNORECASE)
 
@@ -435,13 +435,12 @@ End:") so '$' can match the artificial end marker."""
             "%dnd %b. %Y",           # 2nd Jan. 2024
             "%drd %b. %Y",           # 3rd Jan. 2024
         ]
-        
+
         for pattern in patterns:
             try:
                 return datetime.strptime(cleaned, pattern)
             except ValueError:
                 continue
-        
+
         logger.warning(f"Unable to parse date: {date_str}")
         return None
-

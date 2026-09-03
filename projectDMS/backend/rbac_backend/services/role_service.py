@@ -47,7 +47,7 @@ class RoleServiceError(Exception):
 
 class RoleService:
     """Service for managing roles and their permissions."""
-    
+
     def __init__(self):
         self.db = None
         self.audit_logger = AuditLogger()
@@ -351,13 +351,13 @@ class RoleService:
             return
 
         raise RoleServiceError("Not authorized to manage roles", 403)
-        
+
     async def _get_db(self):
         """Get database connection."""
         if self.db is None:
             self.db = await get_database()
         return self.db
-        
+
     async def _invalidate_role_caches(self, role_id: str) -> None:
         """Invalidate permission caches and JWTs for all users with this role."""
         try:
@@ -366,21 +366,21 @@ class RoleService:
             redis = await runtime.get_redis()
             if not redis:
                 return
-                
+
             db = await self._get_db()
-            
+
             # Find all users with this role ID (handle both string and ObjectId references)
             try:
                 role_oid = ObjectId(role_id)
             except:
                 role_oid = role_id
-                
+
             cursor = db.users.find(
                 {"roles": {"$in": [role_id, role_oid, str(role_id)]}},
                 {"_id": 1}
             )
             users = await cursor.to_list(length=None)
-            
+
             now_ts = int(datetime.utcnow().timestamp())
             for user in users:
                 uid_str = str(user["_id"])
@@ -388,21 +388,21 @@ class RoleService:
                 await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
         except Exception as e:
             logger.error(f"Failed to invalidate cache for role {role_id}: {e}")
-    
+
     async def create_role(
-        self, 
-        role_data: RoleCreate, 
+        self,
+        role_data: RoleCreate,
         created_by: Any
     ) -> Role:
         """Create a new role."""
         try:
             db = await self._get_db()
-            
+
             # Check for duplicate role name
             existing_role = await db.roles.find_one({"name": role_data.name})
             if existing_role:
                 raise RoleServiceError(f"Role '{role_data.name}' already exists", 409)
-            
+
             role_names = self._extract_role_names(created_by)
             is_superadmin = "superadmin" in role_names
             org_id = getattr(created_by, "organization_id", None)
@@ -463,83 +463,83 @@ class RoleService:
                 "updated_at": datetime.utcnow(),
                 "created_by": getattr(created_by, 'id', str(created_by))
             }
-            
+
             # Insert role
             result = await db.roles.insert_one(role_doc)
             role_id = str(result.inserted_id)
-            
+
             # Return created role
             role_doc["id"] = role_id
             role_doc.pop("_id", None)
-            
+
             return Role(**role_doc)
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to create role: {str(e)}")
             raise RoleServiceError("Role creation failed")
-    
+
     async def get_role_by_id(self, role_id: str) -> Optional[Role]:
         """Get role by ID."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
-            
+
             role_doc = await db.roles.find_one({"_id": query_id})
-            
+
             if not role_doc:
                 return None
-            
+
             # Convert ObjectId to string
             role_doc["id"] = str(role_doc["_id"])
             role_doc.pop("_id", None)
             role_doc["scope"] = self._derive_scope_from_doc(role_doc)
-            
+
             # Ensure timestamps exist for backward compatibility
             if "created_at" not in role_doc:
                 role_doc["created_at"] = datetime.utcnow()
             if "updated_at" not in role_doc:
                 role_doc["updated_at"] = datetime.utcnow()
-            
+
             return Role(**role_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get role {role_id}: {str(e)}")
             return None
-    
+
     async def get_role_by_name(self, name: str) -> Optional[Role]:
         """Get role by name."""
         try:
             db = await self._get_db()
-            
+
             role_doc = await db.roles.find_one({"name": name})
-            
+
             if not role_doc:
                 return None
-            
+
             # Convert ObjectId to string
             role_doc["id"] = str(role_doc["_id"])
             role_doc.pop("_id", None)
             role_doc["scope"] = self._derive_scope_from_doc(role_doc)
-            
+
             # Ensure timestamps exist for backward compatibility
             if "created_at" not in role_doc:
                 role_doc["created_at"] = datetime.utcnow()
             if "updated_at" not in role_doc:
                 role_doc["updated_at"] = datetime.utcnow()
-            
+
             return Role(**role_doc)
-            
+
         except Exception as e:
             logger.error(f"Failed to get role by name {name}: {str(e)}")
             return None
-    
+
     async def get_roles_paginated(
         self,
         filters: Dict[str, Any],
@@ -548,17 +548,17 @@ class RoleService:
         """Get roles with pagination and filtering."""
         try:
             db = await self._get_db()
-            
+
             # Build query
             query = {}
-            
+
             # Search filter
             if filters.get("search"):
                 query["$or"] = [
                     {"name": {"$regex": filters["search"], "$options": "i"}},
                     {"description": {"$regex": filters["search"], "$options": "i"}}
                 ]
-            
+
             # System role filter
             if filters.get("is_system") is not None:
                 query["is_system"] = filters["is_system"]
@@ -573,38 +573,38 @@ class RoleService:
                 query["organization_id"] = filters["organization_id"]
             if filters.get("project_id"):
                 query["project_id"] = filters["project_id"]
-            
+
             # Active filter (treat missing flag as active)
             query["is_active"] = {"$ne": False}
-            
+
             # Get total count
             total_count = await db.roles.count_documents(query)
-            
+
             # Get paginated results
             cursor = db.roles.find(query).skip(pagination["skip"]).limit(pagination["limit"])
             role_docs = await cursor.to_list(length=pagination["limit"])
-            
+
             # Convert to Role objects
             roles = []
             for doc in role_docs:
                 doc["id"] = str(doc["_id"])
                 doc.pop("_id", None)
                 doc["scope"] = self._derive_scope_from_doc(doc)
-                
+
                 # Ensure timestamps exist for backward compatibility
                 if "created_at" not in doc:
                     doc["created_at"] = datetime.utcnow()
                 if "updated_at" not in doc:
                     doc["updated_at"] = datetime.utcnow()
-                
+
                 roles.append(Role(**doc))
-            
+
             return roles, total_count
-            
+
         except Exception as e:
             logger.error(f"Failed to get roles: {str(e)}")
             return [], 0
-    
+
     async def update_role(
         self,
         role_id: str,
@@ -614,13 +614,13 @@ class RoleService:
         """Update role."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
-            
+
             existing = await db.roles.find_one({"_id": query_id})
             if not existing:
                 raise RoleServiceError("Role not found", 404)
@@ -645,7 +645,7 @@ class RoleService:
                 "updated_at": datetime.utcnow(),
                 "updated_by": getattr(updated_by, 'id', str(updated_by))
             }
-            
+
             # Add fields that are being updated
             if update_data.name is not None:
                 duplicate = await db.roles.find_one({"name": update_data.name})
@@ -664,38 +664,38 @@ class RoleService:
                 update_doc["organization_id"] = update_data.organization_id
             if update_data.project_id is not None:
                 update_doc["project_id"] = update_data.project_id
-            
+
             # Update role
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {"$set": update_doc}
             )
-            
+
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
-            
+
             # Return updated role
             updated_role = await self.get_role_by_id(role_id)
             await self._invalidate_role_caches(role_id)
             return updated_role
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to update role {role_id}: {str(e)}")
             raise RoleServiceError("Role update failed")
-    
+
     async def delete_role(self, role_id: str, deleted_by: Any) -> bool:
         """Soft delete role."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
-            
+
             existing = await db.roles.find_one({"_id": query_id})
             if not existing:
                 return False
@@ -713,32 +713,32 @@ class RoleService:
                     }
                 }
             )
-            
+
             return result.modified_count > 0
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to delete role {role_id}: {str(e)}")
             return False
-    
+
     async def count_users_with_role(self, role_id: str) -> int:
         """Count users assigned to this role."""
         try:
             db = await self._get_db()
-            
+
             # Count users with this role
             count = await db.users.count_documents({
                 "roles": role_id,
                 "is_active": True
             })
-            
+
             return count
-            
+
         except Exception as e:
             logger.error(f"Failed to count users with role {role_id}: {str(e)}")
             return 0
-    
+
     async def get_role_permissions(self, role_id: str) -> List[Permission]:
         """Get all permissions for a role."""
         try:
@@ -805,7 +805,7 @@ class RoleService:
         except Exception as e:
             logger.error(f"Failed to get role permissions for {role_id}: {str(e)}")
             return []
-    
+
     async def update_role_permissions(
         self,
         role_id: str,
@@ -815,7 +815,7 @@ class RoleService:
         """Update role permissions."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
@@ -828,7 +828,7 @@ class RoleService:
 
             self._ensure_role_manageable(updated_by, existing)
             permission_ids = self._ensure_permissions_assignable(updated_by, permission_ids)
-            
+
             # Update role permissions
             result = await db.roles.update_one(
                 {"_id": query_id},
@@ -840,20 +840,20 @@ class RoleService:
                     }
                 }
             )
-            
+
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
-            
+
             # Return updated role
             await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to update role permissions: {str(e)}")
             raise RoleServiceError("Role permission update failed")
-    
+
     async def add_permission_to_role(
         self,
         role_id: str,
@@ -863,13 +863,13 @@ class RoleService:
         """Add a permission to role."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
-            
+
             existing = await db.roles.find_one({"_id": query_id})
             if not existing:
                 raise RoleServiceError("Role not found", 404)
@@ -888,20 +888,20 @@ class RoleService:
                     }
                 }
             )
-            
+
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
-            
+
             # Return updated role
             await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to add permission to role: {str(e)}")
             raise RoleServiceError("Add permission to role failed")
-    
+
     async def remove_permission_from_role(
         self,
         role_id: str,
@@ -911,13 +911,13 @@ class RoleService:
         """Remove a permission from role."""
         try:
             db = await self._get_db()
-            
+
             # Handle ObjectId conversion
             try:
                 query_id = ObjectId(role_id)
             except:
                 query_id = role_id
-            
+
             existing = await db.roles.find_one({"_id": query_id})
             if not existing:
                 raise RoleServiceError("Role not found", 404)
@@ -935,20 +935,20 @@ class RoleService:
                     }
                 }
             )
-            
+
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
-            
+
             # Return updated role
             await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
-            
+
         except RoleServiceError:
             raise
         except Exception as e:
             logger.error(f"Failed to remove permission from role: {str(e)}")
             raise RoleServiceError("Remove permission from role failed")
-    
+
     async def get_system_roles(self) -> List[Role]:
         """Get all system roles."""
         try:
@@ -956,7 +956,7 @@ class RoleService:
             pagination = {"skip": 0, "limit": 1000}
             roles, _ = await self.get_roles_paginated(filters, pagination)
             return roles
-            
+
         except Exception as e:
             logger.error(f"Failed to get system roles: {str(e)}")
             return []
@@ -972,13 +972,13 @@ class RoleService:
                 doc["id"] = str(doc["_id"])
                 doc.pop("_id", None)
                 doc["scope"] = self._derive_scope_from_doc(doc)
-                
+
                 # Ensure timestamps exist for backward compatibility
                 if "created_at" not in doc:
                     doc["created_at"] = datetime.utcnow()
                 if "updated_at" not in doc:
                     doc["updated_at"] = datetime.utcnow()
-                
+
                 roles.append(Role(**doc))
             return roles
         except Exception as e:
@@ -1005,13 +1005,13 @@ class RoleService:
                 doc["id"] = str(doc["_id"])
                 doc.pop("_id", None)
                 doc["scope"] = self._derive_scope_from_doc(doc)
-                
+
                 # Ensure timestamps exist for backward compatibility
                 if "created_at" not in doc:
                     doc["created_at"] = datetime.utcnow()
                 if "updated_at" not in doc:
                     doc["updated_at"] = datetime.utcnow()
-                
+
                 roles.append(Role(**doc))
             return roles
         except Exception as e:
@@ -1056,7 +1056,7 @@ class RoleService:
                     "is_system": True
                 }
             ]
-            
+
             created_count = 0
             for role_data in default_roles:
                 existing = await self.get_role_by_name(role_data["name"])
@@ -1064,10 +1064,10 @@ class RoleService:
                     role_create = RoleCreate(**role_data)
                     await self.create_role(role_create, "system")
                     created_count += 1
-            
+
             logger.info(f"Created {created_count} default roles")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to create default roles: {str(e)}")
             return False

@@ -24,7 +24,7 @@ for line in lines:
         in_drafting_role = True
     elif '\"_id\": ' in line:
         in_drafting_role = False
-        
+
     if '\"drafting.request.create\"' in line and not in_drafting_role:
         continue # Skip this line
     out_lines.append(line)

@@ -1,6 +1,6 @@
 # Contract Intelligence Audit Validation
 
-> Validation date: 2026-06-28  
+> Validation date: 2026-06-28
 > Scope: Upload Contract, Search Clauses, Contract Q&A, Contract Appraisal, clause library extraction, hierarchical chunking, hybrid search, re-ranking, and knowledge graph integration.
 
 ## Executive Summary

@@ -63,18 +63,18 @@ async def get_permissions(
     try:
         filters = {'search': search}
         pagination = {'skip': skip, 'limit': limit}
-        
+
         permissions, total_count = await permission_service.get_permissions_paginated(
             filters, pagination
         )
-        
+
         return {
             "permissions": permissions,
             "total": total_count,
             "page": pagination["skip"] // pagination["limit"] + 1,
             "limit": pagination["limit"]
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -100,7 +100,7 @@ async def get_permission(
                 detail="Permission not found"
             )
         return permission
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -132,7 +132,7 @@ async def create_permission(
             after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
         )
         return permission
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -167,7 +167,7 @@ async def update_permission(
             after=permission.model_dump(mode="json") if hasattr(permission, "model_dump") else None,
         )
         return permission
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -205,7 +205,7 @@ async def delete_permission(
             before=before.model_dump(mode="json") if hasattr(before, "model_dump") else None,
         )
         return {"message": "Permission deleted successfully"}
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -214,4 +214,3 @@ async def delete_permission(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Permission deletion error: {str(e)}"
         )
-

@@ -60,7 +60,7 @@ async def _authorize_representative_policy(
 
 class RepresentativeController:
     """Secure representative controller with comprehensive validation and authorization."""
-    
+
     def __init__(
         self,
         rep_service: RepresentativeService,
@@ -89,26 +89,26 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Validate inputs
             validated_party_id = validate_object_id(party_id)
             validated_rep_data = await self._validate_representative_input(rep_data)
-            
+
             # Get party and validate access
             party = await self.party_service.get_party_by_id(validated_party_id)
             if not party:
                 raise RepresentativeError("Party not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Authorization check
             await self.auth_service.check_party_access(current_user, party, "create_representative")
-            
+
             # Handle primary representative logic atomically
             if validated_rep_data.is_primary:
                 await self._handle_primary_representative_change(
                     party_id=validated_party_id,
                     level=RepresentativeLevel.PARTY
                 )
-            
+
             # Create representative
             representative = await self.rep_service.create_representative(
                 party_id=validated_party_id,
@@ -125,9 +125,9 @@ class RepresentativeController:
                 "party",
                 validated_party_id,
             )
-            
+
             return representative
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -147,18 +147,18 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Validate inputs
             validated_org_id = self._normalize_identifier(
                 organization_id, "Organization"
             )
             validated_rep_data = await self._validate_representative_input(rep_data)
-            
+
             # Verify organization exists and authorize
             organization = await self.org_service.get_organization_by_id(validated_org_id)
             if not organization:
                 raise RepresentativeError("Organization not found", status.HTTP_404_NOT_FOUND)
-            
+
             await self.auth_service.check_organization_access(
                 current_user, validated_org_id, "create_representative"
             )
@@ -167,14 +167,14 @@ class RepresentativeController:
                 "dms.document.edit_metadata",
                 organization_id=validated_org_id,
             )
-            
+
             # Handle primary representative logic
             if validated_rep_data.is_primary:
                 await self._handle_primary_representative_change(
                     organization_id=validated_org_id,
                     level=RepresentativeLevel.ORGANIZATION
                 )
-            
+
             # Create representative
             representative = await self.rep_service.create_representative(
                 organization_id=validated_org_id,
@@ -191,9 +191,9 @@ class RepresentativeController:
                 "organization",
                 validated_org_id,
             )
-            
+
             return representative
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -213,16 +213,16 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=3)
-            
+
             # Normalize identifiers
             validated_project_id = self._normalize_identifier(project_id, "Project")
             validated_rep_data = await self._validate_representative_input(rep_data)
-            
+
             # Verify project exists and get organization context
             project = await self.project_service.get_project_by_id(validated_project_id)
             if not project:
                 raise RepresentativeError("Project not found", status.HTTP_404_NOT_FOUND)
-            
+
             # Authorization check
             await self.auth_service.check_project_access(
                 current_user, project, "create_representative"
@@ -233,14 +233,14 @@ class RepresentativeController:
                 organization_id=project.get("organization_id") or project.get("organizationId"),
                 project_id=validated_project_id,
             )
-            
+
             # Handle primary representative logic
             if validated_rep_data.is_primary:
                 await self._handle_primary_representative_change(
                     project_id=validated_project_id,
                     level=RepresentativeLevel.PROJECT
                 )
-            
+
             # Create representative
             org_id = project.get("organization_id") or project.get("organizationId")
             if not org_id:
@@ -272,9 +272,9 @@ class RepresentativeController:
                 "project",
                 validated_project_id,
             )
-            
+
             return representative
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -294,7 +294,7 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Build authorized query
             await _authorize_representative_policy(
                 current_user,
@@ -305,19 +305,19 @@ class RepresentativeController:
             authorized_query = await self.auth_service.build_representative_query(
                 current_user, filters
             )
-            
+
             # Get representatives with pagination
             representatives, total_count = await self.rep_service.get_representatives_paginated(
                 authorized_query, pagination
             )
-            
+
             return RepresentativeListResponse(
                 representatives=representatives,
                 total=total_count,
                 page=pagination["skip"] // pagination["limit"] + 1,
                 limit=pagination["limit"]
             )
-            
+
         except HTTPException:
             raise
         except Exception as e:
@@ -336,25 +336,25 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Validate party ID
             validated_party_id = validate_object_id(party_id)
-            
+
             # Get party and authorize
             party = await self.party_service.get_party_by_id(validated_party_id)
             if not party:
                 raise RepresentativeError("Party not found", status.HTTP_404_NOT_FOUND)
-            
+
             await self.auth_service.check_party_access(current_user, party, "read")
             await _authorize_representative_policy(current_user, "dms.document.view")
-            
+
             # Get representatives
             representatives = await self.rep_service.get_representatives_for_party(
                 validated_party_id
             )
-            
+
             return representatives
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -374,15 +374,15 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id)
-            
+
             # Normalize project ID
             validated_project_id = self._normalize_identifier(project_id, "Project")
-            
+
             # Get project and authorize
             project = await self.project_service.get_project_by_id(validated_project_id)
             if not project:
                 raise RepresentativeError("Project not found", status.HTTP_404_NOT_FOUND)
-            
+
             await self.auth_service.check_project_access(current_user, project, "read")
             await _authorize_representative_policy(
                 current_user,
@@ -390,15 +390,15 @@ class RepresentativeController:
                 organization_id=project.get("organization_id") or project.get("organizationId"),
                 project_id=validated_project_id,
             )
-            
+
             # Get representatives with proper scope
             org_id = project.get("organization_id") or project.get("organizationId")
             representatives = await self.rep_service.get_representatives_for_project(
                 validated_project_id, org_id, include_head_office
             )
-            
+
             return representatives
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -418,11 +418,11 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=2)
-            
+
             # Validate inputs
             validated_rep_id = validate_object_id(representative_id)
             validated_update = await self._validate_representative_update(update_data)
-            
+
             # Get existing representative
             existing_rep = await self.rep_service.get_representative_by_id(validated_rep_id)
             if not existing_rep:
@@ -430,16 +430,16 @@ class RepresentativeController:
                     "Representative not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Authorization check based on representative's context
             await self._authorize_representative_operation(
                 current_user, existing_rep, "update"
             )
-            
+
             # Handle primary representative changes
             if validated_update.is_primary and validated_update.is_primary != existing_rep.is_primary:
                 await self._handle_primary_representative_change_for_update(existing_rep)
-            
+
             # Update representative
             updated_rep = await self.rep_service.update_representative(
                 validated_rep_id, validated_update, current_user
@@ -453,9 +453,9 @@ class RepresentativeController:
                 validated_rep_id,
                 changed_fields,
             )
-            
+
             return updated_rep
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -474,10 +474,10 @@ class RepresentativeController:
         try:
             # Rate limiting
             await self.rate_limiter.check_user_limit(current_user.id, cost=5)
-            
+
             # Validate representative ID
             validated_rep_id = validate_object_id(representative_id)
-            
+
             # Get representative for authorization
             representative = await self.rep_service.get_representative_by_id(validated_rep_id)
             if not representative:
@@ -485,12 +485,12 @@ class RepresentativeController:
                     "Representative not found",
                     status.HTTP_404_NOT_FOUND
                 )
-            
+
             # Authorization check
             await self._authorize_representative_operation(
                 current_user, representative, "delete"
             )
-            
+
             # Delete representative
             await self.rep_service.delete_representative(validated_rep_id, current_user)
 
@@ -501,9 +501,9 @@ class RepresentativeController:
                 validated_rep_id,
                 representative.name,
             )
-            
+
             return {"message": "Representative deleted successfully"}
-            
+
         except (RepresentativeError, HTTPException):
             raise
         except Exception as e:
@@ -543,33 +543,33 @@ class RepresentativeController:
     ) -> RepresentativeUpdate:
         """Validate representative update data."""
         validated_fields = {}
-        
+
         if update_data.name is not None:
             validated_fields['name'] = sanitize_text(
                 validate_input(update_data.name, max_length=200, required=True)
             )
-        
+
         if update_data.email is not None:
             validated_fields['email'] = validate_email(update_data.email)
-        
+
         if update_data.phone is not None:
             validated_fields['phone'] = validate_phone(update_data.phone)
-        
+
         if update_data.designation is not None:
             validated_fields['designation'] = sanitize_text(
                 validate_input(update_data.designation, max_length=200)
             )
-        
+
         if update_data.address is not None:
             validated_fields['address'] = sanitize_text(
                 validate_input(update_data.address, max_length=500)
             )
-        
+
         # Boolean fields
         for field in ['is_primary', 'is_active', 'use_head_office']:
             if getattr(update_data, field, None) is not None:
                 validated_fields[field] = getattr(update_data, field)
-        
+
         return RepresentativeUpdate(**validated_fields)
 
     async def _authorize_representative_operation(
@@ -590,7 +590,7 @@ class RepresentativeController:
                     permission,
                     resource_id=str(representative.id),
                 )
-        
+
         elif representative.project_id:
             project = await self.project_service.get_project_by_id(representative.project_id)
             if project:
@@ -603,7 +603,7 @@ class RepresentativeController:
                     organization_id=project.get("organization_id") or project.get("organizationId"),
                     project_id=str(representative.project_id),
                 )
-        
+
         elif representative.organization_id:
             await self.auth_service.check_organization_access(
                 current_user, representative.organization_id, operation
@@ -677,14 +677,14 @@ class RepresentativeController:
     ) -> List[str]:
         """Get list of fields that were changed."""
         changed_fields = []
-        
+
         for field_name in update.__fields_set__:
             if hasattr(original, field_name):
                 old_value = getattr(original, field_name)
                 new_value = getattr(update, field_name)
                 if old_value != new_value:
                     changed_fields.append(field_name)
-        
+
         return changed_fields
 
 
@@ -702,7 +702,7 @@ async def get_representative_controller() -> RepresentativeController:
         scope="representatives",
     )
     audit_logger = AuditLogger()
-    
+
     return RepresentativeController(
         rep_service, party_service, project_service, org_service,
         auth_service, rate_limiter, audit_logger
@@ -811,7 +811,7 @@ async def get_all_representatives(
         'search': search
     }
     pagination = {'skip': skip, 'limit': limit}
-    
+
     return await controller.get_representatives(pagination, filters, current_user)
 
 

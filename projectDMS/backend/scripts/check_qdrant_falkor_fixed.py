@@ -85,21 +85,21 @@ def _parse_redis_url(redis_url: str) -> tuple[str, int, str]:
     # Remove redis:// prefix if present
     if redis_url.startswith('redis://'):
         redis_url = redis_url[8:]
-    
+
     # Remove any unexpected = signs
     redis_url = redis_url.lstrip('=')
-    
+
     # Parse with urllib for proper handling
     parsed = urlparse(f"redis://{redis_url}")
-    
+
     host = parsed.hostname or 'localhost'
     port = parsed.port or 6379
     password = parsed.password or os.getenv('FALKORDB_PASSWORD', 'default_password')
-    
+
     # If no password in URL but we have username, use that as password
     if not password and parsed.username:
         password = parsed.username
-    
+
     return host, port, password
 
 
@@ -144,17 +144,17 @@ def _count_falkor_letters_direct() -> Optional[int]:
             socket_connect_timeout=10,
             socket_timeout=10
         )
-        
+
         # Test connection
         client.ping()
         print("✓ Connected to FalkorDB")
-        
+
         # Execute graph query to count letters
         print("Executing graph query...")
         result = client.execute_command("GRAPH.QUERY", "G", "MATCH (l:Letter) RETURN COUNT(l)")
-        
+
         print(f"Raw result: {result}")
-        
+
         # Parse result - FalkorDB result format can vary
         if result:
             # Format 1: [['COUNT(l)'], [[count]]]
@@ -177,7 +177,7 @@ def _count_falkor_letters_direct() -> Optional[int]:
                                     continue
         print(f"✗ Unexpected result format: {result}")
         return 0
-        
+
     except redis.ConnectionError as exc:
         print(f"✗ Connection failed: {exc}")
         print("  Check if FalkorDB is running: docker compose ps falkordb")
@@ -193,10 +193,10 @@ def _test_basic_commands() -> bool:
     """Test basic Redis commands to verify connection works"""
     try:
         import redis
-        
+
         redis_url = os.getenv('FALKORDB_URL', 'redis://localhost:6380')
         host, port, password = _parse_redis_url(redis_url)
-        
+
         client = redis.Redis(
             host=host,
             port=port,
@@ -204,11 +204,11 @@ def _test_basic_commands() -> bool:
             decode_responses=True,
             socket_connect_timeout=5
         )
-        
+
         # Test basic Redis
         client.ping()
         print("✓ Basic Redis connection works")
-        
+
         # Test if graph commands are available
         try:
             result = client.execute_command("GRAPH.LIST")
@@ -218,10 +218,10 @@ def _test_basic_commands() -> bool:
                 print("✗ Graph commands not available - is this really FalkorDB?")
             else:
                 print(f"✓ Graph commands available (different error): {e}")
-        
+
         client.close()
         return True
-        
+
     except Exception as exc:
         print(f"✗ Basic connection test failed: {exc}")
         return False
@@ -231,25 +231,25 @@ def _sample_falkor_letters(sample_size: int = 5) -> list[str]:
     """Get sample letter codes to verify data exists"""
     try:
         import redis
-        
+
         redis_url = os.getenv('FALKORDB_URL', 'redis://localhost:6380')
         host, port, password = _parse_redis_url(redis_url)
-        
+
         client = redis.Redis(
             host=host,
             port=port,
             password=password,
             decode_responses=True
         )
-        
+
         # Get sample of letter codes
         result = client.execute_command("GRAPH.QUERY", "G", f"MATCH (l:Letter) RETURN l.normCode LIMIT {sample_size}")
-        
+
         if result and len(result) >= 2 and result[1]:
             letters = [row[0] for row in result[1] if row and row[0]]
             return letters
         return []
-        
+
     except Exception as exc:
         print(f"[WARN] Failed to get sample letters: {exc}")
         return []
@@ -276,22 +276,22 @@ async def main(args: argparse.Namespace) -> int:
 
     # Check FalkorDB
     print("\n--- FalkorDB Inspection ---")
-    
+
     # First test basic connection
     print("Testing basic connection...")
     connection_ok = _test_basic_commands()
-    
+
     if connection_ok:
         total_falkor = _count_falkor_letters_direct()
         if total_falkor is not None:
             print(f"Falkor letters: {total_falkor}")
-            
+
             # Show sample letters if any exist
             if total_falkor > 0:
                 sample_letters = _sample_falkor_letters(3)
                 if sample_letters:
                     print(f"Sample letter codes: {sample_letters}")
-                    
+
                     # Test get_letter method with first sample
                     test_code = sample_letters[0]
                     print(f"\nTesting get_letter with: {test_code}")

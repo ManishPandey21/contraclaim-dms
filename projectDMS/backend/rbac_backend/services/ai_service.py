@@ -426,9 +426,3 @@ class AIService:
             sections.append("CURRENT REQUIREMENTS / INPUT:")
             sections.append(request.context)
         return "\n".join(section for section in sections if section)
-
-
-
-
-
-

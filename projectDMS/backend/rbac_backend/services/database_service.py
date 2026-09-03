@@ -157,7 +157,7 @@ class DatabaseService:
             normalized.append(entry)
 
         return normalized
-    
+
     async def save_document_data(
         self,
         document_id: Optional[str],

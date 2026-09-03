@@ -9,11 +9,18 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from .chunker import chunk_text
 from .enrichment import ChunkEnricher
-from .models import Chunk, IngestionJob, IngestionJobCreate, IngestionOptions, IngestionStage, StageTiming, compute_content_hash
+from .models import (
+    Chunk,
+    IngestionJob,
+    IngestionJobCreate,
+    IngestionOptions,
+    IngestionStage,
+    StageTiming,
+    compute_content_hash,
+)
 from ..observability.service import ObservabilityService
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
-from ..services.database_service import DocumentProcessingError
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +49,9 @@ class IngestionPipeline:
             options=payload.options,
             content_hash=payload.content_hash,
         )
-        await self.db.ingestion_jobs.insert_one(job.model_dump(by_alias=True, exclude_none=True))
+        await self.db.ingestion_jobs.insert_one(
+            job.model_dump(by_alias=True, exclude_none=True)
+        )
         return job
 
     async def get_job(self, job_id: str) -> Optional[IngestionJob]:
@@ -60,7 +69,9 @@ class IngestionPipeline:
         stage_timings: List[StageTiming] = []
         timing_breakdown: Dict[str, float] = {}
 
-        async def _update_stage(stage: IngestionStage, progress: float, error: Optional[str] = None):
+        async def _update_stage(
+            stage: IngestionStage, progress: float, error: Optional[str] = None
+        ):
             update = {
                 "stage": stage.value,
                 "status": stage.value,
@@ -69,11 +80,14 @@ class IngestionPipeline:
                 "error": error,
                 "stage_timings": [st.model_dump() for st in stage_timings],
             }
-            await self.db.ingestion_jobs.update_one({"job_id": job_id}, {"$set": update})
+            await self.db.ingestion_jobs.update_one(
+                {"job_id": job_id}, {"$set": update}
+            )
 
         try:
             existing_chunks: Dict[str, Dict[str, Any]] = {
-                chunk["chunk_id"]: chunk async for chunk in self.db.chunks.find({"document_id": job.document_id})
+                chunk["chunk_id"]: chunk
+                async for chunk in self.db.chunks.find({"document_id": job.document_id})
             }
 
             extract_started_at = datetime.utcnow()
@@ -86,11 +100,24 @@ class IngestionPipeline:
             job.content_hash = job.content_hash or compute_content_hash(text)
             if await self._is_dedup(job):
                 stage_timings.append(
-                    StageTiming(stage=IngestionStage.EXTRACTING.value, started_at=extract_started_at, completed_at=datetime.utcnow(), duration_ms=0.0)
+                    StageTiming(
+                        stage=IngestionStage.EXTRACTING.value,
+                        started_at=extract_started_at,
+                        completed_at=datetime.utcnow(),
+                        duration_ms=0.0,
+                    )
                 )
-                await self._mark_complete(job_id, stage_timings, progress=1.0, deduped=True, content_hash=job.content_hash)
+                await self._mark_complete(
+                    job_id,
+                    stage_timings,
+                    progress=1.0,
+                    deduped=True,
+                    content_hash=job.content_hash,
+                )
                 return
-            timing_breakdown["extracting"] = (time.perf_counter() - extract_start) * 1000
+            timing_breakdown["extracting"] = (
+                time.perf_counter() - extract_start
+            ) * 1000
             stage_timings.append(
                 StageTiming(
                     stage=IngestionStage.EXTRACTING.value,
@@ -115,7 +142,10 @@ class IngestionPipeline:
                 c.embedding_model = job.options.embedding_model
                 c.embedding_version = job.options.embedding_version
                 c.embedding_provider = job.options.embedding_provider
-                c.embedding_dim = job.options.embedding_dim or self.vector_client.config.qdrant_vector_size
+                c.embedding_dim = (
+                    job.options.embedding_dim
+                    or self.vector_client.config.qdrant_vector_size
+                )
                 c.chunking_version = job.options.chunking_version
             timing_breakdown["chunking"] = (time.perf_counter() - chunk_start) * 1000
             stage_timings.append(
@@ -135,7 +165,11 @@ class IngestionPipeline:
             for idx, c in enumerate(chunks):
                 cached = existing_chunks.get(c.id)
                 same_hash = cached and cached.get("content_hash") == c.content_hash
-                same_model = cached and cached.get("embedding_model") == c.embedding_model and cached.get("embedding_version") == c.embedding_version
+                same_model = (
+                    cached
+                    and cached.get("embedding_model") == c.embedding_model
+                    and cached.get("embedding_version") == c.embedding_version
+                )
                 if same_hash and same_model:
                     continue
                 embed_indices.append(idx)
@@ -143,7 +177,9 @@ class IngestionPipeline:
 
             vectors: List[List[float]] = []
             if embed_indices:
-                vectors = await self.embedding_client.embed(texts_to_embed, model=job.options.embedding_model)
+                vectors = await self.embedding_client.embed(
+                    texts_to_embed, model=job.options.embedding_model
+                )
             timing_breakdown["embedding"] = (time.perf_counter() - embed_start) * 1000
             stage_timings.append(
                 StageTiming(
@@ -154,7 +190,12 @@ class IngestionPipeline:
                 )
             )
 
-            await _update_stage(IngestionStage.ENRICHING if job.options.enrichment_on else IngestionStage.INDEXING, progress=0.55)
+            await _update_stage(
+                IngestionStage.ENRICHING
+                if job.options.enrichment_on
+                else IngestionStage.INDEXING,
+                progress=0.55,
+            )
 
             if job.options.enrichment_on:
                 enrich_started_at = datetime.utcnow()
@@ -164,7 +205,9 @@ class IngestionPipeline:
                     vectors,
                     strategies=job.options.enrichment_strategies or ["neighborhood"],
                 )
-                timing_breakdown["enriching"] = (time.perf_counter() - enrich_start) * 1000
+                timing_breakdown["enriching"] = (
+                    time.perf_counter() - enrich_start
+                ) * 1000
                 stage_timings.append(
                     StageTiming(
                         stage=IngestionStage.ENRICHING.value,
@@ -251,7 +294,9 @@ class IngestionPipeline:
                 )
             )
 
-            await self._mark_complete(job_id, stage_timings, progress=1.0, content_hash=job.content_hash)
+            await self._mark_complete(
+                job_id, stage_timings, progress=1.0, content_hash=job.content_hash
+            )
             await self.observability.log_run(
                 run_type="ingestion",
                 org_id=job.org_id,
@@ -282,9 +327,9 @@ class IngestionPipeline:
         # document - and its publication guard below never ran.
         from ..services.publication_policy import resolve_canonical_document
 
-        doc = await resolve_canonical_document(self.db, document_id) or await self.db.documents.find_one(
-            {"id": document_id}
-        )
+        doc = await resolve_canonical_document(
+            self.db, document_id
+        ) or await self.db.documents.find_one({"id": document_id})
         if not doc:
             raise ValueError(f"Document {document_id} not found")
         return doc
@@ -305,7 +350,12 @@ class IngestionPipeline:
                 return str(value)
         return ""
 
-    async def _persist_chunks(self, chunks: List[Chunk], content_hash: Optional[str], options: IngestionOptions) -> None:
+    async def _persist_chunks(
+        self,
+        chunks: List[Chunk],
+        content_hash: Optional[str],
+        options: IngestionOptions,
+    ) -> None:
         if not chunks:
             return
         ops = []
@@ -338,12 +388,20 @@ class IngestionPipeline:
     def _build_replace(self, spec):
         from pymongo import ReplaceOne
 
-        return ReplaceOne(spec["filter"], spec["replacement"], upsert=spec.get("upsert", False))
+        return ReplaceOne(
+            spec["filter"], spec["replacement"], upsert=spec.get("upsert", False)
+        )
 
-    async def _prune_stale_vectors(self, job: IngestionJob, current_chunks: Set[str], namespace: Optional[str]) -> None:
+    async def _prune_stale_vectors(
+        self, job: IngestionJob, current_chunks: Set[str], namespace: Optional[str]
+    ) -> None:
         try:
             existing_ids = await self.vector_client.list_chunk_ids(
-                {"org_id": job.org_id, "project_id": job.project_id, "document_id": job.document_id},
+                {
+                    "org_id": job.org_id,
+                    "project_id": job.project_id,
+                    "document_id": job.document_id,
+                },
                 namespace=namespace,
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -353,11 +411,17 @@ class IngestionPipeline:
         if stale:
             await self.vector_client.delete(stale, namespace=namespace)
 
-    async def _update_vector_sync(self, job: IngestionJob, expected: int, namespace: Optional[str]) -> None:
+    async def _update_vector_sync(
+        self, job: IngestionJob, expected: int, namespace: Optional[str]
+    ) -> None:
         """Update vector_sync_status bookkeeping to clear stale statuses."""
         try:
             qdrant_ids = await self.vector_client.list_chunk_ids(
-                {"org_id": job.org_id, "project_id": job.project_id, "document_id": job.document_id},
+                {
+                    "org_id": job.org_id,
+                    "project_id": job.project_id,
+                    "document_id": job.document_id,
+                },
                 namespace=namespace,
             )
             qdrant_count = len(qdrant_ids)

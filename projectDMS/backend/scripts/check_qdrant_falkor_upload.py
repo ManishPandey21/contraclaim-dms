@@ -8,10 +8,10 @@ Uses the correct FalkorDB connection on port 6380 without password.
 Examples:
     # Just inspect without uploading
     python scripts/check_qdrant_falkor_upload.py
-    
+
     # Upload sample data to FalkorDB
     python scripts/check_qdrant_falkor_upload.py --upload-sample
-    
+
     # Upload and then inspect
     python scripts/check_qdrant_falkor_upload.py --upload-sample --inspect
 """
@@ -126,16 +126,16 @@ def _get_falkor_client():
 
 def _upload_sample_data() -> bool:
     """Upload sample letter data to FalkorDB"""
-    
+
     client = _get_falkor_client()
     if not client:
         return False
-    
+
     graph_name = os.getenv('FALKORDB_GRAPH_NAME', 'contraclaim')
-    
+
     try:
         print(f"\n--- Uploading Sample Data to '{graph_name}' ---")
-        
+
         # Sample letter data
         sample_letters = [
             {
@@ -167,18 +167,18 @@ def _upload_sample_data() -> bool:
                 "project": "sample-project-1"
             },
         ]
-        
+
         # Sample reference relationships
         sample_refs = [
             {"letter_code": "SAMPLE-LETTER-002", "ref_code": "SAMPLE-LETTER-001", "type": "REFERENCES"},
             {"letter_code": "SAMPLE-LETTER-003", "ref_code": "SAMPLE-LETTER-001", "type": "CITES"},
             {"letter_code": "SAMPLE-LETTER-004", "ref_code": "SAMPLE-LETTER-002", "type": "REFERENCES"},
         ]
-        
+
         # Create Letter nodes
         for letter in sample_letters:
             norm_code = normalize_letter_code(letter["code"])
-            
+
             query = f"""
             CREATE (l:Letter {{
                 code: $code,
@@ -190,7 +190,7 @@ def _upload_sample_data() -> bool:
             }})
             RETURN l.normCode
             """
-            
+
             params = {
                 "code": letter["code"],
                 "normCode": norm_code,
@@ -199,7 +199,7 @@ def _upload_sample_data() -> bool:
                 "direction": letter["direction"],
                 "project": letter["project"]
             }
-            
+
             try:
                 result = client.execute_command(
                     "GRAPH.QUERY",
@@ -210,25 +210,25 @@ def _upload_sample_data() -> bool:
                 print(f"✓ Created letter: {letter['code']} (normalized: {norm_code})")
             except Exception as exc:
                 print(f"[WARN] Error creating letter {letter['code']}: {exc}")
-        
+
         # Create Reference relationships
         for ref in sample_refs:
             letter_norm = normalize_letter_code(ref["letter_code"])
             ref_norm = normalize_letter_code(ref["ref_code"])
-            
+
             query = f"""
             MATCH (l:Letter {{normCode: $letterCode}})
             MATCH (r:Letter {{normCode: $refCode}})
             CREATE (l)-[:{ref['type']} {{type: $type}}]->(r)
             RETURN COUNT(*)
             """
-            
+
             params = {
                 "letterCode": letter_norm,
                 "refCode": ref_norm,
                 "type": ref["type"]
             }
-            
+
             try:
                 result = client.execute_command(
                     "GRAPH.QUERY",
@@ -239,10 +239,10 @@ def _upload_sample_data() -> bool:
                 print(f"✓ Created relationship: {ref['letter_code']} -{ref['type']}-> {ref['ref_code']}")
             except Exception as exc:
                 print(f"[WARN] Error creating relationship: {exc}")
-        
+
         print("\n✓ Sample data upload completed")
         return True
-        
+
     except Exception as exc:
         print(f"✗ Upload failed: {exc}")
         return False
@@ -263,9 +263,9 @@ def _count_falkor_letters() -> Optional[int]:
     client = _get_falkor_client()
     if not client:
         return None
-    
+
     graph_name = os.getenv('FALKORDB_GRAPH_NAME', 'contraclaim')
-    
+
     try:
         print("Counting letters in FalkorDB...")
         result = client.execute_command(
@@ -273,7 +273,7 @@ def _count_falkor_letters() -> Optional[int]:
             graph_name,
             "MATCH (l:Letter) RETURN COUNT(l)"
         )
-        
+
         # Parse result - format is [['COUNT(l)'], [[count]]]
         if result and len(result) >= 2 and result[1]:
             count = int(result[1][0][0])
@@ -294,12 +294,12 @@ def _get_falkor_schema():
     client = _get_falkor_client()
     if not client:
         return
-    
+
     graph_name = os.getenv('FALKORDB_GRAPH_NAME', 'contraclaim')
-    
+
     try:
         print("\n--- FalkorDB Schema ---")
-        
+
         # Get node labels
         result = client.execute_command("GRAPH.QUERY", graph_name, "CALL db.labels()")
         if result and len(result) >= 2 and result[1]:
@@ -307,7 +307,7 @@ def _get_falkor_schema():
             print(f"Node labels: {labels}")
         else:
             print("No node labels found")
-        
+
         # Get relationship types
         result = client.execute_command("GRAPH.QUERY", graph_name, "CALL db.relationshipTypes()")
         if result and len(result) >= 2 and result[1]:
@@ -315,7 +315,7 @@ def _get_falkor_schema():
             print(f"Relationship types: {rel_types}")
         else:
             print("No relationship types found")
-        
+
         # Get sample letters if they exist
         result = client.execute_command(
             "GRAPH.QUERY",
@@ -344,7 +344,7 @@ async def main(args: argparse.Namespace) -> int:
     config = DocumentProcessingConfig()
     qdrant = _qdrant_client(config)
     falkor = FalkorGraphService()
-    
+
     # Upload sample data if requested
     if args.upload_sample:
         print("=" * 60)
@@ -352,34 +352,34 @@ async def main(args: argparse.Namespace) -> int:
         if not success:
             print("[ERROR] Sample data upload failed")
             return 1
-    
+
     # Inspect storage
     if args.upload_sample and not args.inspect:
         # If only uploading, show what we uploaded
         print("\n" + "=" * 60)
     else:
         print("=" * 60)
-    
+
     print("=== Storage Inspection ===")
     print(f"Qdrant enabled: {bool(qdrant)} (collection='{config.qdrant_collection}')")
     print(f"Falkor enabled: {falkor.enabled}")
-    
+
     # Check Qdrant
     total_qdrant = _count_qdrant_total(qdrant, config.qdrant_collection)
     if total_qdrant is not None:
         print(f"Qdrant total vectors: {total_qdrant}")
-    
+
     # Check FalkorDB
     print("\n--- FalkorDB Inspection ---")
     print("Connecting to FalkorDB on localhost:6380 (no password)...")
     total_falkor = _count_falkor_letters()
     if total_falkor is not None:
         print(f"Falkor letters: {total_falkor}")
-    
+
     # Show schema if we have letters
     if total_falkor and total_falkor > 0:
         _get_falkor_schema()
-    
+
     # Check specific document if requested
     if args.document_id:
         print(f"\n--- Document Details: {args.document_id} ---")
@@ -387,15 +387,15 @@ async def main(args: argparse.Namespace) -> int:
         if not document:
             print(f"[FAIL] Document {args.document_id} not found in MongoDB.")
             return 1
-        
+
         doc_id = str(document.id)
         letter_code = document.letterNo or getattr(document, "letterNoNormalized", None) or doc_id
         norm_code = normalize_letter_code(str(letter_code))
-        
+
         doc_qdrant = _count_qdrant_for_document(qdrant, config.qdrant_collection, doc_id)
         if doc_qdrant is not None:
             print(f"Qdrant chunks for {doc_id}: {doc_qdrant}")
-        
+
         # Check if letter exists in FalkorDB
         print(f"Looking for letter with normCode: {norm_code}")
         entry = _falkor_letter_payload(falkor, norm_code)
@@ -410,7 +410,7 @@ async def main(args: argparse.Namespace) -> int:
                 print(f"  {key}: {value}")
         else:
             print(f"✗ Falkor letter not found for normCode '{norm_code}'")
-    
+
     return 0
 
 

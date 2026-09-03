@@ -31,7 +31,7 @@ async def _find_by_id(coll, id_str: str):
                 return doc
         except Exception:
             pass
-    
+
     # Fallback to searching as a raw string if ObjectId fails or doesn't match
     return await coll.find_one({"_id": id_str})
 
@@ -170,7 +170,7 @@ async def read_projects(
             filters.update(scope_filter)
 
         projects, total_count = await service.get_projects_paginated(filters, {"skip": 0, "limit": 500})
-        
+
         # Log the raw data for debugging
         import logging
         logger = logging.getLogger(__name__)
@@ -190,7 +190,7 @@ async def read_projects(
                     # Fallback if _id is missing
                     payload["_id"] = str(ObjectId())
                     logger.warning(f"Project missing _id, generated: {payload['_id']}")
-                
+
                 serialized.append(Project(**payload))
             except Exception as e:
                 logger.error(f"Failed to serialize project {doc}: {e}")

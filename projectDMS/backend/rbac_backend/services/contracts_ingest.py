@@ -552,7 +552,7 @@ class MarkerService:
 
 class ClauseExtractor:
     """Enhanced clause extraction that preserves complete clauses"""
-    
+
     # Comprehensive patterns for legal document structures
     CLAUSE_PATTERNS = [
         # "CLAUSE 1.2.3 - Title" or "CLAUSE 1.2.3: Title"
@@ -574,7 +574,7 @@ class ClauseExtractor:
     # Structural divisions carry their keyword in the clause number ("Schedule 1")
     # so they never collide with a numeric clause "1".
     _STRUCTURAL_TYPES = {"SCHEDULE", "APPENDIX", "ANNEXURE", "ANNEX", "PART"}
-    
+
     def __init__(self):
         self.patterns = [re.compile(p, re.MULTILINE | re.IGNORECASE) for p in self.CLAUSE_PATTERNS]
 
@@ -601,7 +601,7 @@ class ClauseExtractor:
 
         clause_number = clause_number.rstrip(".")
         return clause_type, clause_number, clause_title
-    
+
     def extract_clauses(self, text: str) -> List[ClauseInfo]:
         """
         Extract complete clauses from contract text.
@@ -609,19 +609,19 @@ class ClauseExtractor:
         """
         if not text or not text.strip():
             return []
-        
+
         # Normalize line endings
         normalized_text = text.replace('\r\n', '\n').replace('\r', '\n')
         lines = normalized_text.split('\n')
-        
+
         clause_markers = []  # List of (line_idx, clause_number, clause_title, clause_type)
-        
+
         # First pass: identify all clause headers
         for idx, line in enumerate(lines):
             stripped = line.strip()
             if not stripped:
                 continue
-            
+
             for pattern in self.patterns:
                 match = pattern.match(line)
                 if match:
@@ -632,7 +632,7 @@ class ClauseExtractor:
                         continue
                     clause_markers.append((idx, clause_number, clause_title, clause_type))
                     break
-        
+
         if not clause_markers:
             # No clauses found, treat entire text as single section
             return [ClauseInfo(
@@ -644,33 +644,33 @@ class ClauseExtractor:
                 end_position=len(text),
                 level=1
             )]
-        
+
         # Second pass: extract complete clause content
         clauses = []
-        
+
         for i, (line_idx, clause_number, clause_title, clause_type) in enumerate(clause_markers):
             # Find start position
             start_line = line_idx
             start_pos = sum(len(lines[j]) + 1 for j in range(start_line))  # +1 for newline
-            
+
             # Find end position (start of next clause or end of document)
             if i < len(clause_markers) - 1:
                 end_line = clause_markers[i + 1][0]
             else:
                 end_line = len(lines)
-            
+
             # Extract complete clause text
             clause_lines = lines[start_line:end_line]
             clause_text = '\n'.join(clause_lines).strip()
-            
+
             # Calculate hierarchy level based on clause numbering
             level = clause_number.count('.') + 1 if '.' in clause_number else 1
-            
+
             # Determine parent clause number
             parent_number = None
             if '.' in clause_number:
                 parent_number = '.'.join(clause_number.split('.')[:-1])
-            
+
             clause_info = ClauseInfo(
                 clause_number=clause_number,
                 clause_title=clause_title or f"{clause_type.title()} {clause_number}",
@@ -681,9 +681,9 @@ class ClauseExtractor:
                 level=level,
                 parent_number=parent_number
             )
-            
+
             clauses.append(clause_info)
-        
+
         return clauses
 
     @staticmethod
@@ -704,7 +704,7 @@ class ClauseExtractor:
         if "." not in clause_number and clause_number.isdigit() and int(clause_number) > 80:
             return True
         return False
-    
+
     def split_long_clause(self, clause: ClauseInfo, max_length: int = 6000) -> List[Dict[str, Any]]:
         """
         Split a long clause intelligently at paragraph or sentence boundaries.
@@ -718,22 +718,22 @@ class ClauseExtractor:
                 'chunk_index': 0,
                 'is_complete': True
             }]
-        
+
         # Split at paragraph boundaries first
         paragraphs = clause.clause_text.split('\n\n')
         chunks = []
         current_chunk = []
         current_length = 0
         chunk_index = 0
-        
+
         header = f"{clause.clause_type.upper()} {clause.clause_number}"
         if clause.clause_title:
             header += f": {clause.clause_title}"
         header += "\n\n"
-        
+
         for para in paragraphs:
             para_len = len(para)
-            
+
             # If single paragraph exceeds max_length, split at sentences
             if para_len > max_length:
                 sentences = re.split(r'([.!?]\s+)', para)
@@ -750,10 +750,10 @@ class ClauseExtractor:
                         current_chunk = []
                         current_length = len(header)
                         chunk_index += 1
-                    
+
                     current_chunk.append(sent)
                     current_length += len(sent)
-            
+
             elif current_length + para_len > max_length and current_chunk:
                 chunk_text = header + '\n\n'.join(current_chunk)
                 chunks.append({
@@ -769,7 +769,7 @@ class ClauseExtractor:
             else:
                 current_chunk.append(para)
                 current_length += para_len
-        
+
         # Save remaining chunk
         if current_chunk:
             chunk_text = header + '\n\n'.join(current_chunk)
@@ -780,7 +780,7 @@ class ClauseExtractor:
                 'chunk_index': chunk_index,
                 'is_complete': len(chunks) == 0
             })
-        
+
         return chunks
 
 
@@ -929,7 +929,7 @@ class DatabaseService:
                 ("uploadType", 1),
                 ("createdAt", -1)
             ], name="docvec_org_proj_type_created_idx", background=True)
-            
+
             await self.db.document_vectors.create_index(
                 [("text", "text"), ("clause_title", "text")],
                 name="docvec_text_idx",
@@ -2063,7 +2063,7 @@ class ContractIngestor:
             chunk_type = clause.chunk_type or clause.clause_type or "clause"
             # Split long clauses intelligently
             clause_chunks = self.clause_extractor.split_long_clause(
-                clause, 
+                clause,
                 max_length=self.config.CHUNK_SIZE
             )
 
@@ -2105,7 +2105,7 @@ class ContractIngestor:
                     "section": section_heading,
                     "section_heading": section_heading,
                     "section_title": section_heading,
-                    
+
                     # NEW CLAUSE METADATA FIELDS (per markdown guide)
                     "clause_number": chunk_data['clause_number'],
                     "clause_no": chunk_data['clause_number'],
@@ -2131,7 +2131,7 @@ class ContractIngestor:
                     "page_start": page_start,
                     "page_end": page_end,
                     "source_pdf_page_link": source_pdf_page_link,
-                    
+
                     "tags": final_tags,
                     "checksum_sha256": chunk_checksum,
                     "source": clause_source,
