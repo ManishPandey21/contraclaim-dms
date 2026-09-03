@@ -111,6 +111,27 @@ def test_exactly_one_precommit_config_is_tracked() -> None:
     )
 
 
+def test_only_the_root_workflow_directory_is_canonical() -> None:
+    """GitHub reads workflows from the repository root and nowhere else.
+
+    A copy under `projectDMS/.github/workflows/` looks like CI, accepts edits,
+    and runs never. One lived there for the whole life of this branch, still
+    anchored at the pre-move `backend/...` paths.
+    """
+    workflows = [
+        f
+        for f in _tracked_files()
+        if "/.github/workflows/" in f or f.startswith(".github/workflows/")
+    ]
+    misplaced = [f for f in workflows if not f.startswith(".github/workflows/")]
+
+    assert not misplaced, (
+        f"workflow files outside the repository root are never executed by "
+        f"GitHub, and drift from the ones that are: {misplaced}"
+    )
+    assert workflows, "no workflow found at .github/workflows/"
+
+
 @pytest.mark.parametrize("hook_id", BACKEND_SCOPED_HOOKS + REPO_WIDE_HOOKS)
 def test_each_required_hook_selects_at_least_one_file(hook_id: str) -> None:
     pattern = _hook_patterns()[hook_id]

@@ -95,6 +95,10 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - name: Run frontend tests
+        # vitest runs files serially (fileParallelism: false in vitest.config.ts
+        # to avoid a parallel-run deadlock). That reuses one fork worker for the
+        # whole suite, whose V8 heap accumulates across files, so give it headroom
+        # to avoid an end-of-run OOM. Fork workers inherit NODE_OPTIONS.
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: npm test -- --run
@@ -131,6 +135,9 @@ jobs:
     needs: [backend-checks, frontend-checks]
     steps:
       - uses: actions/checkout@v4
+      # langgraph, graphiti and docling are profile-gated in compose, but their
+      # Python runtime is still built on every change so a 3.12 incompatibility
+      # cannot stay hidden until an operator enables the profile.
       - name: Build application images
         run: |
           docker build -t projectdms-backend:${{ github.sha }} projectDMS/backend
