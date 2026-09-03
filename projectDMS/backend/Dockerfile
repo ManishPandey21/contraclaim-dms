@@ -26,6 +26,14 @@ RUN apt-get update \
 COPY rbac_backend/requirements.txt ./rbac_backend/requirements.txt
 RUN pip install --upgrade pip && pip install -r rbac_backend/requirements.txt
 
+# The image runs uvicorn and nothing else; nothing at runtime installs a
+# package. pip stays behind anyway, and Trivy reads its vendored manifest
+# (pip/_vendor/vendor.txt) as if those pins were installed packages -
+# msgpack==1.1.2 and setuptools==70.3.0, neither of which is importable
+# here. Removing pip after the install removes the finding and the tool
+# together. Kept as its own layer so the dependency install stays cached.
+RUN pip uninstall -y pip
+
 COPY . .
 RUN mkdir -p /app/uploads /app/logs /app/tmp
 RUN adduser --disabled-password --gecos "" appuser \

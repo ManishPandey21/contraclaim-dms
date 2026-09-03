@@ -37,6 +37,12 @@ BACKUP_VOLUME = REPO_ROOT / "scripts" / "backup_volume.sh"
 LEGACY_BACKUP = REPO_ROOT / "scripts" / "backup.sh"
 CLIENT_DOCKERFILE = REPO_ROOT / "client" / "Dockerfile"
 CLIENT_DOCKERIGNORE = REPO_ROOT / "client" / ".dockerignore"
+PYTHON_SERVICE_DOCKERFILES = (
+    BACKEND_DOCKERFILE,
+    REPO_ROOT / "services" / "docling" / "Dockerfile",
+    REPO_ROOT / "services" / "langgraph" / "Dockerfile",
+    REPO_ROOT / "services" / "graphiti" / "Dockerfile",
+)
 
 
 def test_uvicorn_trusts_proxy_headers() -> None:
@@ -326,6 +332,29 @@ def test_the_client_runtime_stage_copies_only_built_output() -> None:
             f"{source!r} would carry builder content (node_modules, sources, "
             f"package metadata) into the shipped image"
         )
+
+
+@pytest.mark.parametrize(
+    "dockerfile", PYTHON_SERVICE_DOCKERFILES, ids=lambda p: p.parent.name
+)
+def test_python_service_images_do_not_ship_pip(dockerfile: Path) -> None:
+    """Every Python image runs uvicorn; none of them installs anything at runtime.
+
+    pip nevertheless stays in the image, and Trivy reads its vendored manifest
+    (`pip/_vendor/vendor.txt`) as a package list: `msgpack==1.1.2` and
+    `setuptools==70.3.0` were reported as HIGH findings in all four images even
+    though msgpack is not importable in any of them and the installed setuptools
+    is 84.0.0. Upgrading pip does not help - pip 26.2.1 still pins those
+    versions in its vendored manifest. Removing the tool removes the finding.
+    """
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert "pip install" in text, f"{dockerfile} no longer installs dependencies"
+    assert "pip uninstall -y pip" in text, (
+        f"{dockerfile} must remove pip after installing dependencies; leaving it "
+        f"ships a package manager, and its vendored manifest, in an image that "
+        f"never installs a package"
+    )
 
 
 def test_the_client_build_context_excludes_developer_and_test_output() -> None:
