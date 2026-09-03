@@ -1,4 +1,4 @@
-aiosmtplib==3.0.2
+aiosmtplib==5.1.2
 annotated-types==0.7.0
 anyio==4.8.0
 bcrypt==4.2.1
