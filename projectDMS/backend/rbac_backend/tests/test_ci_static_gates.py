@@ -184,3 +184,79 @@ def test_the_backend_test_step_runs_where_its_imports_resolve() -> None:
         "the working directory on sys.path, so `backend.*` imports fail at "
         "collection"
     )
+
+
+# --- the staged mypy baseline ------------------------------------------------
+
+MYPY_GATE = GIT_ROOT / "projectDMS" / "scripts" / "mypy_staged_gate.py"
+MYPY_BASELINE = GIT_ROOT / "projectDMS" / "backend" / "mypy-baseline.txt"
+
+
+def _baseline_entries() -> list[tuple[int, str, str, str]]:
+    entries = []
+    for number, line in enumerate(MYPY_BASELINE.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        assert len(parts) == 4, (
+            f"{MYPY_BASELINE.name}:{number}: expected four tab-separated fields "
+            f"(count, path, code, message), got {len(parts)}: {line!r}"
+        )
+        count, path, code, message = parts
+        assert count.isdigit() and int(count) >= 1, (
+            f"{MYPY_BASELINE.name}:{number}: count must be a positive integer, got {count!r}"
+        )
+        assert path and code and message, f"{MYPY_BASELINE.name}:{number}: empty field"
+        entries.append((int(count), path, code, message))
+    return entries
+
+
+def test_the_mypy_hook_still_invokes_mypy() -> None:
+    """A baseline gate is only honest if it actually type-checks.
+
+    The hook was swapped from mirrors-mypy to a local gate so the historical
+    backlog could be accepted without disabling error codes. The swap is
+    worthless - worse than worthless - if the gate stops running mypy.
+    """
+    hook = next(
+        h
+        for repo in yaml.safe_load(_configured_precommit_config().read_text(encoding="utf-8"))["repos"]
+        for h in repo["hooks"]
+        if h["id"] == "mypy"
+    )
+
+    assert "mypy_staged_gate.py" in hook["entry"], hook["entry"]
+    assert MYPY_GATE.is_file(), f"{MYPY_GATE} is missing"
+
+    source = MYPY_GATE.read_text(encoding="utf-8")
+    assert '"-m", "mypy"' in source, "the gate no longer runs mypy"
+    assert "--ignore-missing-imports" in source and "--scripts-are-modules" in source, (
+        "the gate must pass the flags mirrors-mypy passed, or the finding set "
+        "becomes a property of the invocation rather than of the code"
+    )
+    # mypy must be pinned in the hook's own environment, not inherited.
+    assert any(str(dep).startswith("mypy==") for dep in hook["additional_dependencies"])
+
+
+def test_the_mypy_baseline_is_well_formed_and_not_empty() -> None:
+    entries = _baseline_entries()
+
+    assert entries, "an empty baseline means the gate accepts nothing - regenerate it"
+    assert all(path.startswith("projectDMS/") for _, path, _, _ in entries), (
+        "baseline paths must be repository-relative, or they will not match at runtime"
+    )
+
+
+def test_the_mypy_baseline_holds_no_release_only_scope_escape() -> None:
+    """The baseline may only ever grow by a reviewed regeneration.
+
+    It cannot be checked against the merge-base from inside a unit test, so what
+    is checked here is the property that made that comparison meaningful: the
+    file is machine-generated in a fixed shape, records its provenance commit,
+    and nobody has hand-appended an entry in a different format.
+    """
+    header = MYPY_BASELINE.read_text(encoding="utf-8").split("\n\n", 1)[0]
+
+    assert "MACHINE-GENERATED" in header
+    assert "Provenance" in header and "merge-base" in header
+    assert "mypy_staged_gate.py --regenerate" in header

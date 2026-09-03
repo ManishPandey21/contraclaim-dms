@@ -1,0 +1,83 @@
+# Accepted historical mypy findings. MACHINE-GENERATED - do not hand-edit.
+#
+# Every entry here was present before this release branch existed. The gate
+# in scripts/mypy_staged_gate.py fails on any finding NOT listed, and passes
+# when the list only shrinks, so this file is a ceiling and never a target.
+#
+# Provenance: findings common to this branch and merge-base 08d7fa685ec0d198bd73dcdadc62073ed6f45fe7.
+# Regenerate: python projectDMS/scripts/mypy_staged_gate.py --regenerate
+#
+# Format: count<TAB>path<TAB>error-code<TAB>message
+
+1	projectDMS/backend/rbac_backend/ai_workflows/langgraph/letter_pipeline.py	assignment	Incompatible types in assignment (expression has type "Letter | None", variable has type "Letter")
+1	projectDMS/backend/rbac_backend/ai_workflows/langgraph/letter_pipeline.py	union-attr	Item "None" of "datetime | None" has no attribute "isoformat"
+1	projectDMS/backend/rbac_backend/config/document_processing_config.py	no-redef	Name "ParsedDocumentMetadata" already defined (possibly by an import)
+1	projectDMS/backend/rbac_backend/config/document_processing_config.py	no-redef	Name "ProcessingResult" already defined (possibly by an import)
+4	projectDMS/backend/rbac_backend/graph/graph_adapter.py	union-attr	Item "None" of "str | None" has no attribute "rstrip"
+1	projectDMS/backend/rbac_backend/graph/graph_ingestion_service.py	var-annotated	Need type annotation for "references" (hint: "references: set[<type>] = ...")
+1	projectDMS/backend/rbac_backend/retrieval/reranker.py	union-attr	Item "None" of "RerankerBackend | None" has no attribute "score"
+1	projectDMS/backend/rbac_backend/retrieval/service.py	assignment	Incompatible types in assignment (expression has type "dict[str, list[str]]", target has type "str")
+1	projectDMS/backend/rbac_backend/retrieval/service.py	union-attr	Item "BaseException" of "SearchResponse | BaseException" has no attribute "results"
+1	projectDMS/backend/rbac_backend/retrieval/source_metadata.py	arg-type	Argument 1 to "int" has incompatible type "Any | None"; expected "str | Buffer | SupportsInt | SupportsIndex | SupportsTrunc"
+2	projectDMS/backend/rbac_backend/retrieval/vector_client.py	attr-defined	"None" has no attribute "Distance"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "created_at"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "disabled"
+2	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "email"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "hashed_password"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "id"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "last_login"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "organization_id"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "preferences"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "projects"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "roles"
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	attr-defined	"_User" has no attribute "username"
+4	projectDMS/backend/rbac_backend/services/authentication_service.py	misc	Incompatible types in "await" (actual type "Awaitable[int] | int", expected type "Awaitable[Any]")
+1	projectDMS/backend/rbac_backend/services/authentication_service.py	misc	Incompatible types in "await" (actual type "Awaitable[set[Any]] | set[Any]", expected type "Awaitable[Any]")
+3	projectDMS/backend/rbac_backend/services/authorization_service.py	dict-item	Dict entry 1 has incompatible type "str": "dict[str, list[str]]"; expected "str": "str"
+1	projectDMS/backend/rbac_backend/services/contract_clause/agent.py	arg-type	Argument "chunk_type" to "build_record" of "ClauseStorageService" has incompatible type "str"; expected "Literal['clause', 'clause_part', 'section_chunk', 'table']"
+1	projectDMS/backend/rbac_backend/services/contract_clause/agent.py	operator	Unsupported operand types for > ("float" and "None")
+1	projectDMS/backend/rbac_backend/services/contract_clause/graph_service.py	arg-type	Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/contract_clause/graph_service.py	arg-type	Argument 3 to "clause_node_id" has incompatible type "Any | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/contract_graph_service.py	operator	Unsupported operand types for >= ("int" and "None")
+1	projectDMS/backend/rbac_backend/services/contract_graph_service.py	operator	Unsupported operand types for >= ("int" and "list[str]")
+1	projectDMS/backend/rbac_backend/services/contract_graph_service.py	operator	Unsupported operand types for >= ("int" and "str")
+1	projectDMS/backend/rbac_backend/services/contract_service.py	arg-type	Argument "key" to "sorted" has incompatible type "Callable[[dict[str, Any]], Any | int | None]"; expected "Callable[[dict[str, Any]], SupportsDunderLT[Any] | SupportsDunderGT[Any]]"
+1	projectDMS/backend/rbac_backend/services/contract_service.py	return-value	Incompatible return value type (got "Any | int | None", expected "SupportsDunderLT[Any] | SupportsDunderGT[Any]")
+1	projectDMS/backend/rbac_backend/services/contracts_ingest.py	arg-type	Argument "mongo_uri" to "LlamaIndexVectorService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/contracts_ingest.py	arg-type	Argument "toc" to "MarkerResult" has incompatible type "list[Any | None]"; expected "list[str]"
+3	projectDMS/backend/rbac_backend/services/contracts_ingest.py	arg-type	Argument 1 to "upsert_job_status" of "DatabaseService" has incompatible type "str | None"; expected "str"
+3	projectDMS/backend/rbac_backend/services/contracts_ingest.py	arg-type	Argument 3 to "upsert_job_status" of "DatabaseService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/contracts_ingest.py	var-annotated	Need type annotation for "current_chunk" (hint: "current_chunk: list[<type>] = ...")
+1	projectDMS/backend/rbac_backend/services/conversation_service.py	arg-type	Argument 1 to "_recompute_descendants" of "ConversationService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/conversation_service.py	arg-type	Argument 1 to "get" of "dict" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/conversation_service.py	arg-type	Argument 2 to "_recompute_descendants" of "ConversationService" has incompatible type "list[str | None]"; expected "list[str]"
+1	projectDMS/backend/rbac_backend/services/database_service.py	arg-type	Argument "mongo_uri" to "LlamaIndexVectorService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/database_service.py	union-attr	Item "None" of "LangChainVectorService | None" has no attribute "replace_document"
+1	projectDMS/backend/rbac_backend/services/document_service.py	arg-type	Argument "metadata_source" to "ingest_document" of "GraphIngestionService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/document_service.py	return-value	Incompatible return value type (got "Document | None", expected "Document")
+1	projectDMS/backend/rbac_backend/services/document_service.py	union-attr	Item "None" of "ProcessingResult | None" has no attribute "processed_path"
+1	projectDMS/backend/rbac_backend/services/duplicate_detection_service.py	arg-type	Argument 1 to "get" of "dict" has incompatible type "Any | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/email_service.py	operator	Unsupported right operand type for in ("Any | None")
+1	projectDMS/backend/rbac_backend/services/evidence_graph_service.py	operator	Unsupported operand types for in ("str | None" and "str")
+1	projectDMS/backend/rbac_backend/services/falkor_graph_service.py	assignment	Incompatible types in assignment (expression has type "dict[str, Any]", target has type "str")
+1	projectDMS/backend/rbac_backend/services/falkor_graph_service.py	assignment	Incompatible types in assignment (expression has type "list[Any]", target has type "str")
+1	projectDMS/backend/rbac_backend/services/falkor_graph_service.py	assignment	Incompatible types in assignment (expression has type "str | int | float", target has type "str")
+1	projectDMS/backend/rbac_backend/services/falkor_graph_service.py	var-annotated	Need type annotation for "serialized" (hint: "serialized: dict[<type>, <type>] = ...")
+1	projectDMS/backend/rbac_backend/services/langchain_vector_service.py	no-redef	Name "DocumentProcessingConfig" already defined (possibly by an import)
+1	projectDMS/backend/rbac_backend/services/letter_drafting/incoming_analyzer.py	union-attr	Item "None" of "Any | None" has no attribute "date"
+2	projectDMS/backend/rbac_backend/services/letter_drafting/legal_risk_reviewer.py	union-attr	Item "None" of "Match[str] | None" has no attribute "end"
+2	projectDMS/backend/rbac_backend/services/letter_drafting/legal_risk_reviewer.py	union-attr	Item "None" of "Match[str] | None" has no attribute "start"
+1	projectDMS/backend/rbac_backend/services/letter_drafting/prompts.py	name-defined	Name "Optional" is not defined
+1	projectDMS/backend/rbac_backend/services/letter_drafting/service.py	name-defined	Name "DraftContextBundle" is not defined
+1	projectDMS/backend/rbac_backend/services/letter_service.py	arg-type	Argument 1 to "list_documents_by_letter_no" of "DocumentService" has incompatible type "str | None"; expected "str"
+1	projectDMS/backend/rbac_backend/services/monetization_service.py	union-attr	Item "None" of "dict[str, Any] | None" has no attribute "get"
+1	projectDMS/backend/rbac_backend/services/monetization_service.py	var-annotated	Need type annotation for "doc"
+1	projectDMS/backend/rbac_backend/services/openai_service.py	return	Missing return statement
+1	projectDMS/backend/rbac_backend/services/permission_service.py	arg-type	Argument 1 to "get_permission_by_name" of "PermissionService" has incompatible type "object"; expected "str"
+1	projectDMS/backend/rbac_backend/services/permission_service.py	assignment	Incompatible types in assignment (expression has type "dict[str, bool]", target has type "list[dict[str, dict[str, Any]]]")
+1	projectDMS/backend/rbac_backend/services/permission_service.py	return-value	Incompatible return value type (got "Permission | None", expected "Permission")
+1	projectDMS/backend/rbac_backend/services/permission_service.py	var-annotated	Need type annotation for "category_groups" (hint: "category_groups: dict[<type>, <type>] = ...")
+1	projectDMS/backend/rbac_backend/services/runtime_state.py	misc	Incompatible types in "await" (actual type "Awaitable[bool] | bool | Any", expected type "Awaitable[Any]")
+1	projectDMS/backend/rbac_backend/services/runtime_state.py	union-attr	Item "None" of "Redis | None" has no attribute "ping"
+1	projectDMS/backend/rbac_backend/utils/notification_service.py	var-annotated	Need type annotation for "preference"
+1	projectDMS/backend/rbac_backend/utils/notification_service.py	var-annotated	Need type annotation for "subscription"

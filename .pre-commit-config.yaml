@@ -24,12 +24,35 @@ repos:
       - id: ruff-format
         files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^projectDMS/backend/rbac_backend/routers/retrieval_engine.py$|^projectDMS/backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+  # mypy runs through a gate rather than directly. Repairing this config's file
+  # scope switched mypy on for the first time and it found a historical backlog;
+  # the gate keeps every one of those findings visible and fails on any NEW one,
+  # which disabling error codes or excluding files would not. See
+  # scripts/mypy_staged_gate.py and backend/mypy-baseline.txt.
+  - repo: local
     hooks:
       - id: mypy
+        name: "mypy (staged baseline gate)"
+        entry: python projectDMS/scripts/mypy_staged_gate.py
+        language: python
+        types_or: [python, pyi]
+        require_serial: true
         files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/"
-        additional_dependencies: []
+        # The gate shells out to mypy, so mypy and the type information for the
+        # third-party packages this code imports both live here. Each entry is
+        # whichever form carries types for the version the repository pins:
+        #   redis 7.0.1  ships py.typed, so the real package IS the types
+        #                (types-redis is deprecated for redis>=5 for that reason)
+        #   requests 2.33.0  does not - py.typed arrived after this pin
+        #   bleach 6.4.0     ships none
+        # Stub packages are static-only and must never reach the runtime
+        # requirements. Versions track backend/rbac_backend/requirements.txt
+        # and have to be updated with it.
+        additional_dependencies:
+          - "mypy==1.13.0"
+          - "redis==7.0.1"
+          - "types-requests==2.33.0.20260712"
+          - "types-bleach==6.2.0.20241123"
 
   - repo: local
     hooks:
