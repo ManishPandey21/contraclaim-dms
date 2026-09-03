@@ -391,3 +391,46 @@ def test_mongo_replica_services_have_restore_safe_limits_and_replication_health(
     assert mongo_init_block.count("condition: service_started") == 3, (
         "replica initialization must start before replication-aware health can pass"
     )
+
+
+REQUIREMENTS_FILES = (
+    REPO_ROOT / "backend" / "rbac_backend" / "requirements.txt",
+    REPO_ROOT / "backend" / "requirements.txt",
+    REPO_ROOT / "requirements.txt",
+)
+
+# Only backend/rbac_backend/requirements.txt reaches the image, CI and
+# pip-audit. The other two are installed by hand and by scripts/deploy_*.sh,
+# and they drifted: PYSEC-2026-3552 was fixed in rbac_backend by pinning
+# cryptography 50.0.0 while both other files still pinned 44.0.2, which the
+# same advisory covers. A pin that only one file carries is not a fix, and
+# nothing scans the other two.
+SECURITY_PINNED_PACKAGES = ("cryptography", "PyJWT")
+
+
+def _pinned_version(text: str, package: str) -> str | None:
+    match = re.search(
+        rf"^{re.escape(package)}(?:\[[^\]]+\])?==(?P<version>[^\s#]+)\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return match.group("version") if match else None
+
+
+@pytest.mark.parametrize("package", SECURITY_PINNED_PACKAGES)
+def test_security_pinned_packages_agree_across_requirements_files(package: str) -> None:
+    pinned = {
+        path.name if path.parent == REPO_ROOT else str(path.relative_to(REPO_ROOT)): version
+        for path in REQUIREMENTS_FILES
+        for version in [_pinned_version(path.read_text(encoding="utf-8"), package)]
+        if version is not None
+    }
+
+    assert len(pinned) == len(REQUIREMENTS_FILES), (
+        f"{package} must stay pinned in every requirements file; found {pinned}"
+    )
+    assert len(set(pinned.values())) == 1, (
+        f"{package} is pinned at different versions across requirements files: "
+        f"{pinned}. An advisory fixed in one file leaves the others installable "
+        f"at the vulnerable version, and only backend/rbac_backend is scanned"
+    )

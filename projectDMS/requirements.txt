@@ -36,7 +36,7 @@ cohere==5.19.0
 colorama==0.4.6
 colorlog==6.9.0
 confection==0.1.5
-cryptography==44.0.2
+cryptography==50.0.0
 cymem==2.0.11
 dataclasses-json==0.6.7
 defusedxml==0.7.1
