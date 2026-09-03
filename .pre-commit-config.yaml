@@ -1,3 +1,11 @@
+# pre-commit is scoped to the git repository, not to a subdirectory: it chdirs
+# to `git rev-parse --show-toplevel` and every path it hands a hook is relative
+# to that root. This repository's root holds `projectDMS/`, so the config lives
+# here (the tool looks for it at the root and nowhere else) and every `files:`
+# pattern is anchored at `projectDMS/...`. Anchoring them at `^backend/` - the
+# layout from when projectDMS was its own repository - silently matched zero
+# files, and a static or security hook that matches nothing still reports
+# success. `tests/test_ci_static_gates.py` fails if either regresses.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
@@ -12,15 +20,15 @@ repos:
     hooks:
       - id: ruff
         args: ["--fix"]
-        files: "^backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^backend/rbac_backend/routers/retrieval_engine.py$|^backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^projectDMS/backend/rbac_backend/routers/retrieval_engine.py$|^projectDMS/backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
       - id: ruff-format
-        files: "^backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^backend/rbac_backend/routers/retrieval_engine.py$|^backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$|^projectDMS/backend/rbac_backend/routers/retrieval_engine.py$|^projectDMS/backend/rbac_backend/tests/test_retrieval_engine_basics.py$"
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: v1.13.0
     hooks:
       - id: mypy
-        files: "^backend/rbac_backend/(ingestion|retrieval|agents|observability)/"
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/"
         additional_dependencies: []
 
   - repo: local
@@ -30,7 +38,7 @@ repos:
         entry: python -c "import sys,pathlib; bad=[p for p in sys.argv[1:] if pathlib.Path(p).suffix=='.py' and 'print(' in pathlib.Path(p).read_text()]; sys.exit(1 if bad else 0)"
         language: system
         types: [python]
-        files: "^backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$"
+        files: "^projectDMS/backend/rbac_backend/(ingestion|retrieval|agents|observability)/.*\\.py$"
 
       # Prevents reintroducing the archived/scratch/duplicate files removed in the
       # hotfix #2 dead-code cleanup. Fails if any matching path is staged.

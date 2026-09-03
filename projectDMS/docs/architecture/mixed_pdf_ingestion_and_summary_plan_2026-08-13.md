@@ -285,7 +285,7 @@ short_summary   : 1-2 sentences, <= ~240 chars. Card/list/search-result renderin
 
 detailed_summary: structured, sectioned, provenance-carrying. Document detail view,
                   drafting context, arbitration bundles.
-                  "What does this document establish?" 
+                  "What does this document establish?"
 ```
 
 **The critical design decision: `detailed_summary` is a *view over the canonical JSON*, not

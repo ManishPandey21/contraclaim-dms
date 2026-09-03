@@ -69,8 +69,15 @@ jobs:
         run: pre-commit run --all-files --show-diff-on-failure
       - name: Compile backend modules
         run: python -m compileall -q projectDMS/backend/rbac_backend
+      # Twenty-two test modules import `backend.rbac_backend...`, which resolves
+      # only when `projectDMS` is on sys.path. Invoked as `pytest <path>` from
+      # the checkout root it is not, and collection dies with
+      # `ModuleNotFoundError: No module named 'backend'` before a single test
+      # runs. `python -m` puts the working directory on sys.path, so running it
+      # from `projectDMS` reproduces the invocation the repository documents.
       - name: Run backend test suite
-        run: pytest projectDMS/backend/rbac_backend/tests -q
+        working-directory: projectDMS
+        run: python -m pytest backend/rbac_backend/tests -q
 
   frontend-checks:
     name: Frontend lint, tests, and build
