@@ -92,7 +92,7 @@ wrapt==1.17.3
 # The backend imports only pydantic_ai's OpenAI model adapter.  The meta
 # package installs every optional provider and makes a clean Docker resolver
 # backtrack across unrelated cloud/HuggingFace dependencies.
-pydantic-ai-slim[openai]==1.102.0
+pydantic-ai-slim[openai]==1.106.0
 # pydantic-ai 1.1 imports the private ``opentelemetry._events`` module, which
 # was removed by later API releases. Keep the provider runtime importable.
 opentelemetry-api==1.37.0
