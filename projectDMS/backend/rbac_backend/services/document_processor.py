@@ -565,6 +565,16 @@ class DocumentProcessor:
                     processing_state=ProcessingState.STORED_ONLY.value,
                 )
             extraction = dispatch.extraction
+            if extraction is None:
+                # Every kind that reaches here is an extracting kind - STORED_ONLY
+                # returned above - so a dispatch with no extraction means the
+                # router produced a result no extractor filled in. Say so, rather
+                # than reading attributes off None a few lines down and reporting
+                # it as an AttributeError from the middle of the pipeline.
+                raise DocumentProcessorError(
+                    f"source dispatch for {input_path.name} produced no extraction "
+                    f"(kind={dispatch.kind.value}, state={dispatch.processing_state})"
+                )
 
             # Step 1b: assess every page. Runs unconditionally - companion
             # evidence measured 9 corruptions in a PDF's own text layer, so

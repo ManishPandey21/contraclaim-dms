@@ -27,6 +27,7 @@ from ...models.letter_drafting import (
     DraftExecutionEffect,
     DraftOutboxEvent,
     DraftCommentRequest,
+    DraftLifecycleEventType,
     DraftGovernanceResponse,
     DraftMetricBottleneck,
     DraftMetricBreakdownItem,
@@ -2262,14 +2263,26 @@ class DraftRunService:
                 now,
             )
         else:
-            run = await self.repository.update_fields(letter_id, run_id, fields)
-            if not run:
+            updated = await self.repository.update_fields(letter_id, run_id, fields)
+            if not updated:
                 raise HTTPException(status_code=404, detail="Draft run not found")
+            run = updated
+
+        # Spelled out per stage rather than interpolated. `stage` is already
+        # Literal["drafter", "reviewer", "final"] and the event type is its own
+        # Literal, so the mapping is total in both directions - an f-string only
+        # ever proves "some str", which is how an unknown lifecycle event could
+        # reach the repository.
+        approval_events: Dict[ApprovalStage, DraftLifecycleEventType] = {
+            "drafter": "drafter_approved",
+            "reviewer": "reviewer_approved",
+            "final": "final_approved",
+        }
 
         await self.repository.append_event(
             letter_id,
             run_id,
-            f"{stage}_approved",
+            approval_events[stage],
             actor_user_id=actor,
             status=run.status,
             payload={"comment": request.comment} if request.comment else None,

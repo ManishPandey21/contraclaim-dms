@@ -1313,7 +1313,7 @@ class LetterService:
 
         update_doc: Dict[str, Any]
         if is_analysis_only:
-            update_doc: Dict[str, Any] = {
+            update_doc = {
                 **base_doc,
                 "strategy_plan": payload.get("draft_plan"),
                 "strategic_outline": payload.get("strategy_outline"),

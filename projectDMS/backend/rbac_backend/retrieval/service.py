@@ -1781,7 +1781,7 @@ class RetrievalService:
             if not refinements and clause_hints:
                 refinements = clause_hints[:2]
             return critique, self._dedupe_queries(refinements)[:3]
-        refinements: List[str] = []
+        refinements = []
         for line in critique.splitlines():
             stripped = line.strip(" -•")
             if not stripped:

@@ -515,7 +515,7 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
         raw_event_type = entity.get("event_type")
         event_type = (
             raw_event_type.value
-            if hasattr(raw_event_type, "value")
+            if raw_event_type is not None and hasattr(raw_event_type, "value")
             else str(raw_event_type or "")
         )
         event_id = str(entity.get("_id") or "")

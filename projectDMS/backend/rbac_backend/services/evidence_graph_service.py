@@ -6,6 +6,7 @@ but link decisions and audit history live here as append-only revisions.
 
 from __future__ import annotations
 
+import logging
 import hashlib
 import re
 import uuid
@@ -32,6 +33,9 @@ from ..models.evidence_graph import (
     TimelineSummary,
 )
 from .audit_event_service import AuditEventService
+
+
+logger = logging.getLogger(__name__)
 
 
 class EvidenceGraphError(Exception):
@@ -552,8 +556,8 @@ class EvidenceGraphService:
         document_id: str,
         document_data: Dict[str, Any],
         metadata: Any,
-        metadata_source: str,
-        upload_type: str,
+        metadata_source: Optional[str],
+        upload_type: Optional[str],
         current_user: Any = None,
     ) -> Optional[Dict[str, Any]]:
         org_id = str(document_data.get("organization_id") or "")
@@ -571,7 +575,7 @@ class EvidenceGraphService:
                 "[evidence_graph] Skipping ingestion for %s: source is not consumable",
                 document_id,
             )
-            return
+            return None
 
         full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
         content_seed = "|".join(
@@ -618,7 +622,9 @@ class EvidenceGraphService:
             )
         return extraction
 
-    def _parsed_metadata(self, document_data: Dict[str, Any], metadata: Any, upload_type: str) -> Dict[str, Any]:
+    def _parsed_metadata(
+        self, document_data: Dict[str, Any], metadata: Any, upload_type: Optional[str]
+    ) -> Dict[str, Any]:
         subject = str(getattr(metadata, "subject", None) or document_data.get("subject") or "")
         summary = str(getattr(metadata, "summary", None) or document_data.get("summary") or "")
         full_text = str(getattr(metadata, "full_content", None) or document_data.get("full_text") or "")
@@ -669,7 +675,7 @@ class EvidenceGraphService:
     def _first_value(self, document_data: Dict[str, Any], metadata: Any, field: str) -> Optional[str]:
         return getattr(metadata, field, None) or document_data.get(field)
 
-    def _classify_document(self, text: str, upload_type: str) -> str:
+    def _classify_document(self, text: str, upload_type: Optional[str]) -> str:
         lowered = text.lower()
         candidates: List[Tuple[str, Tuple[str, ...]]] = [
             ("eot_claim", ("extension of time", " eot", "delay claim")),

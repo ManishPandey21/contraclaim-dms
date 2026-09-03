@@ -154,7 +154,7 @@ class DocumentService:
         document_id: str,
         extracted_payload: Dict[str, Any],
         metadata: Any,
-        metadata_source: str,
+        metadata_source: Optional[str],
         upload_type: Optional[str],
     ) -> bool:
         """Publish only while each independent store has current authority."""
@@ -721,7 +721,7 @@ class DocumentService:
             try:
                 original_subtags = list(document.subTags or [])
                 obj_ids = []
-                name_map: Dict[str, str] = {}
+                name_map = {}
                 for st in original_subtags:
                     if isinstance(st, str) and len(st) == 24:
                         try:
@@ -893,7 +893,7 @@ class DocumentService:
                 return job_id
 
         job_id = str(ObjectId())
-        job = {
+        job: Dict[str, Any] = {
             "_id": job_id,
             "document_id": document.id,
             "file_path": file_path,
@@ -2141,7 +2141,7 @@ class DocumentService:
             except InvalidDocumentIdError:
                 target_data = await db.documents.find_one({"_id": ref.documentId})
 
-            entry: Dict[str, Any] = {
+            entry = {
                 "id": ref.documentId,
                 "documentId": ref.documentId,
                 "linkType": ref.linkType,
@@ -3164,49 +3164,6 @@ class DocumentService:
             logger.error(f"Failed to check document existence {document_id}: {e}")
             raise DocumentServiceError(f"Document existence check failed: {str(e)}")
 
-    def _normalize_metadata_references(self, references: Any) -> List[Dict[str, Any]]:
-        normalized: List[Dict[str, Any]] = []
-        if not references:
-            return normalized
-
-        seen: Set[Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]] = set()
-        for ref in references:
-            entry = self._coerce_reference_entry(ref)
-            if not entry:
-                continue
-
-            date_value = entry.get("date")
-            if date_value:
-                try:
-                    formatted = format_date_ddmmyyyy(date_value)
-                    if formatted:
-                        entry = dict(entry)
-                        entry["date"] = formatted
-                except Exception:
-                    pass
-
-            key = (
-                entry.get("letterNo"),
-                entry.get("date"),
-                entry.get("text"),
-                entry.get("raw"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-
-            has_structured_fields = any(
-                entry.get(field) for field in ("letterNo", "letter_no", "date", "text")
-            )
-            if "raw" in entry and not has_structured_fields:
-                entry = dict(entry)
-                entry.pop("raw", None)
-                if not entry:
-                    continue
-
-            normalized.append(entry)
-
-        return normalized
     async def get_documents_count(self, filter_dict: Optional[Dict[str, Any]] = None) -> int:
         """
         Get count of documents matching filter.

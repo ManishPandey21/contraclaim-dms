@@ -208,10 +208,15 @@ def _applied_at(events: Sequence[Dict[str, Any]], when: date) -> bool:
     Events with an unknown start are skipped entirely: a dated question needs a
     proven start, and substituting one would manufacture legal evidence.
     """
-    ordered = sorted(
-        (e for e in events if _parse_date(e.get("effective_at")) is not None),
-        key=lambda e: _parse_date(e.get("effective_at")),
-    )
+    # Parsed once and carried alongside the event: the generator already drops
+    # the undated ones, but a `key=` lambda re-parsing the same field cannot
+    # prove it never returns None. Same order, half the parsing.
+    dated = [
+        (parsed, event)
+        for event, parsed in ((e, _parse_date(e.get("effective_at"))) for e in events)
+        if parsed is not None
+    ]
+    ordered = [event for _, event in sorted(dated, key=lambda pair: pair[0])]
     open_interval = False
     for event in ordered:
         effective = _parse_date(event.get("effective_at"))

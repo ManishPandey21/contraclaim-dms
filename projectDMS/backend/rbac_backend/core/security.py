@@ -661,7 +661,7 @@ def build_scope_query(
             return _deny_all()
         if organization_id is not None and (org_id_val is None or str(organization_id) != str(org_id_val)):
             return _deny_all()
-        q: Dict[str, Any] = {}
+        q = {}
         if org_id_val is not None:
             q[org_field] = str(org_id_val)
         if project_id is not None:
@@ -683,7 +683,7 @@ def build_scope_query(
         proj_ids = [str(p) for p in (getattr(current_user, "projects", []) or [])]
         if not proj_ids:
             return _deny_all()
-        q: Dict[str, Any] = {}
+        q = {}
         if project_id is not None:
             if str(project_id) not in proj_ids:
                 return _deny_all()

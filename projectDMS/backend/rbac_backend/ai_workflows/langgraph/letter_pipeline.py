@@ -326,8 +326,17 @@ class LetterDraftGraph:
                 path - so it now goes through the seam that applies canonical
                 scope AND publication authority in one place.
                 """
+                letter_no = letter.letter_no
+                if not letter_no:
+                    # Nothing shares a letter number that does not exist. Passed
+                    # through, `None` reached `{"letterNo": None}` and matched
+                    # every document whose letterNo is null or missing - an
+                    # association this letter never had. Scope and publication
+                    # authority still applied, so this narrows the fallback
+                    # rather than widening anything.
+                    return []
                 authorised = await document_service.list_documents_by_letter_no(
-                    letter.letter_no,
+                    letter_no,
                     current_user,
                     limit=5,
                     organization_id=scope_org,
@@ -764,7 +773,7 @@ class LetterDraftGraph:
                         # the pushed draft version, so they are authorised
                         # before either happens.
                         authorized_ids = await letter_service.authorized_letter_ids(
-                            [str(entry.id) for entry in related if getattr(entry, "id", None)],
+                            [str(entry.id) for entry in related if entry is not None and getattr(entry, "id", None)],
                             current_user,
                             organization_id=letter_org or None,
                             project_id=letter_project or None,

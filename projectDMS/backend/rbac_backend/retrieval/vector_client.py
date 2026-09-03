@@ -386,7 +386,7 @@ class VectorClient:
                 raise VectorStoreUnavailableError(
                     f"Qdrant scroll failed: {exc}"
                 ) from exc
-        ids: List[str] = []
+        ids = []
         for entry in self._memory_index:
             if entry.get("namespace") != collection:
                 continue

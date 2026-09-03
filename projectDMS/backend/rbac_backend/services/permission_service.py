@@ -758,9 +758,9 @@ class PermissionService:
                 granted = False
             else:
                 role_ids = user_doc.get("roles", []) or []
-                raw_permissions: List[str] = []
-                perm_names: set[str] = set()
-                role_names: set[str] = set()
+                raw_permissions = []
+                perm_names = set()
+                role_names = set()
                 for rid in role_ids:
                     rid_str = str(rid).lower()
                     if rid_str:
