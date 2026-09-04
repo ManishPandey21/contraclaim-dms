@@ -50,7 +50,6 @@ Run with a local FalkorDB:
 
 from __future__ import annotations
 
-import os
 from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -64,10 +63,15 @@ from rbac_backend.services.report_service import ReportService
 from rbac_backend.tests.authority_band_graph import (
     disposable_graph_name,
     drop_disposable_graph,
+    falkor_host,
+    falkor_port,
 )
 
-FALKOR_HOST = os.environ.get("FALKOR_TEST_HOST", "localhost")
-FALKOR_PORT = int(os.environ.get("FALKOR_TEST_PORT", "6380"))
+# Resolved through the shared seam, not from os.environ: under
+# CONTRACLAIM_STAGING_GATE the localhost default is refused outright, so a
+# staging run cannot silently measure the development FalkorDB.
+FALKOR_HOST = falkor_host()
+FALKOR_PORT = falkor_port()
 
 pytestmark = pytest.mark.integration
 

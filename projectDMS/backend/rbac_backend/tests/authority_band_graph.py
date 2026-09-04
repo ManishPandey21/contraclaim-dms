@@ -35,6 +35,8 @@ import os
 import uuid
 from typing import Any, List
 
+from rbac_backend.tests import staging_gate
+
 #: Current sanctioned prefix. Includes a per-run token so residue is attributable.
 AUTHORITY_BAND_GRAPH_PREFIX = "authority_band_"
 
@@ -63,12 +65,25 @@ class DisposableGraphSafetyError(RuntimeError):
     """A cleanup was asked to touch something it did not create."""
 
 
+#: Developer defaults. They address THIS machine, which is the whole hazard:
+#: on the development host `localhost:6380` is the container holding the
+#: business graphs `G` and `contraclaim`. Convenient for development, and
+#: catastrophic for a staging Gate-2 run that forgot the override - the
+#: evidence would be measured against the dev engine and the run would write
+#: graphs into it. `staging_gate` turns both defaults off under
+#: `CONTRACLAIM_STAGING_GATE`; see that module for why it is a single flag.
+FALKOR_HOST_ENV = "FALKOR_TEST_HOST"
+FALKOR_PORT_ENV = "FALKOR_TEST_PORT"
+FALKOR_DEV_HOST_DEFAULT = "localhost"
+FALKOR_DEV_PORT_DEFAULT = 6380
+
+
 def falkor_host() -> str:
-    return os.environ.get("FALKOR_TEST_HOST", "localhost")
+    return staging_gate.resolve_host(FALKOR_HOST_ENV, FALKOR_DEV_HOST_DEFAULT)
 
 
 def falkor_port() -> int:
-    return int(os.environ.get("FALKOR_TEST_PORT", "6380"))
+    return staging_gate.resolve_port(FALKOR_PORT_ENV, FALKOR_DEV_PORT_DEFAULT)
 
 
 def disposable_graph_name(label: str = "") -> str:

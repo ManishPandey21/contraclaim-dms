@@ -19,11 +19,20 @@ from typing import Any, Dict, List
 
 import pytest
 
+from rbac_backend.tests import staging_gate
+
 # 127.0.0.1, not localhost. On Windows `localhost` resolves to ::1 first and
 # the IPv6 hop to a Docker Desktop port binding can stall past a short timeout -
 # which is what made this suite skip intermittently while the container was
 # healthy and serving the same request in ~50ms.
-QDRANT_URL = os.environ.get("QDRANT_TEST_URL", "http://127.0.0.1:6333")
+#
+# That default is a developer convenience and a staging hazard: on this machine
+# it is the running `contract-ai-qdrant-1` dev container, so a staging Gate-2
+# run that forgot the override would measure the wrong engine and report it as
+# staging evidence. `staging_gate` refuses the default outright under
+# CONTRACLAIM_STAGING_GATE.
+QDRANT_DEV_URL_DEFAULT = "http://127.0.0.1:6333"
+QDRANT_URL = staging_gate.resolve_url("QDRANT_TEST_URL", QDRANT_DEV_URL_DEFAULT)
 
 #: Collection creation on a loaded host has been measured at 1.9-2.7s, so the
 #: probe timeout is generous enough not to mistake slowness for absence.
@@ -31,7 +40,16 @@ _TIMEOUT = int(os.environ.get("QDRANT_TEST_TIMEOUT", "30"))
 
 
 def _api_key() -> str:
-    """Local dev key, from the environment or the gitignored secrets file."""
+    """The Qdrant key: from the environment, and in staging mode ONLY from there.
+
+    The checkout fallback below exists so a developer does not have to export
+    the local key by hand. It is also how a staging run picks up the DEV key
+    without anyone noticing: the file is present in every worktree, so a
+    forgotten `QDRANT_API_KEY` produces an authenticated request against
+    whatever endpoint is configured, using a credential nobody chose.
+    `staging_gate` closes that path under CONTRACLAIM_STAGING_GATE, where the
+    key must come from the explicitly supplied staging environment.
+    """
     key = os.environ.get("QDRANT_API_KEY") or os.environ.get("QDRANT_TEST_API_KEY")
     if key:
         return key
@@ -41,8 +59,16 @@ def _api_key() -> str:
         Path(__file__).resolve().parents[4] / "config" / "secrets" / "qdrant_api_key",
         Path(__file__).resolve().parents[3] / "config" / "secrets" / "qdrant_api_key",
     ):
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8").strip()
+        if not candidate.is_file():
+            continue
+        if staging_gate.checkout_secret_is_forbidden(candidate):
+            raise staging_gate.StagingGateConfigurationError(
+                f"{staging_gate.STAGING_GATE_ENV} is set, so this run is staging "
+                "Gate-2 evidence and the Qdrant key may not be read from the "
+                "checkout-local development secret. Export QDRANT_API_KEY (or "
+                "QDRANT_TEST_API_KEY) from staging secret management instead."
+            )
+        return candidate.read_text(encoding="utf-8").strip()
     return ""
 
 

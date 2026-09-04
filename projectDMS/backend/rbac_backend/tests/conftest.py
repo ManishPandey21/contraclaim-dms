@@ -1,11 +1,18 @@
 """Certification modes: a required suite may not skip (GRAPH-GATES U5).
 
-Four independent switches share one mechanism - `G31_WRITER_CERTIFICATION`,
-`G30_READER_CERTIFICATION`, `G32_STATE_REHEARSAL` and
-`G29_UMBRELLA_CERTIFICATION` - each over its own required-file set. They are
+Five independent switches share one mechanism - `G31_WRITER_CERTIFICATION`,
+`G30_READER_CERTIFICATION`, `G32_STATE_REHEARSAL`, `G29_UMBRELLA_CERTIFICATION`
+and `CONTRACLAIM_STAGING_GATE` - each over its own required-file set. They are
 deliberately not one flag: a certification claim must be exactly as wide as the
 evidence behind it, and the umbrella's set is wider than any predecessor's
-precisely because what it asserts is a property of the four composed.
+precisely because what it asserts is a property of the four composed. The fifth
+is the release programme's staging gate, over the four live modules Gate 2's six
+bullets are scored from.
+
+This module also runs the staging preflight in `pytest_configure`, before
+anything is collected, so a staging run whose endpoints are absent or point at
+the development machine stops with one status table instead of importing suites
+that would quietly measure the wrong engine.
 
 Every Falkor suite calls `pytest.skip` when the engine is unreachable. That is
 correct for ordinary development and unacceptable for a certification run: it
@@ -39,6 +46,12 @@ from rbac_backend.tests.authority_band_graph import (
     g31_skip_is_certification_failure,
     g32_state_skip_is_rehearsal_failure,
 )
+from rbac_backend.tests.staging_gate import (
+    STAGING_GATE_ENV,
+    StagingGateConfigurationError,
+    assert_staging_preflight,
+    staging_skip_is_gate_failure,
+)
 
 #: One hook, three independent gates. Each entry is (flag, decision, subject),
 #: and the FIRST match wins - a file in more than one required set is reported
@@ -61,7 +74,38 @@ _CERTIFICATION_GATES = (
         "G29 umbrella",
         "umbrella end-to-end",
     ),
+    # The fifth switch, and the same reasoning one more time. Gate 2 scores six
+    # bullets from four live modules; a skipped one is a bullet that cannot be
+    # ticked and a run that looks green while measuring nothing. Bullet 5's
+    # Redis module is in that set precisely because R-A6 found it missing
+    # entirely - its silence must be loud.
+    (
+        STAGING_GATE_ENV,
+        staging_skip_is_gate_failure,
+        "staging Gate-2",
+        "live external",
+    ),
 )
+
+
+def pytest_configure(config):
+    """Refuse an unsafe staging Gate-2 environment before anything is collected.
+
+    Deliberately here rather than in a fixture: the live modules resolve their
+    endpoints at import time, so a missing or localhost endpoint would surface
+    as a wall of collection errors. One readable status table, before
+    collection, is the whole point.
+    """
+    del config  # the decision is entirely environmental
+    try:
+        assert_staging_preflight()
+    except StagingGateConfigurationError as exc:
+        # Re-raised as a UsageError so the operator gets the status table and
+        # nothing else. Letting the original propagate out of a hook makes
+        # pytest print INTERNALERROR with a pluggy traceback above the report,
+        # which buries the one thing they need to read. Both exit non-zero; only
+        # one of them is legible.
+        raise pytest.UsageError(str(exc)) from exc
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
@@ -81,15 +125,30 @@ def pytest_runtest_makereport(item, call):
     elif report.longrepr is not None:
         reason = str(report.longrepr)
 
+    # The remedy differs by gate. The four graph certifications want a
+    # reachable local FalkorDB; the staging gate wants explicitly supplied
+    # staging endpoints, and naming localhost there would be advice to do the
+    # exact thing that gate exists to forbid.
+    if env_var == STAGING_GATE_ENV:
+        remedy = (
+            "A skipped live suite proves nothing. Supply every staging endpoint "
+            "and live credential explicitly (the preflight report names each one "
+            f"by status), or drop {env_var} and stop calling the run staging "
+            "evidence."
+        )
+    else:
+        remedy = (
+            "A skipped Falkor suite proves nothing. Start FalkorDB (default "
+            "localhost:6380, or set FALKOR_TEST_HOST / FALKOR_TEST_PORT) and "
+            f"re-run, or drop {env_var} and stop calling the run certification "
+            "evidence."
+        )
+
     report.outcome = "failed"
     report.longrepr = (
         f"{env_var} is set, so this run is {gate} certification "
         f"evidence and a required {subject} suite may not skip.\n"
-        f"{item.nodeid} skipped: {reason}\n"
-        "A skipped Falkor suite proves nothing. Start FalkorDB (default "
-        "localhost:6380, or set FALKOR_TEST_HOST / FALKOR_TEST_PORT) and re-run, "
-        f"or drop {env_var} and stop calling the run certification "
-        "evidence."
+        f"{item.nodeid} skipped: {reason}\n" + remedy
     )
     # `wasxfail` is deliberately NOT set here. Setting it - even to None - makes
     # `hasattr(report, "wasxfail")` true, and pytest's session then declines to
