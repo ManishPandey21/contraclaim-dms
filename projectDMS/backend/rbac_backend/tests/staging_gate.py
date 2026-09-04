@@ -382,6 +382,8 @@ GATE2_REQUIRED_LIVE_FILES = (
     "backend/rbac_backend/tests/integration/test_qdrant_containment_live.py",
     # bullet 4 — FalkorDB graph round trip, disposable namespace only.
     "backend/rbac_backend/tests/integration/test_graph_end_to_end_material_influence_falkor.py",
+    # bullet 5 — Redis queue and runtime-state paths.
+    "backend/rbac_backend/tests/integration/test_redis_queue_runtime_state_live.py",
 )
 
 

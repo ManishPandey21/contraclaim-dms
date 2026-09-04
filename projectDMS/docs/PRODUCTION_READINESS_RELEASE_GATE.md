@@ -80,7 +80,20 @@ Current skipped live-test evidence:
 
 - `backend/rbac_backend/tests/integration/test_external_services_integration.py` skips live tests unless `RUN_EXTERNAL_INTEGRATION_TESTS=1`.
 - The same test module skips again when required live integration env vars are missing.
+- `backend/rbac_backend/tests/integration/test_redis_queue_runtime_state_live.py` covers the bullet 5 queue and runtime-state paths and skips on the same switch. It exists so bullet 5 can carry an `evidence:` reference at all; until a staging run executes it, it is a precondition and not gate evidence.
 - These skips are acceptable for normal unit CI, but production release requires a separate staging run with the live dependencies enabled.
+
+**Staging mode is not optional for this gate.** Several live suites default to
+developer endpoints - `FALKOR_TEST_HOST`/`FALKOR_TEST_PORT` to `localhost:6380`,
+`QDRANT_TEST_URL` to `http://127.0.0.1:6333` - and the Qdrant containment suite
+falls back to the checked-out `config/secrets/qdrant_api_key`. A staging run
+launched on a developer machine without overrides would therefore measure the
+development engines and report the result here. `CONTRACLAIM_STAGING_GATE=1`
+(`backend/rbac_backend/tests/staging_gate.py`) refuses every one of those
+defaults before collection, requires each endpoint and credential to be supplied
+explicitly, and converts a skip in a required live module into a failure. A run
+offered as evidence for any bullet in this gate must have been launched with it
+set.
 
 #### Superseded requirement: FalkorDB vector round trip
 

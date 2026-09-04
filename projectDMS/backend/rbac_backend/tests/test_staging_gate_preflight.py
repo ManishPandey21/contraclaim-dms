@@ -336,10 +336,53 @@ def test_a_supplied_live_env_neither_skips_nor_fails(developer_env) -> None:
 # Gate 2 evidence capability - the R-A6 §8.1 gap, structurally
 # --------------------------------------------------------------------------- #
 
+REDIS_LIVE_MODULE = "backend/rbac_backend/tests/integration/test_redis_queue_runtime_state_live.py"
+
+
 def test_every_gate2_required_live_module_exists() -> None:
     """A required set naming a file that does not exist enforces nothing."""
     missing = [name for name in staging_gate.GATE2_REQUIRED_LIVE_FILES if not (PROJECT / name).is_file()]
     assert not missing, f"Gate 2's required live set names non-existent modules: {missing}"
+
+
+def test_bullet_5_has_a_live_redis_evidence_module() -> None:
+    """R-A6 §8.1: bullet 5 was the one criterion with no evidence-eligible artefact.
+
+    Gate 2's evidence convention requires `evidence: <path>` naming a repository
+    path that exists. Delete this module, or drop it from the required set, and
+    bullet 5 becomes unsatisfiable again - so both are asserted.
+    """
+    assert (PROJECT / REDIS_LIVE_MODULE).is_file(), (
+        "the Redis live-integration module is gone; Gate 2 bullet 5 has no "
+        "evidence-eligible artefact again and the gate caps at 5/6"
+    )
+    assert staging_gate.is_gate2_required_file(REDIS_LIVE_MODULE), (
+        "the Redis live module is no longer in the Gate 2 required set, so a "
+        "staging run that skipped it would still report green"
+    )
+
+
+def test_the_redis_evidence_module_is_gated_and_can_skip() -> None:
+    """It must be opt-in for CI and capable of skipping, or the gate is inert.
+
+    A module that runs unconditionally would fail every ordinary CI run; a
+    module that cannot skip makes the staging skip-is-failure conversion
+    meaningless, because there would be nothing to convert.
+    """
+    source = (PROJECT / REDIS_LIVE_MODULE).read_text(encoding="utf-8")
+    assert "require_live_environment" in source, (
+        "the Redis live module no longer routes its environment gate through "
+        "staging_gate, so a missing endpoint would skip even under the gate"
+    )
+    assert "REDIS_TEST_URL" in source
+    assert "pytest.skip" in source or "skip=pytest.skip" in source
+    # It must exercise the production classes, not raw commands: a PING-only
+    # module would satisfy every check above and prove nothing about the app.
+    for symbol in ("RuntimeStateService", "ContractIngestQueue", "InMemoryCache"):
+        assert symbol in source, (
+            f"{REDIS_LIVE_MODULE} no longer exercises {symbol}; bullet 5 claims the "
+            "production queue and runtime-state paths work, not that Redis answers PING"
+        )
 
 
 def test_the_qdrant_module_refuses_the_checkout_secret_under_the_gate() -> None:
