@@ -115,9 +115,19 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Scan Python dependencies
+        # PYSEC-2026-3740 (CVE-2026-81726, GHSA-8mgp-746c-j5xp) is a path-sandbox
+        # bypass in NLTK's model-artifact APIs with no published fix in any
+        # release. It is accepted for THIS release only, on the reachability
+        # evidence and the review triggers recorded in
+        # projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md, and pinned by
+        # projectDMS/backend/rbac_backend/tests/test_nltk_advisory_reachability.py.
+        #
+        # Exactly one advisory id, never a package or a severity: a second NLTK
+        # advisory, or any other finding, still fails this job. pip-audit prints
+        # "1 ignored" on every run, so the exception stays visible in the log.
         run: |
           python -m pip install --upgrade pip pip-audit
-          pip-audit -r projectDMS/backend/rbac_backend/requirements.txt
+          pip-audit -r projectDMS/backend/rbac_backend/requirements.txt --ignore-vuln PYSEC-2026-3740
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}

@@ -19,6 +19,7 @@ instead.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
@@ -425,3 +426,141 @@ def test_no_allowlist_can_swallow_a_real_secret(canary: str) -> None:
                 f"allowlist regex {pattern!r} matches the synthetic credential "
                 f"{canary[:28]!r}; it would suppress the real thing"
             )
+
+
+# --- the accepted no-fix dependency advisory -----------------------------------
+
+NOFIX_RECORD = GIT_ROOT / "projectDMS" / "docs" / "NOFIX_ADVISORY_ACCEPTANCE.md"
+REACHABILITY_GUARD = (
+    GIT_ROOT
+    / "projectDMS"
+    / "backend"
+    / "rbac_backend"
+    / "tests"
+    / "test_nltk_advisory_reachability.py"
+)
+
+#: The one advisory the owner accepted for this release, in the identifier
+#: pip-audit prints in its own ID column.
+ACCEPTED_ADVISORY = "PYSEC-2026-3740"
+
+#: Flags that would weaken the scan itself rather than exempt one advisory.
+#: `--ignore-vuln` is pip-audit's ONLY suppression mechanism, so a wider waiver
+#: has to come from one of these instead - and every one of them is real,
+#: checked against `pip-audit --help`. An earlier revision of this tuple listed
+#: four flags pip-audit does not have, so the test could never fail.
+SCAN_WEAKENING_FLAGS = (
+    "--dry-run",      # collects dependencies and audits nothing
+    "--no-deps",      # skips resolution, and NLTK is transitive
+    "--skip-editable",
+    "--osv-url",      # a different advisory source
+    "--vulnerability-service",
+)
+
+#: Ways to make a failing job report success.
+FAILURE_SWALLOWING = ("|| true", "|| exit 0", "; exit 0", "continue-on-error")
+
+
+def _named_step(job: str, name: str) -> dict:
+    for step in _job(job)["steps"]:
+        if step.get("name") == name:
+            return step
+    raise AssertionError(f"job {job!r} has no step named {name!r}")
+
+
+def _python_scan_command() -> str:
+    return str(_named_step("dependency-scan", "Scan Python dependencies")["run"])
+
+
+def _ignored_advisories() -> list[str]:
+    return re.findall(r"--ignore-vuln[= ]+(\S+)", _python_scan_command())
+
+
+def test_the_python_scan_still_runs_pip_audit_over_the_release_requirements() -> None:
+    command = _python_scan_command()
+
+    assert "pip-audit" in command
+    assert "-r projectDMS/backend/rbac_backend/requirements.txt" in command, (
+        "the scan must read the requirements file the backend image installs"
+    )
+
+
+def test_exactly_one_advisory_is_ignored_and_it_is_the_accepted_one() -> None:
+    """A second id cannot be slipped in beside the first."""
+    ignored = _ignored_advisories()
+
+    assert ignored == [ACCEPTED_ADVISORY], (
+        f"dependency-scan ignores {ignored}; the owner accepted exactly "
+        f"[{ACCEPTED_ADVISORY!r}]. Another advisory needs its own decision "
+        f"record, not another flag."
+    )
+
+
+def test_nothing_wider_than_one_advisory_is_ignored() -> None:
+    """No package-wide suppression, and no quietly weakened scan."""
+    command = _python_scan_command()
+
+    for flag in SCAN_WEAKENING_FLAGS:
+        assert flag not in command, (
+            f"{flag} weakens the scan itself rather than exempting one advisory"
+        )
+    assert "nltk" not in command.lower(), (
+        "the exception is keyed on an advisory id, never on the package: a "
+        "second NLTK advisory must still fail this job"
+    )
+
+
+def test_the_dependency_scan_can_still_fail_the_job() -> None:
+    """An exemption is pointless if the job cannot go red anyway."""
+    step = _named_step("dependency-scan", "Scan Python dependencies")
+    job = _job("dependency-scan")
+
+    assert step.get("continue-on-error") is not True, (
+        "continue-on-error makes every advisory advisory-only"
+    )
+    assert job.get("continue-on-error") is not True, (
+        "the whole dependency-scan job is marked continue-on-error"
+    )
+    for form in FAILURE_SWALLOWING:
+        assert form not in str(step["run"]), (
+            f"{form!r} in the scan step swallows pip-audit's exit code"
+        )
+
+
+def test_the_accepted_advisory_has_a_written_owner_decision() -> None:
+    """An exception with no recorded reasoning is a waiver."""
+    assert NOFIX_RECORD.is_file(), f"{NOFIX_RECORD} is missing"
+    record = NOFIX_RECORD.read_text(encoding="utf-8")
+
+    assert ACCEPTED_ADVISORY in record, (
+        f"{NOFIX_RECORD.name} does not mention {ACCEPTED_ADVISORY}"
+    )
+    for heading in ("Fix available", "Dependency chain", "Reachability", "Review triggers"):
+        assert heading in record, f"{NOFIX_RECORD.name} has no {heading!r} section"
+    assert "Accepted for" in record and "release/contraclaim-rc1" in record, (
+        "the record must name the release it is accepted for, so it expires"
+    )
+
+
+def test_the_reachability_guard_backing_the_acceptance_exists() -> None:
+    """The acceptance rests on this test; it may not quietly disappear."""
+    assert REACHABILITY_GUARD.is_file(), f"{REACHABILITY_GUARD} is missing"
+
+    # Read the guard's own list, not the file's text. A substring search over
+    # the source passes while a name sits only in a docstring: deleting
+    # "save_to_json" from VULNERABLE_APIS went unnoticed that way, because the
+    # module docstring still spells out PerceptronTagger.save_to_json.
+    spec = importlib.util.spec_from_file_location("_nltk_guard", REACHABILITY_GUARD)
+    assert spec and spec.loader
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    # Every component the advisory names, listed here independently on purpose.
+    missing = {
+        "TransitionParser",
+        "AveragedPerceptron",
+        "PerceptronTagger",
+        "save_to_json",
+        "save_maxent_params",
+    } - set(guard.VULNERABLE_APIS)
+    assert not missing, f"the guard no longer checks for {sorted(missing)}"
