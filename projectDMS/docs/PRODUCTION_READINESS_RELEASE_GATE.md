@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 40/100 after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Python dependency scan, live-integration, E2E, backup/restore, and sign-off blockers remain.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 37/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-04, after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -61,15 +61,116 @@ Current known baseline:
 - [ ] Run live external tests with `RUN_EXTERNAL_INTEGRATION_TESTS=1` against staging.
 - [ ] Verify OpenAI document round trip.
 - [ ] Verify Qdrant vector round trip.
-- [ ] Verify FalkorDB graph/vector round trip.
+- [ ] Verify FalkorDB graph round trip (`GRAPH.*`, disposable graph namespace only).
 - [ ] Verify Redis queue/runtime-state paths.
 - [ ] Record all required live integration env vars used for the run.
+
+Every bullet in this gate is a **staging** requirement: it is satisfied only by a run
+against a real staging environment with the live dependencies enabled. A local run
+against developer containers is a precondition, never a substitute, and earns no
+checkbox here.
+
+**Evidence convention.** A bullet in this gate may be checked only when the same line
+carries `evidence: <path-or-command>` naming the executable artefact that proves it —
+a test module, a script, or a recorded command. `test_release_gate_specification.py`
+rejects a checked bullet with no evidence reference, and rejects an evidence reference
+that names a repository path which does not exist.
 
 Current skipped live-test evidence:
 
 - `backend/rbac_backend/tests/integration/test_external_services_integration.py` skips live tests unless `RUN_EXTERNAL_INTEGRATION_TESTS=1`.
 - The same test module skips again when required live integration env vars are missing.
 - These skips are acceptable for normal unit CI, but production release requires a separate staging run with the live dependencies enabled.
+
+#### Superseded requirement: FalkorDB vector round trip
+
+**Old requirement (verbatim, preserved):** "Verify FalkorDB graph/vector round trip."
+
+**Status: SUPERSEDED - 2026-09-04, release `release/contraclaim-rc1`.** Replaced by
+"Verify FalkorDB graph round trip (`GRAPH.*`, disposable graph namespace only)."
+The graph half is unchanged in substance and now names the command family and the
+safety rule; the vector half is withdrawn for the reasons below.
+
+**Why the vector half was factually invalid.** It required a FalkorDB *vector* round
+trip, which in this codebase means `FalkorDBVectorService`, whose `_create_index`
+issues the RediSearch `FT.CREATE` command
+(`backend/rbac_backend/services/falkordb_vector_service.py:41`). The deployed engine
+does not provide it. Measured on 2026-09-04 against the exact production pin in
+`docker-compose.prod.yml`, `falkordb/falkordb:v4.0.8`: Redis 7.2.4, `MODULE LIST`
+returns the single module `graph` (version 40008), `COMMAND INFO FT.CREATE` returns an
+empty reply, and invoking the command returns
+`ERR unknown command 'FT.CREATE'`. The criterion was unsatisfiable by the supported
+architecture, not merely unproven.
+
+**Historical architecture assumption.** The requirement dates from a design in which
+FalkorDB served as a second vector store alongside Qdrant, written against a Redis
+Stack image carrying the RediSearch module. `services/data_sync.py` still reflects that
+design: it writes the same payloads to both `LangChainVectorService` and
+`FalkorDBVectorService`.
+
+**Current architecture.** Qdrant is the only vector store; FalkorDB is the knowledge
+graph, holding letter and clause references. This is the recorded project decision
+(`CLAUDE.md`: "Qdrant is the **only** vector store ... FalkorDB keeps `GRAPH.*` use
+only") and the documented architecture (`docs/ARCHITECTURE.md`). Mechanically, on this
+HEAD: `FalkorDBVectorService` is imported by exactly two places,
+`services/data_sync.py` and the integration test module, and `data_sync.sync_data` has
+**no caller anywhere in the tree** - it runs only if a human invokes the module
+directly. `FalkorGraphService`, by contrast, has live production callers in
+`ai_workflows/langgraph/letter_pipeline.py`, `graph/graph_ingestion_service.py`,
+`routers/storage_sync.py`, `services/contract_clause/agent.py`,
+`services/contract_graph_service.py` and `services/document_service.py`.
+
+**The property the old bullet was meant to establish** - read from its own wording and
+from its five siblings, each of which names one live dependency - is that *every
+external dependency the production application actually uses answers a real round trip
+in the deployed environment*. That property is preserved in full: the graph round trip
+still covers FalkorDB, and the vector round trip is already required of Qdrant by the
+sibling bullet, which is where the production vector path now lives. Nothing a
+production caller depends on has stopped being tested.
+
+**Security and reliability equivalence.** No control is removed. The vector round trip
+is still required, of the component that actually serves it. The graph round trip now
+additionally names the disposable-namespace rule, so satisfying the gate cannot mutate
+a business graph - a constraint the old wording did not carry.
+
+**Local test.** `backend/rbac_backend/tests/integration/test_graph_end_to_end_material_influence_falkor.py`
+(graph consumer and authority containment) and
+`backend/rbac_backend/tests/integration/test_qdrant_containment_live.py` (vector
+containment). Both skip when the engine is unreachable, so they are preconditions, not
+gate evidence.
+
+**Staging test.** `test_external_services_integration.py::test_falkordb_vector_service_round_trip_live`
+implements the withdrawn requirement. It remains in the tree and is not gate evidence
+for any bullet. The staging run covers the replacement through the graph suites above
+plus the Qdrant live round trip.
+
+**Owner approval: APPROVED FOR `release/contraclaim-rc1`.** Not generalised beyond it.
+
+**Review trigger.** Reinstate the vector half if FalkorDB regains a production
+vector-search role - specifically if any production module imports
+`FalkorDBVectorService`, if `data_sync.sync_data` gains a caller, or if the deployed
+FalkorDB image gains a module providing `FT.CREATE`. The first two are enforced by
+`backend/rbac_backend/tests/test_release_gate_specification.py`, which fails the moment
+a production caller appears.
+
+#### Gate 2 local preconditions - executed 2026-09-04, not scored
+
+Engine-level preconditions run against local developer containers. **They are not
+staging, they satisfy no bullet above, and they earn no points.** They exist so that a
+staging failure can be attributed to the environment rather than to the code.
+
+- FalkorDB reachable; `MODULE LIST` = `graph`, `vectorset`; `FT.CREATE` rejected as an
+  unknown command; disposable-graph create/query/delete round trip PASS; `GRAPH.LIST`
+  identical before and after.
+- Redis reachable; runtime-state set/get/delete and queue push/pop round trips PASS.
+- Qdrant reachable; disposable collection created, three known vectors upserted,
+  nearest-neighbour search returned the expected point, collection deleted; inventory
+  identical before and after.
+- Application integration: graph end-to-end material-influence suite 21 passed; Qdrant
+  containment suite 9 passed, both against the live local engines.
+- Negative controls, all failing as required: Falkor on a wrong port, Redis on a wrong
+  port, Qdrant on a wrong endpoint, Qdrant without an API key, `FT.CREATE` against the
+  deployed engine, and the disposable-graph helper asked to delete `contraclaim`.
 
 ### Gate 3: Browser E2E Coverage
 
@@ -206,7 +307,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **40/100** against a target of
+The current production launch-readiness score is **37/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -216,11 +317,16 @@ Run:
 python scripts/production_readiness_score.py
 ```
 
+The table below is the script's own output, re-derived on 2026-09-04. It previously
+read 40/100 with Gate 1 at 5/6; the script has reported 37/100 and 4/6 since a Gate 1
+box was unchecked, and the stale copy was granting three points nothing had earned.
+`test_release_gate_specification.py` now fails if the two disagree again.
+
 Current gate score summary:
 
 | Gate | Score | Checked |
 | --- | ---: | ---: |
-| Gate 1: CI And Local Test Baseline | 12.50 / 15 | 5 / 6 |
+| Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |
 | Gate 2: Live Integration Baseline | 0.00 / 10 | 0 / 6 |
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
