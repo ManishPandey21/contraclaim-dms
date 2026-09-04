@@ -1,3 +1,37 @@
+# Each mongod sizes its WiredTiger internal cache at half of visible RAM minus
+# 1 GB, and in this composition all three members see the WHOLE host. On the
+# production host, sized for it, that is survivable. On a 24-32 GB staging VM it
+# is three caches of ~7.5 GB each competing with ClamAV's 2 GB limit, FalkorDB's
+# 2 GB maxmemory, Qdrant and three Python containers - the members thrash and
+# the failure looks like an application problem.
+#
+# The bound is therefore expressed as a mechanism with an OFF default rather
+# than as a number. `MONGO_WIREDTIGER_CACHE_GB` unset reproduces today's
+# production behaviour exactly, argument for argument; set, every member gets
+# `--wiredTigerCacheSizeGB`. Production can adopt it later by setting one
+# variable, which is a deliberate, reviewable change rather than a side effect
+# of a staging fix. `docker-compose.staging.yml` sets it.
+#
+# The replica-set name is likewise a variable with the historical default. It is
+# deliberately NOT the application's `MONGODB_REPLICA_SET`: that variable is
+# supplied by the operator for the backend's connection string, and feeding it
+# to mongod would rename a live replica set the day the two disagree. Staging
+# uses `rsstg` so a mis-set `DATABASE_URL` fails to connect instead of quietly
+# reaching a production-shaped set.
+x-mongo-env: &mongo-env
+  MONGO_REPLICA_SET_NAME: "${MONGO_REPLICA_SET_NAME:-rs0}"
+  MONGO_WIREDTIGER_CACHE_GB: "${MONGO_WIREDTIGER_CACHE_GB:-}"
+
+# `$$` is escaped for compose, so the container's shell does the expansion:
+# `:+` appends the flag only when the variable is non-empty. `exec` keeps mongod
+# as PID 1 so it still receives the stop signal directly.
+x-mongo-command: &mongo-command
+  - /bin/sh
+  - -c
+  - >-
+    exec mongod --replSet "$${MONGO_REPLICA_SET_NAME:-rs0}" --bind_ip_all
+    $${MONGO_WIREDTIGER_CACHE_GB:+--wiredTigerCacheSizeGB $$MONGO_WIREDTIGER_CACHE_GB}
+
 x-mongo-healthcheck: &mongo-healthcheck
   test: ["CMD-SHELL", "mongosh --quiet --eval \"const s=rs.status(); quit((s.ok === 1 && (s.myState === 1 || s.myState === 2)) ? 0 : 1)\""]
   interval: 30s
@@ -14,7 +48,8 @@ services:
   mongo1:
     image: mongo:8.0
     restart: unless-stopped
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: *mongo-command
+    environment: *mongo-env
     volumes:
       - mongo1_data:/data/db
     networks:
@@ -30,7 +65,8 @@ services:
   mongo2:
     image: mongo:8.0
     restart: unless-stopped
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: *mongo-command
+    environment: *mongo-env
     volumes:
       - mongo2_data:/data/db
     networks:
@@ -46,7 +82,8 @@ services:
   mongo3:
     image: mongo:8.0
     restart: unless-stopped
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    command: *mongo-command
+    environment: *mongo-env
     volumes:
       - mongo3_data:/data/db
     networks:
@@ -62,6 +99,11 @@ services:
   mongo-init:
     image: mongo:8.0
     restart: "no"
+    # The init script reads MONGODB_REPLICA_SET and defaulted to rs0 because
+    # nothing supplied it. It must agree with the name the members were started
+    # under, or `rs.initiate` writes a config no member accepts.
+    environment:
+      MONGODB_REPLICA_SET: "${MONGO_REPLICA_SET_NAME:-rs0}"
     depends_on:
       mongo1:
         condition: service_started
