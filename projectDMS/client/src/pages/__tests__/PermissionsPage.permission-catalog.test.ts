@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   PERMISSION_CATALOG_PERMISSION_ITEMS,
   ROLE_ADMIN_PERMISSION_ITEMS,
-} from "../PermissionsPage";
+} from "../permissionsCatalog";
 
 describe("PermissionsPage permission catalog", () => {
   it("exposes role and permission catalog permissions for assignment", () => {
