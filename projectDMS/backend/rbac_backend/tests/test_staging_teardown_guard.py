@@ -368,6 +368,25 @@ def test_a_missing_rendered_configuration_is_refused(guard: ModuleType) -> None:
     assert not verdict.allowed
 
 
+@pytest.mark.parametrize("section", ["volumes", "networks"])
+def test_a_malformed_render_is_refused_rather_than_crashing(
+    guard: ModuleType, section: str
+) -> None:
+    """A traceback stops the command too, and says nothing the operator can use.
+
+    Compose emits mappings here. Anything else means the document handed to the
+    guard is not what it claims to be, which is a refusal, not an exception.
+    """
+
+    rendered = _rendered()
+    rendered[section] = ["mongo1_data"]
+
+    verdict = guard.assess(project=STAGING_PROJECT, rendered=rendered)
+
+    assert not verdict.allowed
+    assert section in _refusals(verdict)
+
+
 def test_a_command_line_that_targets_another_project_is_refused(
     guard: ModuleType,
 ) -> None:

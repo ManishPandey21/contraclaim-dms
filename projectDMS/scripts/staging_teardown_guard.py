@@ -122,6 +122,17 @@ def _check_resources(
 ) -> list[str]:
     """Enumerate one resource class and refuse everything outside the project."""
 
+    if not isinstance(declared, Mapping):
+        # A render that is not shaped like a render is a render nobody has
+        # checked. Refuse rather than raise: a traceback and a refusal both stop
+        # the command, but only one of them tells the operator what to fix.
+        findings.refuse(
+            f"the rendered configuration's '{kind}s' section is "
+            f"{type(declared).__name__}, not a mapping; this is not "
+            f"`docker compose config --format json` output"
+        )
+        return []
+
     owned: list[str] = []
     for key, definition in sorted(declared.items()):
         name = _effective_name(project, key, definition)
