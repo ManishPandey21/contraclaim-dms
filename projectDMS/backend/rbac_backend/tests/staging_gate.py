@@ -161,6 +161,16 @@ def resolve_host(name: str, default: str) -> str:
     return value
 
 
+def _is_port(value: str) -> bool:
+    """One definition of "is a port", shared by the resolver and the preflight.
+
+    They had two - `int(value)` and `str.isdigit()` - which disagree on `" -1"`.
+    A preflight that passes a value the resolver then rejects is worse than
+    either check alone, because the failure surfaces after collection.
+    """
+    return value.isdigit() and 0 < int(value) < 65536
+
+
 def resolve_port(name: str, default: int) -> int:
     """A port for a live suite. Must be supplied explicitly in staging mode."""
     value = _env(name)
@@ -168,10 +178,9 @@ def resolve_port(name: str, default: int) -> int:
         return int(value or default)
     if not value:
         raise _reject(name, "is not set")
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise _reject(name, f"is not a port number ({value!r})") from exc
+    if not _is_port(value):
+        raise _reject(name, f"is not a port number ({value!r})")
+    return int(value)
 
 
 def resolve_url(name: str, default: str) -> str:
@@ -255,9 +264,22 @@ def _port_finding(name: str, *, mandatory: bool = True) -> PreflightFinding:
     raw = _env(name)
     if not raw:
         return PreflightFinding(name, ABSENT, "not set", mandatory)
-    if not raw.isdigit():
+    if not _is_port(raw):
         return PreflightFinding(name, INVALID_SOURCE, "not a port number", mandatory)
     return PreflightFinding(name, PRESENT, "explicit", mandatory)
+
+
+def _presence_finding(name: str, *, mandatory: bool) -> PreflightFinding:
+    """A plain name that is either supplied or not - a bucket, not an endpoint.
+
+    Routing a bucket name through the endpoint check would mean giving it a
+    locality predicate that can never fire, which reads as a rule and is not one.
+    """
+    return (
+        PreflightFinding(name, PRESENT, "supplied", mandatory)
+        if _env(name)
+        else PreflightFinding(name, ABSENT, "not set", mandatory)
+    )
 
 
 def _credential_finding(
@@ -296,12 +318,36 @@ def qdrant_checkout_secret_candidates() -> Tuple[Path, ...]:
     )
 
 
+def _mongo_finding() -> PreflightFinding:
+    """The Mongo URI, under either of the two names the stack accepts.
+
+    Both are checked, and a local one is a finding under its OWN name. The
+    first version of this took `DATABASE_URL`, and on a failure fell through to
+    `MONGODB_URI` - so `DATABASE_URL=mongodb://localhost:27017` was OVERWRITTEN
+    by a passing `MONGODB_URI` and the preflight went green while the variable
+    the stack actually reads pointed at this machine. A fallback that can
+    replace a rejection with an acceptance is not a fallback, it is a bypass.
+    """
+    names = [name for name in ("DATABASE_URL", "MONGODB_URI") if _env(name)]
+    if not names:
+        return PreflightFinding("DATABASE_URL", ABSENT, "not set", True)
+    for name in names:
+        finding = _endpoint_finding(name, url_is_local)
+        if not finding.ok:
+            return finding
+    return _endpoint_finding(names[0], url_is_local)
+
+
 def preflight_findings() -> List[PreflightFinding]:
     """Every staging Gate-2 precondition, by status only.
 
-    Mandatory findings gate the run. Conditional ones (OpenAI, AWS) are
-    reported so the operator knows which bullets the run can carry; the live
-    tests that need them fail on their own under this mode rather than skipping.
+    Mandatory findings gate the run before collection. The OpenAI and AWS
+    credentials are reported as `if selected`: which of them a run needs depends
+    on which live tests it selects, and only the test knows that. They are not
+    unenforced - `require_live_environment` FAILS on a missing one under this
+    mode, at the test that needs it, rather than skipping. Making them mandatory
+    here instead would block a Falkor-only or Redis-only staging run that needs
+    neither.
     """
     findings = [
         _switch_finding(STAGING_GATE_ENV),
@@ -318,18 +364,15 @@ def preflight_findings() -> List[PreflightFinding]:
         ),
     ]
 
-    mongo = _endpoint_finding("DATABASE_URL", url_is_local)
-    if not mongo.ok and _env("MONGODB_URI"):
-        mongo = _endpoint_finding("MONGODB_URI", url_is_local)
-    findings.append(mongo)
+    findings.append(_mongo_finding())
 
     findings.extend(
         [
             _credential_finding(("OPENAI_API_KEY",), mandatory=False),
             _credential_finding(("AWS_ACCESS_KEY_ID",), mandatory=False),
             _credential_finding(("AWS_SECRET_ACCESS_KEY",), mandatory=False),
-            _endpoint_finding("AWS_BUCKET_NAME", lambda _v: False, mandatory=False),
-            _endpoint_finding("BACKUP_S3_BUCKET", lambda _v: False, mandatory=False),
+            _presence_finding("AWS_BUCKET_NAME", mandatory=False),
+            _presence_finding("BACKUP_S3_BUCKET", mandatory=False),
         ]
     )
     return findings
@@ -341,7 +384,10 @@ def render_report(findings: Optional[Sequence[PreflightFinding]] = None) -> str:
     width = max((len(f.name) for f in rows), default=0)
     lines = ["Staging Gate-2 preflight:"]
     for finding in rows:
-        tier = "required" if finding.mandatory else "optional"
+        # "if selected", not "optional": the selecting test enforces these, and
+        # calling them optional in the one report an operator reads would say
+        # the run may proceed without them whatever it selects.
+        tier = "required   " if finding.mandatory else "if selected"
         lines.append(f"  {finding.name.ljust(width)}  {finding.status:<14} ({tier}) {finding.detail}")
     return "\n".join(lines)
 

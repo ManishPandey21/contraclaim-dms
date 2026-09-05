@@ -53,6 +53,21 @@ def _load(path: Path) -> Dict[str, Any]:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def _directives(path: Path) -> str:
+    """The file without its comment lines.
+
+    Every rule below is about what the file DECLARES. A comment explaining why
+    a key is deliberately absent must not read as that key being present -
+    which is exactly what the first version of the FalkorDB guard did to
+    itself.
+    """
+    return "\n".join(
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if not line.strip().startswith("#")
+    )
+
+
 @pytest.fixture(scope="module")
 def replica() -> Dict[str, Any]:
     return _load(COMPOSE_MONGO_REPLICA)
@@ -200,9 +215,7 @@ def test_the_staging_override_touches_no_development_resource(staging: Dict[str,
     An `external: true` volume is how a staging stack acquires production or
     development data by name, and it is a one-line edit.
     """
-    text = COMPOSE_STAGING.read_text(encoding="utf-8")
-    directives = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
-    assert DEV_PROJECT_PREFIX not in directives, (
+    assert DEV_PROJECT_PREFIX not in _directives(COMPOSE_STAGING), (
         "the staging override names the development project; a staging stack that "
         "attaches a contract-ai_* volume writes into the instance holding the "
         "business graphs"
@@ -239,8 +252,7 @@ def test_the_staging_override_declares_no_service_production_does_not_have(
     unknown = sorted(set(staging["services"]) - available)
     assert not unknown, f"the staging override invents services production does not define: {unknown}"
 
-    text = COMPOSE_STAGING.read_text(encoding="utf-8").lower()
-    declarations = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+    declarations = _directives(COMPOSE_STAGING).lower()
     for absent in NOT_IN_PRODUCTION:
         assert absent not in declarations, (
             f"{absent} is not in any production compose file; CI building an image "
@@ -271,14 +283,7 @@ def test_the_staging_override_leaves_falkordb_persistence_alone(staging: Dict[st
     Without it FalkorDB writes its RDB and AOF to the container layer, the backup
     archives an empty `/data`, and every run reports success.
     """
-    # Directives only: the file's own header explains why REDIS_ARGS is left
-    # alone, and a comment saying so must not read as a redeclaration.
-    directives = "\n".join(
-        line
-        for line in COMPOSE_STAGING.read_text(encoding="utf-8").splitlines()
-        if not line.strip().startswith("#")
-    )
-    assert "REDIS_ARGS" not in directives, (
+    assert "REDIS_ARGS" not in _directives(COMPOSE_STAGING), (
         "the staging override redeclares FalkorDB's REDIS_ARGS; the production "
         "value carries --dir /data and the backup silently archives nothing without it"
     )
@@ -336,9 +341,15 @@ def test_the_staging_template_binds_the_gateway_to_loopback_off_the_dev_port() -
 
 def test_the_staging_template_names_no_data_tier_port() -> None:
     """`pre_deploy_readiness.sh` fails a compose that publishes a data-service port."""
-    text = ENV_STAGING_TEMPLATE.read_text(encoding="utf-8")
-    directives = "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
-    for forbidden in (":6333", ":6379:", ":6380", ":27017:"):
-        assert forbidden not in directives, (
-            f"the staging template appears to publish a data-tier port ({forbidden})"
+    directives = _directives(ENV_STAGING_TEMPLATE)
+    # A docker publish mapping is `[host:]host-port:container-port`, so a
+    # data-tier port is only *published* when it appears between two colons.
+    # Matching a bare `:6333` would reject `QDRANT_URL=http://qdrant:6333`,
+    # which is an internal service address and exactly what staging should
+    # use - and a rule that rejects the correct configuration is a rule
+    # somebody deletes.
+    for port in (6333, 6334, 6379, 6380, 27017):
+        assert f":{port}:" not in directives, (
+            f"the staging template appears to publish data-tier port {port}; "
+            "pre_deploy_readiness.sh fails a compose that publishes one"
         )

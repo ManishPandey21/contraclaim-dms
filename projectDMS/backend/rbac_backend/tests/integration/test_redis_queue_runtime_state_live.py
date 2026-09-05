@@ -54,6 +54,7 @@ Run against a disposable local Redis (developer mode, not gate evidence):
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, List, Optional, Tuple
@@ -172,15 +173,24 @@ async def _queue(
     try:
         yield queue, ready, processing
     finally:
-        # Delete quietly here; the residue ASSERTION is its own test, so a
-        # cleanup problem cannot replace the real failure on the way out.
+        # A cleanup failure must not REPLACE the test's own failure on the way
+        # out - but it must not vanish either. "Silent failures are the house
+        # pattern here" (CLAUDE.md): deferring to the residue test alone loses
+        # the signal entirely under `-k`, `--deselect` or an early abort.
         client = queue._redis
+        cleanup_error: Optional[BaseException] = None
         if client is not None:
             try:
                 await _delete_run_keys(client)
-            except Exception:  # noqa: BLE001 - reported by the residue test
-                pass
+            except Exception as exc:  # noqa: BLE001 - re-raised below when safe
+                cleanup_error = exc
         await queue.close()
+        if cleanup_error is not None and sys.exc_info()[0] is None:
+            raise AssertionError(
+                f"Gate 2 Redis run {RUN_TOKEN} could not delete its own keys from "
+                f"a shared engine: {cleanup_error!r}. Delete anything matching "
+                f"{KEY_NAMESPACE}* manually."
+            ) from cleanup_error
 
 
 async def _scan_run_keys(client: Any) -> List[str]:
@@ -367,6 +377,39 @@ async def test_contract_queue_recovers_a_stale_processing_job_live(
 # --------------------------------------------------------------------------- #
 
 
+async def test_the_queue_assertions_are_value_sensitive_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrong queue behaviour must be RED, not merely "some job came back".
+
+    The positive test above asserts identities. This proves those assertions
+    measure the configured list and the configured job rather than accepting
+    whatever the engine happens to return: a job enqueued onto one queue is not
+    visible on another, and a dequeue from an empty ready list yields nothing
+    instead of an unrelated id.
+    """
+    url = _url_with_db(_require_live_redis(), QUEUE_DB)
+    async with _queue(url, monkeypatch) as (queue, ready, processing):
+        client = await queue.connect()
+        assert client is not None
+
+        job_id = f"{KEY_NAMESPACE}_scoped"
+        await queue.enqueue({"upload_id": job_id})
+
+        other_ready = _queue_key("other_ready")
+        other_processing = _queue_key("other_processing")
+        assert await client.lrange(other_ready, 0, -1) == [], (
+            "a job enqueued onto one queue is visible on another; the queue-name "
+            "assertions above would pass against the wrong list"
+        )
+        assert await client.brpoplpush(other_ready, other_processing, timeout=1) is None
+
+        # And the real list yields exactly the job that was enqueued, not an
+        # arbitrary member.
+        assert await client.brpoplpush(ready, processing, timeout=5) == job_id
+        assert await client.brpoplpush(ready, processing, timeout=1) is None
+
+
 async def test_wrong_port_is_refused_live() -> None:
     """Point the production adapter at a port nothing serves; it must not report a client."""
     parsed = urlsplit(_require_live_redis())
@@ -384,10 +427,22 @@ async def test_wrong_password_is_refused_live() -> None:
     """A wrong password must be a failure, not a fallback."""
     parsed = urlsplit(_require_live_redis())
     if not parsed.password:
-        pytest.skip(
-            "the staging Redis endpoint carries no password, so authentication "
-            "cannot be negatively controlled from here"
+        # Not a skip under the gate. This module is in
+        # `staging_gate.GATE2_REQUIRED_LIVE_FILES`, where a skip is converted
+        # into a failure - so skipping here would fail the run with a message
+        # about a missing control rather than about the actual problem, which
+        # is that the engine is unprotected. Production and staging both start
+        # Redis with `--requirepass` (docker-compose.prod.yml), so a
+        # passwordless endpoint is not the engine Gate 2 claims to have
+        # measured.
+        message = (
+            "the Redis endpoint carries no password. Production runs Redis with "
+            "--requirepass, so an unauthenticated endpoint cannot carry Gate 2 "
+            "bullet 5 evidence and authentication cannot be negatively controlled."
         )
+        if staging_gate.staging_gate_mode():
+            pytest.fail(message)
+        pytest.skip(f"{message} Developer mode: skipped.")
     netloc = f":not-the-staging-password@{parsed.hostname}:{parsed.port or 6379}"
     async with _runtime_state(_url_with_netloc(parsed.geturl(), netloc)) as service:
         assert await service.get_redis() is None, (
