@@ -61,7 +61,14 @@ x-backend-env: &backend-env
   QDRANT_VECTOR_NAME: "${QDRANT_VECTOR_NAME:-}"
   VECTORDB_URL: "http://qdrant:6333"
   VECTORDB_API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
-  LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN:?LANGGRAPH_API_TOKEN is required}"
+  # Not `:?`. LANGGRAPH_ENABLED defaults to false and this file defines no
+  # langgraph service, so hard-requiring the token made `docker compose config`
+  # fail for a service that is not running - which is why the only placeholder
+  # in R-A8I's staging render was this variable. The requirement lives where it
+  # can see the switch: `config.py` refuses a production start with
+  # LANGGRAPH_ENABLED=true and no token, and `verify_langgraph_token` rejects
+  # every call when none is configured.
+  LANGGRAPH_API_TOKEN: "${LANGGRAPH_API_TOKEN:-}"
   LANGGRAPH_ENABLED: "${LANGGRAPH_ENABLED:-false}"
   # The official in-process LangGraph drafting engine is selected entirely on
   # the server. Keep the safe v2/off defaults until an explicit rollout is

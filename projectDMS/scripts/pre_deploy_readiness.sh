@@ -121,10 +121,27 @@ else
   fail "APP_REDIS_URL or RUNTIME_STATE_REDIS_URL is required"
 fi
 
-if [[ -f "$ROOT_DIR/config/secrets/qdrant_api_key" && -s "$ROOT_DIR/config/secrets/qdrant_api_key" ]]; then
-  pass "Qdrant secret file exists"
+# The Qdrant credential, from the place the deployment actually reads it.
+#
+# This used to FAIL unless `config/secrets/qdrant_api_key` existed in the
+# checkout. Two things were wrong with that. `docker-compose.prod.yml`
+# interpolates `${QDRANT_API_KEY}` from the environment and opens no such file, so
+# the check said nothing about whether the stack could start. And the Gate 2
+# staging harness classifies that same file as an INVALID SOURCE and refuses any
+# run that would read it (backend/rbac_backend/tests/staging_gate.py), so one
+# checkout could not satisfy both gates - R-A8I F5.
+qdrant_api_key=$(get_env QDRANT_API_KEY)
+if [[ -n "$qdrant_api_key" ]]; then
+  pass "QDRANT_API_KEY is configured"
 else
-  fail "config/secrets/qdrant_api_key is missing or empty"
+  fail "QDRANT_API_KEY is required; the production compose render cannot resolve without it"
+fi
+
+# The file is still worth naming, as something to remove rather than something to
+# provide: a plaintext credential in the working tree that nothing in the
+# deployment reads is a hazard with no purpose.
+if [[ -f "$ROOT_DIR/config/secrets/qdrant_api_key" ]]; then
+  warn "config/secrets/qdrant_api_key exists in the checkout; nothing in the deployment reads it and the staging gate refuses runs that would. Remove it."
 fi
 
 compose_output=$(mktemp)
