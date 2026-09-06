@@ -64,6 +64,15 @@ Migrations (dry run first, always, before any deploy):
 cd backend && python -m rbac_backend.scripts.migrate_database --list && python -m rbac_backend.scripts.migrate_database --fail-on-warning
 ```
 
+`--fail-on-warning` fails on **warnings** — findings about the database in front
+of the migration, which name a row or a change and go away when the data is
+clean. It reports **notices** — constant sentences a migration writes about its
+own design — and passes. Emit a documentary note as `notices=` on
+`MigrationResult`, never `warnings=`; a notice must be a literal written at the
+call site, and `test_migration_warning_classification.py` fails on one that is
+derived from data. Before that split every tree failed this gate, because
+`20260721_0001` carries two such notes (F-A8M-1).
+
 Local dev: `make front` (client) / `make back` (uvicorn `rbac_backend.main:app` :8000).
 
 ## Conventions

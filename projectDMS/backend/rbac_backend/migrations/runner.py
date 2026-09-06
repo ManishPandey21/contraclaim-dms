@@ -21,11 +21,39 @@ LEDGER_COLLECTION = "schema_migrations"
 
 @dataclass(frozen=True)
 class MigrationResult:
+    """The outcome of one migration.
+
+    ``warnings`` and ``notices`` are two channels on purpose, and what separates
+    them is not severity but *provenance* (F-A8M-1).
+
+    * A **warning** is a property of the database in front of the migration. It
+      names a row, a value or a change that this particular deployment carries,
+      it is absent when the data is clean, and a human has to look at it before
+      the migration is promoted. ``20260906_0001`` emitting "3 duplicate
+      permission row(s) for name 'x' will be removed" is a warning.
+    * A **notice** is a property of the migration itself. It is the same
+      sentence on every database and on every run, and it records a decision the
+      author already made - most often about what the migration deliberately
+      does *not* do. ``20260721_0001`` saying that rollback never restores
+      unverifiable approvals is a notice.
+
+    ``--fail-on-warning`` fails on the first channel and reports the second,
+    because a gate that cannot be satisfied by a healthy tree stops being a
+    gate. Before this split it failed on both, so the documented pre-deploy dry
+    run exited 2 on every tree containing ``20260721_0001`` - which is every
+    tree - and R-A8M measured exactly that on staging.
+
+    ``test_migration_warning_classification.py`` keeps the split honest: a
+    notice has to be a literal string written at the call site, so a finding
+    derived from the data cannot be filed as one.
+    """
+
     version: str
     name: str
     status: str
     operations: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    notices: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -34,6 +62,7 @@ class MigrationResult:
             "status": self.status,
             "operations": self.operations,
             "warnings": self.warnings,
+            "notices": self.notices,
         }
 
 
@@ -133,6 +162,7 @@ class MigrationRunner:
                 status=status,
                 operations=result.operations,
                 warnings=result.warnings,
+                notices=result.notices,
             )
             results.append(result)
 
@@ -147,6 +177,7 @@ class MigrationRunner:
                             "description": migration.description,
                             "operations": result.operations,
                             "warnings": result.warnings,
+                            "notices": result.notices,
                             "applied_at": datetime.now(timezone.utc),
                         }
                     },

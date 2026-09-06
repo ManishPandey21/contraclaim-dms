@@ -23,6 +23,16 @@ python -m rbac_backend.scripts.migrate_database --list
 python -m rbac_backend.scripts.migrate_database --fail-on-warning
 ```
 
+`--fail-on-warning` distinguishes two things a migration can say, by provenance
+rather than by severity. A **warning** is a finding about the database in front
+of the migration — it names a row or a change this deployment carries, and it is
+absent when the data is clean; it exits 2. A **notice** is a constant sentence
+the migration writes about its own design, identical on every database; it is
+printed as `NOTICE …` on stderr and does not fail the gate. Both are always
+reported and neither is suppressed. Until R-A8N the runner failed on both, so
+this documented gate exited 2 on every healthy tree — `20260721_0001` carries
+two documentary notes — which is what R-A8M measured on staging (F-A8M-1).
+
 Apply pending migrations only after backup freshness is confirmed and the dry-run
 output has been reviewed:
 
