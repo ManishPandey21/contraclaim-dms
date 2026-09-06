@@ -87,6 +87,14 @@ from .v20260820_0001_entity_document_links import NAME as ENTITY_DOCUMENT_LINKS_
 from .v20260820_0001_entity_document_links import VERSION as ENTITY_DOCUMENT_LINKS_VERSION
 from .v20260820_0001_entity_document_links import upgrade as upgrade_entity_document_links
 from .v20260813_0001_key_date_eot_attribution import upgrade as upgrade_key_date_attribution
+from .v20260906_0001_permission_name_unique import (
+    DESCRIPTION as PERMISSION_NAME_UNIQUE_DESCRIPTION,
+)
+from .v20260906_0001_permission_name_unique import NAME as PERMISSION_NAME_UNIQUE_NAME
+from .v20260906_0001_permission_name_unique import VERSION as PERMISSION_NAME_UNIQUE_VERSION
+from .v20260906_0001_permission_name_unique import (
+    upgrade as upgrade_permission_name_unique,
+)
 
 
 MIGRATIONS = [
@@ -197,5 +205,11 @@ MIGRATIONS = [
         name=ENTITY_DOCUMENT_LINKS_NAME,
         description=ENTITY_DOCUMENT_LINKS_DESCRIPTION,
         upgrade=upgrade_entity_document_links,
+    ),
+    Migration(
+        version=PERMISSION_NAME_UNIQUE_VERSION,
+        name=PERMISSION_NAME_UNIQUE_NAME,
+        description=PERMISSION_NAME_UNIQUE_DESCRIPTION,
+        upgrade=upgrade_permission_name_unique,
     ),
 ]

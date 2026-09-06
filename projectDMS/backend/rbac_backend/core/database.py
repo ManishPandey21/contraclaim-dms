@@ -133,6 +133,17 @@ async def ensure_indexes(db):
     await db.users.create_index("projects", background=True)
     await db.users.create_index("account_type", background=True)
 
+    # Permissions
+    # `name` is the catalogue's identity: `get_permission_by_name` reads by it and
+    # roles grant by it. It carried no index at all, so R-A8I's restore drill put
+    # 396 rows in here for 198 distinct names and the only trace was one line in
+    # the restore log. A new deployment gets the constraint here; deployments that
+    # already exist get it, and their duplicates collapsed first, from migration
+    # 20260906_0001.
+    await db.permissions.create_index(
+        "name", name="uq_permissions_name", unique=True, background=True
+    )
+
     # Organizations
     # _id is implicitly indexed by MongoDB; do not attempt to create an _id index with options
     await db.organizations.create_index("name", background=True)

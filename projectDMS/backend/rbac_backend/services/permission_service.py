@@ -7,6 +7,7 @@ from uuid import uuid4
 import json
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
@@ -267,7 +268,17 @@ class PermissionService:
             }
 
             # Insert permission
-            result = await db.permissions.insert_one(permission_doc)
+            try:
+                result = await db.permissions.insert_one(permission_doc)
+            except DuplicateKeyError as exc:
+                # The read above and this write are not one operation, so a
+                # concurrent creator can land between them. `uq_permissions_name`
+                # is what turns that into an error instead of a second row; it
+                # must surface as the same 409 the read-path duplicate does, or a
+                # caller cannot tell "already exists" from "creation broke".
+                raise PermissionServiceError(
+                    f"Permission '{permission_data.name}' already exists", 409
+                ) from exc
             permission_id = str(result.inserted_id)
 
             # Return created permission
@@ -426,18 +437,43 @@ class PermissionService:
             return []
 
     async def create_default_permissions(self) -> bool:
-        """Create default system permissions if they don't exist."""
+        """Create default system permissions if they don't exist.
+
+        Two seeders can run against one database at once - a rolling restart, or
+        the web tier and a worker starting together - and the read-then-write this
+        used to be has nothing between the two halves. With
+        `uq_permissions_name` in place the loser of that race now gets a
+        `DuplicateKeyError` instead of writing a second row.
+
+        That error is absorbed *per entry*, and only that error. It means the
+        catalogue entry exists, which is the outcome this method wanted; treating
+        it as fatal would abort the remaining entries and leave the catalogue
+        short of exactly the permissions added most recently, with the whole
+        method returning False into a caller that does not check.
+        """
         try:
             created_count = 0
+            existing_count = 0
 
             for perm_data in DEFAULT_PERMISSIONS:
                 existing = await self.get_permission_by_name(perm_data["name"])
-                if not existing:
-                    permission_create = PermissionCreate(**perm_data)
+                if existing:
+                    existing_count += 1
+                    continue
+                permission_create = PermissionCreate(**perm_data)
+                try:
                     await self.create_permission(permission_create, "system")
                     created_count += 1
+                except (DuplicateKeyError, PermissionServiceError) as exc:
+                    if isinstance(exc, PermissionServiceError) and getattr(exc, "status_code", None) != 409:
+                        raise
+                    existing_count += 1
 
-            logger.info(f"Created {created_count} default permissions")
+            logger.info(
+                "Permission catalog seeded: %s created, %s already present",
+                created_count,
+                existing_count,
+            )
             return True
 
         except Exception as e:
