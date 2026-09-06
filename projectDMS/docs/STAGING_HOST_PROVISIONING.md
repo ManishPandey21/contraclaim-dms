@@ -203,6 +203,7 @@ env -i \
   ENVIRONMENT=staging \
   RUN_EXTERNAL_INTEGRATION_TESTS=1 \
   FALKOR_TEST_HOST=<staging host> FALKOR_TEST_PORT=6379 \
+  FALKOR_TEST_PASSWORD=<staging falkordb password> \
   QDRANT_TEST_URL=http://<staging host>:6333 \
   QDRANT_URL=http://<staging host>:6333 \
   QDRANT_API_KEY=<staging key> \
@@ -224,6 +225,22 @@ every endpoint and credential above, refuses any that names `localhost` or
 `test_external_services_integration.py`, `test_qdrant_containment_live.py`,
 `test_graph_end_to_end_material_influence_falkor.py` or
 `test_redis_queue_runtime_state_live.py` into a failure.
+
+Two R-A8J corrections to that paragraph, both of which R-A8I proved by execution.
+
+`FALKOR_TEST_PASSWORD` is now mandatory and appears above. The staging FalkorDB
+requires AUTH and the harness had no seam to give it one, so all 21 tests in the
+bullet-4 module skipped with `Authentication required` and the bullet could not be
+earned however the run was configured. Its absence now stops the run in the
+preflight, before collection, with the status table rather than nine connection
+attempts. The value is never printed.
+
+And the skip-to-failure conversion **did not fire** in R-A8I. It matched paths
+ending in `backend/rbac_backend/tests/integration/<file>`, and inside the backend
+container the path is `/app/rbac_backend/tests/integration/<file>` - no `backend/`
+segment, no match, 21 skips reported as skips, pytest exit 0. Membership is decided
+on the package-relative path now, so the conversion fires in the container as well
+as in the checkout. A Gate 2 run whose required modules skip exits non-zero.
 
 ## 8. What this document does not do
 
