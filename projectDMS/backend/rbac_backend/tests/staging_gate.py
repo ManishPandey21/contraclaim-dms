@@ -357,6 +357,11 @@ def preflight_findings() -> List[PreflightFinding]:
         _label_finding(),
         _endpoint_finding("FALKOR_TEST_HOST", host_is_local),
         _port_finding("FALKOR_TEST_PORT"),
+        # Mandatory alongside the host and port it belongs to. R-A8I reached an
+        # authenticated staging FalkorDB with no password and lost Gate 2
+        # bullet 4 to 21 skips; the absence has to stop the run before
+        # collection, where the report is still readable.
+        _credential_finding(("FALKOR_TEST_PASSWORD",), mandatory=True),
         _endpoint_finding("QDRANT_TEST_URL", url_is_local),
         _endpoint_finding("REDIS_TEST_URL", url_is_local),
         _credential_finding(

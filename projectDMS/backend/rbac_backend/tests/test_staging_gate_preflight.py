@@ -40,6 +40,7 @@ MANAGED_ENV = (
     staging_gate.ENVIRONMENT_ENV,
     "FALKOR_TEST_HOST",
     "FALKOR_TEST_PORT",
+    "FALKOR_TEST_PASSWORD",
     "QDRANT_TEST_URL",
     "QDRANT_API_KEY",
     "QDRANT_TEST_API_KEY",
@@ -61,6 +62,7 @@ SOUND_STAGING_ENV: Dict[str, str] = {
     staging_gate.ENVIRONMENT_ENV: "staging",
     "FALKOR_TEST_HOST": "falkordb.contraclaim-stg.internal",
     "FALKOR_TEST_PORT": "6379",
+    "FALKOR_TEST_PASSWORD": "staging-falkor-placeholder",
     "QDRANT_TEST_URL": "http://qdrant.contraclaim-stg.internal:6333",
     "QDRANT_API_KEY": "staging-qdrant-key-placeholder",
     "REDIS_TEST_URL": "redis://:staging-redis-placeholder@redis.contraclaim-stg.internal:6379/0",
@@ -610,6 +612,7 @@ def test_a_skipped_gate2_module_fails_the_run_under_the_gate(tmp_path: Path) -> 
         "RUN_EXTERNAL_INTEGRATION_TESTS": "1",
         "FALKOR_TEST_HOST": "falkordb.contraclaim-stg.invalid",
         "FALKOR_TEST_PORT": "6379",
+        "FALKOR_TEST_PASSWORD": "not-a-real-password",
         # `.invalid` is reserved by RFC 2606 and never resolves, so the suite
         # reaches its unreachable-engine skip rather than touching any engine.
         "QDRANT_TEST_URL": "http://qdrant.contraclaim-stg.invalid:6333",
@@ -791,3 +794,123 @@ def test_no_certification_gate_matches_by_basename(gate: str, required_files, pr
     for required in required_files:
         basename = required.rsplit("/", 1)[1]
         assert predicate(f"/app/somewhere_else/{basename}") is False, f"{gate}: {basename}"
+
+
+# --------------------------------------------------------------------------- #
+# R-A8J F1 - the Falkor live harness must authenticate
+# --------------------------------------------------------------------------- #
+#
+# Every Falkor integration module constructed `FalkorGraphConfig(..., password=None)`.
+# The staging FalkorDB requires AUTH, so all 21 tests in the Gate 2 bullet-4
+# module failed to connect and skipped with "Authentication required." The
+# product's `FalkorGraphService` has always supported a password; the harness had
+# no seam to give it one, and no seam meant no way to supply the staging value.
+#
+# The remedy is a seam with the same three properties as every other staging
+# endpoint: explicit in staging mode, absent-is-a-failure, and never read from
+# the checkout. It must not weaken authentication and must not fall back to a
+# development or production credential.
+
+FALKOR_PASSWORD_ENV = "FALKOR_TEST_PASSWORD"
+
+
+def test_the_falkor_password_is_a_seam_not_a_hard_coded_none() -> None:
+    assert hasattr(authority_band_graph, "falkor_password"), (
+        "the Falkor harness has no password seam, so a staging instance that "
+        "requires AUTH can never be reached and Gate 2 bullet 4 is unsatisfiable"
+    )
+
+
+def test_the_staging_password_is_taken_from_the_environment(staging_env) -> None:
+    staging_env.setenv(FALKOR_PASSWORD_ENV, "staging-falkor-placeholder")
+    assert authority_band_graph.falkor_password() == "staging-falkor-placeholder"
+
+
+def test_a_missing_falkor_password_fails_the_preflight_before_collection(staging_env) -> None:
+    """FAIL before execution, not a skip at the connection attempt.
+
+    A skip is precisely the outcome R-A8I recorded, and the outcome the staging
+    mode exists to prevent.
+    """
+    staging_env.delenv(FALKOR_PASSWORD_ENV, raising=False)
+
+    assert FALKOR_PASSWORD_ENV in _failed(staging_gate.preflight_findings())
+    with pytest.raises(staging_gate.StagingGateConfigurationError):
+        staging_gate.assert_staging_preflight()
+    with pytest.raises(staging_gate.StagingGateConfigurationError):
+        authority_band_graph.falkor_password()
+
+
+def test_the_preflight_never_prints_the_falkor_password(staging_env) -> None:
+    secret = "staging-falkor-do-not-print-me"
+    staging_env.setenv(FALKOR_PASSWORD_ENV, secret)
+
+    report = staging_gate.render_report()
+
+    assert FALKOR_PASSWORD_ENV in report
+    assert secret not in report
+
+
+def test_a_developer_run_keeps_the_unauthenticated_default(developer_env) -> None:
+    """The local development FalkorDB has no AUTH; requiring one everywhere
+    would break every ordinary run to fix a staging-only problem."""
+    assert authority_band_graph.falkor_password() is None
+
+    developer_env.setenv(FALKOR_PASSWORD_ENV, "local-dev-password")
+    assert authority_band_graph.falkor_password() == "local-dev-password"
+
+
+#: Every live Falkor module that builds its own connection. A module left with a
+#: literal `password=None` is a module that cannot reach an authenticated
+#: instance, and one of them is Gate 2 bullet 4's sole evidence.
+_FALKOR_LIVE_MODULES = sorted(
+    (TESTS / "integration").glob("test_*falkor*.py"),
+    key=lambda p: p.name,
+)
+
+
+@pytest.mark.parametrize("module", _FALKOR_LIVE_MODULES, ids=lambda p: p.name)
+def test_no_live_falkor_module_hard_codes_an_unauthenticated_connection(module: Path) -> None:
+    tree = ast.parse(module.read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+        if name != "FalkorGraphConfig":
+            continue
+        passwords = [kw for kw in node.keywords if kw.arg == "password"]
+        assert passwords, (
+            f"{module.name} builds a FalkorGraphConfig without a password at all"
+        )
+        for keyword in passwords:
+            assert not (
+                isinstance(keyword.value, ast.Constant) and keyword.value.value is None
+            ), (
+                f"{module.name} hard-codes password=None; an authenticated staging "
+                "FalkorDB refuses it and the whole module skips"
+            )
+
+
+@pytest.mark.parametrize("module", _FALKOR_LIVE_MODULES, ids=lambda p: p.name)
+def test_a_live_falkor_module_does_not_skip_past_an_unreachable_engine_in_staging_mode(
+    module: Path,
+) -> None:
+    """A wrong password reaches the engine as a connection refusal.
+
+    In staging mode that refusal must be RED. Leaving it a `pytest.skip` puts the
+    outcome back in the hands of the report hook alone, and R-A8I is the record
+    of what happens when that hook does not fire.
+    """
+    source = module.read_text(encoding="utf-8")
+
+    assert "falkor_unreachable" in source, (
+        f"{module.name} does not route its unreachable-engine branch through the "
+        "shared seam; under CONTRACLAIM_STAGING_GATE a refused connection must "
+        "fail rather than skip"
+    )
+    assert "FalkorDB not reachable" not in source, (
+        f"{module.name} still skips unconditionally when the engine refuses the "
+        "connection, which is how a wrong password reads as green"
+    )

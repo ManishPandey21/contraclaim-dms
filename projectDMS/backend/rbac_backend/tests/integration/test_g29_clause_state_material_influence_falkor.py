@@ -56,7 +56,9 @@ from rbac_backend.tests.authority_band_graph import (
     disposable_graph_name,
     drop_disposable_graph,
     falkor_host,
+    falkor_password,
     falkor_port,
+    falkor_unreachable,
 )
 
 pytestmark = pytest.mark.integration
@@ -213,7 +215,7 @@ def _falkor(graph_name: str):
             host=falkor_host(),
             port=falkor_port(),
             graph_name=graph_name,
-            password=None,
+            password=falkor_password(),
             enabled=True,
             cleanup=False,
         )
@@ -221,7 +223,7 @@ def _falkor(graph_name: str):
     try:
         service._get_client().ping()
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"FalkorDB not reachable at {falkor_host()}:{falkor_port()}: {exc}")
+        falkor_unreachable(exc)
     return service
 
 

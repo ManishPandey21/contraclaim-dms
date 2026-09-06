@@ -34,6 +34,7 @@ from rbac_backend.tests.authority_band_graph import (
     drop_disposable_graph,
     falkor_host,
     falkor_port,
+    falkor_unreachable,
 )
 
 # Resolved through the shared seam, not from os.environ: under
@@ -51,7 +52,7 @@ def _client():
         client = redis.Redis(host=FALKOR_HOST, port=FALKOR_PORT, decode_responses=True)
         client.ping()
     except Exception as exc:  # pragma: no cover - environment dependent
-        pytest.skip(f"FalkorDB not reachable at {FALKOR_HOST}:{FALKOR_PORT}: {exc}")
+        falkor_unreachable(exc)
     return client
 
 

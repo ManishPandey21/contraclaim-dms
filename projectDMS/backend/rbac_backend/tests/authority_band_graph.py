@@ -35,6 +35,8 @@ import os
 import uuid
 from typing import Any, List
 
+import pytest
+
 from rbac_backend.tests import staging_gate
 from rbac_backend.tests.required_test_paths import matches_required
 
@@ -78,12 +80,59 @@ FALKOR_PORT_ENV = "FALKOR_TEST_PORT"
 FALKOR_DEV_HOST_DEFAULT = "localhost"
 FALKOR_DEV_PORT_DEFAULT = 6380
 
+#: The staging FalkorDB requires AUTH. Every module here used to build
+#: `FalkorGraphConfig(..., password=None)`, so all 21 tests in Gate 2 bullet 4's
+#: sole evidence module skipped with "Authentication required" and the bullet
+#: could not be earned (R-A8I F1). The seam below is the fix, and it has the same
+#: three properties as the endpoint resolvers: explicit under the staging gate,
+#: absent-is-a-failure there, and never read off the disk. There is deliberately
+#: no fallback to a development or production password - a harness that could
+#: authenticate against the wrong instance is the hazard `staging_gate` exists
+#: for, one credential further in.
+FALKOR_PASSWORD_ENV = "FALKOR_TEST_PASSWORD"
+
+
 def falkor_host() -> str:
     return staging_gate.resolve_host(FALKOR_HOST_ENV, FALKOR_DEV_HOST_DEFAULT)
 
 
 def falkor_port() -> int:
     return staging_gate.resolve_port(FALKOR_PORT_ENV, FALKOR_DEV_PORT_DEFAULT)
+
+
+def falkor_password() -> str | None:
+    """The FalkorDB password for a live suite, or ``None`` for no AUTH.
+
+    Development keeps ``None``: the local instance has no AUTH, and requiring a
+    password everywhere would break every ordinary run to fix a staging-only
+    problem. Under the staging gate the value must be supplied explicitly, and
+    its absence raises before collection rather than skipping at the connection
+    attempt - a skip is the outcome the mode exists to prevent.
+    """
+    if not staging_gate.staging_gate_mode():
+        return os.environ.get(FALKOR_PASSWORD_ENV, "").strip() or None
+    return staging_gate.resolve_secret(FALKOR_PASSWORD_ENV)
+
+
+def falkor_unreachable(exc: BaseException) -> None:
+    """The engine refused the connection. Skip in development, fail in staging.
+
+    A wrong password arrives here, and so does a wrong host - both are results a
+    staging run must report, not step over. Outside the gate this stays a skip so
+    a developer without a local FalkorDB is not blocked.
+
+    Never carries the credential: the host, the port and the engine's own error
+    are enough to diagnose it, and an AUTH failure message contains no password.
+    """
+    where = f"{falkor_host()}:{falkor_port()}"
+    if staging_gate.staging_gate_mode():
+        pytest.fail(
+            f"FalkorDB at {where} refused the connection: {exc}. "
+            f"{staging_gate.STAGING_GATE_ENV} is set, so this run is staging "
+            "Gate-2 evidence and an unreachable or unauthenticated engine is a "
+            "gate failure, not a skip."
+        )
+    pytest.skip(f"FalkorDB not reachable at {where}: {exc}")
 
 
 def disposable_graph_name(label: str = "") -> str:
