@@ -46,6 +46,8 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
+from rbac_backend.tests.required_test_paths import matches_required
+
 #: The one staging/live-gate switch. Deliberately singular.
 STAGING_GATE_ENV = "CONTRACLAIM_STAGING_GATE"
 
@@ -433,18 +435,15 @@ GATE2_REQUIRED_LIVE_FILES = (
 )
 
 
-def _normalise(path: str) -> str:
-    return str(path).replace("\\", "/")
-
-
 def is_gate2_required_file(path: str) -> bool:
-    """Does this test file carry evidence one of the Gate 2 bullets is scored from?"""
-    candidate = _normalise(path)
-    for required in GATE2_REQUIRED_LIVE_FILES:
-        required_norm = _normalise(required)
-        if candidate == required_norm or candidate.endswith("/" + required_norm):
-            return True
-    return False
+    """Does this test file carry evidence one of the Gate 2 bullets is scored from?
+
+    Decided on the package-relative identity, so the answer is the same in the
+    repository and inside the backend container. It was a suffix match against
+    the `backend/`-prefixed entry above, which no container path can end with -
+    see `required_test_paths` for what that cost in R-A8I.
+    """
+    return matches_required(path, GATE2_REQUIRED_LIVE_FILES)
 
 
 def staging_skip_is_gate_failure(path: str, outcome: str) -> bool:

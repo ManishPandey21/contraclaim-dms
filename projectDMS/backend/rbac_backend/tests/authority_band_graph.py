@@ -36,6 +36,7 @@ import uuid
 from typing import Any, List
 
 from rbac_backend.tests import staging_gate
+from rbac_backend.tests.required_test_paths import matches_required
 
 #: Current sanctioned prefix. Includes a per-run token so residue is attributable.
 AUTHORITY_BAND_GRAPH_PREFIX = "authority_band_"
@@ -76,7 +77,6 @@ FALKOR_HOST_ENV = "FALKOR_TEST_HOST"
 FALKOR_PORT_ENV = "FALKOR_TEST_PORT"
 FALKOR_DEV_HOST_DEFAULT = "localhost"
 FALKOR_DEV_PORT_DEFAULT = 6380
-
 
 def falkor_host() -> str:
     return staging_gate.resolve_host(FALKOR_HOST_ENV, FALKOR_DEV_HOST_DEFAULT)
@@ -216,23 +216,15 @@ def g31_certification_mode() -> bool:
     return os.environ.get(G31_CERTIFICATION_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
-def _normalise(path: str) -> str:
-    return str(path).replace("\\", "/")
-
-
 def is_g31_required_file(path: str) -> bool:
     """Does this test file belong to the required G31 writer set?
 
-    Matched on the repo-relative suffix so it works from any rootdir and on
-    Windows separators, and so a copy of the file somewhere else cannot
-    accidentally satisfy the requirement by name alone.
+    Matched on the package-relative identity so it works from any rootdir, on
+    Windows separators, and inside the backend container - where the `backend/`
+    segment the entries above carry does not exist. A copy of the file in another
+    package still cannot satisfy the requirement by name alone.
     """
-    candidate = _normalise(path)
-    for required in G31_REQUIRED_WRITER_FILES:
-        required_norm = _normalise(required)
-        if candidate == required_norm or candidate.endswith("/" + required_norm):
-            return True
-    return False
+    return _matches_required(path, G31_REQUIRED_WRITER_FILES)
 
 
 def g31_skip_is_certification_failure(path: str, outcome: str) -> bool:
@@ -309,17 +301,12 @@ def g30_certification_mode() -> bool:
 
 
 def _matches_required(path: str, required_files: Any) -> bool:
-    """Repo-relative suffix match, so rootdir and separators do not matter.
+    """Package-relative identity match - one definition, shared with Gate 2.
 
-    Anchored on `/` so a same-named file in another tree cannot satisfy a
-    requirement by basename alone.
+    Rootdir, separators and the `backend/` prefix all drop out, and a same-named
+    file in another package still cannot satisfy a requirement by basename.
     """
-    candidate = _normalise(path)
-    for required in required_files:
-        required_norm = _normalise(required)
-        if candidate == required_norm or candidate.endswith("/" + required_norm):
-            return True
-    return False
+    return matches_required(path, required_files)
 
 
 def is_g30_required_file(path: str) -> bool:

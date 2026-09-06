@@ -26,6 +26,7 @@ from typing import Dict, List
 import pytest
 
 from rbac_backend.tests import staging_gate
+from rbac_backend.tests import authority_band_graph
 from rbac_backend.tests.authority_band_graph import falkor_host, falkor_port
 
 TESTS = Path(__file__).resolve().parent
@@ -665,3 +666,128 @@ def test_the_qdrant_module_refuses_the_checkout_secret_under_the_gate() -> None:
         "the Qdrant live suite reads config/secrets/qdrant_api_key without asking "
         "the staging gate, so a staging run can authenticate with the dev key"
     )
+
+
+# --------------------------------------------------------------------------- #
+# R-A8J F2 - the guard must fire in the layout that produces Gate 2 evidence
+# --------------------------------------------------------------------------- #
+#
+# The whole mechanism above was inert in the only place Gate 2 evidence can be
+# measured. Inside the backend container the application is installed at `/app`,
+# so pytest's rootdir is `/app` and the path reaching the hook is
+# `/app/rbac_backend/tests/integration/<file>`. Every required entry was written
+# with a `backend/` prefix and matched by suffix, so no container path could ever
+# match: R-A8I's 21 required Falkor tests skipped, the conversion did not fire,
+# and pytest exited 0 with bullet 4 unmeasured.
+#
+# The requirement is a test IDENTITY, not a checkout layout. These tests pin it
+# in both layouts at once, so a fix that hard-codes either root fails the other.
+
+#: The two roots a Gate 2 run is actually launched from. Neither may be
+#: privileged over the other, and neither may be the only one that works.
+CONTAINER_ROOT = "/app"
+REPOSITORY_PREFIX = "backend"
+
+
+def _container_path(required: str) -> str:
+    """The same required module, as the backend container addresses it.
+
+    `backend/rbac_backend/tests/x.py` becomes `/app/rbac_backend/tests/x.py` -
+    the image copies the *contents* of `backend/` to `/app`, so the `backend/`
+    segment does not exist inside the container at all.
+    """
+    assert required.startswith(REPOSITORY_PREFIX + "/"), required
+    return f"{CONTAINER_ROOT}/{required[len(REPOSITORY_PREFIX) + 1:]}"
+
+
+@pytest.mark.parametrize("required", staging_gate.GATE2_REQUIRED_LIVE_FILES)
+def test_a_required_module_is_recognised_in_the_repository_layout(required: str) -> None:
+    assert staging_gate.is_gate2_required_file(required) is True
+    assert staging_gate.is_gate2_required_file(str(PROJECT / required)) is True
+
+
+@pytest.mark.parametrize("required", staging_gate.GATE2_REQUIRED_LIVE_FILES)
+def test_a_required_module_is_recognised_in_the_container_layout(required: str) -> None:
+    """R-A8I F2, as a permanent test.
+
+    `is_gate2_required_file('/app/rbac_backend/tests/integration/...')` returned
+    False, which is why an all-skipped Gate 2 module reported green.
+    """
+    assert staging_gate.is_gate2_required_file(_container_path(required)) is True
+
+
+def test_the_recognition_is_not_hard_coded_to_either_root() -> None:
+    """Any checkout root, not just this machine's and not just `/app`.
+
+    A fix that swapped one hard-coded prefix for another would satisfy the two
+    tests above and fail here - which is the whole point of having it.
+    """
+    tail = "rbac_backend/tests/integration/test_redis_queue_runtime_state_live.py"
+    for root in ("/srv/contraclaim", "/opt/contraclaim-stg/projectDMS/backend", "D:/ci/w1"):
+        assert staging_gate.is_gate2_required_file(f"{root}/{tail}") is True
+    # Windows separators reach the hook on a developer machine.
+    assert staging_gate.is_gate2_required_file(
+        r"C:\ci\work\rbac_backend\tests\integration\test_redis_queue_runtime_state_live.py"
+    ) is True
+
+
+def test_an_unrelated_module_is_not_recognised_in_either_layout() -> None:
+    """Root independence must not become basename matching.
+
+    A module with the same file name in another package is a different test, and
+    a guard that converted its skips would fail runs Gate 2 does not score.
+    """
+    for candidate in (
+        "backend/rbac_backend/tests/test_contract_master.py",
+        "/app/rbac_backend/tests/test_contract_master.py",
+        "/app/rbac_backend/tests/test_redis_queue_runtime_state_live.py",
+        "/app/other_package/tests/integration/test_redis_queue_runtime_state_live.py",
+        "/app/integration/test_redis_queue_runtime_state_live.py",
+    ):
+        assert staging_gate.is_gate2_required_file(candidate) is False, candidate
+
+
+def test_a_required_skip_in_the_container_layout_is_a_gate_failure(developer_env) -> None:
+    """The end of the chain: the decision the conftest hook actually consults."""
+    container = _container_path(
+        "backend/rbac_backend/tests/integration/"
+        "test_graph_end_to_end_material_influence_falkor.py"
+    )
+
+    # Outside staging mode a skip stays a skip, in either layout.
+    assert staging_gate.staging_skip_is_gate_failure(container, "skipped") is False
+
+    developer_env.setenv(staging_gate.STAGING_GATE_ENV, "1")
+    assert staging_gate.staging_skip_is_gate_failure(container, "skipped") is True
+    assert staging_gate.staging_skip_is_gate_failure(container, "passed") is False
+    assert staging_gate.staging_skip_is_gate_failure(container, "failed") is False
+    assert staging_gate.staging_skip_is_gate_failure(
+        "/app/rbac_backend/tests/test_contract_master.py", "skipped"
+    ) is False
+
+
+#: The other four certification gates carry the identical defect, because they
+#: share the shape. Fixing Gate 2 alone would leave G29/G30/G31/G32-STATE inert
+#: inside the same container.
+_CERTIFICATION_REQUIRED_SETS = (
+    ("G31 writer", authority_band_graph.G31_REQUIRED_WRITER_FILES, authority_band_graph.is_g31_required_file),
+    ("G30 reader", authority_band_graph.G30_REQUIRED_READER_FILES, authority_band_graph.is_g30_required_file),
+    ("G32-STATE", authority_band_graph.G32_STATE_REQUIRED_FILES, authority_band_graph.is_g32_state_required_file),
+    ("G29 umbrella", authority_band_graph.G29_UMBRELLA_REQUIRED_FILES, authority_band_graph.is_g29_umbrella_required_file),
+)
+
+
+@pytest.mark.parametrize("gate,required_files,predicate", _CERTIFICATION_REQUIRED_SETS)
+def test_every_certification_gate_recognises_the_container_layout(
+    gate: str, required_files, predicate
+) -> None:
+    for required in required_files:
+        assert predicate(required) is True, f"{gate}: repository layout {required}"
+        assert predicate(_container_path(required)) is True, f"{gate}: container layout {required}"
+
+
+@pytest.mark.parametrize("gate,required_files,predicate", _CERTIFICATION_REQUIRED_SETS)
+def test_no_certification_gate_matches_by_basename(gate: str, required_files, predicate) -> None:
+    for required in required_files:
+        basename = required.rsplit("/", 1)[1]
+        assert predicate(f"/app/somewhere_else/{basename}") is False, f"{gate}: {basename}"
