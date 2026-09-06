@@ -1,7 +1,14 @@
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci && npm install --no-save @rollup/rollup-linux-x64-gnu
+# `npm ci` alone. This used to be followed by
+# `npm install --no-save @rollup/rollup-linux-x64-gnu`, because the lockfile
+# was generated on Windows and carried only the win32 rollup binaries - so the
+# native binary that links the production bundle was fetched outside the
+# lockfile, unpinned and unverified, on every build. The linux binary is in the
+# lockfile now at rollup's exact version with its integrity hash, so the
+# install is the lockfile and nothing else.
+RUN npm ci
 COPY . .
 RUN npm run build
 
