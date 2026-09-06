@@ -334,6 +334,22 @@ def test_the_client_runtime_stage_copies_only_built_output() -> None:
         )
 
 
+def _run_instructions(dockerfile: Path) -> list[str]:
+    """The RUN instructions of a Dockerfile, one string per layer it builds.
+
+    Line continuations are folded, so an instruction split across several
+    source lines comes back as the single layer Docker builds from it.
+    Comments and blank lines are dropped.
+    """
+    continuation = chr(92) + chr(10)
+    folded = dockerfile.read_text(encoding="utf-8").replace(continuation, " ")
+    return [
+        " ".join(stripped.split())
+        for stripped in (line.strip() for line in folded.splitlines())
+        if stripped.startswith("RUN ")
+    ]
+
+
 @pytest.mark.parametrize(
     "dockerfile", PYTHON_SERVICE_DOCKERFILES, ids=lambda p: p.parent.name
 )
@@ -347,13 +363,61 @@ def test_python_service_images_do_not_ship_pip(dockerfile: Path) -> None:
     is 84.0.0. Upgrading pip does not help - pip 26.2.1 still pins those
     versions in its vendored manifest. Removing the tool removes the finding.
     """
-    text = dockerfile.read_text(encoding="utf-8")
+    runs = _run_instructions(dockerfile)
 
-    assert "pip install" in text, f"{dockerfile} no longer installs dependencies"
-    assert "pip uninstall -y pip" in text, (
+    assert any("pip install" in run for run in runs), (
+        f"{dockerfile} no longer installs dependencies"
+    )
+    assert any("pip uninstall -y pip" in run for run in runs), (
         f"{dockerfile} must remove pip after installing dependencies; leaving it "
         f"ships a package manager, and its vendored manifest, in an image that "
         f"never installs a package"
+    )
+
+
+@pytest.mark.parametrize(
+    "dockerfile", PYTHON_SERVICE_DOCKERFILES, ids=lambda p: p.parent.name
+)
+def test_pip_is_removed_in_the_same_layer_that_installs_it(dockerfile: Path) -> None:
+    """Removing pip in a later layer does not remove it from the image.
+
+    An image is scanned layer by layer, and a whiteout in an upper layer does
+    not erase what a lower layer holds. While these Dockerfiles carried a
+    standalone `RUN pip uninstall -y pip`, the dependency-install layer beneath
+    it still shipped `pip/_vendor/vendor.txt`, and the exact CI Trivy policy
+    (`--ignore-unfixed --severity CRITICAL,HIGH --exit-code 1`) reported
+    `msgpack 1.1.2` and `setuptools 70.3.0` as fixable HIGH findings against the
+    distributable backend image. That was measured on the release artefact, not
+    theorised: the runtime filesystem never contained either package, and the
+    scan failed anyway, because the lower layer did.
+
+    Installing and removing in one instruction means no layer ever contains the
+    manifest, and that instruction's opaque whiteout over `site-packages/pip`
+    also masks the copy inherited from `python:3.12-slim`, which pins
+    `setuptools==70.3.0` too.
+
+    So the property is *same layer*, not *present somewhere in the file*: no
+    instruction may remove pip without installing in it, and the last
+    instruction that installs with pip must also be the one that removes it.
+    """
+    runs = _run_instructions(dockerfile)
+    installs = [run for run in runs if "pip install" in run]
+    removals = [run for run in runs if "pip uninstall" in run]
+
+    assert installs, f"{dockerfile} no longer installs dependencies"
+    assert removals, f"{dockerfile} no longer removes pip"
+
+    for removal in removals:
+        assert "pip install" in removal, (
+            f"{dockerfile} removes pip in an instruction of its own: {removal!r}. "
+            f"That builds a layer in which pip, and its vendored manifest, still "
+            f"exist; the image ships that layer and the CI scanner reads it. "
+            f"Remove pip in the same RUN that installs the dependencies."
+        )
+
+    assert installs[-1] in removals, (
+        f"{dockerfile} ends with a layer that still contains pip: "
+        f"{installs[-1]!r}. The last pip install must also remove pip."
     )
 
 
