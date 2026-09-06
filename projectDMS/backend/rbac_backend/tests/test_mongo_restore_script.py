@@ -48,9 +48,14 @@ PRODUCTION_DB = "contraclaim"
 #: Two stubs, one log. `mongorestore` is what a host execution reaches; `docker`
 #: is what a compose execution reaches. Recording both in one file means a test
 #: can assert not only that the right one ran but that the other one did not.
+#:
+#: `/bin/sh` by absolute path, and shell builtins only - no shebang that has to
+#: be resolved through PATH, and no `basename`. A stub that needs PATH to find
+#: its own interpreter, or to find a utility, cannot run in the built layouts
+#: below, where PATH holds only the directories a test created.
 _STUB = (
-    "#!/usr/bin/env bash\n"
-    'printf \'%s\' "$(basename "$0")" >>"$STUB_LOG"\n'
+    "#!/bin/sh\n"
+    'printf \'%s\' "${0##*/}" >>"$STUB_LOG"\n'
     'for arg in "$@"; do printf \' %s\' "$arg" >>"$STUB_LOG"; done\n'
     "printf '\\n' >>\"$STUB_LOG\"\n"
     "exit ${STUB_EXIT:-0}\n"
@@ -129,7 +134,86 @@ def harness(tmp_path: Path):
 
     run.archive = archive
     run.bin_dir = bin_dir
+    run.log = log
     return run
+
+
+@pytest.fixture()
+def built_layout(tmp_path: Path, harness):
+    """Run the script against a PATH this test built, never the one the host has.
+
+    F-A8L-1. The no-resolver control used to create its precondition by stripping
+    PATH to ``<stub bin>:/usr/bin``. On the Windows development host git-bash's
+    ``/usr/bin`` carries no python and no getent, so the precondition held and the
+    control passed. In the release image ``/usr/bin/getent`` exists - measured, not
+    assumed - so a resolver always answered, the refusal branch was never reached,
+    and the same control failed. The control was reading the host, not the script.
+
+    Here every directory on PATH is created by the test, so which resolvers exist
+    is *stated* rather than inherited, and the answer is the same on every host.
+    Borrowing a system directory is rejected outright below, because that is the
+    defect itself rather than a stylistic preference.
+
+    ``ROOT_DIR`` is passed explicitly: the script derives it with ``dirname``,
+    which is not on a built PATH. That seam already exists in the script and is
+    used here rather than widening the script's behaviour.
+    """
+    system_dir = tmp_path / "built-system-bin"
+    system_dir.mkdir()
+
+    def run(*, resolvers=(), env=None, uri=STAGING_URI, db=STAGING_DB, argv=None):
+        for name, body in resolvers:
+            stub = system_dir / name
+            stub.write_text(f"#!/bin/sh\n{body}", encoding="utf-8", newline="\n")
+            stub.chmod(0o755)
+
+        path_dirs = [harness.bin_dir, system_dir]
+        for directory in path_dirs:
+            assert tmp_path in directory.parents, (
+                f"{directory} was not built by this test. The layout has to be "
+                f"built rather than borrowed: borrowing a system directory is "
+                f"exactly F-A8L-1, where the control passed on a host whose "
+                f"/usr/bin had no resolver and failed in a container whose did."
+            )
+        run.path = os.pathsep.join(str(directory) for directory in path_dirs)
+
+        environment = {
+            "PATH": run.path,
+            "STUB_LOG": str(harness.log),
+            "ROOT_DIR": str(REPO_ROOT),
+            "RESTORE_EXEC_CONTEXT": "auto",
+        }
+        if uri is not None:
+            environment["MONGO_URI"] = uri
+        if db is not None:
+            environment["MONGO_DB"] = db
+        environment.update(env or {})
+
+        result = subprocess.run(
+            [BASH, str(SCRIPT), *(argv if argv is not None else [str(harness.archive)])],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=str(REPO_ROOT),
+        )
+        result.stub_log = (
+            harness.log.read_text(encoding="utf-8") if harness.log.exists() else ""
+        )
+        return result
+
+    run.path = None
+    run.system_dir = system_dir
+    return run
+
+
+#: A resolver stub answers the way `resolves_locally()` reads answers: with a word
+#: on stdout for python, and with an exit status for getent. Each layout below
+#: names the machine it stands for.
+_NO_RESOLVER: tuple = ()
+_PYTHON_SAYS_YES = (("python3", "printf 'YES\\n'\n"),)
+_PYTHON_SAYS_NO = (("python3", "printf 'NO\\n'\n"),)
+_GETENT_FINDS_IT = (("getent", "exit 0\n"),)
+_GETENT_DOES_NOT = (("getent", "exit 2\n"),)
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +401,7 @@ def test_the_completion_message_names_the_target_it_actually_restored(harness) -
     assert STAGING_DB in result.stdout
 
 
-def test_auto_context_refuses_when_no_resolver_exists(tmp_path: Path, harness) -> None:
+def test_auto_context_refuses_when_no_resolver_exists(built_layout) -> None:
     """"Cannot tell" and "definitely not local" must not collapse into each other.
 
     With no `getent` and no python on PATH, `auto` has no way to decide. Assuming
@@ -329,27 +413,100 @@ def test_auto_context_refuses_when_no_resolver_exists(tmp_path: Path, harness) -
     context would be empty, no branch would match, and the script would print
     "restore completed" having restored nothing.
     """
-    log = tmp_path / "stub.log"
-    stripped_path = f"{harness.bin_dir}{os.pathsep}/usr/bin"
-
-    result = subprocess.run(
-        [BASH, str(SCRIPT), str(harness.archive)],
-        capture_output=True,
-        text=True,
-        cwd=str(REPO_ROOT),
-        env={
-            "PATH": stripped_path,
-            "STUB_LOG": str(log),
-            "MONGO_URI": STAGING_URI,
-            "MONGO_DB": STAGING_DB,
-            "RESTORE_EXEC_CONTEXT": "auto",
-        },
-    )
+    result = built_layout(resolvers=_NO_RESOLVER)
 
     assert result.returncode != 0, result.stdout
     assert "resolver" in result.stderr
     assert "completed" not in result.stdout.lower()
-    assert not log.exists() or log.read_text(encoding="utf-8") == ""
+    assert result.stub_log == ""
+
+
+def test_the_no_resolver_layout_actually_has_no_resolver(built_layout) -> None:
+    """The precondition is measured, not hoped for.
+
+    This is the assertion F-A8L-1 was missing. A refusal test proves nothing if
+    the condition it thinks it created does not exist: with a resolver on PATH the
+    script correctly picks a context, the refusal never fires, and the failure
+    reads as a script defect when it is a harness one. So the layout is probed
+    with the same PATH the script was given, and every resolver `resolves_locally`
+    consults must be absent from it.
+    """
+    built_layout(resolvers=_NO_RESOLVER)
+
+    probe = subprocess.run(
+        [BASH, "-c", "command -v python3 python getent || echo NONE"],
+        capture_output=True,
+        text=True,
+        env={"PATH": built_layout.path},
+    )
+
+    assert probe.stdout.strip() == "NONE", (
+        f"a resolver is reachable from the no-resolver layout: {probe.stdout!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("resolvers", "reason"),
+    [
+        pytest.param((("python3", "exit 9\n"),), "exits non-zero", id="exits-non-zero"),
+        pytest.param(
+            (("python3", "printf 'maybe\\n'\n"),), "answers neither word", id="unparseable"
+        ),
+    ],
+)
+def test_auto_context_refuses_when_the_resolver_cannot_answer(
+    built_layout, resolvers, reason
+) -> None:
+    """A resolver that is present but broken is still "cannot tell".
+
+    A Windows Store `python3` shim or a broken venv shebang is on PATH and exits
+    non-zero for reasons that have nothing to do with the name being looked up.
+    Reading that as "the host does not resolve" sends a perfectly local restore
+    into a container. Only a literal YES or NO is an answer; anything else falls
+    through, and with nothing left to ask the script refuses rather than guesses.
+    """
+    result = built_layout(resolvers=resolvers)
+
+    assert result.returncode != 0, f"a resolver that {reason} must not decide"
+    assert "resolver" in result.stderr
+    assert result.stub_log == ""
+
+
+@pytest.mark.parametrize(
+    ("resolvers", "expected"),
+    [
+        pytest.param(_NO_RESOLVER, "refused", id="windows-git-bash-no-resolver"),
+        pytest.param(_GETENT_DOES_NOT, "compose", id="debian-container-getent"),
+        pytest.param(_GETENT_FINDS_IT, "host", id="debian-container-getent-resolves"),
+        pytest.param(_PYTHON_SAYS_NO, "compose", id="python-resolver-says-no"),
+        pytest.param(_PYTHON_SAYS_YES, "host", id="python-resolver-says-yes"),
+    ],
+)
+def test_the_auto_decision_is_the_resolver_answer_in_every_layout(
+    built_layout, resolvers, expected
+) -> None:
+    """The same five machines, whichever machine the suite runs on.
+
+    `windows-git-bash-no-resolver` is the development host, whose `/usr/bin` has
+    neither python nor getent. `debian-container-*` is the release image, whose
+    `/usr/bin/getent` exists - that layout is why the old control could not hold
+    in the container. Each row states its own resolver, so the row that runs is
+    the row that was written, and no row is decided by the host underneath.
+    """
+    result = built_layout(resolvers=resolvers)
+
+    if expected == "refused":
+        assert result.returncode != 0
+        assert "resolver" in result.stderr
+        assert result.stub_log == ""
+        return
+
+    assert result.returncode == 0, result.stderr
+    assert f"execution context: {expected}" in result.stdout
+    if expected == "host":
+        assert result.stub_log.startswith("mongorestore "), result.stub_log
+    else:
+        assert result.stub_log.startswith("docker "), result.stub_log
 
 
 def test_a_relative_archive_path_survives_the_compose_branch(harness, tmp_path: Path) -> None:
