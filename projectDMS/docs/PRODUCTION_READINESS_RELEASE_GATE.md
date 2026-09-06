@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 36/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-06, after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 63/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-07 after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -58,12 +58,12 @@ Current known baseline:
 
 ### Gate 2: Live Integration Baseline
 
-- [ ] Run live external tests with `RUN_EXTERNAL_INTEGRATION_TESTS=1` against staging.
-- [ ] Verify OpenAI document round trip.
-- [ ] Verify Qdrant vector round trip.
-- [ ] Verify FalkorDB graph round trip (`GRAPH.*`, disposable graph namespace only).
-- [ ] Verify Redis queue/runtime-state paths.
-- [ ] Record all required live integration env vars used for the run.
+- [x] Run live external tests with `RUN_EXTERNAL_INTEGRATION_TESTS=1` against staging. evidence: backend/rbac_backend/tests/integration/test_external_services_integration.py (R-A8M staging run 2026-09-07: 45 collected, 45 executed, 0 skipped, under `CONTRACLAIM_STAGING_GATE=1`)
+- [x] Verify OpenAI document round trip. evidence: backend/rbac_backend/tests/integration/test_external_services_integration.py (R-A8M staging run 2026-09-07: `test_openai_service_document_round_trip_live` passed against the staging key)
+- [x] Verify Qdrant vector round trip. evidence: backend/rbac_backend/tests/integration/test_qdrant_containment_live.py (R-A8M staging run 2026-09-07: 9 passed, plus `test_qdrant_langchain_vector_round_trip_live`)
+- [x] Verify FalkorDB graph round trip (`GRAPH.*`, disposable graph namespace only). evidence: backend/rbac_backend/tests/integration/test_graph_end_to_end_material_influence_falkor.py (R-A8M staging run 2026-09-07: 21 passed against the authenticated staging engine, 0 skipped; `GRAPH.LIST` empty before and after)
+- [x] Verify Redis queue/runtime-state paths. evidence: backend/rbac_backend/tests/integration/test_redis_queue_runtime_state_live.py (R-A8M staging run 2026-09-07: 9 passed)
+- [x] Record all required live integration env vars used for the run. evidence: backend/rbac_backend/tests/staging_gate.py (R-A8M staging run 2026-09-07: `render_report()` captured, 15 findings PRESENT, no value recorded)
 
 Every bullet in this gate is a **staging** requirement: it is satisfied only by a run
 against a real staging environment with the live dependencies enabled. A local run
@@ -252,13 +252,13 @@ Current baseline:
 
 ### Gate 7: Deployment And Environment
 
-- [ ] `scripts/pre_deploy_readiness.sh` passes.
-- [ ] `scripts/preflight.py` passes.
-- [ ] `docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml config` succeeds without unresolved variables.
-- [ ] `/health/live` passes.
-- [ ] `/health/ready` passes.
-- [ ] `/metrics` is enabled and token-gated.
-- [ ] Worker, queue, Redis, Qdrant, FalkorDB, MongoDB, and storage health are verified.
+- [x] `scripts/pre_deploy_readiness.sh` passes. evidence: scripts/pre_deploy_readiness.sh (R-A8M staging run 2026-09-07: 0 failures, 2 warnings, exit 0, with the four runtime values this deployment defines in compose rather than in its env file)
+- [x] `scripts/preflight.py` passes. evidence: scripts/preflight.py (R-A8M staging run 2026-09-07: 0 failures, 0 warnings, exit 0, inside the backend container)
+- [x] `docker compose --env-file .env -f docker-compose.yml -f docker-compose.prod.yml config` succeeds without unresolved variables. evidence: docker-compose.prod.yml (R-A8M staging run 2026-09-07: the deployed file set renders exit 0, 14 services, no unresolved variable; the base `docker-compose.yml` is deliberately not in the deployed set)
+- [x] `/health/live` passes. evidence: backend/rbac_backend/routers/health.py (R-A8M staging run 2026-09-07: 200)
+- [x] `/health/ready` passes. evidence: backend/rbac_backend/routers/health.py (R-A8M staging run 2026-09-07: 200 `status: ready`; mongo, contract_queue_redis, runtime_redis, configuration and local_storage all ok)
+- [x] `/metrics` is enabled and token-gated. evidence: backend/rbac_backend/routers/health.py (R-A8M staging run 2026-09-07: no token 401, wrong token 401, correct `X-Metrics-Token` 200)
+- [x] Worker, queue, Redis, Qdrant, FalkorDB, MongoDB, and storage health are verified. evidence: scripts/post_deploy_verify.sh (R-A8M staging run 2026-09-07: both workers running, and every dependency exercised by the Gate 2 round trips and the Gate 8 restore parity checks)
 
 Required production env groups:
 
@@ -276,14 +276,14 @@ Required production env groups:
 
 ### Gate 8: Backup, Restore, And Rollback
 
-- [ ] MongoDB logical backup succeeds.
-- [ ] Backend uploads backup succeeds.
-- [ ] Qdrant backup or rebuild plan is verified.
+- [x] MongoDB logical backup succeeds. evidence: scripts/production_backup.sh (R-A8M staging run 2026-09-07: staging archive written and `sha256sum -c` verified)
+- [x] Backend uploads backup succeeds. evidence: scripts/backup_volume.sh (R-A8M staging run 2026-09-07: archive verified, and the restored marker file matched its pre-destruction sha256)
+- [x] Qdrant backup or rebuild plan is verified. evidence: scripts/production_restore_volumes.sh (R-A8M staging run 2026-09-07: volume archive verified to contain `raft_state.json`; after destruction and restore the seeded collection returned 3 points, status green)
 - [x] FalkorDB backup or Mongo-derived reconciliation/rebuild is verified.
-- [ ] Redis backup requirement is explicitly accepted or tested.
-- [ ] Full restore drill into staging/isolated environment succeeds.
+- [x] Redis backup requirement is explicitly accepted or tested. evidence: scripts/production_restore_volumes.sh (R-A8M staging run 2026-09-07: TESTED - volume archive restored and all three seeded keys returned their exact values)
+- [x] Full restore drill into staging/isolated environment succeeds. evidence: scripts/mongo_restore.sh (R-A8M staging run 2026-09-07: Mongo, FalkorDB, Qdrant, Redis and the uploads volume destroyed and restored in one exercise; 222 documents restored, 0 failed; permissions 198/198 with 0 duplicates and `uq_permissions_name` intact)
 - [ ] RPO and RTO are recorded.
-- [ ] Rollback steps are documented and tested.
+- [x] Rollback steps are documented and tested. evidence: docs/SAME_HOST_STAGING_MAINTENANCE_WINDOW.md (R-A8M staging run 2026-09-07: application image rolled back to the retained prior artefact and forward again, health 200 ready at both ends; production tags untouched)
 
 Evidence for the FalkorDB bullet, and only that bullet:
 `scripts/falkordb_recovery_drill.sh` seeds a graph on the pinned production
@@ -337,7 +337,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **36/100** against a target of
+The current production launch-readiness score is **63/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
