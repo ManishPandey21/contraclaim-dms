@@ -350,3 +350,22 @@ def test_auto_context_refuses_when_no_resolver_exists(tmp_path: Path, harness) -
     assert "resolver" in result.stderr
     assert "completed" not in result.stdout.lower()
     assert not log.exists() or log.read_text(encoding="utf-8") == ""
+
+
+def test_a_relative_archive_path_survives_the_compose_branch(harness, tmp_path: Path) -> None:
+    """The compose branch `cd`s to the repository root before running docker.
+
+    A relative archive path stops resolving there - and it stops resolving *after*
+    the production refusals have already passed, so the failure would arrive
+    looking like a docker problem rather than a path one.
+    """
+    relative = harness.archive.name
+    staged = REPO_ROOT / relative
+    staged.write_bytes(harness.archive.read_bytes())
+    try:
+        result = harness(argv=[relative], env={"RESTORE_EXEC_CONTEXT": "compose"})
+    finally:
+        staged.unlink(missing_ok=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stub_log.startswith("docker ")

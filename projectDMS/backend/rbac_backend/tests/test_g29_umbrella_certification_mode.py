@@ -112,7 +112,12 @@ def test_every_required_umbrella_suite_is_a_real_engine_suite() -> None:
         assert "FALKOR_TEST_HOST" in source or "falkor_host" in source, (
             f"{name} is in the G29 required set but never reaches a real engine"
         )
-        assert "pytest.skip" in source, (
+        # Either the literal call or the shared seam. `falkor_unreachable` skips
+        # outside strict mode exactly as `pytest.skip` did, and fails inside it -
+        # which is more of the property this test is after, not less. Asserting
+        # the literal string was a proxy for "has an unreachable-engine branch",
+        # and R-A8J broke the proxy while strengthening the property.
+        assert "pytest.skip" in source or "falkor_unreachable" in source, (
             f"{name} cannot skip on an unreachable engine, so requiring it "
             "proves nothing about strict mode"
         )

@@ -76,7 +76,13 @@ if [[ $# -lt 1 ]]; then
   exit 1
 fi
 
+# Absolute before anything else. The compose branch `cd`s to ROOT_DIR to run
+# `docker compose`, and a relative archive path silently stops resolving at that
+# point - the redirect would fail after the production checks had already passed.
 ARCHIVE=$1
+if [[ "${ARCHIVE}" != /* && ! "${ARCHIVE}" =~ ^[A-Za-z]:[/\\] ]]; then
+  ARCHIVE="$PWD/${ARCHIVE}"
+fi
 
 MONGO_URI=${MONGO_URI:-${DATABASE_URL:-}}
 MONGO_DB=${MONGO_DB:-${MONGODB_DATABASE:-}}
