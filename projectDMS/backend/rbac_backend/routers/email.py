@@ -107,9 +107,9 @@ class EmailController:
             # Audit log
             await self.audit_logger.log_email_sent(
                 current_user.id,
-                validated_request.recipients,
-                document.get("id"),
-                "document_share"
+                "document_share",
+                recipients=validated_request.recipients,
+                document_id=document.get("id"),
             )
 
             return EmailResponse(
@@ -303,13 +303,20 @@ class EmailController:
 
             # Log successful delivery
             await self.audit_logger.log_email_delivered(
-                sender_user_id, recipients, document_id
+                sender_user_id,
+                content.get('subject', 'Document Shared'),
+                recipients=recipients,
+                document_id=document_id,
             )
 
         except Exception as e:
             logger.error(f"Async email sending failed: {str(e)}")
             await self.audit_logger.log_email_failed(
-                sender_user_id, recipients, str(e)
+                sender_user_id,
+                content.get('subject', 'Document Shared'),
+                str(e),
+                recipients=recipients,
+                document_id=document_id,
             )
 
     async def _send_template_email_async(
@@ -330,13 +337,17 @@ class EmailController:
             )
 
             await self.audit_logger.log_template_email_sent(
-                sender_user_id, recipients, template_name
+                sender_user_id, template_name, recipients=recipients
             )
 
         except Exception as e:
             logger.error(f"Template email sending failed: {str(e)}")
             await self.audit_logger.log_email_failed(
-                sender_user_id, recipients, str(e)
+                sender_user_id,
+                content.get('subject', 'Notification'),
+                str(e),
+                recipients=recipients,
+                template_name=template_name,
             )
 
 

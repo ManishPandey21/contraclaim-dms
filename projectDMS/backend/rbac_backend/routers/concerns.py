@@ -80,7 +80,7 @@ class ConcernController:
 
             # Audit log
             await self.audit_logger.log_concern_created(
-                current_user.id, concern.id, validated_data.party_id
+                current_user.id, concern.id, party_id=validated_data.party_id
             )
 
             return concern
@@ -254,7 +254,7 @@ class ConcernController:
 
             # Audit log
             await self.audit_logger.log_concern_deleted(
-                current_user.id, validated_concern_id, concern.name or "unnamed"
+                current_user.id, validated_concern_id, name=concern.name or "unnamed"
             )
 
             return {"message": "Concern deleted successfully"}

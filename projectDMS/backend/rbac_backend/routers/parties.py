@@ -75,7 +75,7 @@ class PartyController:
 
             # Audit log
             await self.audit_logger.log_party_created(
-                current_user.id, party.id, party.name, party.type.value
+                current_user.id, party.id, party.name, party_type=party.type.value
             )
 
             return party

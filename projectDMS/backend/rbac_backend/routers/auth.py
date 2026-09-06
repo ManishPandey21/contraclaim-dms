@@ -293,8 +293,11 @@ class AuthController:
             # Extend session
             await self.auth_service.extend_session(session_id, access_token_expires)
 
-            # Audit log
-            await self.audit_logger.log_token_refreshed(current_user.id)
+            # Audit log. The token is issued and the session extended, so from
+            # here on nothing may turn this request into a failure: a 500 would
+            # deny the client a token the server has in fact granted, and leave
+            # the two disagreeing about the session (F-A8M-6).
+            await self._audit_token_refreshed(current_user.id, session_id)
 
             return TokenResponse(
                 access_token=access_token,
@@ -310,6 +313,28 @@ class AuthController:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Token refresh service temporarily unavailable"
             )
+
+    async def _audit_token_refreshed(self, user_id: str, session_id: str) -> bool:
+        """Record a completed refresh, without being able to undo it.
+
+        ``AuditLogger._write_record`` already treats a persistence failure as
+        operational rather than fatal — it warns and returns ``False``. This
+        applies the same rule one level up, to the call itself, because the
+        caller has already mutated state: after ``extend_session`` there is no
+        honest failure left to report. The failure is made loud in the log
+        rather than silent, and the request still answers with the token it
+        genuinely issued.
+        """
+        try:
+            return await self.audit_logger.log_token_refreshed(user_id, session_id)
+        except Exception:
+            logger.exception(
+                "Token refresh audit failed AFTER the session was extended "
+                "(user=%s, session=%s); the refresh itself succeeded",
+                user_id,
+                session_id,
+            )
+            return False
 
     async def logout_user(
         self,

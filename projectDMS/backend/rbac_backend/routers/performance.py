@@ -192,7 +192,9 @@ class PerformanceController:
             cleared_entries = await self.performance_service.clear_all_caches()
 
             # Audit log for security
-            await self.audit_logger.log_cache_cleared(current_user.id, cleared_entries)
+            await self.audit_logger.log_cache_cleared(
+                current_user.id, cleared_entries=cleared_entries
+            )
 
             return {
                 "message": f"Cache cleared successfully. {cleared_entries} entries removed."

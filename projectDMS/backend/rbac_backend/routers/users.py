@@ -275,7 +275,7 @@ class UserController:
 
             # Audit log
             await self.audit_logger.log_user_created(
-                current_user.id, user.id, user.email, validated_data.roles
+                current_user.id, user.id, user.email, roles=validated_data.roles
             )
 
             # Send welcome email (background task)
