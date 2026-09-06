@@ -125,6 +125,29 @@ def test_a_secret_inside_a_binary_archive_is_caught(tmp_path):
     assert _run(evidence, env) == NOT_CLEAN
 
 
+def test_the_scan_reads_raw_bytes_and_never_a_decoded_string(tmp_path):
+    """The archive case above cannot pin this on its own, and a mutation proved it.
+
+    Replacing ``read_bytes()`` with ``read_text(errors="ignore").encode()`` left
+    every behavioural test green: the planted bytes happen to survive the host's
+    locale decode. They would not survive a decode on a host whose locale
+    rejects them, and no test could name which host that is. So the seam is
+    asserted directly - the scan path opens files as bytes, and text decoding is
+    absent from it - which is the property, not a proxy for it.
+    """
+    source = SCRIPT.read_text(encoding="utf-8")
+    scan_body = source.split("def scan(", 1)[1].split("\ndef ", 1)[0]
+
+    assert "read_bytes()" in scan_body, (
+        "the scan path must read raw bytes; a decoded string throws away the "
+        "bytes of every binary artefact before the search runs"
+    )
+    assert "read_text" not in scan_body, (
+        "text decoding reached the scan path: a decode with errors='ignore' can "
+        "drop the very bytes a credential is hiding in"
+    )
+
+
 def test_a_base64_encoded_secret_is_caught(tmp_path):
     secret = "kubernetes-style-secret-value"
     env = _env(tmp_path, SERVICE_TOKEN=secret)
