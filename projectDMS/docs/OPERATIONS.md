@@ -154,9 +154,32 @@ Restore order:
 Mongo restore:
 
 ```bash
-MONGO_URI=<target-uri> MONGO_DB=contraclaim \
+MONGO_URI=<target-uri> MONGO_DB=<target-database> \
 scripts/mongo_restore.sh /var/backups/contractdms/mongo/contraclaim-<stamp>.archive.gz
 ```
+
+`MONGO_DB` has no default. It used to default to `contraclaim`, so a forgotten
+variable aimed the restore at production; the script now refuses to run without an
+explicit target.
+
+Two further behaviours matter when the target is a replica set addressed by
+docker-internal names.
+
+- **Execution context.** The production and staging URIs name the replica set as
+  `mongo1`, `mongo2`, `mongo3`, which do not resolve on the host - R-A8I's drill
+  failed with `dial tcp: lookup mongo1 ... server misbehaving` and completed only
+  when the same script was re-run by hand inside the container.
+  `RESTORE_EXEC_CONTEXT` defaults to `auto`: the script resolves each host in the
+  URI and, if one does not resolve, runs `mongorestore` inside the replica-set
+  container (`MONGO_EXEC_SERVICE`, default `mongo1`) with the archive streamed on
+  stdin. Force it with `RESTORE_EXEC_CONTEXT=host` or `=compose`. The context it
+  chose is printed before the restore starts - read that line; it is the answer to
+  "which topology did this actually use".
+- **Production is refused by default.** A `MONGO_DB` of `contraclaim`, or a URI
+  naming `replicaSet=rs0`, exits non-zero before connecting unless
+  `ALLOW_PRODUCTION_RESTORE=1` is also set. Step 1 above is not optional: R-A8I
+  recorded a restore racing a running application producing 396 permission rows for
+  198 distinct names.
 
 Volume restore:
 
