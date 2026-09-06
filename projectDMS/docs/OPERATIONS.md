@@ -181,6 +181,14 @@ docker-internal names.
   recorded a restore racing a running application producing 396 permission rows for
   198 distinct names.
 
+### Off-site backup posture
+
+Production documents and production backups currently share one S3 bucket, and the
+staging backup principal deliberately has no `DeleteObject`. Both are recorded,
+with what closing the first involves and how to clean up after the second, in
+[S3_STORAGE_POSTURE_DEBT.md](S3_STORAGE_POSTURE_DEBT.md). Read it before quoting
+an RPO that treats the off-site copy as a separate failure domain.
+
 Volume restore:
 
 ```bash
