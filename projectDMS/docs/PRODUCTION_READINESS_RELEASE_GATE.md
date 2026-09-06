@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 37/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-04, after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 36/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-06, after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -190,18 +190,35 @@ staging failure can be attributed to the environment rather than to the code.
 - [ ] Login, logout, session refresh, and CSRF behavior.
 - [ ] Org-Admin permission save/retrieve, including Client DMS permissions.
 - [ ] Document upload, view, download, share, and authorization denial.
-- [x] Contract upload, ingestion status, clause extraction, search, Q&A, and appraisal.
+- [ ] Contract upload, ingestion status, clause extraction, search, Q&A, and appraisal.
 - [ ] Contract timeline link verify/reject.
 - [ ] Chronology create, extract, verify/reject, export, and attach-to-arbitration flow.
 - [ ] Arbitration draft create, generate, edit, save version, approve/return, export DOCX/PDF.
 - [ ] Empty, loading, and API-error states for every production route.
 - [ ] Desktop and mobile smoke coverage for primary workflows.
 
+**Evidence convention.** Same as Gate 2, plus the part only this gate needs. A
+bullet may be checked only when the same line carries `evidence: <path>`, that path
+exists, and `docs/GATE_3_EVIDENCE_MATRIX.md` records the bullet as `EXECUTABLE` -
+meaning an unmocked spec that runs against a **deployed** stack.
+`test_gate3_evidence_matrix.py` enforces all three. A mocked suite proves the
+component renders its own states and proves nothing about a deployment, so it can
+never satisfy a bullet here.
+
+**How a run reaches staging.** `E2E_BASE_URL` points the Playwright suite at a
+deployment and suppresses the dev server; `CONTRACLAIM_STAGING_E2E=1` turns a
+missing staging variable from a skip into a failure, the same rule
+`CONTRACLAIM_STAGING_GATE` applies to Gate 2. The two mocked suites are excluded
+automatically when `E2E_BASE_URL` is set.
+
 Current baseline:
 
-- Playwright E2E is now present in `client/package.json`, `client/playwright.config.ts`, and `client/e2e/contract-workflows.spec.ts`.
-- Local Playwright run covers mocked browser workflows for contract upload/progress, search success/empty/error, Q&A validation/cited answer, appraisal generation/report opening, and a mobile contract-search smoke check.
-- Remaining Gate 3 items still need browser coverage before production promotion.
+- Playwright E2E is present in `client/package.json`, `client/playwright.config.ts`, `client/e2e/`.
+- `contract-workflows.spec.ts` and `contract-master.spec.ts` intercept `**/api/**`. They cover mocked browser workflows for contract upload/progress, search success/empty/error, Q&A validation/cited answer, appraisal generation/report opening, and a mobile contract-search smoke check - and they are excluded from any run that targets a deployment.
+- `login-responsive.spec.ts` and `blog.spec.ts` run unmocked at desktop, tablet and 390 px, over the public and login surfaces.
+- `staging/session-authentication.spec.ts` covers bullet 1 against a deployment. Written in R-A8J from the server's own contracts and **not yet executed against one**.
+- **Bullet 4 was unchecked in R-A8J.** It had been ticked with no `evidence:` reference, and the only spec covering its subject mocks the API - which this gate's own preamble says earns no checkbox. Unticking it lowers the recorded score by one bullet and makes it match what has actually been measured.
+- The remaining seven bullets, the property each one asks for, and what is missing are enumerated in `docs/GATE_3_EVIDENCE_MATRIX.md`.
 
 ### Gate 4: Security And RBAC
 
@@ -320,7 +337,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **37/100** against a target of
+The current production launch-readiness score is **36/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -330,10 +347,16 @@ Run:
 python scripts/production_readiness_score.py
 ```
 
-The table below is the script's own output, re-derived on 2026-09-04. It previously
-read 40/100 with Gate 1 at 5/6; the script has reported 37/100 and 4/6 since a Gate 1
-box was unchecked, and the stale copy was granting three points nothing had earned.
+The table below is the script's own output, re-derived on 2026-09-06. It previously
+read 40/100 with Gate 1 at 5/6; the script has reported 4/6 for Gate 1 since a box
+was unchecked, and the stale copy was granting three points nothing had earned.
 `test_release_gate_specification.py` now fails if the two disagree again.
+
+It read 37/100 until R-A8J, when Gate 3 bullet 4 was unchecked. That bullet had
+been ticked with no `evidence:` reference, and the only spec covering its subject
+mocks `**/api/**` - which Gate 3's own preamble says earns no checkbox. The score
+is one point lower because a point that had never been earned was being counted,
+not because anything regressed.
 
 Current gate score summary:
 
@@ -341,7 +364,7 @@ Current gate score summary:
 | --- | ---: | ---: |
 | Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |
 | Gate 2: Live Integration Baseline | 0.00 / 10 | 0 / 6 |
-| Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
+| Gate 3: Browser E2E Coverage | 0.00 / 12 | 0 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
 | Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
