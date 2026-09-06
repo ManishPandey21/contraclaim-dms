@@ -315,3 +315,38 @@ def test_the_completion_message_names_the_target_it_actually_restored(harness) -
     result = harness(env={"RESTORE_EXEC_CONTEXT": "host"})
 
     assert STAGING_DB in result.stdout
+
+
+def test_auto_context_refuses_when_no_resolver_exists(tmp_path: Path, harness) -> None:
+    """"Cannot tell" and "definitely not local" must not collapse into each other.
+
+    With no `getent` and no python on PATH, `auto` has no way to decide. Assuming
+    "unresolvable" would send a perfectly local restore into a container that may
+    not exist, so it refuses and names both explicit contexts instead.
+
+    The refusal happens inside a command substitution, which only exits the
+    subshell - `set -e` has to carry it out to the script, and if it did not the
+    context would be empty, no branch would match, and the script would print
+    "restore completed" having restored nothing.
+    """
+    log = tmp_path / "stub.log"
+    stripped_path = f"{harness.bin_dir}{os.pathsep}/usr/bin"
+
+    result = subprocess.run(
+        [BASH, str(SCRIPT), str(harness.archive)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env={
+            "PATH": stripped_path,
+            "STUB_LOG": str(log),
+            "MONGO_URI": STAGING_URI,
+            "MONGO_DB": STAGING_DB,
+            "RESTORE_EXEC_CONTEXT": "auto",
+        },
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "resolver" in result.stderr
+    assert "completed" not in result.stdout.lower()
+    assert not log.exists() or log.read_text(encoding="utf-8") == ""
