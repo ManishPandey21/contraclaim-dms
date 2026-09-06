@@ -180,6 +180,27 @@ docker-internal names.
   `ALLOW_PRODUCTION_RESTORE=1` is also set. Step 1 above is not optional: R-A8I
   recorded a restore racing a running application producing 396 permission rows for
   198 distinct names.
+- **The exit code certifies parity, not completion.** R-A8M's idempotency run
+  reported `0 document(s) restored successfully. 222 document(s) failed to
+  restore.`, `mongorestore` exited 0 — duplicate-key failures are not fatal to it —
+  and the script printed `MongoDB restore completed`. It no longer does. After the
+  restore the script prints a `--- RESTORE VERIFICATION ---` block
+  (`EXPECTED_DOCS`, `RESTORED_DOCS`, `FAILED_DOCS`, `EXPECTED_COLLECTIONS`,
+  `RESTORED_COLLECTIONS`, `MISSING_COLLECTIONS`, `MATCH`, `STATUS`) and exits
+  non-zero unless `STATUS` is `OK` or `OK_EMPTY`. **Read `STATUS`, not the prose.**
+
+  | Situation | Outcome |
+  |---|---|
+  | every offered document restored | `STATUS=OK`, exit 0 |
+  | any failed document, or a shortfall against the expectation | `STATUS=FAILED`, exit 5 |
+  | a collection the archive carried and the restore skipped | `STATUS=FAILED`, exit 5 |
+  | nothing restored and nothing offered | `STATUS=FAILED`, exit 5 — a genuinely empty archive is indistinguishable from a wrong `--nsInclude`, a wrong database or a wrong endpoint, so declare it with `RESTORE_ALLOW_EMPTY=1` (`STATUS=OK_EMPTY`) |
+  | `mongorestore` printed no summary this script can read | `STATUS=UNVERIFIED`, exit 4 |
+  | `RESTORE_VERIFY=0` | restores, certifies nothing, and says so |
+
+  `RESTORE_EXPECTED_DOCS=<n>` replaces the archive's own accounting with a count
+  you state, which is the stronger check when you know it: the archive's own
+  accounting cannot see documents it never read.
 
 ### Off-site backup posture
 

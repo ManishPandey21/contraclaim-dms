@@ -22,9 +22,19 @@ all: the database must be named, and a production name or the production replica
 set is refused unless a separate, explicit production-restore authorisation is
 given.
 
+R-A8M then found the third thing this script owed and did not do: it certified.
+The Gate 8 idempotency run reported `0 document(s) restored successfully. 222
+document(s) failed to restore.`, `mongorestore` exited 0 because duplicate-key
+failures are not fatal to it, and the script printed `MongoDB restore completed`.
+An exit status is now a necessary condition and not a sufficient one - what the
+archive offered and what landed are counted and compared, and the comparison
+decides the exit code (F-A8M-3).
+
 These are behavioural tests. `mongorestore` and `docker` are replaced by stubs on
 PATH that record their arguments, so the script's decisions are observed rather
-than read - a static check cannot tell a documented branch from a taken one.
+than read - a static check cannot tell a documented branch from a taken one. The
+last two rows go further and replay verbatim output from the real tool, so the
+parser is measured against the format it will actually meet.
 """
 
 from __future__ import annotations
@@ -53,11 +63,30 @@ PRODUCTION_DB = "contraclaim"
 #: be resolved through PATH, and no `basename`. A stub that needs PATH to find
 #: its own interpreter, or to find a utility, cannot run in the built layouts
 #: below, where PATH holds only the directories a test created.
+#:
+#: F-A8M-3. The stub also speaks `mongorestore`'s accounting, because the script
+#: now reads it. A stub that only recorded its arguments would let the script's
+#: verification see nothing at all, and "nothing to read" is one of the outcomes
+#: under test - so it is produced deliberately (`STUB_QUIET=1`) rather than by
+#: default. All of it goes to stderr, which is where the real tool writes it.
 _STUB = (
     "#!/bin/sh\n"
     'printf \'%s\' "${0##*/}" >>"$STUB_LOG"\n'
     'for arg in "$@"; do printf \' %s\' "$arg" >>"$STUB_LOG"; done\n'
     "printf '\\n' >>\"$STUB_LOG\"\n"
+    'if [ -z "${STUB_QUIET:-}" ]; then\n'
+    '  ns="${STUB_RESTORE_NS:-${MONGO_DB:-db}.permissions}"\n'
+    '  docs="${STUB_RESTORE_DOCS:-198}"\n'
+    '  failed="${STUB_RESTORE_FAILED:-0}"\n'
+    '  applied="${STUB_RESTORE_APPLIED:-$docs}"\n'
+    '  for offered in $ns ${STUB_RESTORE_UNAPPLIED_NS:-}; do\n'
+    '    echo "reading metadata for $offered from archive" >&2\n'
+    "  done\n"
+    '  for name in $ns; do\n'
+    '    echo "finished restoring $name ($applied document(s), $failed failure(s))" >&2\n'
+    "  done\n"
+    '  echo "$applied document(s) restored successfully. $failed document(s) failed to restore." >&2\n'
+    "fi\n"
     "exit ${STUB_EXIT:-0}\n"
 )
 
@@ -526,3 +555,299 @@ def test_a_relative_archive_path_survives_the_compose_branch(harness, tmp_path: 
 
     assert result.returncode == 0, result.stderr
     assert result.stub_log.startswith("docker ")
+
+
+# --------------------------------------------------------------------------- #
+# F-A8M-3 - a restore is not certified by an exit code
+# --------------------------------------------------------------------------- #
+#
+# R-A8M's Gate 8 idempotency run reported
+#
+#   0 document(s) restored successfully. 222 document(s) failed to restore.
+#
+# and this script printed "MongoDB restore completed" and exited 0, because
+# duplicate-key failures are not fatal to `mongorestore`. The disaster path -
+# restoring into an empty database - was unaffected, which is exactly why the
+# defect survived: the run that matters most is the one that happens to agree
+# with the wrong check.
+#
+# The stubs below speak `mongorestore`'s accounting, so each row states what the
+# tool reported and the script's verdict is observed rather than read.
+
+
+def _evidence(stdout: str) -> dict:
+    """The structured block, parsed. Prose is deliberately not consulted."""
+    fields = {}
+    for line in stdout.splitlines():
+        if "=" in line and not line.startswith("-"):
+            key, _, value = line.partition("=")
+            if key.isupper():
+                fields[key] = value
+    return fields
+
+
+def test_the_r_a8m_shape_is_a_failure(harness) -> None:
+    """0 restored, 222 failed, exit 0 - the exact run that certified itself."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_APPLIED": "0",
+            "STUB_RESTORE_FAILED": "222",
+        }
+    )
+
+    assert result.returncode != 0, "a restore that restored nothing reported success"
+    assert "completed" not in result.stdout.lower()
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_DOCS"] == "222"
+    assert evidence["RESTORED_DOCS"] == "0"
+    assert evidence["FAILED_DOCS"] == "222"
+    assert evidence["MATCH"] == "NO"
+    assert evidence["STATUS"] == "FAILED"
+
+
+def test_a_partial_restore_is_a_failure(harness) -> None:
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_APPLIED": "180",
+            "STUB_RESTORE_FAILED": "18",
+        }
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_DOCS"] == "198"
+    assert evidence["RESTORED_DOCS"] == "180"
+    assert evidence["STATUS"] == "FAILED"
+
+
+def test_a_shortfall_against_an_operator_declared_expectation_is_a_failure(harness) -> None:
+    """The archive's own accounting cannot see documents it never read. An
+    operator who knows the count states it, and then the archive has to match."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_APPLIED": "150",
+            "RESTORE_EXPECTED_DOCS": "222",
+        }
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_SOURCE"] == "operator-declared"
+    assert evidence["EXPECTED_DOCS"] == "222"
+    assert evidence["RESTORED_DOCS"] == "150"
+    assert evidence["STATUS"] == "FAILED"
+
+
+def test_an_undeclared_zero_document_restore_is_a_failure(harness) -> None:
+    """A wrong database, a wrong --nsInclude and a genuinely empty archive all
+    look like this from here. Only the operator can tell them apart, so the
+    benign reading has to be declared rather than assumed."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_APPLIED": "0",
+            "STUB_RESTORE_NS": "",
+        }
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert evidence["STATUS"] == "FAILED"
+    assert "RESTORE_ALLOW_EMPTY" in result.stderr
+
+
+def test_a_declared_empty_archive_is_an_explicit_success(harness) -> None:
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_APPLIED": "0",
+            "STUB_RESTORE_NS": "",
+            "RESTORE_ALLOW_EMPTY": "1",
+        }
+    )
+
+    assert result.returncode == 0, result.stderr
+    evidence = _evidence(result.stdout)
+    assert evidence["STATUS"] == "OK_EMPTY"
+    assert evidence["RESTORED_DOCS"] == "0"
+
+
+def test_a_collection_the_archive_carried_and_the_restore_skipped_is_a_failure(
+    harness,
+) -> None:
+    """"Command succeeded" and "everything arrived" are different claims. A
+    namespace the archive offered and the restore never applied is a semantic
+    mismatch even though every document it did apply landed."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_RESTORE_UNAPPLIED_NS": f"{STAGING_DB}.documents",
+        }
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert f"{STAGING_DB}.documents" in evidence["MISSING_COLLECTIONS"]
+    assert evidence["STATUS"] == "FAILED"
+
+
+def test_a_restore_that_reports_nothing_is_unverified_not_successful(harness) -> None:
+    """`mongorestore` exiting 0 while saying nothing this script can read is not
+    evidence of anything. Certifying it would be the same mistake in a new
+    format."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host", "STUB_QUIET": "1"})
+
+    assert result.returncode != 0
+    assert "UNVERIFIED" in result.stderr
+    assert "completed" not in result.stdout.lower()
+
+
+def test_verification_can_be_declined_but_never_silently(harness) -> None:
+    """An operator may decide the check is not available to them. What they may
+    not do is get a success message for it."""
+    result = harness(
+        env={"RESTORE_EXEC_CONTEXT": "host", "STUB_QUIET": "1", "RESTORE_VERIFY": "0"}
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "UNVERIFIED" in result.stdout + result.stderr
+    assert "restore completed" not in result.stdout.lower()
+
+
+def test_a_healthy_restore_still_passes_and_says_what_it_did(harness) -> None:
+    """The positive control. Without it every assertion above is satisfied by a
+    script that refuses everything."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode == 0, result.stderr
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_DATABASE"] == STAGING_DB
+    assert evidence["RESTORED_DATABASE"] == STAGING_DB
+    assert evidence["EXPECTED_DOCS"] == "198"
+    assert evidence["RESTORED_DOCS"] == "198"
+    assert evidence["FAILED_DOCS"] == "0"
+    assert evidence["MISSING_COLLECTIONS"] == "<none>"
+    assert evidence["MATCH"] == "YES"
+    assert evidence["STATUS"] == "OK"
+    assert "MongoDB restore completed" in result.stdout
+
+
+def test_the_same_verification_applies_in_the_compose_context(harness) -> None:
+    """The compose branch is the one Gate 8 actually runs. A verification that
+    only guarded the host branch would have missed R-A8M entirely."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "compose",
+            "STUB_RESTORE_APPLIED": "0",
+            "STUB_RESTORE_FAILED": "222",
+        }
+    )
+
+    assert result.returncode != 0
+    assert _evidence(result.stdout)["STATUS"] == "FAILED"
+
+
+def test_the_verification_does_not_write_the_connection_uri_to_a_temporary_file(
+    harness, tmp_path: Path
+) -> None:
+    """The tool echoes the URI, which carries credentials, and a restore is
+    routinely run as root. Capturing its output through a file in a shared
+    temporary directory would be this script creating a secret leak of its own."""
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "$(mktemp" not in source, "the restore output is being staged through a file"
+    assert "restore_output=$(run_restore 2>&1)" in source
+
+
+# --------------------------------------------------------------------------- #
+# The parser against the real tool's real output
+# --------------------------------------------------------------------------- #
+#
+# The stubs above emit whatever this file tells them to, so on their own they
+# prove the script's *logic* and nothing about its *format*. These two rows are
+# verbatim `mongorestore` output, captured from mongo:8.0 - the image this
+# deployment runs - restoring a 222-document archive into a disposable container
+# in both states: an empty target, and the populated target that produced the
+# R-A8M false success. Backticks, timestamps, tabs and all.
+
+_REAL_MONGORESTORE_SUCCESS = """\
+2026-09-06T20:27:45.736+0000\tpreparing collections to restore from
+2026-09-06T20:27:45.747+0000\treading metadata for `ra8n_disposable.beta` from `archive on stdin`
+2026-09-06T20:27:45.748+0000\treading metadata for `ra8n_disposable.alpha` from `archive on stdin`
+2026-09-06T20:27:45.820+0000\trestoring `ra8n_disposable.beta` from `archive on stdin`
+2026-09-06T20:27:45.833+0000\tfinished restoring `ra8n_disposable.beta` (92 documents, 0 failures)
+2026-09-06T20:27:45.910+0000\trestoring `ra8n_disposable.alpha` from `archive on stdin`
+2026-09-06T20:27:45.946+0000\tfinished restoring `ra8n_disposable.alpha` (130 documents, 0 failures)
+2026-09-06T20:27:45.946+0000\tno indexes to restore for collection `ra8n_disposable.beta`
+2026-09-06T20:27:45.946+0000\t222 document(s) restored successfully. 0 document(s) failed to restore.
+"""
+
+_REAL_MONGORESTORE_ALL_DUPLICATES = """\
+2026-09-06T20:28:20.700+0000\tpreparing collections to restore from
+2026-09-06T20:28:20.740+0000\treading metadata for `ra8n_disposable.beta` from `archive on stdin`
+2026-09-06T20:28:20.741+0000\treading metadata for `ra8n_disposable.alpha` from `archive on stdin`
+2026-09-06T20:28:20.828+0000\tcontinuing through error: E11000 duplicate key error collection: ra8n_disposable.alpha index: _id_ dup key: { _id: 129 }
+2026-09-06T20:28:20.828+0000\tfinished restoring `ra8n_disposable.beta` (0 documents, 92 failures)
+2026-09-06T20:28:20.828+0000\tfinished restoring `ra8n_disposable.alpha` (0 documents, 130 failures)
+2026-09-06T20:28:20.828+0000\t0 document(s) restored successfully. 222 document(s) failed to restore.
+"""
+
+
+@pytest.fixture()
+def replaying_harness(tmp_path: Path, harness):
+    """A `mongorestore` that reads back a recorded transcript, byte for byte."""
+
+    def run(transcript: str, *, env=None, db=STAGING_DB):
+        recorded = tmp_path / "transcript.txt"
+        recorded.write_text(transcript, encoding="utf-8", newline="\n")
+        replay = harness.bin_dir / "mongorestore"
+        replay.write_text(
+            "#!/bin/sh\n"
+            'printf \'%s\n\' "mongorestore" >>"$STUB_LOG"\n'
+            f'while IFS= read -r line; do printf \'%s\n\' "$line" >&2; done <"{recorded}"\n'
+            "exit 0\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        replay.chmod(0o755)
+        return harness(env={"RESTORE_EXEC_CONTEXT": "host", **(env or {})}, db=db)
+
+    return run
+
+
+def test_the_parser_reads_real_mongorestore_success_output(replaying_harness) -> None:
+    result = replaying_harness(
+        _REAL_MONGORESTORE_SUCCESS, db="ra8n_disposable"
+    )
+
+    assert result.returncode == 0, result.stderr
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_DOCS"] == "222"
+    assert evidence["RESTORED_DOCS"] == "222"
+    assert evidence["FAILED_DOCS"] == "0"
+    # Backticks stripped on both sides; comparing a quoted name against an
+    # unquoted one would report every collection as missing.
+    assert evidence["RESTORED_COLLECTIONS"] == (
+        "ra8n_disposable.beta ra8n_disposable.alpha"
+    )
+    assert evidence["MISSING_COLLECTIONS"] == "<none>"
+    assert evidence["STATUS"] == "OK"
+
+
+def test_the_parser_reads_the_real_r_a8m_false_success_output(replaying_harness) -> None:
+    """The transcript this script used to certify. Same bytes, opposite verdict."""
+    result = replaying_harness(
+        _REAL_MONGORESTORE_ALL_DUPLICATES, db="ra8n_disposable"
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert evidence["EXPECTED_DOCS"] == "222"
+    assert evidence["RESTORED_DOCS"] == "0"
+    assert evidence["FAILED_DOCS"] == "222"
+    assert evidence["MATCH"] == "NO"
+    assert evidence["STATUS"] == "FAILED"
+    assert "completed" not in result.stdout.lower()

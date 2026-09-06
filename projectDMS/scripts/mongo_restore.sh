@@ -52,6 +52,17 @@ Execution context:
   COMPOSE_FILES                compose file flags
   ENV_FILE                     env file passed to docker compose (default: .env)
 
+Verification:
+  RESTORE_VERIFY               1 | 0   compare what the archive offered against
+                               what landed (default: 1). 0 restores without
+                               certifying anything, and says so.
+  RESTORE_EXPECTED_DOCS        operator-declared document count for the target
+                               namespaces; overrides the archive's own accounting
+  RESTORE_ALLOW_EMPTY=1        declare that this archive is genuinely empty. An
+                               undeclared zero-document restore is a FAILURE,
+                               because "empty archive" and "wrong target" look
+                               identical from here.
+
 Production:
   ALLOW_PRODUCTION_RESTORE=1   authorise a restore into the production database
                                or the production replica set
@@ -63,6 +74,9 @@ ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
 COMPOSE_FILES=${COMPOSE_FILES:-"-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml"}
 RESTORE_EXEC_CONTEXT=${RESTORE_EXEC_CONTEXT:-auto}
 MONGO_EXEC_SERVICE=${MONGO_EXEC_SERVICE:-mongo1}
+RESTORE_VERIFY=${RESTORE_VERIFY:-1}
+RESTORE_EXPECTED_DOCS=${RESTORE_EXPECTED_DOCS:-}
+RESTORE_ALLOW_EMPTY=${RESTORE_ALLOW_EMPTY:-}
 ALLOW_PRODUCTION_RESTORE=${ALLOW_PRODUCTION_RESTORE:-}
 
 #: Names that mean production. `contraclaim` is the production database; `rs0` is
@@ -234,26 +248,234 @@ esac
 
 echo "Restoring ${MONGO_DB} from ${ARCHIVE} (execution context: ${context})"
 
-case "$context" in
-  host)
-    mongorestore \
-      --uri="${MONGO_URI}" \
-      --archive="${ARCHIVE}" \
-      --gzip \
-      --nsInclude="${MONGO_DB}.*"
-    ;;
-  compose)
-    # The archive lives on the host and the container has no route to it, so it is
-    # streamed on stdin: `--archive` with no value reads standard input.
-    cd "$ROOT_DIR"
-    docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T "${MONGO_EXEC_SERVICE}" \
+run_restore() {
+  case "$context" in
+    host)
       mongorestore \
         --uri="${MONGO_URI}" \
-        --archive \
+        --archive="${ARCHIVE}" \
         --gzip \
-        --nsInclude="${MONGO_DB}.*" \
-      <"${ARCHIVE}"
-    ;;
-esac
+        --nsInclude="${MONGO_DB}.*"
+      ;;
+    compose)
+      # The archive lives on the host and the container has no route to it, so it is
+      # streamed on stdin: `--archive` with no value reads standard input.
+      cd "$ROOT_DIR"
+      docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T "${MONGO_EXEC_SERVICE}" \
+        mongorestore \
+          --uri="${MONGO_URI}" \
+          --archive \
+          --gzip \
+          --nsInclude="${MONGO_DB}.*" \
+        <"${ARCHIVE}"
+      ;;
+  esac
+}
+
+# --------------------------------------------------------------------------- #
+# The restore, and then what it actually did
+# --------------------------------------------------------------------------- #
+#
+# F-A8M-3. The Gate 8 idempotency run reported
+#
+#   0 document(s) restored successfully. 222 document(s) failed to restore.
+#
+# and this script printed "MongoDB restore completed" and exited 0, because
+# duplicate-key failures are not fatal to `mongorestore` and the script read
+# only its exit status. That is the Qdrant 401 vector-loss shape again: a
+# success reported for a step that was skipped.
+#
+# Exit status is now a necessary condition and not a sufficient one. What the
+# archive offered and what landed are counted separately and compared, and the
+# comparison - not the log prose - decides the exit code.
+#
+# `mongorestore` writes its progress and its summary to stderr, so both streams
+# are captured. The output is still shown to the operator afterwards: a
+# verification that hides the tool's own diagnostics is worse than none.
+#
+# Captured into a variable rather than a temporary file, for two reasons. The
+# tool echoes the connection URI, which carries credentials, and a restore is
+# frequently run as root - a world-readable `/tmp` copy of that is a secret leak
+# this script would be creating itself. And the parsing below is pure bash, so
+# this file needs no `grep`, `sed`, `awk` or `mktemp` on PATH, which matters
+# because the execution-context tests deliberately run it against a PATH holding
+# only the directories they built.
+
+set +e
+restore_output=$(run_restore 2>&1)
+restore_status=$?
+set -e
+
+printf '%s\n' "$restore_output"
+
+if [[ "$restore_status" -ne 0 ]]; then
+  echo "REFUSED: mongorestore exited ${restore_status}; nothing is certified." >&2
+  exit "$restore_status"
+fi
+
+if [[ "${RESTORE_VERIFY}" == "0" || "${RESTORE_VERIFY}" == "false" ]]; then
+  echo "STATUS=UNVERIFIED (RESTORE_VERIFY=0): the restore ran and nothing was checked." >&2
+  echo "MongoDB restore ran, UNVERIFIED: ${MONGO_DB} from ${ARCHIVE} (${context})"
+  exit 0
+fi
+
+#: `N document(s) restored successfully. M document(s) failed to restore.`
+#: Both numbers come from one line, so a version that renames one renames the
+#: other and the parse fails as a unit rather than half-succeeding.
+SUMMARY_RE='([0-9]+) document\(s\) restored successfully\.[[:space:]]+([0-9]+) document\(s\) failed to restore'
+#: Two different namespace inventories, deliberately read from two different
+#: lines. `reading metadata for <ns> from archive ...` is what the archive
+#: offered; `finished restoring <ns> (...)` is what was applied. Reading both
+#: from the same line would make the comparison below vacuous - a collection the
+#: archive carried and the restore never reached would simply be absent from
+#: both sides and the parity would still say YES.
+OFFERED_RE='reading metadata for ([^ ]+) from'
+APPLIED_RE='finished restoring ([^ ]+)'
+
+append_unique() {
+  # $1 = current space-delimited list, $2 = candidate. Prints the new list.
+  case " $1 " in
+    *" $2 "*) printf '%s' "$1" ;;
+    *) printf '%s' "${1:+$1 }$2" ;;
+  esac
+}
+
+restored_docs=""
+failed_docs=0
+expected_collections=""
+restored_collections=""
+
+while IFS= read -r line; do
+  if [[ "$line" =~ $SUMMARY_RE ]]; then
+    restored_docs=${BASH_REMATCH[1]}
+    failed_docs=${BASH_REMATCH[2]}
+  fi
+  # The real tool quotes namespaces in backticks and an older one does not, so
+  # they are stripped on both sides. Comparing a quoted name against an unquoted
+  # one would report every collection as missing.
+  if [[ "$line" =~ $OFFERED_RE ]]; then
+    expected_collections=$(append_unique "$expected_collections" "${BASH_REMATCH[1]//\`/}")
+  fi
+  if [[ "$line" =~ $APPLIED_RE ]]; then
+    restored_collections=$(append_unique "$restored_collections" "${BASH_REMATCH[1]//\`/}")
+  fi
+done <<<"$restore_output"
+
+restored_collection_count=0
+for _ns in $restored_collections; do
+  restored_collection_count=$((restored_collection_count + 1))
+done
+
+expected_collection_source="archive metadata"
+if [[ -z "$expected_collections" ]]; then
+  # An older mongorestore, or one run at a lower verbosity, names namespaces
+  # only as it finishes them. Say so rather than silently comparing a set
+  # against itself.
+  expected_collections=$restored_collections
+  expected_collection_source="restore progress (no archive metadata lines)"
+fi
+
+missing_collections=""
+for ns in $expected_collections; do
+  case " $restored_collections " in
+    *" $ns "*) ;;
+    *) missing_collections="${missing_collections}${ns} " ;;
+  esac
+done
+missing_collections=${missing_collections% }
+
+if [[ -z "$restored_docs" ]]; then
+  {
+    echo "STATUS=UNVERIFIED"
+    echo "mongorestore exited 0 but produced no document summary this script can read,"
+    echo "so there is no evidence the archive was applied. A restore is not certified"
+    echo "by an exit code. Re-run with a mongorestore whose summary this script"
+    echo "understands, or set RESTORE_VERIFY=0 to state deliberately that this run"
+    echo "certifies nothing."
+  } >&2
+  exit 4
+fi
+
+# What the archive offered for these namespaces. `mongorestore` accounts for
+# every document it read as either restored or failed, so the two together are
+# the inventory it actually saw - which is precisely the number R-A8M's run
+# reported (0 + 222) while calling itself complete. An operator who knows the
+# expected count may state it instead, and then it is the archive's accounting
+# that has to match.
+if [[ -n "${RESTORE_EXPECTED_DOCS}" ]]; then
+  if ! [[ "${RESTORE_EXPECTED_DOCS}" =~ ^[0-9]+$ ]]; then
+    echo "RESTORE_EXPECTED_DOCS must be a document count (got '${RESTORE_EXPECTED_DOCS}')" >&2
+    exit 1
+  fi
+  expected_docs=${RESTORE_EXPECTED_DOCS}
+  expected_source="operator-declared"
+else
+  expected_docs=$((restored_docs + failed_docs))
+  expected_source="archive accounting (restored + failed)"
+fi
+
+status="OK"
+reasons=()
+
+if [[ "$failed_docs" -ne 0 ]]; then
+  status="FAILED"
+  reasons+=("${failed_docs} document(s) failed to restore")
+fi
+
+if [[ "$restored_docs" -ne "$expected_docs" ]]; then
+  status="FAILED"
+  reasons+=("restored ${restored_docs} of ${expected_docs} expected document(s)")
+fi
+
+if [[ "$expected_docs" -eq 0 && "$restored_docs" -eq 0 ]]; then
+  # An empty archive and a restore aimed at the wrong database produce the same
+  # zero. Only the operator can tell them apart, so the benign reading has to be
+  # declared rather than assumed.
+  if [[ "${RESTORE_ALLOW_EMPTY}" == "1" || "${RESTORE_ALLOW_EMPTY}" == "true" ]]; then
+    status="OK_EMPTY"
+    reasons=()
+  else
+    status="FAILED"
+    reasons+=("no documents were restored and none were offered; an empty archive is indistinguishable from a wrong --nsInclude, a wrong database or a wrong endpoint. Set RESTORE_ALLOW_EMPTY=1 if this archive is genuinely empty.")
+  fi
+fi
+
+if [[ -n "$missing_collections" ]]; then
+  status="FAILED"
+  reasons+=("the archive carried collections the restore never applied: ${missing_collections}")
+fi
+
+if [[ "$status" != "OK_EMPTY" && "$restored_collection_count" -eq 0 && "$restored_docs" -gt 0 ]]; then
+  status="FAILED"
+  reasons+=("documents were reported restored but no collection was named")
+fi
+
+if [[ "$status" == "FAILED" ]]; then match=NO; else match=YES; fi
+
+# Printed with builtins, not `cat`: this block has to survive the built-PATH
+# layouts the execution-context tests run the script under, where nothing is on
+# PATH except the directories those tests created.
+echo "--- RESTORE VERIFICATION ---"
+echo "EXPECTED_DATABASE=${MONGO_DB}"
+echo "EXPECTED_COLLECTIONS=${expected_collections:-<none>}"
+echo "EXPECTED_COLLECTION_SOURCE=${expected_collection_source}"
+echo "EXPECTED_DOCS=${expected_docs}"
+echo "EXPECTED_SOURCE=${expected_source}"
+echo "RESTORED_DATABASE=${MONGO_DB}"
+echo "RESTORED_COLLECTIONS=${restored_collections:-<none>}"
+echo "RESTORED_DOCS=${restored_docs}"
+echo "FAILED_DOCS=${failed_docs}"
+echo "MISSING_COLLECTIONS=${missing_collections:-<none>}"
+echo "MATCH=${match}"
+echo "STATUS=${status}"
+
+if [[ "$status" == "FAILED" ]]; then
+  echo "RESTORE FAILED VERIFICATION:" >&2
+  for reason in "${reasons[@]}"; do
+    echo "  - ${reason}" >&2
+  done
+  echo "The restore is NOT certified. Do not treat this database as recovered." >&2
+  exit 5
+fi
 
 echo "MongoDB restore completed: ${MONGO_DB} from ${ARCHIVE} (${context})"
