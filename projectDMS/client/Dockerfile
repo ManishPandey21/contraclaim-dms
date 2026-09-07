@@ -1,6 +1,13 @@
 FROM node:20-bookworm-slim AS builder
 WORKDIR /app
-COPY package*.json ./
+# `.npmrc` sets engine-strict, and it has to arrive before `npm ci` runs.
+# Without it this stage would keep building on whatever npm the base image
+# happens to carry: npm 10 accepts this lockfile and npm 11 does not, so the
+# major that resolved the shipped bundle was decided by a base-image bump rather
+# than by anything in this repository (F-A8M-4). Bumping the tag to a node whose
+# npm is out of range now fails here, loudly, instead of silently resolving the
+# dependency tree a different way.
+COPY package*.json .npmrc ./
 # `npm ci` alone. This used to be followed by
 # `npm install --no-save @rollup/rollup-linux-x64-gnu`, because the lockfile
 # was generated on Windows and carried only the win32 rollup binaries - so the

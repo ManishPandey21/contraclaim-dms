@@ -16,12 +16,29 @@ reason the missing entries went unnoticed for as long as they did.
 
 So the fix is the lockfile, not the npm major: the platform binaries the release
 actually builds on are pinned at rollup's exact version, and the Dockerfile
-installs the lockfile and nothing else. `npm ci` then behaves identically under
-npm 10 and npm 11, on Linux and on Windows.
+installs the lockfile and nothing else.
 
-The check is on the manifest rather than on a run of `npm ci`, deliberately: the
-failure only reproduces on a platform whose binary is missing, so a test that ran
-the install would pass on the very machine that generated the incomplete lockfile.
+**Corrected by R-A8N.** That paragraph used to end "`npm ci` then behaves
+identically under npm 10 and npm 11, on Linux and on Windows". R-A8M measured
+otherwise, and R-A8N reproduced it in the release images: npm 11 requires *every*
+optional platform package a dependency declares to be present in the lockfile,
+and rollup 4.60.4 declares twenty-three.
+
+    node:20-bookworm-slim   npm 10.8.2    npm ci  exit 0
+    node:24-bookworm-slim   npm 11.19.0   npm ci  EUSAGE, 20 missing @rollup/*
+
+Pinning the two platforms the release builds on satisfies npm 10 and cannot
+satisfy npm 11 by construction. The claim was never measured, and this file could
+not have caught it: it reads the manifest, by design (see below). Chasing the
+lockfile across majors would mean regenerating it once per npm release forever,
+so the answer is one supported toolchain, declared in `package.json` and
+*enforced* by `client/.npmrc`'s `engine-strict`.
+`test_client_toolchain_determinism.py` owns that half.
+
+The check here is on the manifest rather than on a run of `npm ci`, deliberately:
+the failure only reproduces on a platform whose binary is missing, so a test that
+ran the install would pass on the very machine that generated the incomplete
+lockfile.
 """
 
 from __future__ import annotations
@@ -123,9 +140,11 @@ def test_the_client_image_installs_the_lockfile_and_nothing_else() -> None:
 def test_the_node_and_npm_versions_are_pinned_where_ci_can_read_them() -> None:
     """R-A8I ran the gate under npm 11 while the image ships npm 10.
 
-    The fix above makes both work, so the pin is a statement of what is supported
-    rather than a workaround - but without it there is nothing in the repository
-    that says which runtime the evidence should be produced under.
+    The fix above does NOT make both work - R-A8N measured that, and the module
+    docstring records it. The pin is therefore load-bearing rather than
+    decorative: it is the only thing in the repository that says which runtime
+    the evidence should be produced under. Whether it is *enforced* is
+    `test_client_toolchain_determinism.py`'s question.
     """
     manifest = json.loads(PACKAGE_JSON.read_text(encoding="utf-8"))
     engines = manifest.get("engines") or {}

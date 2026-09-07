@@ -92,6 +92,12 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: projectDMS/client/package-lock.json
+      # Recorded, not assumed. `client/.npmrc` sets engine-strict so an npm
+      # outside the supported range already fails `npm ci` at the engine check
+      # (F-A8M-4); printing the versions puts the toolchain that produced this
+      # evidence into the log, where a later phase can read it.
+      - name: Record the client toolchain
+        run: node --version && npm --version
       - run: npm ci
       - run: npm run lint
       - name: Run frontend tests
@@ -136,6 +142,7 @@ jobs:
       - name: Scan frontend dependencies
         working-directory: projectDMS/client
         run: |
+          node --version && npm --version
           npm ci
           npm audit --audit-level=high
 
