@@ -10,12 +10,13 @@ RETENTION_DAYS=${RETENTION_DAYS:-14}
 
 cd "$ROOT_DIR"
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+# The environment file is data, never a program: `source` executed it, and one
+# unquoted `&` in the staging DATABASE_URL backgrounded the assignment so this
+# script died on "MONGO_URI or DATABASE_URL is required" with no backup taken
+# (F-A8M-2). See scripts/lib/env_file.sh.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+env_file_load "$ENV_FILE"
 MONGO_DB_NAME=${MONGO_DB:-${MONGODB_DATABASE:-contraclaim}}
 
 mkdir -p "$BACKUP_ROOT/mongo" "$BACKUP_ROOT/volumes" "$BACKUP_ROOT/manifests"

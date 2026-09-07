@@ -18,12 +18,10 @@ set -euo pipefail
 ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 ENV_FILE=${ENV_FILE:-"$ROOT_DIR/.env"}
 
-if [[ -f "$ENV_FILE" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_FILE"
-  set +a
-fi
+# Read as data, not executed - see scripts/lib/env_file.sh and F-A8M-2.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+env_file_load "$ENV_FILE"
 
 BACKUP_ROOT=${BACKUP_ROOT:-/var/backups/contractdms}
 BACKUP_S3_PREFIX=${BACKUP_S3_PREFIX:-contraclaim/backups}

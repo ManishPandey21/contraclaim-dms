@@ -28,14 +28,14 @@ pass() { printf 'PASS: %s\n' "$1"; }
 warn() { printf 'WARN: %s\n' "$1"; warnings=$((warnings + 1)); }
 fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 
+# The environment file is data, never a program. `source` executed it, and one
+# unquoted `&` in a URI backgrounded the assignment so the variable never
+# arrived - F-A8M-2. See scripts/lib/env_file.sh.
+# shellcheck source=scripts/lib/env_file.sh
+. "$ROOT_DIR/scripts/lib/env_file.sh"
+
 load_env_file() {
-  local file=$1
-  if [[ -f "$file" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$file"
-    set +a
-  fi
+  env_file_load "$1"
 }
 
 get_env() {
