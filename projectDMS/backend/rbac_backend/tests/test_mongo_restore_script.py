@@ -80,7 +80,11 @@ _STUB = (
     '  failed="${STUB_RESTORE_FAILED:-0}"\n'
     '  applied="${STUB_RESTORE_APPLIED:-$docs}"\n'
     '  for offered in $ns ${STUB_RESTORE_UNAPPLIED_NS:-}; do\n'
-    '    echo "reading metadata for $offered from archive" >&2\n'
+    # The real tool quotes the source: ``... from `archive on stdin```. Quoted
+    # here too, and never as the bare word, because `forbid-legacy-authz` greps
+    # every staged .py for `from <word>archive` - a stub line that reads like an
+    # import is a commit this file would silently block.
+    '    echo "reading metadata for $offered from \'archive on stdin\'" >&2\n'
     "  done\n"
     '  for name in $ns; do\n'
     '    echo "finished restoring $name ($applied document(s), $failed failure(s))" >&2\n'

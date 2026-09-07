@@ -297,13 +297,20 @@ trusting this checkbox. Adopting the fix on a host that has been running the
 previous configuration requires the one-time data move in
 `docs/DOCKER_INSTALL_RUNBOOK.md` §15.1.
 
-The other seven bullets are deliberately unticked. Backend-uploads and Qdrant
-restores have not been drilled; a *full* restore drill needs every store in one
-exercise; the Redis requirement and the RPO/RTO targets are decisions rather
-than measurements (local figures: backup 1 s, restore 3 s on a three-node
-graph, and a 75-document Mongo restore in under a second — floor numbers from a
-developer machine, not production RTOs); and deployment rollback, as opposed to
-migration rollback, has never been tested.
+R-A8M's staging execution closed six of the seven bullets that were open when
+that paragraph was written — the uploads, Qdrant and Redis restores, the full
+single-exercise restore drill, and deployment rollback in both directions. **One
+bullet remains, and it is a decision rather than a measurement.**
+
+RPO/RTO targets are the release owner's to set. R-A8M measured what a target has
+to be defensible against — daily 01:30 backup cadence with a 26 h freshness
+alarm, backup 5 s, off-site sync 9 s, volume restore 3 s, a 222-document Mongo
+restore 6 s, image rollback 35 s each way — and R-A8N wrote those measurements
+up against candidate policies, with what each would cost and what is still
+unmeasured (detection time, production-scale restore timing, off-site
+*retrieval* timing), in [RPO_RTO_OWNER_DECISION.md](RPO_RTO_OWNER_DECISION.md).
+A measurement is not a target: the bullet stays unticked until the owner chooses
+one and records it.
 
 ### Gate 9: Final Production Readiness Review
 
