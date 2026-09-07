@@ -124,6 +124,38 @@ async def get_database():
         database = client[_database_name()]
     return database
 
+async def resolve_database(explicit=None):
+    """Return an explicit handle, or this process's own connection. Never None.
+
+    F-A8M-5. Several module-level helpers answered ``database=None`` with
+
+        from ..core.database import database
+
+    which binds the module global **at import time**: ``None`` before anything
+    connects, and still ``None`` afterwards, because the local name is a
+    snapshot and not a reference to the global. R-A8M measured the consequence -
+    ``initialize_all_data()`` returned all zeros while logging
+    ``'NoneType' object has no attribute 'projects'`` once per record, and the
+    per-record ``except Exception: continue`` above it turned that into a
+    successful-looking run that seeded nothing.
+
+    ``None`` therefore means "the connection this process is configured for",
+    resolved live through :func:`get_database` - never a literal default, never
+    a stale snapshot. A resolver that still yields nothing is an error here
+    rather than a ``NoneType`` attribute error somewhere downstream: the caller
+    is about to write seed data, and the one outcome that must be impossible is
+    writing it somewhere nobody chose.
+    """
+    if explicit is not None:
+        return explicit
+    resolved = await get_database()
+    if resolved is None:
+        raise RuntimeError(
+            "No database was given and the application connection is not "
+            "available; refusing to run against an unresolved target."
+        )
+    return resolved
+
 async def ensure_indexes(db):
     """Create indexes to improve RBAC scoped queries and general performance."""
 

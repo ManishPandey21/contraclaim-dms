@@ -19,6 +19,16 @@ class DataInitializer:
     """Service for initializing default data with proper error handling"""
 
     def __init__(self, database):
+        # Fail closed. `None` used to travel straight through to every write,
+        # where the per-record `except Exception: continue` below swallowed the
+        # resulting AttributeError and the run reported success having seeded
+        # nothing (F-A8M-5). A seeder with no target is not a seeder.
+        if database is None:
+            raise ValueError(
+                "DataInitializer requires a database handle; pass one explicitly "
+                "or use the module-level helpers, which resolve the application's "
+                "own connection."
+            )
         self.database = database
 
     async def initialize_all_data(self) -> Dict[str, int]:
@@ -325,56 +335,50 @@ class DataInitializer:
 
 # Factory function
 def create_data_initializer(database) -> DataInitializer:
-    """Create data initializer instance"""
+    """Create data initializer instance. Refuses an unresolved target."""
     return DataInitializer(database)
 
 # Convenience functions for backward compatibility
 async def initialize_permissions(database=None):
     """Initialize permissions with dependency injection"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_permissions()
 
 async def initialize_roles(database=None):
     """Initialize roles with dependency injection"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_roles()
 
 async def initialize_users(database=None):
     """Initialize users with dependency injection"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_users()
 
 async def initialize_organizations(database=None):
     """Initialize organizations with dependency injection"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_organizations()
 
 async def initialize_projects(database=None):
     """Initialize projects with dependency injection"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_projects()
 
 async def initialize_all_data(database=None) -> Dict[str, int]:
     """Initialize all data types"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    initializer = create_data_initializer(database)
+    initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_all_data()
 
 

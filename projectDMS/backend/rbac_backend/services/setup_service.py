@@ -238,8 +238,7 @@ def create_setup_service(database) -> SetupService:
 # Convenience functions for backward compatibility
 async def initialize_application_data(database=None):
     """Convenience function for application initialization"""
-    if database is None:
-        from ..core.database import database
+    from ..core.database import resolve_database
 
-    setup_service = create_setup_service(database)
+    setup_service = create_setup_service(await resolve_database(database))
     return await setup_service.initialize_application_data()
