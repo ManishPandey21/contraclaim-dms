@@ -38,8 +38,8 @@ here is `EXECUTABLE` and names an artefact that exists.
 | # | Bullet | Intended property | Executable evidence | Current coverage | Missing coverage |
 |---|---|---|---|---|---|
 | 1 | Login, logout, session refresh, and CSRF behavior. | A browser session can be established and ended; a refresh keeps the same session; an unsafe cookie-authenticated request without a matching CSRF token is refused. | `client/e2e/staging/session-authentication.spec.ts` | `EXECUTABLE` | **Executed against a deployment in R-A8Q Stage B, 2026-09-08: 4/4 passed** over TLS, unmocked, under `CONTRACLAIM_STAGING_E2E=1`. The refresh half was measured beyond the spec's own assertions: one `token_refresh` audit row, its user resolving to the signed-in account, its `resource_id` equal to the reissued token's `session_id`. The bullet is ticked. |
-| 2 | Org-Admin permission save/retrieve, including Client DMS permissions. | An org-admin changes a role's permissions in the browser, the change persists across a reload, and the Client DMS permissions are among those offered. | — | `MISSING` | Needs an org-admin account on staging and a disposable role, so the run leaves no permanent grant behind. Neither exists yet. |
-| 3 | Document upload, view, download, share, and authorization denial. | A document uploaded in the browser is viewable and downloadable by its owner, and a user outside its scope is refused rather than shown an empty page. | — | `MISSING` | Needs two accounts in different scopes and a disposable document, plus a teardown that removes it - the drill must not accumulate staging documents. |
+| 2 | Org-Admin permission save/retrieve, including Client DMS permissions. | An org-admin changes a role's permissions in the browser, the change persists across a reload, and the Client DMS permissions are among those offered. | `client/e2e/staging/org-admin-permissions.spec.ts`, `client/e2e/staging/fixtures.ts` | `EXECUTABLE` | Spec written in R-A8R against the deployed page's own affordances and the server's own contracts; the disposable role is created and deleted by the run-owned fixture harness. **Not yet executed against a deployment** - R-A8R had no staging window. Needs `E2E_ORG_ADMIN_EMAIL`/`_PASSWORD` and `E2E_STAGING_ORG_ID` on the staging stack. |
+| 3 | Document upload, view, download, share, and authorization denial. | A document uploaded in the browser is viewable and downloadable by its owner, and a user outside its scope is refused rather than shown an empty page. | `client/e2e/staging/document-lifecycle.spec.ts`, `client/e2e/staging/fixtures.ts` | `EXECUTABLE_PARTIAL` | Upload, view, download and the denial (detail route, download and **listing**, accepting 403/404 and never 401 or an empty 200) are covered and torn down. The **share** leg is split: `POST /api/share-document` authorises with `dms.document.share` and then sends real email, so its refusal is asserted and its delivery is not. Delivery needs a staging SMTP sink, which is an owner decision about staging configuration rather than a test to write. **Not yet executed against a deployment.** |
 | 4 | Contract upload, ingestion status, clause extraction, search, Q&A, and appraisal. | The contract workflow completes against real ingestion, a real vector store and a real model. | `client/e2e/contract-workflows.spec.ts` | `MOCKED` | The existing spec routes `**/api/**` to fixtures, so it proves the UI's own states and nothing about the deployment. Real ingestion also costs model tokens, which the run has to budget for. |
 | 5 | Contract timeline link verify/reject. | A proposed timeline link can be verified and rejected in the browser and the decision survives a reload. | — | `MISSING` | Needs a seeded contract with at least one unverified link. |
 | 6 | Chronology create, extract, verify/reject, export, and attach-to-arbitration flow. | The chronology lifecycle completes end to end, including the export and the attachment. | — | `MISSING` | Needs seeded source documents; the export leg also needs a download assertion, not just a click. |
@@ -49,9 +49,24 @@ here is `EXECUTABLE` and names an artefact that exists.
 
 ## What this means for the score
 
-Two bullets are `EXECUTABLE`, and one of those (9) is partial. Five are `MISSING`. Bullet 1 has now been executed against a deployment and is ticked; bullet 9 stays partial.
-One (4) has only mocked evidence. One (7) is blocked behind a product decision
-rather than behind a test.
+Bullet 1 has been executed against a deployment and is ticked. Bullets 2 and 3
+gained executable artefacts in R-A8R and **neither is ticked**: a spec that
+exists is not a spec that has run, and the fourth condition below is the one no
+test can check. Bullets 3 and 9 are partial for different reasons - 3 because one
+leg of it has an external side effect nobody has decided about, 9 because its
+subject is the authenticated workflows that bullets 2, 3 and 5 have to establish
+first. Three are `MISSING` (5, 6 and — as a workflow — 4's real ingestion). One
+(4) has only mocked evidence. One (7) is blocked behind a product decision rather
+than behind a test, and one (8) cannot be satisfied as written at all.
+
+**R-A8R added the fixture harness bullets 2, 3 and 5 all needed.**
+`client/e2e/staging/fixtures.ts` creates run-owned objects (every name carries
+`g3-<E2E_RUN_ID>`), creates them idempotently, deletes only what carries the tag,
+reports what it could not delete, refuses any write that does not name
+`E2E_STAGING_ORG_ID`, and refuses to run at all against a host listed in
+`E2E_PRODUCTION_HOSTS`. Those four properties are asserted structurally by
+`backend/rbac_backend/tests/test_gate3_staging_fixtures.py`, which establishes
+that the rules are written into the harness — not that the harness has run.
 
 Bullet 8 deserves a decision rather than a spec. The gate text says *"Every bullet
 in this gate is a staging requirement: it is satisfied only by a run against a

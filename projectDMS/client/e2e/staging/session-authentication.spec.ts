@@ -18,9 +18,11 @@
  * The browser half uses only selectors an existing unmocked spec already proves
  * exist on the deployed login page (`login-responsive.spec.ts`).
  *
- * NOT YET EXECUTED AGAINST A DEPLOYMENT. R-A8J is a remediation phase with no
- * staging window; this file is the executable artefact Gate 3 bullet 1 has never
- * had, and the bullet stays unchecked until a staging run produces the result.
+ * EXECUTED AGAINST A DEPLOYMENT in R-A8Q Stage B, 2026-09-08: 4/4 passed,
+ * chromium, unmocked, over TLS, under `CONTRACLAIM_STAGING_E2E=1`. The refresh
+ * half was measured past this file's own assertions - one `token_refresh` audit
+ * row, its user resolving to the signed-in account, its `resource_id` equal to
+ * the `session_id` in the reissued token. Gate 3 bullet 1 is ticked on that run.
  */
 import { expect, test } from "@playwright/test";
 
