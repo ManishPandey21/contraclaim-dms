@@ -408,6 +408,89 @@ export async function ensureDisposableDocument(
 }
 
 // --------------------------------------------------------------------------- #
+// Arbitration drafts - bullet 7
+// --------------------------------------------------------------------------- #
+
+export interface FixtureArbitrationDraft {
+  id: string;
+  title: string;
+}
+
+export function fixtureDraftTitle(label: string): string {
+  return `${RUN_TAG}-${label}`;
+}
+
+async function findDraftByTitle(
+  session: FixtureSession,
+  title: string
+): Promise<FixtureArbitrationDraft | null> {
+  const response = await session.request.get("/api/arbitration/drafts", {
+    params: { q: title, limit: 50 },
+  });
+  if (!response.ok()) {
+    throw new Error(`GET /api/arbitration/drafts failed with ${response.status()}`);
+  }
+  const body = await response.json();
+  const rows: any[] = Array.isArray(body) ? body : (body.drafts ?? body.items ?? []);
+  const match = rows.find((row) => row?.title === title);
+  return match ? { id: String(match._id ?? match.id), title } : null;
+}
+
+/**
+ * A disposable arbitration draft, created once per run tag.
+ *
+ * `manual_facts` and `relief_sought` are supplied so the deterministic generator
+ * has real source material and the generated draft is not an empty shell -
+ * bullet 7 asks that the chain *completes*, not that the endpoints answer 200.
+ *
+ * No model is involved. `ArbitrationDraftingService._resolve_generator` reads
+ * `ARBITRATION_DRAFT_MODE`, whose default is `deterministic`, so a staging run
+ * costs no tokens and is reproducible. That is also why this bullet does not
+ * depend on the LangGraph rollout: the drafting surface is served by
+ * `arbitration_v2` whatever `ARBITRATION_ENGINE_ROLLOUT_MODE` says.
+ */
+export async function ensureDisposableArbitrationDraft(
+  session: FixtureSession,
+  label: string
+): Promise<FixtureArbitrationDraft> {
+  const title = fixtureDraftTitle(label);
+  const organizationId = fixtureOrganizationId();
+  const projectId = fixtureProjectId();
+  assertWriteIsTenantSafe({ organization_id: organizationId, name: title });
+
+  const existing = await findDraftByTitle(session, title);
+  if (existing) {
+    return existing;
+  }
+
+  const response = await session.request.post("/api/arbitration/drafts", {
+    headers: session.headers(),
+    data: {
+      organization_id: organizationId,
+      project_id: projectId,
+      draft_type: "statement_of_claim",
+      party_role: "claimant",
+      dispute_type: "eot_delay",
+      title,
+      relief_sought: `Extension of time of 28 days. Fixture ${RUN_ID}.`,
+      manual_facts:
+        "The Employer instructed a change to the piling sequence on 3 March. " +
+        "The Contractor gave notice within 14 days and maintained records " +
+        `throughout. Fixture ${RUN_ID}.`,
+      governing_law: "Laws of India",
+      arbitration_clause: "Clause 20.6",
+      currency: "INR",
+      include_register_sources: false,
+    },
+  });
+  if (!response.ok()) {
+    throw new Error(`POST /api/arbitration/drafts failed with ${response.status()}`);
+  }
+  const created = await response.json();
+  return { id: String(created._id ?? created.id), title };
+}
+
+// --------------------------------------------------------------------------- #
 // Teardown
 // --------------------------------------------------------------------------- #
 
@@ -449,6 +532,28 @@ export async function cleanupRunOwned(session: FixtureSession): Promise<CleanupR
         report.deleted.push(`document:${letterNo}`);
       } else {
         report.failed.push({ subject: `document:${letterNo}`, status: response.status() });
+      }
+    }
+  }
+
+  const drafts = await session.request.get("/api/arbitration/drafts", {
+    params: { q: RUN_TAG, limit: 200 },
+  });
+  if (drafts.ok()) {
+    const body = await drafts.json();
+    const rows: any[] = Array.isArray(body) ? body : (body.drafts ?? body.items ?? []);
+    for (const row of rows) {
+      if (!isRunOwned(row?.title)) {
+        continue;
+      }
+      const id = String(row._id ?? row.id);
+      const response = await session.request.delete(`/api/arbitration/drafts/${id}`, {
+        headers: session.headers(),
+      });
+      if (response.ok() || response.status() === 404) {
+        report.deleted.push(`arbitration_draft:${row.title}`);
+      } else {
+        report.failed.push({ subject: `arbitration_draft:${row.title}`, status: response.status() });
       }
     }
   }

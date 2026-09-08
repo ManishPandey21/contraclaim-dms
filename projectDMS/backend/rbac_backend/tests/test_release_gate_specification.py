@@ -388,6 +388,109 @@ def test_falkor_graph_service_still_has_production_callers() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Gate 3 bullet 7 - the distinction that kept it in the scored gate
+# --------------------------------------------------------------------------- #
+#
+# R-A8S opened with a proposal to withdraw Gate 3 bullet 7 (arbitration draft
+# create/generate/edit/version/approve/export) because "the arbitration engine is
+# intentionally not the primary production path". That reasoning conflates two
+# different code paths, and the source says so:
+#
+#   * the *LangGraph workflow engine* (`langgraph_v1`) is deliberately not
+#     primary, and is reached only from `workflow_service.py`;
+#   * the *drafting* surface bullet 7 names is served by `arbitration_v2`, which
+#     the shipped configuration selects for every request.
+#
+# Withdrawing the bullet would therefore have removed E2E coverage of a live
+# production feature. The owner withdrew the proposal on that evidence. These
+# guards re-derive the distinction so it cannot quietly stop being true - in
+# either direction.
+
+ARBITRATION_DRAFTING = RBAC_BACKEND / "services" / "arbitration_drafting"
+
+
+def test_the_arbitration_drafting_path_is_independent_of_the_langgraph_rollout() -> None:
+    """`ArbitrationDraftingService.generate` must not consult the engine policy.
+
+    The moment it does, bullet 7 really is gated behind the rollout decision and
+    the withdrawal argument becomes sound - so this is where that has to surface.
+    """
+    service = (ARBITRATION_DRAFTING / "service.py").read_text(encoding="utf-8")
+    tree = ast.parse(service)
+
+    generate = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef))
+            and node.name == "generate"
+        ),
+        None,
+    )
+    assert generate is not None, "ArbitrationDraftingService.generate is gone"
+
+    body = ast.get_source_segment(service, generate) or ""
+    assert body, "could not read the source of generate()"
+    for forbidden in ("ArbitrationEnginePolicy", "ARBITRATION_ENGINE_ROLLOUT_MODE", "langgraph"):
+        assert forbidden.lower() not in body.lower(), (
+            f"arbitration draft generation now reaches {forbidden!r}. Gate 3 bullet 7 "
+            "was kept in the scored gate because the drafting surface is served by "
+            "arbitration_v2 regardless of the LangGraph rollout; that is no longer "
+            "true, so the sequencing question has to be reopened."
+        )
+
+    assert "ARBITRATION_DRAFT_MODE" in service, (
+        "the drafting generator is no longer selected by ARBITRATION_DRAFT_MODE"
+    )
+
+
+def test_the_default_draft_mode_needs_no_model() -> None:
+    """The reason bullet 7 is achievable in staging at zero model cost.
+
+    If the default flipped to `llm`, a staging run would need a funded key and
+    the bullet's cost profile would change - which is a planning fact, not a
+    detail.
+    """
+    service = (ARBITRATION_DRAFTING / "service.py").read_text(encoding="utf-8")
+    assert re.search(
+        r'os\.getenv\("ARBITRATION_DRAFT_MODE"\)\s*or\s*"deterministic"', service
+    ), "the arbitration draft mode no longer defaults to the deterministic generator"
+
+
+def test_the_arbitration_engine_is_still_not_primary() -> None:
+    """The other half of the distinction, which is genuinely true and must stay so.
+
+    Nothing in R-A8S enables the LangGraph rollout. If a future change ships
+    `ROLLOUT_MODE=primary` or `PRODUCTION_ACCEPTED=true` as a *default*, the
+    acceptance receipt chain has been bypassed rather than satisfied.
+    """
+    config = (RBAC_BACKEND / "core" / "config.py").read_text(encoding="utf-8")
+    assert 'ARBITRATION_ENGINE_DEFAULT: str = Field(default="arbitration_v2"' in config
+    assert 'ARBITRATION_ENGINE_ROLLOUT_MODE: str = Field(default="off"' in config
+    assert (
+        "ARBITRATION_ENGINE_PRODUCTION_ACCEPTED: bool = Field(default=False" in config
+    )
+
+
+def test_gate3_bullet_7_is_still_scored(gate_text: str) -> None:
+    """The withdrawal was proposed and refused; the bullet has to still be there."""
+    section = re.search(r"^### Gate 3:.*?$(.*?)^### Gate 4:", gate_text, re.S | re.M)
+    assert section
+    scored = [
+        entry[1] for entry in re.findall(r"^- \[([ xX])\] (.+)$", section.group(1), re.M)
+    ]
+    assert any("arbitration draft" in bullet.lower() for bullet in scored), (
+        "Gate 3 no longer scores the arbitration drafting workflow. It was proposed "
+        "for withdrawal in R-A8S and kept, because the drafting surface is a live "
+        "production path independent of the LangGraph rollout."
+    )
+    assert len(scored) == 9, (
+        f"Gate 3 has {len(scored)} scored bullets; it had 9, and the R-A8S "
+        "amendments replaced a bullet rather than removing one"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The stated score must be the computed score
 # --------------------------------------------------------------------------- #
 
