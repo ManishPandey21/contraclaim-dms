@@ -78,6 +78,103 @@ The archive is shaped to restore straight into a volume mounted at `/data`, so
 | Staging credentials | present (§9) |
 | Backup cron disabled | `/etc/cron.d/contraclaim-backup` fires at 01:30 daily and shells into the stopped stack. Either schedule the window clear of 01:30–02:00 IST or comment the entry for its duration |
 | `certbot.timer` | a renewal attempt during the window fails while nginx is down. Stop the timer with nginx and start it again with nginx |
+| **Time budget** | **§1a. The only precondition that expires. It is checked last, immediately before the stop, and again at the stop** |
+
+---
+
+## 1a. The time gate — the last thing checked before the stop
+
+Every other precondition in §1 answers a question about state. None of them
+answers *"is there enough window left to finish this and still hold the
+recovery reserve?"*, and that is the question R-A8P got wrong.
+
+R-A8P's window opened at `08:05:07Z` for four hours, reserving the final 90
+minutes for teardown, restart, recovery verification and observation — so the
+reserve began at `10:35:07Z`. Its PRE-OUTAGE GO/NO-GO was **24/24 GREEN at
+`08:15Z`**. The session then sat idle for about two and a half hours, and the
+production stop executed at **`10:42:04Z`** — seven minutes *inside* the
+reserve, with staging not yet started. Nothing refused it, because a GO computed
+from twenty-four state checks stays "true" for as long as the state holds, and
+the clock is not one of the things it was checking.
+
+### The contract
+
+```
+NOW + EXPECTED_EXECUTION_BUDGET + RECOVERY_RESERVE  <=  WINDOW_END
+NOW < HARD_RECOVERY_START            (= WINDOW_END - RECOVERY_RESERVE)
+```
+
+with
+
+```
+LATEST_SAFE_STOP = HARD_RECOVERY_START - EXPECTED_EXECUTION_BUDGET
+```
+
+`scripts/check_maintenance_time_budget.py` is the only thing that decides it.
+Exit 0 is GO, exit 2 is NO-GO, and exit 2 is also what a malformed window end, a
+non-positive reserve or an absent execution budget produce — a gate that cannot
+evaluate its inputs refuses.
+
+### The sequence, and the reason it is an order rather than a list
+
+```
+PREP  →  broad GO/NO-GO  →  FINAL CLOCK RECHECK  →  TIME-BUDGET GATE #1
+      →  record OUTAGE_START  →  TIME-BUDGET GATE #2  →  audited stop
+```
+
+**Nothing goes between the last time gate and the stop** except recording
+`OUTAGE_START` and issuing the stop itself. No re-reads, no "one more check", no
+waiting on anything. If the operator or the session pauses materially after gate
+#1 — a break, a question, a slow command — **gate #1 is re-run from the top**.
+"It was green earlier" is not evidence and is not accepted as one.
+
+```bash
+WINDOW_END=2026-09-08T12:05:07+00:00      # from the owner, not invented
+RESERVE=90                                 # minutes, production recovery
+BUDGET=120                                 # minutes, see "Execution budget" below
+GATE=/var/backups/contraclaim-stg-evidence/<run-id>/time-gate.json
+
+# GATE #1 — after every other GO item passes, and not before
+python3 scripts/check_maintenance_time_budget.py \
+  --window-end "$WINDOW_END" \
+  --recovery-reserve-minutes "$RESERVE" \
+  --execution-budget-minutes "$BUDGET" \
+  --max-authorization-age-seconds 300 \
+  --emit-authorization "$GATE"            # exit 0 or the window is over
+
+date -u '+OUTAGE_START %Y-%m-%dT%H:%M:%SZ' | tee -a "$EVIDENCE/outage.txt"
+
+# GATE #2 — immediately before the stop. Re-reads the clock, recomputes the
+# budget, and refuses an authorization older than its declared lifetime.
+python3 scripts/check_maintenance_time_budget.py --confirm "$GATE"
+
+$PROD stop gateway client backend contract-worker    # only if gate #2 exited 0
+```
+
+The authorization document holds clock data only — window end, reserve, budget,
+issue time, expiry, verdict — so it is safe to seal into the evidence directory,
+and it is the record of *when* the stop was authorized rather than *that* it
+was.
+
+### Execution budget
+
+`EXPECTED_EXECUTION_BUDGET` is the time the work between the stop and the
+reserve needs: production stop, staging bring-up, migration recertification,
+Gate 2, the stale Gate 7 and Gate 8 bullets, Gate 3 bullet 1, and the evidence
+freeze. It **excludes** the recovery reserve, which pays for teardown, restart,
+recovery verification and observation.
+
+The only measurement this repository has is R-A8M: **59 minutes 23 seconds** of
+outage for a strict *superset* of that work — it also covered every Gate 3,
+Gate 7 and Gate 8 bullet, plus the teardown and the production restart that now
+live inside the reserve. One measurement, one host, no variance data, so the
+planning value is that measurement doubled and rounded up to the next quarter
+hour: **120 minutes**. Do not plan with 59; it is a floor that has been observed
+once, not a budget.
+
+A four-hour window therefore permits a stop no later than `WINDOW_START + 30m`,
+which leaves nothing for the pre-outage revalidation. **Book five to six hours**
+unless the budget itself has been re-derived from a newer measurement.
 
 ---
 
@@ -137,7 +234,10 @@ PROD='docker compose -p contraclaim -f docker-compose.prod.yml -f docker-compose
 | 1 | Health + before-state | §2 |
 | 2 | Hot backup | `RETENTION_DAYS=100000 STAMP=$STAMP bash scripts/production_backup.sh` |
 | 3 | Suspend the backup cron | comment `/etc/cron.d/contraclaim-backup` |
+| **3a** | **TIME-BUDGET GATE #1** | **§1a — after every other GO item, and nothing else between this and step 5 but 3b and 4** |
+| **3b** | **Record `OUTAGE_START`** | `date -u '+OUTAGE_START %Y-%m-%dT%H:%M:%SZ' \| tee -a "$EVIDENCE/outage.txt"` |
 | 4 | Stop ingress | `sudo systemctl stop certbot.timer && sudo systemctl stop nginx` |
+| **4a** | **TIME-BUDGET GATE #2** | `python3 scripts/check_maintenance_time_budget.py --confirm "$GATE"` — **RED here means abort before step 5, no exception** |
 | 5 | Stop the application tier | `$PROD stop gateway client backend contract-worker` |
 | 6 | Stop the unmanaged sidecars **by name** | `docker stop contraclaim-arbitration-audit-new contraclaim-arbitration-audit-test` |
 | 7 | Quiesced backup — the authoritative one | repeat step 2 with a new `$STAMP`, then the §0 rescue capture |
@@ -147,6 +247,14 @@ PROD='docker compose -p contraclaim -f docker-compose.prod.yml -f docker-compose
 Step 7 is deliberately after step 5: a backup taken while the application is
 writing is a fuzzy point in time. The hot backup at step 2 is the one that
 survives a failure *during* the stop.
+
+Steps 3a, 3b and 4a are the R-A8P remediation and they are an order, not a
+checklist. Step 4a re-reads the clock and recomputes the budget; it refuses an
+authorization older than five minutes, so a pause anywhere after step 3a turns
+into a refusal rather than into an overrun. **If step 4a is RED, ingress has
+been stopped and nothing else has: start nginx and `certbot.timer` again,
+restore the backup cron, and reschedule.** That is a sub-minute reversal, which
+is the whole reason gate #2 sits before step 5 rather than after it.
 
 ### Proofs required before staging is created
 
