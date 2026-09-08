@@ -340,42 +340,42 @@ def create_data_initializer(database) -> DataInitializer:
 
 # Convenience functions for backward compatibility
 async def initialize_permissions(database=None):
-    """Initialize permissions with dependency injection"""
+    """Initialize permissions. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_permissions()
 
 async def initialize_roles(database=None):
-    """Initialize roles with dependency injection"""
+    """Initialize roles. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_roles()
 
 async def initialize_users(database=None):
-    """Initialize users with dependency injection"""
+    """Initialize users. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_users()
 
 async def initialize_organizations(database=None):
-    """Initialize organizations with dependency injection"""
+    """Initialize organizations. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_organizations()
 
 async def initialize_projects(database=None):
-    """Initialize projects with dependency injection"""
+    """Initialize projects. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))
     return await initializer.initialize_projects()
 
 async def initialize_all_data(database=None) -> Dict[str, int]:
-    """Initialize all data types"""
+    """Initialize all data types. The target must be named - see `resolve_database`."""
     from ..core.database import resolve_database
 
     initializer = create_data_initializer(await resolve_database(database))

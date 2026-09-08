@@ -105,9 +105,14 @@ class EmailController:
             )
 
             # Audit log
+            # `subject` is the wrapper's second positional and renders into the
+            # audit message, so it has to be the subject. The old call put the
+            # recipient list there - and never bound at all, so nothing was
+            # recorded. The kind of email stays, as the detail it always was.
             await self.audit_logger.log_email_sent(
                 current_user.id,
-                "document_share",
+                email_content.get("subject", "Document Shared"),
+                email_type="document_share",
                 recipients=validated_request.recipients,
                 document_id=document.get("id"),
             )

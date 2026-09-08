@@ -99,6 +99,13 @@ jobs:
       - name: Record the client toolchain
         run: node --version && npm --version
       - run: npm ci
+      # `npm ci` must never rewrite the lockfile. Under an npm major that
+      # disagrees with it the install either fails at the engine check
+      # (`client/.npmrc`) or, historically, resolved a different tree - and a
+      # rewritten lockfile is the visible symptom of the second. Asserted here
+      # rather than left to a phase to notice by hand (F-A8M-4).
+      - name: The lockfile is unchanged by installing it
+        run: git diff --exit-code -- package-lock.json
       - run: npm run lint
       - name: Run frontend tests
         # vitest runs files serially (fileParallelism: false in vitest.config.ts
@@ -144,6 +151,7 @@ jobs:
         run: |
           node --version && npm --version
           npm ci
+          git diff --exit-code -- package-lock.json
           npm audit --audit-level=high
 
   docker-build-and-scan:

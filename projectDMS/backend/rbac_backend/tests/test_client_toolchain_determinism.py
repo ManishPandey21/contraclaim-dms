@@ -199,3 +199,11 @@ def test_ci_pins_the_same_node_major_and_records_what_it_ran_under():
     assert workflow.count("npm --version") >= 2, (
         "a client job installs without recording the npm it used"
     )
+
+    # And every job that installs must assert the lockfile survived it. A
+    # rewritten lockfile is the visible symptom of an npm that resolved a
+    # different tree, and leaving it to a release phase to notice by hand is how
+    # F-A8M-4 stayed open for two phases.
+    assert workflow.count("git diff --exit-code -- package-lock.json") >= 2, (
+        "a client job runs npm ci without checking that the lockfile is unchanged"
+    )

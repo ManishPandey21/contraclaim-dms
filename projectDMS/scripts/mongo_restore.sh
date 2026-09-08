@@ -113,6 +113,14 @@ if [[ -z "${MONGO_DB}" ]]; then
   exit 1
 fi
 
+# Validated HERE, with the other inputs, and not beside the verification that
+# consumes it. A malformed expectation discovered after the restore is a refusal
+# arriving one irreversible operation too late.
+if [[ -n "${RESTORE_EXPECTED_DOCS}" && ! "${RESTORE_EXPECTED_DOCS}" =~ ^[0-9]+$ ]]; then
+  echo "RESTORE_EXPECTED_DOCS must be a document count (got a non-number)" >&2
+  exit 1
+fi
+
 # --------------------------------------------------------------------------- #
 # Production refusal - before anything is read, connected to or written
 # --------------------------------------------------------------------------- #
@@ -248,28 +256,66 @@ esac
 
 echo "Restoring ${MONGO_DB} from ${ARCHIVE} (execution context: ${context})"
 
-run_restore() {
+append_unique() {
+  # $1 = current space-delimited list, $2 = candidate. Prints the new list.
+  case " $1 " in
+    *" $2 "*) printf '%s' "$1" ;;
+    *) printf '%s' "${1:+$1 }$2" ;;
+  esac
+}
+
+# One invocation shape for both passes. `$@` carries the pass-specific flags, so
+# the inventory pass and the real restore cannot drift apart in how they reach
+# the deployment - which is the whole point of an inventory taken with the same
+# tool through the same route.
+run_mongorestore() {
   case "$context" in
     host)
-      mongorestore \
-        --uri="${MONGO_URI}" \
-        --archive="${ARCHIVE}" \
-        --gzip \
-        --nsInclude="${MONGO_DB}.*"
+      mongorestore --uri="${MONGO_URI}" --archive="${ARCHIVE}" --gzip "$@"
       ;;
     compose)
       # The archive lives on the host and the container has no route to it, so it is
       # streamed on stdin: `--archive` with no value reads standard input.
+      # The `cd` is contained: every caller runs this inside a command
+      # substitution, which is a subshell.
       cd "$ROOT_DIR"
       docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T "${MONGO_EXEC_SERVICE}" \
-        mongorestore \
-          --uri="${MONGO_URI}" \
-          --archive \
-          --gzip \
-          --nsInclude="${MONGO_DB}.*" \
+        mongorestore --uri="${MONGO_URI}" --archive --gzip "$@" \
         <"${ARCHIVE}"
       ;;
   esac
+}
+
+run_restore() {
+  run_mongorestore --nsInclude="${MONGO_DB}.*"
+}
+
+# The archive's own inventory, read BEFORE anything is written.
+#
+# `--dryRun -v` with NO `--nsInclude` makes `mongorestore` read the archive's
+# prelude and name every namespace it carries:
+#
+#   archive prelude `contraclaim_staging.permissions`
+#
+# That is a genuine pre-restore inventory and it is what catches a restore aimed
+# at the wrong database: the archive offers collections, the restore applies
+# none, and the two disagree. Measured against mongo:8.0.
+#
+# Document counts are NOT available here - a dry run reports `0 document(s)
+# restored successfully` by construction, and a mongodump archive does not carry
+# per-collection counts in its prelude. That is a property of the format, not an
+# omission, and it is why the document axis below is reconciled from the real
+# pass's own accounting instead.
+archive_namespaces() {
+  local output
+  output=$(run_mongorestore --dryRun -v 2>&1) || return 1
+  local line names=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ archive\ prelude\ ([^[:space:]]+) ]]; then
+      names=$(append_unique "$names" "${BASH_REMATCH[1]//\`/}")
+    fi
+  done <<<"$output"
+  printf '%s' "$names"
 }
 
 # --------------------------------------------------------------------------- #
@@ -294,19 +340,50 @@ run_restore() {
 # verification that hides the tool's own diagnostics is worse than none.
 #
 # Captured into a variable rather than a temporary file, for two reasons. The
-# tool echoes the connection URI, which carries credentials, and a restore is
-# frequently run as root - a world-readable `/tmp` copy of that is a secret leak
-# this script would be creating itself. And the parsing below is pure bash, so
-# this file needs no `grep`, `sed`, `awk` or `mktemp` on PATH, which matters
-# because the execution-context tests deliberately run it against a PATH holding
-# only the directories they built.
+# tool's diagnostics can carry the connection URI, and a restore is frequently
+# run as root - a world-readable `/tmp` copy of that is a secret leak this
+# script would be creating itself. And the parsing below is pure bash, so this
+# file needs no `grep`, `sed`, `awk` or `mktemp` on PATH, which matters because
+# the execution-context tests deliberately run it against a PATH holding only
+# the directories they built.
+#
+# What IS printed is redacted first. Capturing the output into a variable keeps
+# it off the disk; it does not keep it out of the log an operator pipes to a
+# file, and release evidence is exactly such a file. `redact_userinfo` removes
+# the `user:password@` half of any URI in the text, by value, before anything is
+# echoed - the lesson `compose config leaks secrets into evidence` records.
+
+redact_userinfo() {
+  # mongodb://user:pass@host -> mongodb://***:***@host, for every occurrence.
+  local text=$1 out="" rest="$1" before scheme
+  out=""
+  while [[ "$rest" =~ ([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@[:space:]]+)@ ]]; do
+    scheme=${BASH_REMATCH[1]}
+    before=${rest%%"${scheme}${BASH_REMATCH[2]}@"*}
+    out+="${before}${scheme}***:***@"
+    rest=${rest#*"${scheme}${BASH_REMATCH[2]}@"}
+  done
+  printf '%s' "${out}${rest}"
+}
+
+# The archive's inventory, taken BEFORE anything is written. Best effort by
+# design: an older `mongorestore` without `--dryRun` simply yields nothing here,
+# and the verification says so rather than pretending it had an inventory.
+archive_collections=""
+archive_inventory_source="unavailable (mongorestore reported no archive prelude)"
+if [[ "${RESTORE_VERIFY}" != "0" && "${RESTORE_VERIFY}" != "false" ]]; then
+  set +e
+  archive_collections=$(archive_namespaces)
+  set -e
+  [[ -n "$archive_collections" ]] && archive_inventory_source="archive prelude (pre-restore dry run)"
+fi
 
 set +e
 restore_output=$(run_restore 2>&1)
 restore_status=$?
 set -e
 
-printf '%s\n' "$restore_output"
+printf '%s\n' "$(redact_userinfo "$restore_output")"
 
 if [[ "$restore_status" -ne 0 ]]; then
   echo "REFUSED: mongorestore exited ${restore_status}; nothing is certified." >&2
@@ -331,19 +408,17 @@ SUMMARY_RE='([0-9]+) document\(s\) restored successfully\.[[:space:]]+([0-9]+) d
 #: both sides and the parity would still say YES.
 OFFERED_RE='reading metadata for ([^ ]+) from'
 APPLIED_RE='finished restoring ([^ ]+)'
-
-append_unique() {
-  # $1 = current space-delimited list, $2 = candidate. Prints the new list.
-  case " $1 " in
-    *" $2 "*) printf '%s' "$1" ;;
-    *) printf '%s' "${1:+$1 }$2" ;;
-  esac
-}
+#: Gate 8's restore drill turns on `uq_permissions_name` surviving, so index work
+#: is reported too. `mongorestore` says one of two things per collection, and
+#: both are recorded: an index that was restored, and a collection that had none.
+INDEX_RESTORED_RE='restoring indexes for collection ([^ ]+)'
+NO_INDEX_RE='no indexes to restore for collection ([^ ]+)'
 
 restored_docs=""
 failed_docs=0
 expected_collections=""
 restored_collections=""
+indexed_collections=""
 
 while IFS= read -r line; do
   if [[ "$line" =~ $SUMMARY_RE ]]; then
@@ -359,21 +434,55 @@ while IFS= read -r line; do
   if [[ "$line" =~ $APPLIED_RE ]]; then
     restored_collections=$(append_unique "$restored_collections" "${BASH_REMATCH[1]//\`/}")
   fi
+  if [[ "$line" =~ $INDEX_RESTORED_RE ]]; then
+    indexed_collections=$(append_unique "$indexed_collections" "${BASH_REMATCH[1]//\`/}")
+  fi
 done <<<"$restore_output"
+
+# A namespace may legally contain a glob character, and these lists are split by
+# word rather than iterated as an array. `set -f` for the duration so a
+# collection called `a*` cannot path-expand into whatever is in the working
+# directory. (The `case` membership tests below are quoted and were always safe.)
+set -f
 
 restored_collection_count=0
 for _ns in $restored_collections; do
   restored_collection_count=$((restored_collection_count + 1))
 done
 
-expected_collection_source="archive metadata"
-if [[ -z "$expected_collections" ]]; then
-  # An older mongorestore, or one run at a lower verbosity, names namespaces
-  # only as it finishes them. Say so rather than silently comparing a set
-  # against itself.
+# What the archive offered, in preference order, each source named in the
+# evidence so a reader knows which one answered:
+#
+#   1. the pre-restore dry run's `archive prelude` lines - a genuine inventory,
+#      taken before anything was written, and the only source that can see a
+#      collection the restore never reached because it was aimed elsewhere;
+#   2. the real pass's `reading metadata for` lines - what the archive offered
+#      WITHIN the target namespace, so blind to a wrong `--nsInclude`;
+#   3. the restore's own progress. This compares a set against itself and proves
+#      nothing about collections; it is a floor, and it says so.
+if [[ -n "$archive_collections" ]]; then
+  expected_collections=$archive_collections
+  expected_collection_source=$archive_inventory_source
+elif [[ -n "$expected_collections" ]]; then
+  expected_collection_source="restore metadata (post-restore; blind to a wrong --nsInclude)"
+else
   expected_collections=$restored_collections
-  expected_collection_source="restore progress (no archive metadata lines)"
+  expected_collection_source="restore progress only - NOT an independent inventory"
 fi
+
+# The dry-run inventory covers the whole archive; the restore is bounded to one
+# database. Compare like with like, and keep what was excluded so the wrong-target
+# case can be diagnosed rather than merely failed.
+in_target=""
+out_of_target=""
+for ns in $expected_collections; do
+  if [[ "$ns" == "${MONGO_DB}."* ]]; then
+    in_target=$(append_unique "$in_target" "$ns")
+  else
+    out_of_target=$(append_unique "$out_of_target" "$ns")
+  fi
+done
+expected_collections=$in_target
 
 missing_collections=""
 for ns in $expected_collections; do
@@ -383,6 +492,8 @@ for ns in $expected_collections; do
   esac
 done
 missing_collections=${missing_collections% }
+
+set +f
 
 if [[ -z "$restored_docs" ]]; then
   {
@@ -404,7 +515,7 @@ fi
 # that has to match.
 if [[ -n "${RESTORE_EXPECTED_DOCS}" ]]; then
   if ! [[ "${RESTORE_EXPECTED_DOCS}" =~ ^[0-9]+$ ]]; then
-    echo "RESTORE_EXPECTED_DOCS must be a document count (got '${RESTORE_EXPECTED_DOCS}')" >&2
+    echo "RESTORE_EXPECTED_DOCS must be a document count (got a non-number)" >&2
     exit 1
   fi
   expected_docs=${RESTORE_EXPECTED_DOCS}
@@ -428,10 +539,16 @@ if [[ "$restored_docs" -ne "$expected_docs" ]]; then
 fi
 
 if [[ "$expected_docs" -eq 0 && "$restored_docs" -eq 0 ]]; then
-  # An empty archive and a restore aimed at the wrong database produce the same
-  # zero. Only the operator can tell them apart, so the benign reading has to be
-  # declared rather than assumed.
-  if [[ "${RESTORE_ALLOW_EMPTY}" == "1" || "${RESTORE_ALLOW_EMPTY}" == "true" ]]; then
+  if [[ -n "$out_of_target" && -z "$expected_collections" ]]; then
+    # The pre-restore inventory answers what the document counts cannot: the
+    # archive DOES carry collections, and not one of them is in the database
+    # this restore was aimed at. That is a wrong target, diagnosed rather than
+    # merely refused - and it is why the inventory pass exists.
+    status="FAILED"
+    reasons+=("the archive carries no collection in '${MONGO_DB}'. It carries: ${out_of_target}. This restore is aimed at the wrong database.")
+  elif [[ "${RESTORE_ALLOW_EMPTY}" == "1" || "${RESTORE_ALLOW_EMPTY}" == "true" ]]; then
+    # A genuinely empty archive. Declared, because from the document counts
+    # alone it is indistinguishable from a wrong target.
     status="OK_EMPTY"
     reasons=()
   else
@@ -466,6 +583,8 @@ echo "RESTORED_COLLECTIONS=${restored_collections:-<none>}"
 echo "RESTORED_DOCS=${restored_docs}"
 echo "FAILED_DOCS=${failed_docs}"
 echo "MISSING_COLLECTIONS=${missing_collections:-<none>}"
+echo "EXCLUDED_BY_TARGET=${out_of_target:-<none>}"
+echo "COLLECTIONS_WITH_RESTORED_INDEXES=${indexed_collections:-<none>}"
 echo "MATCH=${match}"
 echo "STATUS=${status}"
 

@@ -24,9 +24,6 @@ fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 # shellcheck source=scripts/lib/env_file.sh
 . "$ROOT_DIR/scripts/lib/env_file.sh"
 
-load_env_file() {
-  env_file_load "$1"
-}
 
 resolve_python_bin() {
   if [[ -n "$PYTHON_BIN" ]]; then
@@ -95,8 +92,8 @@ cd "$ROOT_DIR"
 # Compose injects the root .env into the running services. Load the legacy
 # backend file first only as a fallback; otherwise a stale backend/.env can
 # make verification authenticate with a token that is not deployed.
-load_env_file "$BACKEND_ENV_FILE"
-load_env_file "$ENV_FILE"
+env_file_load "$BACKEND_ENV_FILE"
+env_file_load "$ENV_FILE"
 
 python_bin=$(resolve_python_bin || true)
 BACKEND_BASE_URL=$(resolve_backend_base_url)

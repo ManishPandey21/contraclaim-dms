@@ -24,10 +24,16 @@ Startup does not use the broken entry point, so no deployment was affected. That
 is the reason to fix it rather than a reason not to: the next caller would have
 been an operator running a repair by hand against production.
 
-The contract now: an explicit handle is used as given; ``None`` means "the
-connection this process is configured for", resolved live through
-``get_database()``; and anything that still resolves to nothing is an error
-before a single write.
+The contract now: an explicit handle is used exactly as given, and ``None`` is
+**refused**. Resolving ``None`` through ``get_database()`` would work, and on a
+production host it would work by seeding production - which is the outcome the
+finding says must be impossible ("do not let None silently select a default
+production DB"). A caller who wants this process's own connection writes
+
+    await initialize_all_data(await get_database())
+
+which is auditable in a way an omitted argument is not, and nothing depended on
+the old behaviour because the old behaviour never worked.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ from types import SimpleNamespace
 import pytest
 
 import rbac_backend.core.database as database_module
-from rbac_backend.core.database import resolve_database
+from rbac_backend.core.database import UnresolvedDatabaseError, resolve_database
 from rbac_backend.services.data_initialization import (
     DataInitializer,
     create_data_initializer,
@@ -111,18 +117,19 @@ def test_the_setup_service_refuses_an_unresolved_target():
         create_setup_service(None)
 
 
-async def test_a_resolver_that_yields_nothing_is_an_error_not_a_target(monkeypatch):
-    """The last line of defence. If the application connection is genuinely
-    unavailable, the seeder stops here rather than at an AttributeError inside a
-    write loop that swallows it."""
+async def test_an_omitted_target_is_refused_and_never_guessed(application_connection):
+    """The load-bearing control.
 
-    async def _no_connection():
-        return None
-
-    monkeypatch.setattr(database_module, "get_database", _no_connection)
-
-    with pytest.raises(RuntimeError, match="refusing to run against an unresolved target"):
+    A configured connection IS available here - `application_connection` is
+    installed - and the refusal fires anyway. That is the point: the failure
+    mode being closed is not "no database exists", it is "a database exists and
+    nobody said it was the one they meant". On a production host that database
+    is production.
+    """
+    with pytest.raises(UnresolvedDatabaseError, match="will not pick one for you"):
         await resolve_database(None)
+
+    assert application_connection.writes == [], "an omitted target still reached a database"
 
 
 # --- 2. The handle that is given is the handle that is used ----------------
@@ -140,20 +147,32 @@ async def test_an_explicit_handle_is_used_exactly_as_given(application_connectio
     assert application_connection.writes == []
 
 
-async def test_none_resolves_to_the_connection_this_process_is_configured_for(
-    application_connection,
-):
-    resolved = await resolve_database(None)
+async def test_the_production_connection_is_not_reachable_by_omission(monkeypatch):
+    """The named negative control: production DB accidental fallback -> RED.
 
-    assert resolved is application_connection
-    assert resolved.name == "configured-for-this-process"
+    The configured connection is made to look like production. An omitted
+    argument must not reach it, and must not reach anything else either.
+    """
+    production = _NamedDB("contraclaim")
+    touched = []
+
+    async def _get_database():
+        touched.append("get_database")
+        return production
+
+    monkeypatch.setattr(database_module, "get_database", _get_database)
+
+    with pytest.raises(UnresolvedDatabaseError):
+        await resolve_database(None)
+
+    assert production.writes == []
+    assert touched == [], "the helper consulted a connection it should not have chosen"
 
 
-async def test_the_module_level_helper_seeds_the_resolved_database_and_no_other(
+async def test_the_module_level_helper_seeds_the_named_database_and_no_other(
     application_connection, monkeypatch
 ):
-    """End to end through the entry point R-A8M measured: it must now reach a
-    real handle and actually write, rather than return zeros."""
+    """A named handle reaches the writes, and reaches only that handle."""
     from rbac_backend.services import data_initialization
 
     seen: list = []
@@ -166,11 +185,24 @@ async def test_the_module_level_helper_seeds_the_resolved_database_and_no_other(
 
     monkeypatch.setattr(data_initialization, "DataInitializer", _Recording)
 
-    created = await data_initialization.initialize_roles()
+    created = await data_initialization.initialize_roles(application_connection)
 
     assert created == 1
     assert seen == [application_connection]
     assert application_connection.writes == [("roles", {"_id": "role-1"})]
+
+
+async def test_the_module_level_helper_refuses_when_no_target_is_named(
+    application_connection, monkeypatch
+):
+    """The entry point R-A8M measured. It used to return all zeros and report
+    success; it must now refuse rather than choose."""
+    from rbac_backend.services import data_initialization
+
+    with pytest.raises(UnresolvedDatabaseError):
+        await data_initialization.initialize_all_data()
+
+    assert application_connection.writes == []
 
 
 async def test_a_test_database_passed_explicitly_is_never_swapped_for_another(

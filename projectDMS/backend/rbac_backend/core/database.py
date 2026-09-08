@@ -124,8 +124,12 @@ async def get_database():
         database = client[_database_name()]
     return database
 
+class UnresolvedDatabaseError(RuntimeError):
+    """A write was about to run against a database nobody named."""
+
+
 async def resolve_database(explicit=None):
-    """Return an explicit handle, or this process's own connection. Never None.
+    """Return the caller's database handle. Refuse if there isn't one.
 
     F-A8M-5. Several module-level helpers answered ``database=None`` with
 
@@ -139,22 +143,29 @@ async def resolve_database(explicit=None):
     per-record ``except Exception: continue`` above it turned that into a
     successful-looking run that seeded nothing.
 
-    ``None`` therefore means "the connection this process is configured for",
-    resolved live through :func:`get_database` - never a literal default, never
-    a stale snapshot. A resolver that still yields nothing is an error here
-    rather than a ``NoneType`` attribute error somewhere downstream: the caller
-    is about to write seed data, and the one outcome that must be impossible is
-    writing it somewhere nobody chose.
+    **``None`` is refused, not resolved.** Resolving it through
+    :func:`get_database` would work, and on a production host it would work by
+    seeding production - which is precisely the outcome the finding says must be
+    impossible: "do not let None silently select a default production DB". A
+    caller who wants this process's own connection says so in one line,
+
+        await initialize_all_data(await get_database())
+
+    and that line is auditable in a way an omitted argument is not. Nothing
+    depended on the old behaviour, because the old behaviour never worked.
+
+    The refusal is an exception and not a return, because every caller is about
+    to write seed data: the one outcome that must be impossible is writing it
+    somewhere nobody chose.
     """
     if explicit is not None:
         return explicit
-    resolved = await get_database()
-    if resolved is None:
-        raise RuntimeError(
-            "No database was given and the application connection is not "
-            "available; refusing to run against an unresolved target."
-        )
-    return resolved
+    raise UnresolvedDatabaseError(
+        "No database handle was given. This helper will not pick one for you: "
+        "an omitted argument on a production host would seed production. Pass "
+        "the target explicitly - `await get_database()` for this process's own "
+        "connection, or a disposable handle for a drill."
+    )
 
 async def ensure_indexes(db):
     """Create indexes to improve RBAC scoped queries and general performance."""

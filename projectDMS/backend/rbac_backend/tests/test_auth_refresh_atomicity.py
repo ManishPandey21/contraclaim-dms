@@ -366,3 +366,88 @@ async def test_the_refresh_is_rate_limited_at_the_documented_cost():
     await controller.refresh_token(_current_user(), _token())
 
     assert limiter.calls == [(USER_ID, 2)]
+
+
+# --- 4. Replay, and the status the client actually sees --------------------
+
+
+async def test_a_second_refresh_on_the_same_session_still_succeeds():
+    """Contract item 7: repeated refresh behaviour is unchanged.
+
+    Refresh is idempotent by design - it extends the session it was given and
+    issues a token for it. Two refreshes must therefore both succeed, extend the
+    same session, and emit one audit event each. Anything else would be a
+    behaviour change smuggled in beside the fix.
+    """
+    auth_service = _FakeAuthService()
+    audit = _RecordingAuditLogger()
+    controller = _controller(audit=audit, auth_service=auth_service)
+
+    first = await controller.refresh_token(_current_user(), _token())
+    second = await controller.refresh_token(_current_user(), _token())
+
+    assert first.access_token and second.access_token
+    assert [s for s, _ in auth_service.extended] == [SESSION_ID, SESSION_ID]
+    assert len(audit.events("token_refresh")) == 2
+    assert {event.resource_id for event in audit.events("token_refresh")} == {SESSION_ID}
+
+
+async def test_a_replayed_refresh_after_logout_is_refused():
+    """The other half of replay: the same token, presented after the session was
+    invalidated, must not extend anything."""
+    auth_service = _FakeAuthService()
+    controller = _controller(auth_service=auth_service)
+    replayed = _token()
+
+    await controller.refresh_token(_current_user(), replayed)
+
+    auth_service._active.clear()  # what logout does
+    error = await _refusal(controller, replayed)
+
+    assert _status_of(error) == 401
+    assert len(auth_service.extended) == 1, "a replay after logout extended the session"
+
+
+def test_the_route_returns_200_and_not_500_for_the_controllers_result():
+    """Contract item 1 is about the HTTP status, and the handler is where a
+    500 was manufactured. The route body is bound and inspected rather than
+    executed, because executing it needs the whole dependency stack - what it
+    has to show is that the controller's return value is the response and that
+    nothing between them can turn a value into a failure.
+    """
+    import inspect
+
+    from rbac_backend.routers import auth as auth_router
+
+    source = inspect.getsource(auth_router.refresh_token)
+
+    assert "await controller.refresh_token(current_user, token)" in source
+    assert "return token_response" in source
+    # Only the controller and the cookie helper stand between the result and the
+    # client; neither raises on a successful refresh.
+    assert "_set_auth_cookie(response, token_response.access_token" in source
+    assert "500" not in source
+
+
+def test_the_controller_cannot_reach_its_own_500_on_a_successful_refresh():
+    """The mechanism, pinned where it lives.
+
+    Everything that may fail the request happens before `extend_session`; the
+    only call after it goes through `_audit_token_refreshed`, which cannot
+    raise. A future edit that puts a raising call between the mutation and the
+    return re-opens F-A8M-6, and this is what notices.
+    """
+    import inspect
+
+    source = inspect.getsource(AuthController.refresh_token)
+    after_mutation = source.split("extend_session", 1)[1]
+    awaited = [
+        line.strip()
+        for line in after_mutation.splitlines()
+        if line.strip().startswith("await ")
+    ]
+
+    assert awaited == ["await self._audit_token_refreshed(current_user.id, session_id)"], (
+        "a new call was added between the session mutation and the response; "
+        "if it can raise, a completed refresh answers 500 again"
+    )

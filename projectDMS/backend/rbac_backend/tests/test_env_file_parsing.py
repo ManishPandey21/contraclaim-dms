@@ -82,8 +82,23 @@ BASH = _usable_bash()
 
 @pytest.fixture(scope="module", autouse=True)
 def _bash_available() -> None:
-    if BASH is None:
-        pytest.skip("no usable bash on this host")
+    """Skip for a developer without bash; FAIL when the run is evidence.
+
+    A whole shell suite that vanishes green is the shape `staging_gate.py`
+    exists to prevent: the run reports success having measured nothing. On CI
+    and inside a certification run there is always a bash, so an absent one
+    there is a broken environment and must be reported as a failure, not as a
+    skip.
+    """
+    if BASH is not None:
+        return
+    if os.environ.get("CI") or os.environ.get("CONTRACLAIM_STAGING_GATE"):
+        pytest.fail(
+            "no usable bash on this host, and this run is being offered as "
+            "evidence (CI / CONTRACLAIM_STAGING_GATE). A skipped shell suite "
+            "measures nothing."
+        )
+    pytest.skip("no usable bash on this host")
 
 
 @pytest.fixture()
@@ -376,3 +391,81 @@ def test_the_template_check_would_catch_the_r_a8m_shape(tmp_path: Path):
 
     with pytest.raises(AssertionError, match="unquoted"):
         test_a_template_value_that_needs_quoting_is_quoted(offending)
+
+
+# --- 6. The three defects a review found in the parser itself --------------
+#
+# All three were the parser disagreeing with its own documented grammar, which
+# is the failure mode a hand-written parser is for: the header says what compose
+# does, and only a test can say whether this file does it.
+
+
+#: One literal backslash, spelled without escapes so no reader of this file has
+#: to count them. The rows below are about backslash handling, and writing them
+#: with `\\` is how the defect got past review in the first place.
+BACKSLASH = chr(92)
+
+
+def test_an_escaped_backslash_is_decoded(load):
+    """A doubled backslash inside a double-quoted value decodes to one.
+
+    The case arm was quoted, and quoting a case pattern removes its special
+    meaning - so it matched a literal two-character string, which a single
+    character never is. The arm was dead: the doubled backslash fell through
+    undecoded, and the character after it was then re-read as an escape.
+    """
+    result = load('TARGET="a' + BACKSLASH * 2 + 'b"\n', "TARGET")
+
+    assert result.returncode == 0, result.stderr
+    assert result.values["TARGET"] == "a" + BACKSLASH + "b"
+
+
+def test_an_escaped_backslash_does_not_swallow_the_next_character(load):
+    """The second half of the same defect.
+
+    A doubled backslash followed by `n` is a backslash and the letter `n`, not a
+    newline: the first backslash consumes the second, so nothing is left to
+    escape the `n`. Before the fix the dead arm left the first backslash in
+    place and the pair `\\n` was then read as the newline escape.
+    """
+    result = load('TARGET="a' + BACKSLASH * 2 + 'nb"\n', "TARGET")
+
+    assert result.values["TARGET"] == "a" + BACKSLASH + "nb"
+    assert "\n" not in result.values["TARGET"]
+
+
+def test_an_inline_comment_is_cut_at_the_first_hash_not_the_last(load):
+    """Compose reads `foo # one # two` as `foo`. The ERE this replaces was
+    greedy in the other direction and kept `foo # one`, so a value could carry
+    half a comment into the environment."""
+    result = load("TARGET=foo # one # two\n", "TARGET")
+
+    assert result.values["TARGET"] == "foo"
+
+
+def test_a_hash_with_no_leading_space_is_still_part_of_the_value(load):
+    """The positive control for the row above: without it, a parser that cut at
+    every `#` would pass the greedy test and be wrong in the other direction."""
+    result = load("TARGET=abc#def#ghi\n", "TARGET")
+
+    assert result.values["TARGET"] == "abc#def#ghi"
+
+
+def test_a_quoted_value_closing_on_a_file_with_no_trailing_newline(load):
+    """`read` returns non-zero on a final line with no newline while still
+    having filled the variable. Without `|| [[ -n "$line" ]]` in the
+    continuation, such a file was rejected as unterminated."""
+    result = load('TARGET="l1\nl2"', "TARGET")
+
+    assert result.returncode == 0, result.stderr
+    assert result.values["TARGET"] == "l1\nl2"
+
+
+def test_a_genuinely_unterminated_quote_is_still_refused(load):
+    """The negative control for the row above. Accepting an unterminated quote
+    to make a no-trailing-newline file work would trade one defect for a worse
+    one: a truncated secret that looks like a value."""
+    result = load('TARGET="oops\n', "TARGET")
+
+    assert result.returncode != 0
+    assert "unterminated" in result.stderr

@@ -32,9 +32,9 @@ decides the exit code (F-A8M-3).
 
 These are behavioural tests. `mongorestore` and `docker` are replaced by stubs on
 PATH that record their arguments, so the script's decisions are observed rather
-than read - a static check cannot tell a documented branch from a taken one. The
-last two rows go further and replay verbatim output from the real tool, so the
-parser is measured against the format it will actually meet.
+than read - a static check cannot tell a documented branch from a taken one. Two
+of them go further and replay verbatim output from the real tool, so the parser
+is measured against the format it will actually meet.
 """
 
 from __future__ import annotations
@@ -74,6 +74,25 @@ _STUB = (
     'printf \'%s\' "${0##*/}" >>"$STUB_LOG"\n'
     'for arg in "$@"; do printf \' %s\' "$arg" >>"$STUB_LOG"; done\n'
     "printf '\\n' >>\"$STUB_LOG\"\n"
+    # The pre-restore inventory pass. `mongorestore --dryRun -v` with no
+    # --nsInclude names every namespace the archive carries, which is the only
+    # source that can see a collection a wrong --nsInclude excluded. The stub
+    # answers it the way mongo:8.0 does - measured, not invented.
+    'case " $* " in\n'
+    '  *" --dryRun "*)\n'
+    '    if [ -z "${STUB_NO_DRYRUN:-}" ]; then\n'
+    '      for offered in ${STUB_ARCHIVE_NS-${STUB_RESTORE_NS-${MONGO_DB:-db}.permissions} ${STUB_RESTORE_UNAPPLIED_NS:-}}; do\n'
+    # Single-quoted format string: in `sh`, a backtick inside double quotes is
+    # command substitution, so the real tool's backticked namespace has to be
+    # quoted this way or the stub would try to execute `%s`.
+    "        printf 'archive prelude `%s`\\n' \"$offered\" >&2\n"
+    "      done\n"
+    '      echo "dry run completed" >&2\n'
+    '      echo "0 document(s) restored successfully. 0 document(s) failed to restore." >&2\n'
+    "    fi\n"
+    "    exit 0\n"
+    "    ;;\n"
+    "esac\n"
     'if [ -z "${STUB_QUIET:-}" ]; then\n'
     '  ns="${STUB_RESTORE_NS:-${MONGO_DB:-db}.permissions}"\n'
     '  docs="${STUB_RESTORE_DOCS:-198}"\n'
@@ -129,8 +148,23 @@ BASH = _usable_bash()
 
 @pytest.fixture(scope="module", autouse=True)
 def _bash_available() -> None:
-    if BASH is None:
-        pytest.skip("no usable bash on this host")
+    """Skip for a developer without bash; FAIL when the run is evidence.
+
+    A whole shell suite that vanishes green is the shape `staging_gate.py`
+    exists to prevent: the run reports success having measured nothing. On CI
+    and inside a certification run there is always a bash, so an absent one
+    there is a broken environment and must be reported as a failure, not as a
+    skip.
+    """
+    if BASH is not None:
+        return
+    if os.environ.get("CI") or os.environ.get("CONTRACLAIM_STAGING_GATE"):
+        pytest.fail(
+            "no usable bash on this host, and this run is being offered as "
+            "evidence (CI / CONTRACLAIM_STAGING_GATE). A skipped shell suite "
+            "measures nothing."
+        )
+    pytest.skip("no usable bash on this host")
 
 
 @pytest.fixture()
@@ -855,3 +889,136 @@ def test_the_parser_reads_the_real_r_a8m_false_success_output(replaying_harness)
     assert evidence["MATCH"] == "NO"
     assert evidence["STATUS"] == "FAILED"
     assert "completed" not in result.stdout.lower()
+
+
+# --------------------------------------------------------------------------- #
+# The pre-restore inventory
+# --------------------------------------------------------------------------- #
+#
+# The document axis is reconciled from the real pass's own accounting, because a
+# mongodump archive does not carry per-collection counts and `--dryRun` reports
+# `0 document(s) restored successfully` by construction - measured against
+# mongo:8.0, not assumed. What a dry run DOES give is the archive's namespace
+# inventory, read before anything is written:
+#
+#   archive prelude `ra8n_disposable.beta`
+#
+# That is the only source that can see a collection the restore never reached
+# because it was aimed at the wrong database - the real pass's own
+# `reading metadata for` lines are already filtered by `--nsInclude`.
+
+
+def test_a_restore_aimed_at_the_wrong_database_is_diagnosed_not_merely_refused(
+    harness,
+) -> None:
+    """Before the inventory pass this was indistinguishable from an empty
+    archive, and the operator was told to declare the archive empty - advice
+    that would have hidden the real fault."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_ARCHIVE_NS": "someotherdb.alpha someotherdb.beta",
+            "STUB_RESTORE_NS": "",
+            "STUB_RESTORE_APPLIED": "0",
+        }
+    )
+
+    assert result.returncode != 0
+    evidence = _evidence(result.stdout)
+    assert evidence["STATUS"] == "FAILED"
+    assert evidence["EXPECTED_COLLECTION_SOURCE"].startswith("archive prelude")
+    assert "someotherdb.alpha" in evidence["EXCLUDED_BY_TARGET"]
+    assert "aimed at the wrong database" in result.stderr
+
+
+def test_the_inventory_is_taken_before_the_restore_writes_anything(harness) -> None:
+    """Order matters: an inventory taken afterwards cannot be an inventory. The
+    stub log records both invocations, and the dry run has to be first."""
+    harness(env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    lines = [line for line in harness.log.read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) >= 2, lines
+    assert "--dryRun" in lines[0], f"the first mongorestore call was not the dry run: {lines[0]}"
+    assert "--dryRun" not in lines[1]
+    assert "--nsInclude" not in lines[0], (
+        "the inventory pass must not be filtered by --nsInclude, or it cannot see "
+        "the collections a wrong target excluded"
+    )
+    assert f"--nsInclude={STAGING_DB}.*" in lines[1]
+
+
+def test_a_mongorestore_without_dryrun_degrades_to_a_named_weaker_source(harness) -> None:
+    """An older tool yields no inventory. The verification must say so rather
+    than compare a set against itself while reporting `MATCH=YES` unqualified."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host", "STUB_NO_DRYRUN": "1"})
+
+    assert result.returncode == 0, result.stderr
+    evidence = _evidence(result.stdout)
+    assert evidence["STATUS"] == "OK"
+    assert evidence["EXPECTED_COLLECTION_SOURCE"].startswith("restore metadata")
+
+
+def test_an_unreachable_endpoint_is_never_certified(harness) -> None:
+    """`mongorestore` exiting non-zero - a wrong endpoint, a wrong replica set, a
+    container that is not running - must not reach the verification at all."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host", "STUB_EXIT": "1"})
+
+    assert result.returncode != 0
+    assert "nothing is certified" in result.stderr
+    assert "STATUS=OK" not in result.stdout
+    assert "completed" not in result.stdout.lower()
+
+
+def test_a_malformed_expectation_is_refused_before_the_restore_runs(harness) -> None:
+    """A refusal that arrives after an irreversible operation is not a refusal."""
+    result = harness(
+        env={"RESTORE_EXEC_CONTEXT": "host", "RESTORE_EXPECTED_DOCS": "two hundred"}
+    )
+
+    assert result.returncode != 0
+    assert "RESTORE_EXPECTED_DOCS" in result.stderr
+    assert result.stub_log == "", "the restore ran before the input was validated"
+
+
+def test_the_declared_expectation_is_never_echoed_back_verbatim(harness) -> None:
+    """The value is operator input on a command line beside real secrets; the
+    refusal names the variable, not what was in it."""
+    result = harness(
+        env={"RESTORE_EXEC_CONTEXT": "host", "RESTORE_EXPECTED_DOCS": "s3cr3t-looking"}
+    )
+
+    assert result.returncode != 0
+    assert "s3cr3t-looking" not in result.stderr
+
+
+def test_credentials_in_the_tools_output_are_redacted_before_being_printed(
+    harness,
+) -> None:
+    """The captured output is echoed for the operator, and release evidence is a
+    file an operator piped that output into. `compose config leaks secrets into
+    evidence` is the same lesson: redact by value."""
+
+    noisy = harness.bin_dir / "mongorestore"
+    noisy.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\' "${0##*/}" >>"$STUB_LOG"\n'
+        'for arg in "$@"; do printf \' %s\' "$arg" >>"$STUB_LOG"; done\n'
+        "printf '\n' >>\"$STUB_LOG\"\n"
+        'case " $* " in *" --dryRun "*) exit 0 ;; esac\n'
+        'echo "connected to mongodb://appuser:hunter2@mongo1:27017/db" >&2\n'
+        'echo "finished restoring db.permissions (1 documents, 0 failures)" >&2\n'
+        'echo "1 document(s) restored successfully. 0 document(s) failed to restore." >&2\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    noisy.chmod(0o755)
+
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host"}, db="db")
+
+    combined = result.stdout + result.stderr
+    assert "hunter2" not in combined, "the tool's credentials reached the operator's log"
+    assert "appuser" not in combined
+    assert "mongodb://***:***@mongo1:27017" in combined, (
+        "the URI was removed entirely rather than redacted; the operator still "
+        "needs to see which host was contacted"
+    )

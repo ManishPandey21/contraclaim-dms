@@ -68,11 +68,16 @@ _env_file_unescape() {
     char=${input:index:1}
     if [[ "$char" == "\\" && $((index + 1)) -lt ${#input} ]]; then
       next=${input:index+1:1}
+      # The backslash arm is written `\\)` and NOT `'\\')`. Quoting a case
+      # pattern removes its special meaning, so `'\\')` matches the literal
+      # two-character string `\\` - which a single character never is, so the
+      # arm was dead and `\\` fell through undecoded while the character after
+      # it was re-read as an escape. Measured: `"a\\b"` came back as `a\\b`.
       case "$next" in
         n) output+=$'\n'; index=$((index + 2)); continue ;;
         r) output+=$'\r'; index=$((index + 2)); continue ;;
         t) output+=$'\t'; index=$((index + 2)); continue ;;
-        '\\') output+="\\"; index=$((index + 2)); continue ;;
+        \\) output+="\\"; index=$((index + 2)); continue ;;
         '"') output+='"'; index=$((index + 2)); continue ;;
       esac
     fi
@@ -138,7 +143,12 @@ env_file_load() {
       while [[ "$close" == "-1" ]]; do
         # A quoted value may span lines. Keep reading; running out of file with
         # the quote still open is an error, not a value.
-        if ! IFS= read -r line; then
+        #
+        # `|| [[ -n "$line" ]]` for the same reason the outer loop has it: a
+        # final line with no trailing newline makes `read` return non-zero
+        # while still having filled `line`. Without it, a file whose last
+        # character is the closing quote was rejected as unterminated.
+        if ! IFS= read -r line && [[ -z "$line" ]]; then
           echo "${file}:${open_lineno}: unterminated ${quote} quote" >&2
           return 1
         fi
@@ -157,11 +167,13 @@ env_file_load() {
     else
       # Unquoted. ` #` starts a comment; every other character - `&`, `$`, `;`,
       # a backtick, an embedded `=` - is part of the value.
-      if [[ "$raw" =~ ^(.*[[:space:]])\#.*$ ]]; then
-        value=${BASH_REMATCH[1]}
-      else
-        value=$raw
-      fi
+      #
+      # `%%` removes the LONGEST matching suffix, which is the shortest kept
+      # prefix, so the cut lands on the FIRST ` #`. The ERE this replaces was
+      # greedy in the other direction and cut on the last one: compose reads
+      # `foo # one # two` as `foo`, and this file read it as `foo # one`. The
+      # header promises the two do not disagree.
+      value=${raw%%[[:space:]]#*}
       value=${value%"${value##*[![:space:]]}"}   # strip trailing whitespace
     fi
 
