@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Check local backup freshness for release gates and cron monitors."""
+"""Check local backups for release gates and cron monitors.
+
+Freshness *and* content. This used to check only that a file existed, was
+non-empty and was younger than 26 hours, which the 89-byte FalkorDB archive
+satisfied every night while carrying no graph at all. Each artifact now reports
+an explicit state, and `VALID` is the only one that claims a recovery artefact
+exists; `UNVERIFIED` says no content contract is declared for that label.
+"""
 
 from __future__ import annotations
 
@@ -33,12 +40,21 @@ def main() -> int:
     )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON only.")
     parser.add_argument("--warn-only", action="store_true", help="Always exit zero after reporting status.")
+    parser.add_argument(
+        "--freshness-only",
+        action="store_true",
+        help=(
+            "Skip content validation. Every artifact then reports UNVERIFIED rather than VALID, "
+            "because a freshness check cannot show that an archive restores."
+        ),
+    )
     args = parser.parse_args()
 
     result = build_backup_health(
         args.root,
         max_age_hours=args.max_age_hours,
         required_volume_labels=_labels(args.volume_labels),
+        verify_content=not args.freshness_only,
     )
     if args.json:
         print(json.dumps(result, indent=2, sort_keys=True))
@@ -52,6 +68,15 @@ def main() -> int:
             age = artifact.get("age_hours")
             age_text = f", age={age}h" if age is not None else ""
             print(f"- {label}: {artifact['status']} ({detail}{age_text})")
+            if artifact.get("detail"):
+                print(f"    {artifact['detail']}")
+        if result.get("unverified_artifacts"):
+            print(
+                "Note: "
+                + ", ".join(result["unverified_artifacts"])
+                + " were checked for freshness only. No content contract is declared for them, "
+                + "so their restorability is unproven."
+            )
 
     return 0 if args.warn_only or result["status"] == "ok" else 1
 

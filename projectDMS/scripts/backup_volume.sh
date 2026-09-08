@@ -7,71 +7,116 @@
 # executed by itself cannot be tested.
 #
 # Usage:
-#   scripts/backup_volume.sh <volume> <archive-path> [required-pattern ...]
-#   scripts/backup_volume.sh --verify <archive-path> [required-pattern ...]
+#   scripts/backup_volume.sh <volume> <archive-path> [contract ...]
+#   scripts/backup_volume.sh --verify <archive-path> [contract ...]
 #
-# Required patterns are shell globs matched against the archive's entry list.
-# When any are given, the archive must contain an entry matching at least one
-# of them or the backup fails. `tar` exiting 0 over an empty directory is not a
-# backup: that is exactly how the FalkorDB graph went unprotected while every
-# nightly run reported success.
+# A contract is one of:
+#
+#   --profile <name>   a semantic check for that kind of volume. The only one
+#                      today is `redis-persistence`, used by FalkorDB and
+#                      Redis: the archive must carry a usable RDB snapshot or a
+#                      usable multi-part AOF directory **at its root**, so it
+#                      restores straight into the mounted volume.
+#   --require <glob>   every --require must match a non-empty regular file.
+#   --any-of  <glob>   at least one --any-of must match a non-empty file.
+#   <glob>             a bare pattern is an --any-of, which is what bare
+#                      patterns have always meant.
+#
+# `--require` and `--any-of` are separate flags because they used to be the
+# same flag. Multiple bare patterns were an OR while the maintenance runbook
+# invoked them as `--verify "$ARCH" '*dump.rdb' '*appendonlydir*'` and read that
+# as an AND, so an archive holding an empty `appendonlydir/` and no `dump.rdb`
+# verified clean and was kept as the only copy of the graph (R-A8P F2).
+#
+# The decision itself lives in scripts/validate_backup_archive.py, which
+# post_deploy_verify, the nightly backup status check and the recovery drill
+# also call. One definition of "valid archive", not four.
 set -euo pipefail
+
+ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+VALIDATOR="$ROOT_DIR/scripts/validate_backup_archive.py"
+# shellcheck source=scripts/lib/docker_paths.sh
+. "$ROOT_DIR/scripts/lib/docker_paths.sh"
+
+usable_python() {
+  command -v "$1" >/dev/null 2>&1 && "$1" -c "import sys" >/dev/null 2>&1
+}
+
+resolve_python() {
+  # An explicit PYTHON_BIN is honoured or refused, never silently replaced: an
+  # operator who names an interpreter is usually naming the only one with the
+  # right environment, and falling back to another would verify the archive
+  # somewhere other than where they meant.
+  if [[ -n "${PYTHON_BIN:-}" ]]; then
+    if usable_python "$PYTHON_BIN"; then
+      printf '%s' "$PYTHON_BIN"
+      return 0
+    fi
+    return 1
+  fi
+
+  local candidate
+  for candidate in python3 python; do
+    if usable_python "$candidate"; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
 
 verify_archive() {
   local archive=$1
   shift
-  local patterns=("$@")
 
-  if [[ ! -f "$archive" ]]; then
-    echo "Backup verification failed: no archive at $archive" >&2
+  local python_bin
+  if ! python_bin=$(resolve_python); then
+    echo "Backup verification failed: no usable python interpreter." >&2
+    echo "The archive contract is evaluated by $VALIDATOR; without an" >&2
+    echo "interpreter it cannot be evaluated, and an unevaluated contract is" >&2
+    echo "not a pass. Set PYTHON_BIN to an interpreter and re-run." >&2
     return 1
   fi
 
-  local entries
-  if ! entries=$(tar -tzf "$archive"); then
-    echo "Backup verification failed: $archive is not a readable gzip tarball" >&2
-    return 1
-  fi
+  local args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --profile|--require|--any-of)
+        if [[ $# -lt 2 ]]; then
+          echo "Backup verification failed: $1 needs a value" >&2
+          return 2
+        fi
+        args+=("$1" "$2")
+        shift 2
+        ;;
+      --*)
+        echo "Backup verification failed: unknown contract flag $1" >&2
+        return 2
+        ;;
+      *)
+        args+=(--any-of "$1")
+        shift
+        ;;
+    esac
+  done
 
-  if [[ ${#patterns[@]} -eq 0 ]]; then
-    return 0
-  fi
-
-  local entry pattern
-  while IFS= read -r entry; do
-    for pattern in "${patterns[@]}"; do
-      # shellcheck disable=SC2053
-      if [[ "$entry" == $pattern ]]; then
-        echo "Backup verification passed: $archive contains $entry"
-        return 0
-      fi
-    done
-  done <<<"$entries"
-
-  echo "Backup verification FAILED: $archive contains none of: ${patterns[*]}" >&2
-  echo "Archive holds $(printf '%s\n' "$entries" | wc -l) entry/entries:" >&2
-  printf '%s\n' "$entries" | sed 's/^/  /' >&2
-  echo "The volume this archived holds no persisted state. Check that the" >&2
-  echo "service actually writes its snapshot inside the mounted volume." >&2
-  return 1
+  # native_path is a no-op on Linux. On a developer machine the interpreter
+  # is python.exe, which cannot open a /c/... path MSYS did not rewrite.
+  "$python_bin" "$(native_path "$VALIDATOR")" "$(native_path "$archive")" ${args[@]+"${args[@]}"}
 }
 
 if [[ "${1:-}" == "--verify" ]]; then
   shift
   if [[ $# -lt 1 ]]; then
-    echo "usage: $0 --verify <archive-path> [required-pattern ...]" >&2
+    echo "usage: $0 --verify <archive-path> [contract ...]" >&2
     exit 2
   fi
   verify_archive "$@"
   exit $?
 fi
 
-ROOT_DIR=${ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
-# shellcheck source=scripts/lib/docker_paths.sh
-. "$ROOT_DIR/scripts/lib/docker_paths.sh"
-
 if [[ $# -lt 2 ]]; then
-  echo "usage: $0 <volume> <archive-path> [required-pattern ...]" >&2
+  echo "usage: $0 <volume> <archive-path> [contract ...]" >&2
   exit 2
 fi
 

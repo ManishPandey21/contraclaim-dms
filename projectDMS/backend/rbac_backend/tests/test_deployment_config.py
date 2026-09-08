@@ -153,6 +153,17 @@ def test_falkordb_persists_inside_the_volume_that_gets_backed_up() -> None:
     )
 
 
+#: What each stateful volume's backup call must declare. The Redis-family
+#: volumes carry a semantic profile rather than a pattern list: a pattern list
+#: cannot tell an `appendonlydir/` holding an AOF from an empty directory with
+#: the same name, which is how the 89-byte FalkorDB archive verified clean.
+REQUIRED_BACKUP_CONTRACTS = {
+    "falkordb_data": "--profile redis-persistence",
+    "redis_data": "--profile redis-persistence",
+    "qdrant_data": "--any-of",
+}
+
+
 def test_production_backup_requires_real_persistence_files_in_each_state_archive() -> None:
     """`tar` exiting 0 is not a backup.
 
@@ -168,16 +179,36 @@ def test_production_backup_requires_real_persistence_files_in_each_state_archive
         ]
         assert calls, f"{script.name} no longer backs up any volume"
 
-        for volume_suffix in ("falkordb_data", "redis_data", "qdrant_data"):
+        for volume_suffix, contract in REQUIRED_BACKUP_CONTRACTS.items():
             call = next(
                 (line for line in calls if line.split('"')[1].endswith(volume_suffix)),
                 None,
             )
             assert call, f"{script.name} no longer backs up {volume_suffix}"
-            assert call.count('"') > 4, (
-                f"{script.name}'s {volume_suffix} backup must declare the entries "
-                f"its archive has to contain, or an empty volume is archived as a "
-                f"successful backup"
+            assert contract in call, (
+                f"{script.name}'s {volume_suffix} backup must declare `{contract}`, or an "
+                f"empty volume is archived as a successful backup"
+            )
+
+
+def test_no_backup_call_relies_on_bare_patterns_meaning_a_conjunction() -> None:
+    """R-A8P F2: bare patterns are a disjunction, and the runbook read them as
+    a conjunction.
+
+    Every caller now says which it means. A bare pattern list is still accepted
+    by the script for compatibility, and nothing in this repository uses one,
+    so no reader has to guess again.
+    """
+    for script in (PRODUCTION_BACKUP, LEGACY_BACKUP):
+        for line in script.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("backup_volume "):
+                continue
+            trailing = "".join(line.split('"')[4:]).strip()
+            if not trailing:
+                continue
+            assert trailing.startswith(("--profile", "--any-of", "--require")), (
+                f"{script.name} declares an archive contract without saying whether it is a "
+                f"conjunction or a disjunction: {line}"
             )
 
 

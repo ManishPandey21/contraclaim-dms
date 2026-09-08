@@ -32,10 +32,10 @@ backup_volume() {
   bash "$PROJECT_DIR/scripts/backup_volume.sh" "$volume" "$BACKUP_DIR/${archive}.tar.gz" "$@"
 }
 
-backup_volume "${PROJECT_NAME}_qdrant_data" qdrant_data "*/collections/*" "*raft_state*"
+backup_volume "${PROJECT_NAME}_qdrant_data" qdrant_data --any-of "*/collections/*" --any-of "*raft_state*"
 backup_volume "${PROJECT_NAME}_qdrant_snapshots" qdrant_snapshots
-backup_volume "${PROJECT_NAME}_falkordb_data" falkordb_data "*dump.rdb" "*appendonlydir*"
-backup_volume "${PROJECT_NAME}_redis_data" redis_data "*dump.rdb" "*appendonlydir*"
+backup_volume "${PROJECT_NAME}_falkordb_data" falkordb_data --profile redis-persistence
+backup_volume "${PROJECT_NAME}_redis_data" redis_data --profile redis-persistence
 
 for svc in "${SERVICES[@]}"; do
   "${COMPOSE_CMD[@]}" unpause "$svc" || true

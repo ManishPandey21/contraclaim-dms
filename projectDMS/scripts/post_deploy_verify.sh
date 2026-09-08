@@ -122,13 +122,18 @@ fi
 backup_root=$(get_env BACKUP_ROOT)
 backup_max_age=$(get_env BACKUP_MAX_AGE_HOURS)
 require_fresh_backup=${REQUIRE_FRESH_BACKUP:-false}
-if [[ -n "$python_bin" ]] && "$python_bin" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
-  pass "Backup freshness check passed"
+# Freshness alone once certified an 89-byte archive of an empty directory as
+# `falkordb-data: ok`. backup_status.py now also opens every archive that has a
+# declared content contract, so this line claims validity or it claims nothing.
+if [[ -z "$python_bin" ]]; then
+  fail "No Python interpreter was available to validate the backup archives"
+elif "$python_bin" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+  pass "Backups are fresh, and every archive with a content contract is a valid recovery artefact"
 else
   if [[ "$require_fresh_backup" == "true" || "$require_fresh_backup" == "True" ]]; then
-    fail "Backup freshness check failed"
+    fail "Backup validation failed (freshness, or archive content that will not restore)"
   else
-    warn "Backup freshness check failed; set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
+    warn "Backup validation failed (freshness, or archive content that will not restore); set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
   fi
 fi
 

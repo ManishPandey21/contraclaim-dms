@@ -164,7 +164,7 @@ sleep 2
 step "4. Run the production backup procedure against the volume"
 ARCHIVE="$WORK_DIR/falkordb-data-drill.tar.gz"
 BACKUP_START=$(date +%s)
-if bash "$ROOT_DIR/scripts/backup_volume.sh" "$SOURCE_VOLUME" "$ARCHIVE" "*dump.rdb" "*appendonlydir*"; then
+if bash "$ROOT_DIR/scripts/backup_volume.sh" "$SOURCE_VOLUME" "$ARCHIVE" --profile redis-persistence; then
   pass "backup command completed"
 else
   fail "backup command reported failure"
@@ -219,7 +219,7 @@ else
 fi
 
 docker volume create "$EMPTY_VOLUME" >/dev/null
-if bash "$ROOT_DIR/scripts/backup_volume.sh" "$EMPTY_VOLUME" "$WORK_DIR/empty.tar.gz" "*dump.rdb" "*appendonlydir*" >/dev/null 2>&1; then
+if bash "$ROOT_DIR/scripts/backup_volume.sh" "$EMPTY_VOLUME" "$WORK_DIR/empty.tar.gz" --profile redis-persistence >/dev/null 2>&1; then
   fail "backing up a volume with no persisted graph state reported success"
 else
   pass "volume with no persisted graph state refused"

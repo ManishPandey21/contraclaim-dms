@@ -45,24 +45,33 @@ rescue archive**, the rescue capture below is the backup.
 
 ```bash
 STAMP=$(date '+%Y%m%d-%H%M%S')
-TMP=$(mktemp -d /tmp/falkor-rescue.XXXXXX)
-docker exec contraclaim-falkordb-1 sh -c \
-  'PW=$(printf "%s" "$REDIS_ARGS" | sed -n "s/.*--requirepass \([^ ]*\).*/\1/p"); \
-   redis-cli --no-auth-warning -a "$PW" BGSAVE'
-sleep 5
-docker cp contraclaim-falkordb-1:/FalkorDB/dump.rdb        "$TMP/dump.rdb"
-docker cp contraclaim-falkordb-1:/FalkorDB/appendonlydir   "$TMP/appendonlydir"
 ARCH=/var/backups/contractdms/volumes/falkordb-persistence-${STAMP}.tar.gz
-tar -czf "$ARCH" -C "$TMP" .
-rm -rf "$TMP"
-
-# A file is not a backup. Prove the entries are there.
-bash scripts/backup_volume.sh --verify "$ARCH" '*dump.rdb' '*appendonlydir*'
+bash scripts/falkordb_rescue_archive.sh contraclaim-falkordb-1 "$ARCH"
 sha256sum "$ARCH" | tee -a /var/backups/contractdms/manifests/checksums-${STAMP}.sha256
 ```
 
+`scripts/falkordb_rescue_archive.sh` reads the persistence directory out of the
+container (`CONFIG GET dir` — `/FalkorDB` today, `/data` after the cutover),
+BGSAVEs, copies `dump.rdb` and `appendonlydir/` to the **root** of a staging
+directory, writes the archive with `tar -C "$staging" .`, and validates it
+against the shared archive contract before exiting zero.
+
+**Each of those steps exists because the hand-typed recipe it replaces produced
+an unrestorable archive.** R-A8O's rescue archive was 14.7 MB, verified and
+checksummed, with its entries under a `FalkorDB/` prefix and
+`bin/src/falkordb.so` inside — because `docker cp <container>:/FalkorDB "$TMP"`
+recreates the directory component. Restored into a volume mounted at `/data` it
+yields `/data/FalkorDB/dump.rdb`, where the engine does not look. **Archive size
+is not evidence that an archive restores** (R-A8P F4).
+
 The archive is shaped to restore straight into a volume mounted at `/data`, so
-`scripts/production_restore_volumes.sh` consumes it unchanged.
+`scripts/production_restore_volumes.sh` consumes it unchanged. Record the shape
+in the evidence directory:
+
+```bash
+tar -tzf "$ARCH" | head       # expect ./dump.rdb and ./appendonlydir/...
+                              # a FalkorDB/ prefix is an abort, at any size
+```
 
 ---
 
@@ -241,7 +250,7 @@ PROD='docker compose -p contraclaim -f docker-compose.prod.yml -f docker-compose
 | 5 | Stop the application tier | `$PROD stop gateway client backend contract-worker` |
 | 6 | Stop the unmanaged sidecars **by name** | `docker stop contraclaim-arbitration-audit-new contraclaim-arbitration-audit-test` |
 | 7 | Quiesced backup — the authoritative one | repeat step 2 with a new `$STAMP`, then the §0 rescue capture |
-| 8 | Verify every archive before going further | `scripts/backup_volume.sh --verify` per archive; `python3 scripts/backup_status.py --root /var/backups/contractdms --max-age-hours 26` |
+| 8 | Verify every archive before going further | `bash scripts/backup_volume.sh --verify "$ARCH" --profile redis-persistence` for each Redis-family archive, `--any-of`/`--require` per its declared contract otherwise; then `python3 scripts/backup_status.py --root /var/backups/contractdms --max-age-hours 26` |
 | 9 | Stop the data tier | `$PROD stop clamav qdrant falkordb redis mongo3 mongo2 mongo1` |
 
 Step 7 is deliberately after step 5: a backup taken while the application is
@@ -255,6 +264,18 @@ into a refusal rather than into an overrun. **If step 4a is RED, ingress has
 been stopped and nothing else has: start nginx and `certbot.timer` again,
 restore the backup cron, and reschedule.** That is a sub-minute reversal, which
 is the whole reason gate #2 sits before step 5 rather than after it.
+
+Step 8's verification is not the pattern list it used to be. `--verify A B`
+passed when *either* pattern matched, so an archive holding an empty
+`appendonlydir/` and no `dump.rdb` verified clean (R-A8P F2), and
+`backup_status.py` reported `falkordb-data: ok` for an 89-byte archive of an
+empty directory (R-A8P F3). Both now decide through one contract:
+`--profile redis-persistence` requires a usable RDB snapshot **or** a usable
+multi-part AOF directory, at the archive root, with a real payload;
+`--require` is a conjunction and `--any-of` a disjunction, each said out loud.
+`backup_status.py` applies the same contract, and reports `VALID`,
+`UNVERIFIED`, `STALE`, `EMPTY`, `MISSING`, `UNREADABLE`, `INVALID_CONTENT` or
+`INVALID_ROOT` — never `ok`.
 
 ### Proofs required before staging is created
 
