@@ -439,3 +439,177 @@ def test_the_vector_service_really_does_need_redisearch() -> None:
         "falkordb_vector_service no longer depends on RediSearch. The Gate 2 "
         "supersession reasoning cites FT.CREATE specifically and must be re-derived."
     )
+
+
+# --------------------------------------------------------------------------- #
+# ...and every OTHER place the document states it
+# --------------------------------------------------------------------------- #
+#
+# The guard above matches one phrasing, `launch-readiness score is N/100`. R-A8R
+# found three stated figures it could not see, all of them wrong:
+#
+#   * "Current production launch-readiness score: **32/100**" - a colon, not "is"
+#   * "current readiness score is 32/100" inside the P0-008 blocker row
+#   * "Total: **66 / 100**" in the rendered gate table, whose spaces around the
+#     slash defeat the pattern - and whose Gate 1 row still read 4/6 after the
+#     box was ticked
+#
+# A drift guard that only sees one sentence is a drift guard the next figure
+# routes around. These two rules see the rest.
+
+
+def _score_result():
+    import importlib.util
+
+    script = PROJECT / "scripts" / "production_readiness_score.py"
+    spec = importlib.util.spec_from_file_location("_readiness_score_full", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.calculate(GATE_FILE)
+
+
+SCORE_TARGET = 85
+
+#: `68/100`, `68 / 100`, `**68/100**`. The separator spacing is the whole point.
+SCORE_FIGURE = re.compile(r"(\d+)\s*/\s*100")
+
+
+def stated_current_scores(text: str) -> List[tuple[int, str]]:
+    """(value, line) for every figure a line offers as the CURRENT score.
+
+    Scoped to lines that say both "current" and "score", so a sentence recording
+    what the score used to be - which the document legitimately does, several
+    times - is not swept up. That is a real distinction, not a loophole: a
+    historical figure is only a lie if it claims to be current.
+    """
+    found = []
+    for line in text.splitlines():
+        low = line.lower()
+        if "current" not in low or "score" not in low:
+            continue
+        for match in SCORE_FIGURE.finditer(line):
+            found.append((int(match.group(1)), line.strip()))
+    return found
+
+
+def test_no_line_claims_a_current_score_the_script_does_not_compute(gate_text: str) -> None:
+    computed = _computed_score()
+    wrong = [
+        (value, line)
+        for value, line in stated_current_scores(gate_text)
+        if value not in (computed, SCORE_TARGET)
+    ]
+    assert not wrong, (
+        f"the script computes {computed}/100, and these lines state something else:\n"
+        + "\n".join(f"  {value}/100 in: {line}" for value, line in wrong)
+    )
+
+
+def test_the_current_score_is_stated_somewhere(gate_text: str) -> None:
+    """Otherwise the rule above is satisfied by deleting every figure."""
+    computed = _computed_score()
+    assert any(value == computed for value, _ in stated_current_scores(gate_text)), (
+        f"no line states the computed score {computed}/100 as the current one"
+    )
+
+
+GATE_TABLE_ROW = re.compile(
+    r"^\|\s*(Gate \d+:[^|]+?)\s*\|\s*([\d.]+)\s*/\s*(\d+)\s*\|\s*(\d+)\s*/\s*(\d+)\s*\|$"
+)
+
+
+def rendered_gate_table(text: str) -> List[dict]:
+    return [
+        {
+            "gate": match.group(1).strip(),
+            "points": float(match.group(2)),
+            "weight": int(match.group(3)),
+            "checked": int(match.group(4)),
+            "total": int(match.group(5)),
+        }
+        for match in (GATE_TABLE_ROW.match(line.strip()) for line in text.splitlines())
+        if match
+    ]
+
+
+def test_the_rendered_gate_table_matches_the_script(gate_text: str) -> None:
+    """The table says it is "the script's own output". It has to be.
+
+    It went stale twice: once showing Gate 2 at 0/6 and Gate 8 at 1/8 after those
+    bullets were ticked with evidence, and once showing Gate 1 at 4/6 after the
+    lint box was ticked. Both times the checkboxes were right and the rendering
+    was wrong, which is the safe direction - and still a document that reports two
+    different scores depending on where you read.
+    """
+    rendered = rendered_gate_table(gate_text)
+    assert rendered, "the rendered gate-score table is gone from the document"
+
+    computed = {gate["gate"]: gate for gate in _score_result()["gate_scores"]}
+    assert len(rendered) == len(computed), (
+        f"the table renders {len(rendered)} gates; the script computes {len(computed)}"
+    )
+
+    mismatches = []
+    for row in rendered:
+        gate = computed.get(row["gate"])
+        if gate is None:
+            mismatches.append(f"{row['gate']}: not a gate the script knows about")
+            continue
+        if (row["checked"], row["total"]) != (gate["checked"], gate["total"]):
+            mismatches.append(
+                f"{row['gate']}: table says {row['checked']}/{row['total']}, "
+                f"script says {gate['checked']}/{gate['total']}"
+            )
+        if abs(row["points"] - gate["points"]) > 0.01 or row["weight"] != gate["weight"]:
+            mismatches.append(
+                f"{row['gate']}: table says {row['points']}/{row['weight']}, "
+                f"script says {gate['points']}/{gate['weight']}"
+            )
+    assert not mismatches, "\n".join(mismatches)
+
+
+def test_the_table_total_is_the_computed_score(gate_text: str) -> None:
+    match = re.search(r"^Total:\s*\*?\*?(\d+)\s*/\s*100", gate_text, re.M)
+    assert match, "the gate table no longer states a total"
+    assert int(match.group(1)) == _computed_score()
+
+
+# --- the guards' own breakages ---------------------------------------------- #
+
+
+def test_the_current_score_rule_ignores_a_historical_figure() -> None:
+    """A document that cannot record what the score used to be is a worse document."""
+    text = "The figure recorded here through Phase 8 was 32/100 and was never re-derived."
+    assert stated_current_scores(text) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("Current production launch-readiness score: **32/100**.", id="colon-form"),
+        pytest.param("current readiness score is 32/100", id="inline-in-a-table-row"),
+        pytest.param("Current score: 32 / 100", id="spaced-separator"),
+    ],
+)
+def test_the_current_score_rule_catches_the_forms_that_escaped(line: str) -> None:
+    assert stated_current_scores(line) == [(32, line.strip())]
+
+
+def test_the_table_rule_rejects_a_stale_row() -> None:
+    stale = "| Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |"
+    rows = rendered_gate_table(stale)
+    assert rows == [
+        {
+            "gate": "Gate 1: CI And Local Test Baseline",
+            "points": 10.0,
+            "weight": 15,
+            "checked": 4,
+            "total": 6,
+        }
+    ]
+    live = {gate["gate"]: gate for gate in _score_result()["gate_scores"]}
+    assert rows[0]["checked"] != live["Gate 1: CI And Local Test Baseline"]["checked"], (
+        "this control is anchored on Gate 1 being 5/6; if that changes, re-anchor it "
+        "rather than deleting it"
+    )

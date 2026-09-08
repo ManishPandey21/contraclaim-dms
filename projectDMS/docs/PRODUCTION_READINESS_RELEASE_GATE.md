@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 66/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 68/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after release programme R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -31,17 +31,28 @@ Production promotion is blocked until all gates are checked.
 
 - [x] `python -m pytest backend/rbac_backend/tests -q` passes with 0 failures.
 - [x] Backend tests do not require live OpenAI, MongoDB Atlas Vector Search, Qdrant, FalkorDB, Redis, or network access unless explicitly marked as live integration tests.
-- [ ] `npm run lint` passes in `client`.
+- [x] `npm run lint` passes in `client`. evidence: client/package.json (release programme R-A8R, 2026-09-08: `npm run lint` -> `eslint . --max-warnings=0`, eslint v9.39.4, **exit 0, no output**, against `release/contraclaim-rc1` at `c66a1ef`)
 - [x] `npm test -- --run` passes in `client`.
 - [x] `npm run build` passes in `client`.
 - [ ] GitHub Actions passes for backend, frontend, dependency scans, and Docker image scans.
 
-Correction (release programme R-A4): the lint box was ticked and is not true.
-`npm run lint` runs `eslint . --max-warnings=0` and **exits 1** on two
+Correction history for the lint box, because it has been wrong in both directions.
+
+**R-A4:** the box was ticked and was not true. `npm run lint` runs
+`eslint . --max-warnings=0` and **exited 1** on two
 `react-refresh/only-export-components` warnings in
-`client/src/pages/PermissionsPage.tsx`, which are present at the base commit
-and are not release-introduced. Nothing about the code changed here; the
-checkbox was recording an outcome the command does not produce.
+`client/src/pages/PermissionsPage.tsx`. It was unticked.
+
+**R-A8R (2026-09-08):** it is now true, and the paragraph above had gone stale in
+the other direction. Release commit `6448663` *fix(client): let the permissions
+page export only a component* removed the two warnings, and the command was
+re-executed on this branch: eslint v9.39.4, **exit 0, no output**. A correction
+that outlives the defect it describes is the same failure as the original tick,
+so the box is ticked and this is what it was measured with.
+
+**This is a local run, and Gate 1 bullet 6 is still open.** CI running the same
+command on the pushed branch is a separate bullet and a separate piece of
+evidence; nothing here earns it.
 
 Current known baseline:
 
@@ -361,7 +372,10 @@ time. No production S3 architecture change is authorised in this phase.
 
 Current score evidence:
 
-- Current production launch-readiness score: **32/100**.
+- Current production launch-readiness score is **68/100** (re-derived by
+  `scripts/production_readiness_score.py`, release programme R-A8R, 2026-09-08).
+  The figure recorded here through Phase 8 was 32/100 and had not been re-derived
+  since.
 - Current verdict: **Not Ready**.
 - Score target: **85/100**.
 - Scoring script: `python scripts/production_readiness_score.py`.
@@ -378,11 +392,11 @@ Current score evidence:
 | P0-005 | Resolved (code) | Upload antivirus can be disabled | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py` | Deploy ClamAV in staging and capture a live infected/clean scan as final Gate 5 proof |
 | P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box |
 | P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
-| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/8 and current readiness score is 32/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
+| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 68/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **66/100** against a target of
+The current production launch-readiness score is **68/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -404,7 +418,7 @@ is one point lower because a point that had never been earned was being counted,
 not because anything regressed.
 
 Current gate score summary, re-derived mechanically from
-`scripts/production_readiness_score.py` on 2026-09-08. This table is a rendering
+`scripts/production_readiness_score.py` on 2026-09-08 (R-A8R). This table is a rendering
 of the checkboxes above and nothing else; when the two disagree, the checkboxes
 and their evidence lines are the record. (The previous copy of this table
 predated the R-A8M staging execution and still showed Gate 2 at 0/6, Gate 7 at
@@ -413,7 +427,7 @@ stale rendering, not withdrawn evidence.)
 
 | Gate | Score | Checked |
 | --- | ---: | ---: |
-| Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |
+| Gate 1: CI And Local Test Baseline | 12.50 / 15 | 5 / 6 |
 | Gate 2: Live Integration Baseline | 10.00 / 10 | 6 / 6 |
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
@@ -423,7 +437,7 @@ stale rendering, not withdrawn evidence.)
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
 
-Total: **66 / 100** against a target of 85.
+Total: **68 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 
@@ -767,7 +781,7 @@ If host `mongosh` is installed but cannot resolve Docker service names from `DAT
 
 - [x] Added deterministic readiness scoring script: `scripts/production_readiness_score.py`.
 - [x] Recorded final production-readiness audit: `docs/PRODUCTION_READINESS_FINAL_AUDIT.md`.
-- [x] Current launch-readiness score calculated from launch-gate evidence: **32/100**.
+- [x] Launch-readiness score calculated from launch-gate evidence **as at Phase 8**: 32/100. (Superseded — re-derived as 68/100 in R-A8R. Read the readiness-score section above, not this line.)
 - [x] Current verdict remains **Not Ready**.
 - [x] Pending blockers are recorded by phase.
 - [x] Critical blocker register includes final staging deploy/smoke/restore/sign-off gap as `P0-008`.
