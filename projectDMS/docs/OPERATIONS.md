@@ -60,7 +60,16 @@ Endpoints:
 - `/health/live`: process liveness.
 - `/health/ready`: MongoDB, Redis, config, and writable upload-storage readiness.
 - `/health/observability`: token-gated operational snapshot.
-- `/health/operations`: token-gated backup freshness report.
+- `/health/operations`: token-gated backup report - freshness **and**, for every
+  archive with a declared content contract, whether it is a usable recovery
+  artefact. Each artifact carries an explicit state: `VALID`, `UNVERIFIED`
+  (fresh, no contract declared), `UNEVALUATED` (contract declared, not
+  applied), `STALE`, `EMPTY`, `MISSING`, `UNREADABLE`, `INVALID_CONTENT` or
+  `INVALID_ROOT`. Only `VALID` and `UNVERIFIED` are healthy, and only `VALID`
+  claims the archive restores. The contract lives in
+  `services/backup_archive_validation.py` and is shared with
+  `scripts/backup_volume.sh`, so the nightly backup and the health endpoint
+  cannot drift apart.
 - `/metrics`: Prometheus text format, token-gated when `METRICS_TOKEN` is set.
 
 Important environment variables:
@@ -130,7 +139,8 @@ The backup job writes:
 - `mongo/<db>-<stamp>.archive.gz`
 - `volumes/<label>-<stamp>.tar.gz`
 
-Check backup freshness:
+Check the backups - freshness, and the content of every archive that declares
+a contract:
 
 ```bash
 python scripts/backup_status.py --root /var/backups/contractdms --max-age-hours 26
@@ -314,9 +324,10 @@ scripts/post_deploy_verify.sh
 ```
 
 This checks container status, `/health/live`, `/health/ready`,
-`/health/observability`, `/metrics`, backup freshness, MongoDB, Redis, and
-recent backend exception signatures. Set `REQUIRE_FRESH_BACKUP=true` to make
-backup freshness a hard post-deploy gate.
+`/health/observability`, `/metrics`, backup freshness and archive validity,
+MongoDB, Redis, and recent backend exception signatures. Set
+`REQUIRE_FRESH_BACKUP=true` to make the backup check a hard post-deploy gate;
+without it a backup that will not restore is a warning rather than a failure.
 
 ## 7. Scheduler Ownership
 

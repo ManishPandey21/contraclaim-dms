@@ -344,7 +344,11 @@ Verify the contract is green after the first run:
 ```bash
 curl -fsS -H "X-Metrics-Token: <METRICS_TOKEN>" \
   https://app.yourdomain.com/api/health/operations
-# expect "status":"ok" with mongo + all volume artifacts "ok"
+# expect "status":"ok", every artifact VALID or UNVERIFIED, and
+# "unhealthy_artifacts": []. VALID means the archive was opened and carries a
+# usable payload; UNVERIFIED means no content contract is declared for that
+# label, so its restorability is unproven. UNEVALUATED, INVALID_CONTENT and
+# INVALID_ROOT are all failures.
 ```
 
 > **How the health contract works (H5):** `/api/health/operations`

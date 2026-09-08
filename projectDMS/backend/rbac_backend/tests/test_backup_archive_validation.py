@@ -18,18 +18,21 @@ answer, and every caller is routed through it.
 
 from __future__ import annotations
 
-import io
 import json
 import os
-import random
-import shutil
 import subprocess
 import sys
-import tarfile
 from pathlib import Path
 
 import pytest
 
+from rbac_backend.tests.backup_archive_fixtures import (
+    AOF_MEMBERS,
+    RDB_BYTES,
+    incompressible,
+    working_bash,
+    write_archive,
+)
 from rbac_backend.services.backup_archive_validation import (
     INVALID_CONTENT,
     INVALID_ROOT,
@@ -44,40 +47,11 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 VALIDATOR = REPO_ROOT / "scripts" / "validate_backup_archive.py"
 BACKUP_VOLUME = REPO_ROOT / "scripts" / "backup_volume.sh"
 
-#: A real RDB file starts with the ASCII magic plus a four-digit version.
-RDB_BYTES = b"REDIS0011\xfa\x09redis-ver\x057.4.0\xff\x00\x00\x00\x00\x00\x00\x00\x00"
-AOF_MANIFEST = b"file appendonly.aof.1.base.rdb seq 1 type b\nfile appendonly.aof.1.incr.aof seq 1 type i\n"
-AOF_INCR = b"*2\r\n$6\r\nSELECT\r\n$1\r\n0\r\n"
-
-
-def _incompressible(size: int) -> bytes:
-    """A payload gzip cannot shrink, so the archive's size is a real number.
-
-    R-A8O's unrestorable rescue archive was 14.7 MB. The point of the F4 test
-    is that a large archive proves nothing, and a run of zero bytes would
-    quietly undermine it by compressing away to nothing.
-    """
-    return b"\x7fELF" + random.Random(1729).randbytes(size)
-
-
-def _archive(path: Path, members: dict[str, bytes], *, directories: tuple[str, ...] = ()) -> Path:
-    with tarfile.open(path, "w:gz") as tar:
-        for name in directories:
-            info = tarfile.TarInfo(name)
-            info.type = tarfile.DIRTYPE
-            tar.addfile(info)
-        for name, payload in members.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            tar.addfile(info, io.BytesIO(payload))
-    return path
-
-
 # ------------------------------------------------------- the Falkor profile
 
 
 def test_an_archive_with_dump_rdb_at_the_root_is_valid(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "rdb-only.tar.gz", {"./dump.rdb": RDB_BYTES})
+    archive = write_archive(tmp_path / "rdb-only.tar.gz", {"./dump.rdb": RDB_BYTES})
 
     verdict = validate_archive(archive, profile="redis-persistence")
 
@@ -86,13 +60,9 @@ def test_an_archive_with_dump_rdb_at_the_root_is_valid(tmp_path: Path) -> None:
 
 
 def test_an_aof_only_archive_is_valid(tmp_path: Path) -> None:
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "aof-only.tar.gz",
-        {
-            "./appendonlydir/appendonly.aof.manifest": AOF_MANIFEST,
-            "./appendonlydir/appendonly.aof.1.base.rdb": RDB_BYTES,
-            "./appendonlydir/appendonly.aof.1.incr.aof": AOF_INCR,
-        },
+        dict(AOF_MEMBERS),
         directories=("./appendonlydir/",),
     )
 
@@ -102,12 +72,11 @@ def test_an_aof_only_archive_is_valid(tmp_path: Path) -> None:
 
 
 def test_an_archive_with_both_rdb_and_aof_is_valid(tmp_path: Path) -> None:
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "both.tar.gz",
         {
             "./dump.rdb": RDB_BYTES,
-            "./appendonlydir/appendonly.aof.manifest": AOF_MANIFEST,
-            "./appendonlydir/appendonly.aof.1.incr.aof": AOF_INCR,
+            **AOF_MEMBERS,
         },
         directories=("./appendonlydir/",),
     )
@@ -121,7 +90,7 @@ def test_the_eighty_nine_byte_empty_data_archive_is_refused(tmp_path: Path) -> N
     `tar -czf` over an empty `/data` yields one directory entry and 89 bytes,
     and every layer above it called that a backup.
     """
-    archive = _archive(tmp_path / "empty.tar.gz", {}, directories=("./",))
+    archive = write_archive(tmp_path / "empty.tar.gz", {}, directories=("./",))
 
     verdict = validate_archive(archive, profile="redis-persistence")
 
@@ -132,19 +101,21 @@ def test_the_eighty_nine_byte_empty_data_archive_is_refused(tmp_path: Path) -> N
 
 def test_an_empty_appendonlydir_with_no_dump_rdb_is_refused(tmp_path: Path) -> None:
     """F2's concrete failure: the archive the OR semantics certified."""
-    archive = _archive(tmp_path / "hollow.tar.gz", {}, directories=("./", "./appendonlydir/"))
+    archive = write_archive(tmp_path / "hollow.tar.gz", {}, directories=("./", "./appendonlydir/"))
 
     assert validate_archive(archive, profile="redis-persistence").status == INVALID_CONTENT
 
 
 def test_a_nested_falkordb_prefix_is_refused_as_the_wrong_restore_root(tmp_path: Path) -> None:
     """F4. Restoring this into /data yields /data/FalkorDB/dump.rdb."""
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "nested.tar.gz",
         {
             "FalkorDB/dump.rdb": RDB_BYTES,
-            "FalkorDB/appendonlydir/appendonly.aof.manifest": AOF_MANIFEST,
-            "bin/src/falkordb.so": _incompressible(65536),
+            "FalkorDB/appendonlydir/appendonly.aof.manifest": AOF_MEMBERS[
+                "./appendonlydir/appendonly.aof.manifest"
+            ],
+            "bin/src/falkordb.so": incompressible(65536),
         },
     )
 
@@ -156,23 +127,23 @@ def test_a_nested_falkordb_prefix_is_refused_as_the_wrong_restore_root(tmp_path:
 
 
 def test_an_archive_of_only_binary_module_files_is_refused(tmp_path: Path) -> None:
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "modules.tar.gz",
-        {"./bin/src/falkordb.so": _incompressible(65536)},
+        {"./bin/src/falkordb.so": incompressible(65536)},
     )
 
     assert validate_archive(archive, profile="redis-persistence").status == INVALID_CONTENT
 
 
 def test_a_zero_byte_dump_rdb_is_refused(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "hollow-rdb.tar.gz", {"./dump.rdb": b""})
+    archive = write_archive(tmp_path / "hollow-rdb.tar.gz", {"./dump.rdb": b""})
 
     assert validate_archive(archive, profile="redis-persistence").status == INVALID_CONTENT
 
 
 def test_a_dump_rdb_without_the_rdb_magic_is_refused(tmp_path: Path) -> None:
     """Structural signature, where it is feasible to check one."""
-    archive = _archive(tmp_path / "fake-rdb.tar.gz", {"./dump.rdb": b"this is not an RDB file at all"})
+    archive = write_archive(tmp_path / "fake-rdb.tar.gz", {"./dump.rdb": b"this is not an RDB file at all"})
 
     verdict = validate_archive(archive, profile="redis-persistence")
 
@@ -192,7 +163,7 @@ def test_an_unreadable_archive_is_refused(tmp_path: Path) -> None:
 
 
 def test_an_unknown_profile_fails_closed(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "x.tar.gz", {"./dump.rdb": RDB_BYTES})
+    archive = write_archive(tmp_path / "x.tar.gz", {"./dump.rdb": RDB_BYTES})
 
     with pytest.raises(ArchiveValidationError):
         validate_archive(archive, profile="no-such-profile")
@@ -202,7 +173,7 @@ def test_an_unknown_profile_fails_closed(tmp_path: Path) -> None:
 
 
 def _two_member_archive(tmp_path: Path, name: str, *members: str) -> Path:
-    return _archive(tmp_path / name, {member: b"payload" for member in members})
+    return write_archive(tmp_path / name, {member: b"payload" for member in members})
 
 
 def test_require_means_every_pattern_must_be_present(tmp_path: Path) -> None:
@@ -218,7 +189,7 @@ def test_require_means_every_pattern_must_be_present(tmp_path: Path) -> None:
     [("./a.dat",), ("./b.dat",), ()],
 )
 def test_require_refuses_when_any_required_pattern_is_absent(tmp_path: Path, present: tuple[str, ...]) -> None:
-    archive = _archive(tmp_path / "partial.tar.gz", {name: b"payload" for name in present}, directories=("./",))
+    archive = write_archive(tmp_path / "partial.tar.gz", {name: b"payload" for name in present}, directories=("./",))
 
     verdict = validate_archive(archive, require=("*a.dat", "*b.dat"))
 
@@ -240,7 +211,7 @@ def test_a_pattern_is_satisfied_only_by_a_non_empty_file(tmp_path: Path) -> None
     `appendonlydir/` as an entry whether or not anything was ever written into
     it, and a glob match against the entry list cannot tell the difference.
     """
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "dir-only.tar.gz",
         {},
         directories=("./", "./appendonlydir/"),
@@ -251,13 +222,13 @@ def test_a_pattern_is_satisfied_only_by_a_non_empty_file(tmp_path: Path) -> None
 
 
 def test_an_empty_file_does_not_satisfy_a_pattern(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "zero.tar.gz", {"./a.dat": b""})
+    archive = write_archive(tmp_path / "zero.tar.gz", {"./a.dat": b""})
 
     assert validate_archive(archive, require=("*a.dat",)).status == INVALID_CONTENT
 
 
 def test_unexpected_extra_files_are_allowed(tmp_path: Path) -> None:
-    archive = _archive(
+    archive = write_archive(
         tmp_path / "extra.tar.gz",
         {"./dump.rdb": RDB_BYTES, "./nodes.conf": b"whatever", "./README": b"hi"},
     )
@@ -266,7 +237,7 @@ def test_unexpected_extra_files_are_allowed(tmp_path: Path) -> None:
 
 
 def test_no_contract_at_all_verifies_only_that_the_archive_reads(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "bare.tar.gz", {}, directories=("./",))
+    archive = write_archive(tmp_path / "bare.tar.gz", {}, directories=("./",))
 
     verdict = validate_archive(archive)
 
@@ -287,7 +258,7 @@ def _run_validator(*args: str) -> "subprocess.CompletedProcess[str]":
 
 
 def test_the_validator_cli_reports_valid(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
+    archive = write_archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
 
     result = _run_validator(str(archive), "--profile", "redis-persistence", "--json")
 
@@ -295,8 +266,8 @@ def test_the_validator_cli_reports_valid(tmp_path: Path) -> None:
     assert json.loads(result.stdout)["status"] == VALID
 
 
-def test_the_validator_cli_refuses_the_empty_archive(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "empty.tar.gz", {}, directories=("./",))
+def test_the_validator_cli_refuses_the_emptywrite_archive(tmp_path: Path) -> None:
+    archive = write_archive(tmp_path / "empty.tar.gz", {}, directories=("./",))
 
     result = _run_validator(str(archive), "--profile", "redis-persistence")
 
@@ -305,7 +276,7 @@ def test_the_validator_cli_refuses_the_empty_archive(tmp_path: Path) -> None:
 
 
 def test_the_validator_cli_rejects_an_unknown_profile(tmp_path: Path) -> None:
-    archive = _archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
+    archive = write_archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
 
     result = _run_validator(str(archive), "--profile", "nope")
 
@@ -315,21 +286,7 @@ def test_the_validator_cli_rejects_an_unknown_profile(tmp_path: Path) -> None:
 # ------------------------------------------------ backup_volume.sh delegates
 
 
-def _working_bash() -> str | None:
-    candidates = [shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe"]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            probe = subprocess.run([candidate, "-c", "exit 0"], capture_output=True, timeout=30)
-        except OSError:
-            continue
-        if probe.returncode == 0:
-            return candidate
-    return None
-
-
-BASH = _working_bash()
+BASH = working_bash()
 
 
 def _verify(archive: Path, *args: str, python_bin: str | None = sys.executable) -> "subprocess.CompletedProcess[str]":
@@ -351,9 +308,9 @@ def _verify(archive: Path, *args: str, python_bin: str | None = sys.executable) 
 
 @pytest.mark.skipif(BASH is None, reason="a working bash is required to run the backup script")
 def test_the_shell_verifier_uses_the_same_profile_contract(tmp_path: Path) -> None:
-    good = _archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
-    hollow = _archive(tmp_path / "hollow.tar.gz", {}, directories=("./", "./appendonlydir/"))
-    nested = _archive(tmp_path / "nested.tar.gz", {"FalkorDB/dump.rdb": RDB_BYTES})
+    good = write_archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
+    hollow = write_archive(tmp_path / "hollow.tar.gz", {}, directories=("./", "./appendonlydir/"))
+    nested = write_archive(tmp_path / "nested.tar.gz", {"FalkorDB/dump.rdb": RDB_BYTES})
 
     assert _verify(good, "--profile", "redis-persistence").returncode == 0
     assert _verify(hollow, "--profile", "redis-persistence").returncode != 0
@@ -362,8 +319,8 @@ def test_the_shell_verifier_uses_the_same_profile_contract(tmp_path: Path) -> No
 
 @pytest.mark.skipif(BASH is None, reason="a working bash is required to run the backup script")
 def test_the_shell_verifier_honours_require_as_a_conjunction(tmp_path: Path) -> None:
-    both = _archive(tmp_path / "both.tar.gz", {"./a.dat": b"x", "./b.dat": b"y"})
-    only_a = _archive(tmp_path / "only-a.tar.gz", {"./a.dat": b"x"})
+    both = write_archive(tmp_path / "both.tar.gz", {"./a.dat": b"x", "./b.dat": b"y"})
+    only_a = write_archive(tmp_path / "only-a.tar.gz", {"./a.dat": b"x"})
 
     assert _verify(both, "--require", "*a.dat", "--require", "*b.dat").returncode == 0
     assert _verify(only_a, "--require", "*a.dat", "--require", "*b.dat").returncode != 0
@@ -373,7 +330,7 @@ def test_the_shell_verifier_honours_require_as_a_conjunction(tmp_path: Path) -> 
 @pytest.mark.skipif(BASH is None, reason="a working bash is required to run the backup script")
 def test_the_shell_verifier_fails_closed_without_an_interpreter(tmp_path: Path) -> None:
     """No Python means the contract cannot be evaluated, which is not a pass."""
-    good = _archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
+    good = write_archive(tmp_path / "good.tar.gz", {"./dump.rdb": RDB_BYTES})
 
     result = _verify(good, "--profile", "redis-persistence", python_bin="/nonexistent/python")
 

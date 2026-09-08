@@ -80,12 +80,26 @@ echo "FalkorDB in $container persists into $persistence_dir"
 if [[ "$bgsave" == "true" ]]; then
   echo "Flushing the snapshot (BGSAVE) ..."
   redis_cli "BGSAVE" >/dev/null
+  saved=false
   for _ in $(seq 1 60); do
     if redis_cli "INFO persistence" | tr -d '\r' | grep -q '^rdb_bgsave_in_progress:0'; then
+      saved=true
       break
     fi
     sleep 1
   done
+  # Falling through this loop silently would archive whatever dump.rdb happened
+  # to be on disk - possibly hours old, and structurally valid enough to pass
+  # every check downstream. A stale rescue archive that looks current is worse
+  # than no rescue archive, so the timeout is fatal.
+  if [[ "$saved" != "true" ]]; then
+    echo "BGSAVE did not finish within 60s in $container." >&2
+    echo "Archiving now would capture whatever snapshot predates it, and nothing" >&2
+    echo "downstream can tell a stale dump.rdb from a current one. Re-run once the" >&2
+    echo "save completes, or pass --no-bgsave to archive the existing files" >&2
+    echo "deliberately." >&2
+    exit 1
+  fi
 fi
 
 staging=$(mktemp -d "${RESCUE_WORK_DIR:-${TMPDIR:-/tmp}}/falkor-rescue.XXXXXX")

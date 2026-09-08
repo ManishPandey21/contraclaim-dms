@@ -10,11 +10,12 @@ runbook prescribes is the corrected one.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from rbac_backend.tests.backup_archive_fixtures import working_bash
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNBOOK = REPO_ROOT / "docs" / "SAME_HOST_STAGING_MAINTENANCE_WINDOW.md"
@@ -22,6 +23,7 @@ TIME_GATE = REPO_ROOT / "scripts" / "check_maintenance_time_budget.py"
 RESCUE = REPO_ROOT / "scripts" / "falkordb_rescue_archive.sh"
 BACKUP_VOLUME = REPO_ROOT / "scripts" / "backup_volume.sh"
 VALIDATOR = REPO_ROOT / "scripts" / "validate_backup_archive.py"
+RESCUE_DRILL = REPO_ROOT / "scripts" / "falkordb_rescue_restore_drill.sh"
 
 
 @pytest.fixture(scope="module")
@@ -30,21 +32,7 @@ def runbook() -> str:
     return RUNBOOK.read_text(encoding="utf-8")
 
 
-def _working_bash() -> str | None:
-    candidates = [shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe"]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            probe = subprocess.run([candidate, "-c", "exit 0"], capture_output=True, timeout=30)
-        except OSError:
-            continue
-        if probe.returncode == 0:
-            return candidate
-    return None
-
-
-BASH = _working_bash()
+BASH = working_bash()
 
 
 # --------------------------------------------------------------- F1, in prose
@@ -68,9 +56,14 @@ def test_the_runbook_requires_two_gates_and_puts_the_second_before_the_stop(runb
     assert "TIME-BUDGET GATE #1" in runbook
     assert "TIME-BUDGET GATE #2" in runbook
 
-    gate_two = runbook.index("TIME-BUDGET GATE #2")
+    gate_two = runbook.index("| **3c** | **TIME-BUDGET GATE #2**")
+    ingress_stop = runbook.index("| 4 | Stop ingress", gate_two)
     stop_command = runbook.index("$PROD stop gateway client backend contract-worker", gate_two)
-    assert gate_two < stop_command, "gate #2 must be read before the application tier is stopped"
+    assert gate_two < ingress_stop < stop_command, (
+        "gate #2 must be read before the FIRST production-mutating command, and stopping "
+        "nginx already takes the site down - putting the gate after it means the abort is "
+        "no longer free"
+    )
 
 
 def test_the_runbook_refuses_a_stale_go_in_so_many_words(runbook: str) -> None:
@@ -124,14 +117,14 @@ def test_the_runbook_drops_the_ok_vocabulary_for_backup_artifacts(runbook: str) 
 
 
 @pytest.mark.skipif(BASH is None, reason="a working bash is required")
-@pytest.mark.parametrize("script", [RESCUE, BACKUP_VOLUME])
+@pytest.mark.parametrize("script", [RESCUE, BACKUP_VOLUME, RESCUE_DRILL])
 def test_the_shell_scripts_parse(script: Path) -> None:
     assert BASH is not None
     result = subprocess.run([BASH, "-n", str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("script", [RESCUE, BACKUP_VOLUME])
+@pytest.mark.parametrize("script", [RESCUE, BACKUP_VOLUME, RESCUE_DRILL])
 def test_the_shell_scripts_stop_on_error(script: Path) -> None:
     assert "set -euo pipefail" in script.read_text(encoding="utf-8")
 
@@ -179,3 +172,27 @@ def test_backup_volume_fails_closed_without_an_interpreter() -> None:
 
     assert "an unevaluated contract is" in text
     assert "not a pass" in text
+
+
+def test_the_rescue_path_has_a_drill_of_its_own() -> None:
+    """The volume drill never touched the path production is actually on.
+
+    `falkordb_recovery_drill.sh` restores from a *volume* archive. Production
+    persists into the container writable layer, so the archive that matters is
+    the hand-taken rescue one - and nothing exercised it, which is why R-A8O's
+    archive was 14.7 MB of unrestorable data that everything called verified.
+    """
+    text = RESCUE_DRILL.read_text(encoding="utf-8")
+
+    assert "falkordb_rescue_archive.sh" in text, "the drill must exercise the rescue helper"
+    assert "production_restore_volumes.sh" in text, "and the real restore script"
+    assert "GRAPH.QUERY" in text, "tar exiting 0 is not a pass; only a matching graph is"
+    assert "FalkorDB/" in text and "empty" in text, "both negative controls must be present"
+    assert "ra8qrescue_" in text, "every resource it creates must be run-owned and disposable"
+
+
+def test_the_rescue_drill_never_names_a_production_resource() -> None:
+    text = RESCUE_DRILL.read_text(encoding="utf-8")
+
+    for forbidden in ("contraclaim-falkordb-1", "contraclaim_falkordb_data", "-p contraclaim"):
+        assert forbidden not in text, f"the drill must not be able to reach {forbidden}"

@@ -310,9 +310,16 @@ def confirm_authorization(
 def load_authorization(document: Any) -> MaintenanceAuthorization:
     """Rebuild an authorization from the document `issue_authorization` wrote.
 
-    The stored verdict is re-derived from the stored inputs at the stored
-    issue time rather than trusted from the file, so editing `verdict.go` to
-    `true` in the JSON buys nothing.
+    The stored verdict is re-derived from the stored inputs at the stored issue
+    time rather than trusted from the file, so editing `verdict.go` to `true`
+    buys nothing.
+
+    It is not a tamper-proof document and is not meant to be one: `window_end`,
+    `issued_at` and `max_age_seconds` are read as given, and editing any of them
+    does move the decision. It is an operator's own note about an owner-supplied
+    window. Its job is to stop a stale GO being reused by accident, not to
+    survive someone determined to defeat it; the window comes from the owner,
+    and the receipt records which values were used.
     """
 
     if isinstance(document, (str, bytes)):

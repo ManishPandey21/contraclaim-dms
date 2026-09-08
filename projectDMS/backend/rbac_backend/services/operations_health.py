@@ -10,12 +10,20 @@ Every artifact now carries an explicit state:
 
     VALID           fresh, and its declared content contract is satisfied
     UNVERIFIED      fresh, non-empty, and no content contract exists for it
+    UNEVALUATED     a contract exists and was NOT applied - a skipped step
     STALE           older than the freshness bound
     EMPTY           zero bytes
     MISSING         no such file
     UNREADABLE      present, not a readable archive
     INVALID_CONTENT present and readable, carrying nothing recoverable
     INVALID_ROOT    the payload is there, nested where a restore will not find it
+
+`UNEVALUATED` is unhealthy, and that distinction is the point. "Never mark
+success on a skipped step" is a house rule, and an archive whose contract was
+skipped - because it exceeded the inline ceiling, or because the caller asked
+for freshness only - is a skipped step. `UNVERIFIED` is healthy because no
+contract was ever declared for that label; the gap is in this module, not in
+the backup.
 
 The content contract itself lives in `backup_archive_validation`, which
 `backup_volume.sh`, the maintenance runbook and the recovery drill also call.
@@ -29,10 +37,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .backup_archive_validation import (
+    EMPTY,
     INVALID_CONTENT,
     INVALID_ROOT,
     MISSING,
     STALE,
+    UNEVALUATED,
     UNREADABLE,
     UNVERIFIED,
     VALID,
@@ -41,8 +51,6 @@ from .backup_archive_validation import (
 )
 
 DEFAULT_VOLUME_LABELS = ("backend-uploads", "qdrant-data", "falkordb-data", "redis-data")
-
-EMPTY = "EMPTY"
 
 #: Validating content means decompressing the whole archive, and this runs on
 #: `/health/operations`, which is polled. Above this ceiling the archive is
@@ -54,6 +62,9 @@ MAX_INLINE_VALIDATION_BYTES = 256 * 1024 * 1024
 #: The two states that do not indicate a problem. `UNVERIFIED` is in this set
 #: because a missing *contract* is a gap in this module, not a failure of the
 #: backup - but it is named in the output so nobody reads it as proof.
+#: `UNEVALUATED` is deliberately NOT in this set: there the contract exists and
+#: was skipped, and a gate that goes green on a check it declined to run is the
+#: R-A8P F3 shape all over again.
 HEALTHY_STATES = frozenset({VALID, UNVERIFIED})
 
 
@@ -106,11 +117,19 @@ def _file_status(
     if contract and size > max_inline_validation_bytes:
         return {
             **record,
-            "status": UNVERIFIED,
+            "status": UNEVALUATED,
             "detail": (
                 f"{size} bytes exceeds the {max_inline_validation_bytes}-byte inline validation "
-                f"ceiling; validate it out of band with scripts/validate_backup_archive.py"
+                f"ceiling, so the content contract was not applied. Validate it out of band with "
+                f"scripts/validate_backup_archive.py, or raise the ceiling."
             ),
+        }
+
+    if contract and not verify_content:
+        return {
+            **record,
+            "status": UNEVALUATED,
+            "detail": "a content contract is declared for this label and freshness-only was requested",
         }
 
     if verify_content and contract:
@@ -156,6 +175,7 @@ def build_backup_health(
             "missing_artifacts": ["backup_root"],
             "unhealthy_artifacts": ["backup_root"],
             "unverified_artifacts": [],
+            "unevaluated_artifacts": [],
             "artifacts": {},
         }
 
@@ -191,6 +211,7 @@ def build_backup_health(
     missing = [label for label, item in artifacts.items() if item.get("status") == MISSING]
     unhealthy = [label for label, item in artifacts.items() if item.get("status") not in HEALTHY_STATES]
     unverified = [label for label, item in artifacts.items() if item.get("status") == UNVERIFIED]
+    unevaluated = [label for label, item in artifacts.items() if item.get("status") == UNEVALUATED]
     return {
         "status": "ok" if not unhealthy else "failed",
         "backup_root": str(root),
@@ -199,5 +220,6 @@ def build_backup_health(
         "missing_artifacts": missing,
         "unhealthy_artifacts": unhealthy,
         "unverified_artifacts": unverified,
+        "unevaluated_artifacts": unevaluated,
         "artifacts": artifacts,
     }

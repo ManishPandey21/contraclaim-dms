@@ -49,12 +49,21 @@ INVALID_ROOT = "INVALID_ROOT"
 MISSING = "MISSING"
 #: A file that is not a readable gzip tarball.
 UNREADABLE = "UNREADABLE"
-#: A file that is present and fresh, whose content contract has not been
-#: evaluated. Never report this as "ok".
+#: Present and fresh, and no content contract is declared for this label. The
+#: archive may well be fine; nothing here has shown that it is. Never report
+#: this as "ok".
 UNVERIFIED = "UNVERIFIED"
+#: Present and fresh, a content contract IS declared, and it was not applied -
+#: the archive exceeded the inline validation ceiling, or the caller asked for
+#: freshness only. This is a skipped step, not a passed one, and callers must
+#: treat it as unhealthy: marking success on a skipped step is the exact shape
+#: of the defect this module exists to close.
+UNEVALUATED = "UNEVALUATED"
 #: Present, content valid, but older than the freshness bound. Freshness is the
 #: caller's concern; the constant lives here so the vocabulary has one home.
 STALE = "STALE"
+#: A zero-byte file. Freshness again, and here for the same reason.
+EMPTY = "EMPTY"
 
 #: First bytes of any RDB file, and of the `*.base.rdb` member of a multi-part
 #: AOF. Redis writes "REDIS" followed by a four-digit version.
@@ -255,8 +264,14 @@ PROFILE_BY_LABEL = {
     "redis-data": "redis-persistence",
 }
 
-#: Labels whose archives have no content contract yet. They are reported
-#: UNVERIFIED rather than VALID, so nothing claims more than it measured.
+#: Labels whose contract is a pattern list rather than a semantic profile.
+#: Qdrant persists either a collections tree or a raft state file, and either
+#: proves the volume held state, so this one is a genuine disjunction - which is
+#: why `any_of` is exposed as its own thing rather than being what a bare
+#: pattern list happens to mean.
+#:
+#: A label in neither mapping has no content contract at all and is reported
+#: UNVERIFIED, never VALID, so nothing claims more than it measured.
 ANY_OF_BY_LABEL = {
     "qdrant-data": ("*/collections/*", "*raft_state*"),
 }

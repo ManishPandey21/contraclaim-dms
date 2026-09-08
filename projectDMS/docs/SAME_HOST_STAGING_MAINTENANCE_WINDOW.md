@@ -73,6 +73,14 @@ tar -tzf "$ARCH" | head       # expect ./dump.rdb and ./appendonlydir/...
                               # a FalkorDB/ prefix is an abort, at any size
 ```
 
+`scripts/falkordb_rescue_restore_drill.sh` exercises this whole path against a
+disposable container that reproduces the production shape - persistence in the
+writable layer, rescue archive, restore into a clean volume, graph inventory
+parity, plus the R-A8O-shaped and 89-byte archives as negative controls. It
+touches no live container, volume or graph. Run it whenever the rescue path,
+the archive contract or the restore script changes; it is what would have caught
+R-A8O's archive before it was relied on.
+
 ---
 
 ## 1. Preconditions
@@ -131,8 +139,9 @@ PREP  →  broad GO/NO-GO  →  FINAL CLOCK RECHECK  →  TIME-BUDGET GATE #1
       →  record OUTAGE_START  →  TIME-BUDGET GATE #2  →  audited stop
 ```
 
-**Nothing goes between the last time gate and the stop** except recording
-`OUTAGE_START` and issuing the stop itself. No re-reads, no "one more check", no
+**Nothing goes between the last time gate and the stop** - and the stop begins
+at `systemctl stop nginx`, not at `docker compose stop`, because that is the
+first command a user would notice. No re-reads, no "one more check", no
 waiting on anything. If the operator or the session pauses materially after gate
 #1 — a break, a question, a slow command — **gate #1 is re-run from the top**.
 "It was green earlier" is not evidence and is not accepted as one.
@@ -157,7 +166,8 @@ date -u '+OUTAGE_START %Y-%m-%dT%H:%M:%SZ' | tee -a "$EVIDENCE/outage.txt"
 # budget, and refuses an authorization older than its declared lifetime.
 python3 scripts/check_maintenance_time_budget.py --confirm "$GATE"
 
-$PROD stop gateway client backend contract-worker    # only if gate #2 exited 0
+sudo systemctl stop certbot.timer && sudo systemctl stop nginx   # gate #2 exited 0
+$PROD stop gateway client backend contract-worker
 ```
 
 The authorization document holds clock data only — window end, reserve, budget,
@@ -243,10 +253,10 @@ PROD='docker compose -p contraclaim -f docker-compose.prod.yml -f docker-compose
 | 1 | Health + before-state | §2 |
 | 2 | Hot backup | `RETENTION_DAYS=100000 STAMP=$STAMP bash scripts/production_backup.sh` |
 | 3 | Suspend the backup cron | comment `/etc/cron.d/contraclaim-backup` |
-| **3a** | **TIME-BUDGET GATE #1** | **§1a — after every other GO item, and nothing else between this and step 5 but 3b and 4** |
+| **3a** | **TIME-BUDGET GATE #1** | **§1a — after every other GO item passes, and nothing but 3b and 3c may follow it** |
 | **3b** | **Record `OUTAGE_START`** | `date -u '+OUTAGE_START %Y-%m-%dT%H:%M:%SZ' \| tee -a "$EVIDENCE/outage.txt"` |
+| **3c** | **TIME-BUDGET GATE #2** | `python3 scripts/check_maintenance_time_budget.py --confirm "$GATE"` — **RED here means abort before step 4, no exception** |
 | 4 | Stop ingress | `sudo systemctl stop certbot.timer && sudo systemctl stop nginx` |
-| **4a** | **TIME-BUDGET GATE #2** | `python3 scripts/check_maintenance_time_budget.py --confirm "$GATE"` — **RED here means abort before step 5, no exception** |
 | 5 | Stop the application tier | `$PROD stop gateway client backend contract-worker` |
 | 6 | Stop the unmanaged sidecars **by name** | `docker stop contraclaim-arbitration-audit-new contraclaim-arbitration-audit-test` |
 | 7 | Quiesced backup — the authoritative one | repeat step 2 with a new `$STAMP`, then the §0 rescue capture |
@@ -257,13 +267,17 @@ Step 7 is deliberately after step 5: a backup taken while the application is
 writing is a fuzzy point in time. The hot backup at step 2 is the one that
 survives a failure *during* the stop.
 
-Steps 3a, 3b and 4a are the R-A8P remediation and they are an order, not a
-checklist. Step 4a re-reads the clock and recomputes the budget; it refuses an
+Steps 3a, 3b and 3c are the R-A8P remediation and they are an order, not a
+checklist. Step 3c re-reads the clock and recomputes the budget; it refuses an
 authorization older than five minutes, so a pause anywhere after step 3a turns
-into a refusal rather than into an overrun. **If step 4a is RED, ingress has
-been stopped and nothing else has: start nginx and `certbot.timer` again,
-restore the backup cron, and reschedule.** That is a sub-minute reversal, which
-is the whole reason gate #2 sits before step 5 rather than after it.
+into a refusal rather than into an overrun.
+
+**Gate #2 sits before step 4, not after it, because stopping nginx is already
+production-mutating** - the site is down from that moment, whatever the
+containers are doing. The gate has to be the last thing between the operator
+and the first command a user would notice. **If step 3c is RED, nothing has
+been stopped at all:** uncomment the backup cron and reschedule. That is the
+cheapest possible abort, and it is only available if the gate runs here.
 
 Step 8's verification is not the pattern list it used to be. `--verify A B`
 passed when *either* pattern matched, so an archive holding an empty

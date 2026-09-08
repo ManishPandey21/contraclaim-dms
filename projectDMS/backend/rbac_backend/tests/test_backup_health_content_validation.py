@@ -13,10 +13,9 @@ proven.
 
 from __future__ import annotations
 
-import io
+import gzip
 import subprocess
 import sys
-import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -25,44 +24,46 @@ from rbac_backend.services.backup_archive_validation import (
     INVALID_ROOT,
     MISSING,
     STALE,
+    UNEVALUATED,
     UNVERIFIED,
     VALID,
 )
 from rbac_backend.services.operations_health import build_backup_health
+from rbac_backend.tests.backup_archive_fixtures import (
+    RDB_BYTES,
+    write_archive,
+    write_empty_data_archive,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKUP_STATUS = REPO_ROOT / "scripts" / "backup_status.py"
 
-RDB_BYTES = b"REDIS0011\xfa\x09redis-ver\x057.4.0\xff\x00\x00\x00\x00\x00\x00\x00\x00"
 NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def _gzip(path: Path, payload: bytes) -> Path:
+    """A mongodump archive is a gzip stream, so the fixture is one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wb") as handle:
+        handle.write(payload)
+    return path
+
+
 def _tar(path: Path, members: dict[str, bytes], directories: tuple[str, ...] = ()) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(path, "w:gz") as tar:
-        for name in directories:
-            info = tarfile.TarInfo(name)
-            info.type = tarfile.DIRTYPE
-            tar.addfile(info)
-        for name, payload in members.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(payload)
-            tar.addfile(info, io.BytesIO(payload))
-    return path
-
-
-def _write(path: Path, content: bytes = b"payload") -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
-    return path
+    return write_archive(path, members, directories=directories)
 
 
 def _healthy_root(tmp_path: Path) -> Path:
     """Every artifact present, fresh, and carrying what it claims to."""
     root = tmp_path / "backups"
-    _write(root / "manifests" / "backup-20260908-010000.json", b"{}")
-    _write(root / "mongo" / "contraclaim-20260908-010000.archive.gz", b"mongo archive bytes")
-    _write(root / "volumes" / "backend-uploads-20260908-010000.tar.gz", b"uploads")
+    manifest = root / "manifests" / "backup-20260908-010000.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text("{}", encoding="utf-8")
+    # Real archives, not placeholder text. Neither label declares a content
+    # contract today, so text would pass - and would stop passing, silently and
+    # for the wrong reason, the moment one is declared.
+    _gzip(root / "mongo" / "contraclaim-20260908-010000.archive.gz", b"mongodump archive body")
+    write_archive(root / "volumes" / "backend-uploads-20260908-010000.tar.gz", {"./letters/1.pdf": b"%PDF-1.4"})
     _tar(
         root / "volumes" / "qdrant-data-20260908-010000.tar.gz",
         {"./collections/contracts/segments/0/segment.json": b"{}", "./raft_state.json": b"{}"},
@@ -98,7 +99,7 @@ def test_a_backup_root_carrying_real_archives_is_healthy(tmp_path: Path) -> None
 def test_the_eighty_nine_byte_falkordb_archive_is_no_longer_ok(tmp_path: Path) -> None:
     """The reproduction, and the fix, in one test."""
     root = _replace_falkor_archive(tmp_path)
-    empty = _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {}, directories=("./",))
+    empty = write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
     assert empty.stat().st_size < 200, "this must be the artefact production actually produces"
 
     result = build_backup_health(str(root), max_age_hours=26, now=NOW)
@@ -159,7 +160,7 @@ def test_staleness_is_still_reported(tmp_path: Path) -> None:
 def test_an_invalid_archive_outranks_its_freshness(tmp_path: Path) -> None:
     """Two hours old and unrestorable is an unrestorable archive, not a fresh one."""
     root = _replace_falkor_archive(tmp_path)
-    _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {}, directories=("./",))
+    write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
 
     result = build_backup_health(str(root), max_age_hours=26, now=NOW)
 
@@ -178,14 +179,20 @@ def test_a_missing_artifact_is_still_missing(tmp_path: Path) -> None:
 
 
 def test_freshness_only_mode_claims_nothing_about_content(tmp_path: Path) -> None:
-    """The escape hatch does not become a way to get a green light cheaply."""
+    """The escape hatch does not become a way to get a green light cheaply.
+
+    Declining to run a declared contract is a skipped step, and a skipped step
+    is not a pass - so the aggregate goes red too, not only the label.
+    """
     root = _replace_falkor_archive(tmp_path)
-    _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {}, directories=("./",))
+    write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
 
     result = build_backup_health(str(root), max_age_hours=26, now=NOW, verify_content=False)
 
-    assert result["artifacts"]["falkordb-data"]["status"] == UNVERIFIED
-    assert "falkordb-data" in result["unverified_artifacts"]
+    assert result["artifacts"]["falkordb-data"]["status"] == UNEVALUATED
+    assert "falkordb-data" in result["unevaluated_artifacts"]
+    assert result["status"] == "failed"
+    assert "falkordb-data" in result["unhealthy_artifacts"]
 
 
 # ------------------------------------------------------------------ the CLI
@@ -193,7 +200,7 @@ def test_freshness_only_mode_claims_nothing_about_content(tmp_path: Path) -> Non
 
 def test_the_status_cli_fails_on_an_empty_falkordb_archive(tmp_path: Path) -> None:
     root = _replace_falkor_archive(tmp_path)
-    _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {}, directories=("./",))
+    write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
 
     result = subprocess.run(
         [sys.executable, str(BACKUP_STATUS), "--root", str(root), "--max-age-hours", "100000"],
@@ -207,11 +214,12 @@ def test_the_status_cli_fails_on_an_empty_falkordb_archive(tmp_path: Path) -> No
     assert "falkordb-data: ok" not in result.stdout
 
 
-def test_an_archive_above_the_inline_ceiling_is_unverified_not_valid(tmp_path: Path) -> None:
+def test_an_archive_above_the_inline_ceiling_is_unevaluated_and_unhealthy(tmp_path: Path) -> None:
     """`/health/operations` is polled, and decompression is not free.
 
-    Above the ceiling the archive is reported for what it is - unread - rather
-    than either read on every request or quietly called valid.
+    Above the ceiling the archive is reported for what it is - unread - and the
+    aggregate goes red, rather than the archive being read on every request or
+    quietly counted as healthy.
     """
     root = _replace_falkor_archive(tmp_path)
     _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {"./dump.rdb": RDB_BYTES})
@@ -224,7 +232,10 @@ def test_an_archive_above_the_inline_ceiling_is_unverified_not_valid(tmp_path: P
     )
 
     artifact = result["artifacts"]["falkordb-data"]
-    assert artifact["status"] == UNVERIFIED
+    assert artifact["status"] == UNEVALUATED
     assert artifact["content_verified"] is False
     assert "ceiling" in artifact["detail"]
-    assert result["status"] == "ok"
+    assert result["status"] == "failed", (
+        "an archive whose contract was skipped for cost must not be counted as healthy; "
+        "that is the R-A8P F3 shape with a different reason attached"
+    )

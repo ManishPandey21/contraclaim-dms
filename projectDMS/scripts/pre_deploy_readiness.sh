@@ -173,13 +173,20 @@ if [[ -n "$backup_bucket" ]]; then
 else
   fail "BACKUP_S3_BUCKET is required for offsite production backups"
 fi
-if [[ -n "$PYTHON_BIN" ]] && "$PYTHON_BIN" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
-  pass "Fresh local backup is present"
+# No interpreter means the backups were never examined, and an unexamined
+# backup is not a fresh one. `[[ -n "$PYTHON_BIN" ]] && ...` folded that case
+# into the soft warning branch - the same fail-open shape post_deploy_verify.sh
+# carried. backup_status.py validates archive content as well as age now, so
+# this line claims a usable recovery artefact or it claims nothing.
+if [[ -z "$PYTHON_BIN" ]]; then
+  fail "No Python interpreter was available to check the local backups"
+elif "$PYTHON_BIN" "$ROOT_DIR/scripts/backup_status.py" --root "${backup_root:-/var/backups/contractdms}" --max-age-hours "${backup_max_age:-26}"; then
+  pass "Local backups are fresh, and every archive with a content contract is a valid recovery artefact"
 else
   if [[ "$REQUIRE_FRESH_BACKUP" == "true" || "$REQUIRE_FRESH_BACKUP" == "True" ]]; then
-    fail "Fresh local backup is required before deploy"
+    fail "A fresh, valid local backup is required before deploy"
   else
-    warn "Fresh local backup not found; set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
+    warn "Local backup check failed (freshness, or archive content that will not restore); set REQUIRE_FRESH_BACKUP=true to make this a hard gate"
   fi
 fi
 
