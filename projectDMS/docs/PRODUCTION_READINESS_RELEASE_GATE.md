@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 68/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after release programme R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 74/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -376,14 +376,14 @@ re-derives the distinction on every run, so it cannot quietly stop being true.
 
 - [x] `ANTIVIRUS_ENABLED=true` in production. Enforced by `Settings.validate_runtime_configuration`: production refuses to boot when antivirus is disabled unless `ANTIVIRUS_REQUIRED_IN_PRODUCTION=false` is set as a recorded override. Proven by `test_config_validation.py::test_production_validation_requires_antivirus_enabled` and `::test_production_validation_allows_explicit_antivirus_opt_out`.
 - [x] `CLAMAV_FAIL_OPEN=false` in production. Enforced by startup validation; proven by `test_config_validation.py::test_production_validation_rejects_antivirus_fail_open`.
-- [ ] Upload MIME, extension, size, and concurrency limits are validated.
+- [x] Upload MIME, extension, size, and concurrency limits are validated. evidence: backend/rbac_backend/tests/test_upload_limit_enforcement.py (R-A8S 2026-09-09: 21 passed. Boundary at the configured cap, one byte below / exactly / one byte over; a forged `Content-Length` refused because the limit counts bytes actually read; the refusal trips mid-stream and leaves no spool file. Bulk count and total size at and over `BULK_UPLOAD_MAX_FILES` / `BULK_UPLOAD_MAX_SIZE_MB`; the (N+1)th concurrent upload refused with 429 per user and per organisation. Both upload surfaces driven end to end and asserted at **413** - F-A8S-2, the document surface answered 500 and the contract surface 422 before this phase)
 - [x] Contract uploads fail closed when ClamAV is unavailable. `routers/contracts.py` and `routers/documents.py` reject with HTTP 400 when `scan_file` returns not-clean; `AntivirusService` returns not-clean when the daemon is unreachable with `fail_open=false` (`test_antivirus_service.py::test_scan_offline_fail_closed`, `::test_scan_clamav_error_fail_closed`). In production the scan branch is always active because antivirus is required.
-- [ ] Sensitive extracted text is not logged.
+- [x] Sensitive extracted text is not logged. evidence: backend/rbac_backend/tests/test_extracted_content_not_logged.py (R-A8S 2026-09-09: 26 passed. An AST guard over every logging call in the ingestion and extraction trees - positional, f-string, `%`, `.format`, concatenation, slices, method calls and `extra={}` - with metadata logging explicitly preserved; plus a runtime control that pushes a distinctive marker through the real chunker with the root logger captured at DEBUG and finds it in the chunks and in no log line, field or traceback. It found one real channel: Marker's subprocess stderr, now logged as a length)
 
 ### Gate 6: Database, Migrations, And Seeds
 
 - [x] Versioned migration/index plan exists before production promotion.
-- [ ] Fresh install path is tested against real MongoDB.
+- [x] Fresh install path is tested against real MongoDB. evidence: docs/GATE_6_FRESH_INSTALL_EVIDENCE.md (R-A8Q Stage B staging run 2026-09-08, mapped requirement-by-requirement in R-A8S: an empty `contraclaim_staging` on the live replica set `rsstg` - read back from `rs.status().set`, not merely configured - took 19 of 19 migrations via `python -m rbac_backend.scripts.migrate_database`, dry run exit 0 with `warnings: []`, second apply 0 newly applied / 19 skipped, permission catalogue 198 == 198 distinct with `uq_permissions_name` unique, and the application served Gate 2 and Gate 3 bullet 1 on that database)
 - [ ] Existing database upgrade path is tested against a staging copy.
 - [x] Permission seeds are versioned and idempotent.
 - [x] Backfill/migration entry points support dry-run before mutation.
@@ -485,7 +485,7 @@ time. No production S3 architecture change is authorised in this phase.
 
 Current score evidence:
 
-- Current production launch-readiness score is **68/100** (re-derived by
+- Current production launch-readiness score is **74/100** (re-derived by
   `scripts/production_readiness_score.py`, release programme R-A8R, 2026-09-08).
   The figure recorded here through Phase 8 was 32/100 and had not been re-derived
   since.
@@ -505,11 +505,11 @@ Current score evidence:
 | P0-005 | Resolved (code) | Upload antivirus can be disabled | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py` | Deploy ClamAV in staging and capture a live infected/clean scan as final Gate 5 proof |
 | P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box |
 | P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
-| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 68/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
+| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 74/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **68/100** against a target of
+The current production launch-readiness score is **74/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -544,13 +544,13 @@ stale rendering, not withdrawn evidence.)
 | Gate 2: Live Integration Baseline | 10.00 / 10 | 6 / 6 |
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
-| Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
-| Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
+| Gate 5: Upload And Content Safety | 10.00 / 10 | 5 / 5 |
+| Gate 6: Database, Migrations, And Seeds | 8.33 / 10 | 5 / 6 |
 | Gate 7: Deployment And Environment | 10.00 / 10 | 7 / 7 |
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
 
-Total: **68 / 100** against a target of 85.
+Total: **74 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 
@@ -894,7 +894,7 @@ If host `mongosh` is installed but cannot resolve Docker service names from `DAT
 
 - [x] Added deterministic readiness scoring script: `scripts/production_readiness_score.py`.
 - [x] Recorded final production-readiness audit: `docs/PRODUCTION_READINESS_FINAL_AUDIT.md`.
-- [x] Launch-readiness score calculated from launch-gate evidence **as at Phase 8**: 32/100. (Superseded — re-derived as 68/100 in R-A8R. Read the readiness-score section above, not this line.)
+- [x] Launch-readiness score calculated from launch-gate evidence **as at Phase 8**: 32/100. (Superseded — re-derived as 74/100 in R-A8S. Read the readiness-score section above, not this line.)
 - [x] Current verdict remains **Not Ready**.
 - [x] Pending blockers are recorded by phase.
 - [x] Critical blocker register includes final staging deploy/smoke/restore/sign-off gap as `P0-008`.
