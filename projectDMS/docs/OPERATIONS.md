@@ -252,6 +252,59 @@ Manual checks:
 If Qdrant or FalkorDB are stale but Mongo and uploads are correct, prefer a
 reconciliation/rebuild over treating the derived stores as authoritative.
 
+### Recovery objective — RPO and RTO
+
+**Status: OBJECTIVE RECORDED. Not OBJECTIVE FULLY DEMONSTRATED.**
+
+| | |
+|---|---|
+| **RPO** | **24 hours** |
+| **RTO** | **8 hours** |
+| **Restore-drill cadence** | **Quarterly, in staging** |
+| Decided | **2026-09-08** |
+| Decided by | **the release owner**, approving Candidate A — Conservative from [RPO_RTO_OWNER_DECISION.md](RPO_RTO_OWNER_DECISION.md) §4 |
+
+This records the objective the deployment is being held to. It does **not**
+record that the objective has been demonstrated end to end, and no run has
+established that a real recovery completes inside 8 hours or that no more than
+24 hours of data is lost. Candidate A was chosen because it is the row this
+deployment already satisfies by construction — the daily 01:30 backup already
+bounds worst-case loss at 24 hours — rather than one that needs new capability
+first.
+
+Read the two lines apart:
+
+* **OBJECTIVE RECORDED** — the target exists, is owner-approved, and is the
+  number every recovery decision is measured against from 2026-09-08.
+* **OBJECTIVE FULLY DEMONSTRATED** — not claimed. See the debt below.
+
+The owner accepted, explicitly and on the record, that **staging-scale restore
+measurements are the present evidence basis** for this release, subject to later
+production-scale validation.
+
+#### Debt carried with this decision
+
+These stay open, and each is a production-cutover or operational-hardening item
+rather than a caveat on the number:
+
+1. **Production document storage and backup storage must be separated into
+   independent S3 failure domains.** They share one bucket today
+   ([S3_STORAGE_POSTURE_DEBT.md](S3_STORAGE_POSTURE_DEBT.md)), so the off-site
+   copy is not yet an independent failure domain, and the 24 h RPO must not be
+   quoted as if it were. **No production S3 architecture change is authorised in
+   this phase.**
+2. **Production-scale restore timing is unmeasured.** Every restore figure behind
+   this decision was taken at staging scale — a 222-document Mongo restore
+   against production's live corpus, and 3 Qdrant points against production's
+   2,092.
+3. **Recovery-event detection time is unmeasured.** Every measured figure starts
+   at "an operator has decided to restore". RTO starts at the event, so detection
+   time must be estimated or measured before the 8 h RTO can be claimed as
+   demonstrated end to end.
+
+Re-drill quarterly in staging, per the cadence above, and revise this block when
+any of the three items closes.
+
 ## 6. Post-Deploy Verification
 
 Run:

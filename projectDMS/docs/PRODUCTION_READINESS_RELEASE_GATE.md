@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 63/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-07 after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 65/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -282,7 +282,7 @@ Required production env groups:
 - [x] FalkorDB backup or Mongo-derived reconciliation/rebuild is verified.
 - [x] Redis backup requirement is explicitly accepted or tested. evidence: scripts/production_restore_volumes.sh (R-A8M staging run 2026-09-07: TESTED - volume archive restored and all three seeded keys returned their exact values)
 - [x] Full restore drill into staging/isolated environment succeeds. evidence: scripts/mongo_restore.sh (R-A8M staging run 2026-09-07: Mongo, FalkorDB, Qdrant, Redis and the uploads volume destroyed and restored in one exercise; 222 documents restored, 0 failed; permissions 198/198 with 0 duplicates and `uq_permissions_name` intact)
-- [ ] RPO and RTO are recorded.
+- [x] RPO and RTO are recorded. evidence: docs/OPERATIONS.md (§5 "Recovery objective": the release owner approved Candidate A — Conservative on 2026-09-08 — RPO 24 h, RTO 8 h, restore drill quarterly in staging. **OBJECTIVE RECORDED, not OBJECTIVE FULLY DEMONSTRATED** — neither figure has been validated end to end; staging-scale restore measurements are the accepted evidence basis for this release, and S3 failure-domain separation, production-scale restore timing and detection time remain open.)
 - [x] Rollback steps are documented and tested. evidence: docs/SAME_HOST_STAGING_MAINTENANCE_WINDOW.md (R-A8M staging run 2026-09-07: application image rolled back to the retained prior artefact and forward again, health 200 ready at both ends; production tags untouched)
 
 Evidence for the FalkorDB bullet, and only that bullet:
@@ -299,8 +299,8 @@ previous configuration requires the one-time data move in
 
 R-A8M's staging execution closed six of the seven bullets that were open when
 that paragraph was written — the uploads, Qdrant and Redis restores, the full
-single-exercise restore drill, and deployment rollback in both directions. **One
-bullet remains, and it is a decision rather than a measurement.**
+single-exercise restore drill, and deployment rollback in both directions. The
+seventh was a decision rather than a measurement, and the owner has now made it.
 
 RPO/RTO targets are the release owner's to set. R-A8M measured what a target has
 to be defensible against — daily 01:30 backup cadence with a 26 h freshness
@@ -309,8 +309,18 @@ restore 6 s, image rollback 35 s each way — and R-A8N wrote those measurements
 up against candidate policies, with what each would cost and what is still
 unmeasured (detection time, production-scale restore timing, off-site
 *retrieval* timing), in [RPO_RTO_OWNER_DECISION.md](RPO_RTO_OWNER_DECISION.md).
-A measurement is not a target: the bullet stays unticked until the owner chooses
-one and records it.
+
+**On 2026-09-08 the release owner approved Candidate A — Conservative: RPO 24 h,
+RTO 8 h, restore drill quarterly in staging**, recorded in
+[OPERATIONS.md](OPERATIONS.md) §5. Read the bullet exactly as it is written.
+The objective is **RECORDED**; it is **not DEMONSTRATED**. Nothing here says a
+recovery has been shown to complete within 8 hours or that data loss has been
+shown to stay inside 24 hours. The owner accepted staging-scale restore
+measurements as the evidence basis for this release, subject to later
+production-scale validation, and three items stay open as production-cutover
+debt: separating production document and backup storage into independent S3
+failure domains, production-scale restore timing, and recovery-event detection
+time. No production S3 architecture change is authorised in this phase.
 
 ### Gate 9: Final Production Readiness Review
 
@@ -344,7 +354,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **63/100** against a target of
+The current production launch-readiness score is **65/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -365,19 +375,27 @@ mocks `**/api/**` - which Gate 3's own preamble says earns no checkbox. The scor
 is one point lower because a point that had never been earned was being counted,
 not because anything regressed.
 
-Current gate score summary:
+Current gate score summary, re-derived mechanically from
+`scripts/production_readiness_score.py` on 2026-09-08. This table is a rendering
+of the checkboxes above and nothing else; when the two disagree, the checkboxes
+and their evidence lines are the record. (The previous copy of this table
+predated the R-A8M staging execution and still showed Gate 2 at 0/6, Gate 7 at
+0/7 and Gate 8 at 1/8 while the bullets above were ticked with evidence — a
+stale rendering, not withdrawn evidence.)
 
 | Gate | Score | Checked |
 | --- | ---: | ---: |
 | Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |
-| Gate 2: Live Integration Baseline | 0.00 / 10 | 0 / 6 |
+| Gate 2: Live Integration Baseline | 10.00 / 10 | 6 / 6 |
 | Gate 3: Browser E2E Coverage | 0.00 / 12 | 0 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
 | Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
-| Gate 7: Deployment And Environment | 0.00 / 10 | 0 / 7 |
-| Gate 8: Backup, Restore, And Rollback | 1.25 / 10 | 1 / 8 |
+| Gate 7: Deployment And Environment | 10.00 / 10 | 7 / 7 |
+| Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
+
+Total: **65 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 

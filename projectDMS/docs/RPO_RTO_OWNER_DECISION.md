@@ -1,6 +1,22 @@
-# Gate 8 bullet 7 — RPO and RTO: measurements, and the decision they are waiting on
+# Gate 8 bullet 7 — RPO and RTO: the measurements, and the decision taken from them
 
-**Status: OWNER DECISION OPEN. Gate 8 stays 7/8.**
+**Status: OWNER DECISION MADE, 2026-09-08 — Candidate A (Conservative).
+RPO 24 h · RTO 8 h · restore drill quarterly in staging. Gate 8 is 8/8.**
+
+**The bullet is closed as OBJECTIVE RECORDED, not OBJECTIVE FULLY DEMONSTRATED.**
+The decision is written into [OPERATIONS.md](OPERATIONS.md) §5 with the date and
+the release owner's approval. Neither figure has been validated end to end: the
+owner explicitly accepted the staging-scale restore measurements in §1 as the
+evidence basis for this release, subject to later production-scale validation,
+and carried §5's items 1 and 3 — S3 failure-domain separation and detection
+time — as production-cutover debt. §5 item 2 is satisfied by that explicit
+acceptance rather than by a production-scale drill. No production S3
+architecture change is authorised in this phase.
+
+Everything below is the analysis the decision was made from, and is preserved
+as it was written on 2026-09-07. Its present tense — "nothing here ticks the
+bullet", "Gate 8 remains 7 of 8" — describes the state before the decision
+above, not the state now.
 
 Gate 8 bullet 7 reads "RPO and RTO are recorded". R-A8M measured the numbers
 that a target has to be defensible against; it did not, and could not, set the
@@ -124,5 +140,9 @@ When the owner chooses:
    evidence line naming this note and the decision.
 3. Re-run `scripts/production_readiness_score.py`; Gate 8 becomes 8/8.
 
-Until step 1 exists, **Gate 8 remains 7 of 8 — 8.75/10**, and R-A8N leaves it
-there.
+Steps 1, 2 and 3 were carried out on 2026-09-08 (release programme R-A8O):
+the decision is in [OPERATIONS.md](OPERATIONS.md) §5, Gate 8 bullet 7 is ticked in
+[PRODUCTION_READINESS_RELEASE_GATE.md](PRODUCTION_READINESS_RELEASE_GATE.md) with an
+evidence line that says RECORDED and not DEMONSTRATED, and
+`scripts/production_readiness_score.py` re-derives **Gate 8 at 8 of 8 — 10.00/10**,
+moving the total from 63/100 to **65/100**.
