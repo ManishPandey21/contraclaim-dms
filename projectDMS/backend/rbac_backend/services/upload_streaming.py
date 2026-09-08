@@ -10,12 +10,42 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
 
-from fastapi import UploadFile
+from fastapi import HTTPException, UploadFile, status
 
 from ..core.config import settings
 from ..models.document import FileValidationResult
 from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
+
+
+class UploadTooLargeError(HTTPException):
+    """A refusal, raised as one, at the seam that discovers it.
+
+    This used to be a bare `ValueError`, and the two production callers
+    disagreed about what that meant. `routers/contracts.py` runs under
+    `handle_exceptions`, which maps `ValueError` to 422; `DocumentController`
+    has its own handler, whose `except Exception` turned the refusal into
+    **500 "Document creation service temporarily unavailable"** - measured, not
+    inferred. A client cannot tell that from a real outage, so the UI shows a
+    server-error state and the user retries the same oversize file, and
+    monitoring counts a policy decision as a 5xx.
+
+    `UploadConcurrencyLimiter` already raises `HTTPException(429)` from this
+    same layer for the same reason, and `contract_service` raises 413 for its
+    own size rule. Raising the status here rather than at each call site is what
+    stops the fourth caller re-introducing the disagreement: every existing
+    handler in the upload paths re-raises `HTTPException` unchanged.
+    """
+
+    def __init__(self, max_size_bytes: int) -> None:
+        super().__init__(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=(
+                "Upload exceeds the maximum allowed file size "
+                f"({max_size_bytes // (1024 * 1024)}MB)"
+            ),
+        )
+        self.max_size_bytes = int(max_size_bytes)
 
 
 @dataclass
@@ -69,7 +99,7 @@ async def spool_upload_file(
                 break
             total += len(chunk)
             if max_size_bytes is not None and total > max_size_bytes:
-                raise ValueError("Upload exceeds the maximum allowed file size")
+                raise UploadTooLargeError(max_size_bytes)
             hasher.update(chunk)
             if len(sample) < max_sample:
                 remaining = max_sample - len(sample)
