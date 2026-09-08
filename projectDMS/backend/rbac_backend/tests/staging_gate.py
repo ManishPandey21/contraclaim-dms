@@ -46,7 +46,11 @@ from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-from rbac_backend.tests.required_test_paths import matches_required
+from rbac_backend.tests.required_test_paths import (
+    canonical_test_path,
+    matches_required,
+    normalise,
+)
 
 #: The one staging/live-gate switch. Deliberately singular.
 STAGING_GATE_ENV = "CONTRACLAIM_STAGING_GATE"
@@ -440,6 +444,45 @@ GATE2_REQUIRED_LIVE_FILES = (
 )
 
 
+#: Test nodes inside a required module that are NOT Gate 2 evidence, because the
+#: criterion they implement has been formally superseded in the gate document.
+#:
+#: Required membership above is decided per **file**, which cannot express "this
+#: module carries three bullets and one obsolete requirement". R-A8Q measured
+#: what that costs: 45 collected, 45 executed, 44 passed, and the single failure
+#: was a test for a requirement withdrawn four days earlier. That is F-A8Q-1 —
+#: the test outlived the requirement.
+#:
+#: `test_falkordb_vector_service_round_trip_live` exercises
+#: `FalkorDBVectorService`, whose `_create_index` issues the RediSearch
+#: `FT.CREATE` command. The production pin `falkordb/falkordb:v4.0.8` loads only
+#: the `graph` module, so the command does not exist and the test cannot pass
+#: with or without `FALKORDB_URL`. The gate document withdrew that criterion on
+#: 2026-09-04 ("Superseded requirement: FalkorDB vector round trip"), keeping the
+#: graph half and leaving the vector round trip required of Qdrant, which is
+#: where the production vector path lives.
+#:
+#: Withdrawal is not suppression, and the difference is load-bearing:
+#:
+#: * the test stays in the tree and runs in every ordinary run, as legacy
+#:   coverage of a service that still exists;
+#: * only a **certification** run — one launched with `CONTRACLAIM_STAGING_GATE`
+#:   — deselects it, and reports the deselection by name rather than dropping it
+#:   quietly;
+#: * `test_gate2_required_inventory.py` refuses an entry naming a test that does
+#:   not exist, sits outside the required set, or carries another bullet's
+#:   evidence — and refuses the *absence* of this entry while a live FalkorDB
+#:   vector test is still inside a required module.
+#:
+#: Reinstate by deleting the entry here. That is the same trigger the gate
+#: document names: a production caller for `FalkorDBVectorService`, a caller for
+#: `data_sync.sync_data`, or a deployed image providing `FT.CREATE`.
+GATE2_WITHDRAWN_LIVE_TESTS = (
+    "backend/rbac_backend/tests/integration/test_external_services_integration.py"
+    "::test_falkordb_vector_service_round_trip_live",
+)
+
+
 def is_gate2_required_file(path: str) -> bool:
     """Does this test file carry evidence one of the Gate 2 bullets is scored from?
 
@@ -449,6 +492,43 @@ def is_gate2_required_file(path: str) -> bool:
     see `required_test_paths` for what that cost in R-A8I.
     """
     return matches_required(path, GATE2_REQUIRED_LIVE_FILES)
+
+
+def canonical_test_node(nodeid: str) -> str:
+    """A pytest node id reduced to ``<package-relative module>::<test>``.
+
+    The layout-independence `required_test_paths` gives a file path, applied to
+    the half of a node id that is one. Parametrisation brackets and class
+    segments are kept — they are part of the test's identity, not of the path's.
+    """
+    module, separator, remainder = normalise(nodeid).partition("::")
+    if not separator:
+        return canonical_test_path(module)
+    return f"{canonical_test_path(module)}::{remainder}"
+
+
+def is_gate2_withdrawn_test(nodeid: str) -> bool:
+    """Is this node one Gate 2 no longer scores, from any root?
+
+    A bare module path is never withdrawn. Withdrawing a whole required module is
+    what removing it from `GATE2_REQUIRED_LIVE_FILES` already means, and one
+    entry here must not be able to take three bullets' evidence with it.
+    """
+    canonical = canonical_test_node(nodeid)
+    if "::" not in canonical:
+        return False
+    return any(canonical == canonical_test_node(node) for node in GATE2_WITHDRAWN_LIVE_TESTS)
+
+
+def gate2_withdrawn_from_certification(nodeid: str) -> bool:
+    """The whole decision, as one pure function — the shape the other gates use.
+
+    Only a certification run deselects. Outside `CONTRACLAIM_STAGING_GATE` the
+    withdrawn test collects and runs exactly as it always has.
+    """
+    if not staging_gate_mode():
+        return False
+    return is_gate2_withdrawn_test(nodeid)
 
 
 def staging_skip_is_gate_failure(path: str, outcome: str) -> bool:

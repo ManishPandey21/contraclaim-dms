@@ -50,8 +50,15 @@ from rbac_backend.tests.staging_gate import (
     STAGING_GATE_ENV,
     StagingGateConfigurationError,
     assert_staging_preflight,
+    gate2_withdrawn_from_certification,
+    staging_gate_mode,
     staging_skip_is_gate_failure,
 )
+
+#: Node ids deselected as withdrawn Gate-2 criteria, carried from the collection
+#: hook to the terminal summary. A `config.stash` key rather than a module global
+#: so `-p xdist` workers cannot share one list.
+_WITHDRAWN_STASH = pytest.StashKey[list]()
 
 #: One hook, three independent gates. Each entry is (flag, decision, subject),
 #: and the FIRST match wins - a file in more than one required set is reported
@@ -106,6 +113,57 @@ def pytest_configure(config):
         # which buries the one thing they need to read. Both exit non-zero; only
         # one of them is legible.
         raise pytest.UsageError(str(exc)) from exc
+
+
+def pytest_collection_modifyitems(config, items):
+    """Deselect the Gate-2 criteria the gate document has formally withdrawn.
+
+    Only under `CONTRACLAIM_STAGING_GATE`. Required Gate-2 membership is decided
+    per file, so a module carrying three live bullets also carried
+    `test_falkordb_vector_service_round_trip_live`, whose criterion was
+    superseded on 2026-09-04 and whose `FT.CREATE` the production FalkorDB pin
+    does not implement. R-A8Q's certification run was 44/45 for exactly that
+    reason — F-A8Q-1.
+
+    Deselected, not skipped and not silenced:
+
+    * a skip inside a required module is converted to a FAILURE two hooks below,
+      which is the correct rule and the wrong answer here — the test is not
+      unmeasured, it is not asked for;
+    * an `xfail` would report a result for a requirement that no longer exists;
+    * outside this mode nothing is removed at all, so the legacy coverage stays.
+
+    The deselection is announced in the terminal summary. A gate that quietly
+    drops a test is the failure mode this whole module exists to prevent.
+    """
+    if not staging_gate_mode():
+        return
+
+    withdrawn = [item for item in items if gate2_withdrawn_from_certification(item.nodeid)]
+    if not withdrawn:
+        return
+
+    remaining = [item for item in items if item not in withdrawn]
+    config.hook.pytest_deselected(items=withdrawn)
+    items[:] = remaining
+    config.stash[_WITHDRAWN_STASH] = [item.nodeid for item in withdrawn]
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Say which Gate-2 criteria were withdrawn, and where the decision lives."""
+    del exitstatus
+    nodeids = config.stash.get(_WITHDRAWN_STASH, [])
+    if not nodeids:
+        return
+    terminalreporter.write_sep("-", "staging Gate-2: withdrawn criteria")
+    for nodeid in nodeids:
+        terminalreporter.write_line(f"  deselected {nodeid}")
+    terminalreporter.write_line(
+        "  Superseded by docs/PRODUCTION_READINESS_RELEASE_GATE.md "
+        '("Superseded requirement: FalkorDB vector round trip", 2026-09-04). '
+        "The inventory is staging_gate.GATE2_WITHDRAWN_LIVE_TESTS and "
+        "test_gate2_required_inventory.py is what stops it drifting."
+    )
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)

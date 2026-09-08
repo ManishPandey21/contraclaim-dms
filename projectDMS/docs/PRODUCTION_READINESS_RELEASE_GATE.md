@@ -157,6 +157,34 @@ implements the withdrawn requirement. It remains in the tree and is not gate evi
 for any bullet. The staging run covers the replacement through the graph suites above
 plus the Qdrant live round trip.
 
+**How the withdrawal is enforced, and why it had to be (F-A8Q-1).** For four days it
+was not. Required Gate 2 membership
+(`backend/rbac_backend/tests/staging_gate.py::GATE2_REQUIRED_LIVE_FILES`) is decided
+per **file**, and the withdrawn test lives inside a required file, so the paragraph
+above said the test was not gate evidence while the harness still ran it as part of a
+required module. R-A8Q's certification run measured the consequence: **45 collected, 45
+executed, 44 passed**, the single failure being a test for a requirement withdrawn on
+2026-09-04.
+
+Membership is therefore stated at test granularity as well.
+`GATE2_WITHDRAWN_LIVE_TESTS` names the node ids inside required modules that Gate 2
+does not score, and `CONTRACLAIM_STAGING_GATE` **deselects** them - announced by node
+id in the terminal summary, never silently. Outside that switch nothing is removed, so
+the test still runs in every ordinary and full-suite run as legacy coverage of a
+service that still exists. Deselection rather than skip or xfail is deliberate: a skip
+inside a required module is converted to a failure by the same conftest, which is the
+right rule for an unmeasured requirement and the wrong answer for one that has been
+withdrawn.
+
+`backend/rbac_backend/tests/test_gate2_required_inventory.py` is what stops the
+inventory drifting in either direction. It derives each module's capabilities from its
+source rather than its filename and refuses: a live FalkorDB vector test inside a
+required module that is *not* withdrawn; the loss of Qdrant vector coverage; the loss
+of FalkorDB `GRAPH.*` coverage; a withdrawal naming a test that does not exist; a
+withdrawal outside the required set; and a withdrawal that would remove coverage
+another bullet is scored from. Each rule has a synthetic mutation that breaks exactly
+it. Reinstating the requirement is one deletion from `GATE2_WITHDRAWN_LIVE_TESTS`.
+
 **Owner approval: APPROVED FOR `release/contraclaim-rc1`.** Not generalised beyond it.
 
 **Review trigger.** Reinstate the vector half if FalkorDB regains a production
