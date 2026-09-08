@@ -299,6 +299,19 @@ Current baseline:
 - [x] `/metrics` is enabled and token-gated. evidence: backend/rbac_backend/routers/health.py (R-A8M staging run 2026-09-07: no token 401, wrong token 401, correct `X-Metrics-Token` 200)
 - [x] Worker, queue, Redis, Qdrant, FalkorDB, MongoDB, and storage health are verified. evidence: scripts/post_deploy_verify.sh (R-A8M staging run 2026-09-07: both workers running, and every dependency exercised by the Gate 2 round trips and the Gate 8 restore parity checks)
 
+**The script this bullet names changed in R-A8R, after the run that earned it.**
+The tick stands — every dependency the bullet lists was verified by that run, and
+nothing was removed. What changed is the edge check: it was conditional on
+`PUBLIC_BASE_URL` being set, so an unset value skipped the only control over the
+surface users arrive through, and staging (which by design has no public DNS)
+could satisfy it only by pointing at production. `scripts/lib/edge_target.sh`
+now makes the mode an input and an unset edge a **failure** in both modes
+(`docs/OPERATIONS.md` §6.1). The change is strictly stricter, so it cannot
+invalidate a run that passed the weaker version — but the script that was run no
+longer exists, and **`post_deploy_verify.sh` must be re-executed once** in
+whatever window comes next before this evidence line describes a current
+artefact.
+
 Required production env groups:
 
 - Runtime: `ENVIRONMENT`, `PUBLIC_BASE_URL`, `PUBLIC_API_BASE_URL`, `FRONTEND_URL`, `API_URL`.
