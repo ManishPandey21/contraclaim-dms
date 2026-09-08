@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 65/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 66/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-08 after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: Not Ready for production.
 
@@ -187,7 +187,7 @@ staging failure can be attributed to the environment rather than to the code.
 
 ### Gate 3: Browser E2E Coverage
 
-- [ ] Login, logout, session refresh, and CSRF behavior.
+- [x] Login, logout, session refresh, and CSRF behavior. evidence: client/e2e/staging/session-authentication.spec.ts (R-A8Q Stage B staging run 2026-09-08: 4/4 passed, unmocked, chromium, against the deployed staging stack over TLS with `CONTRACLAIM_STAGING_E2E=1`; `POST /api/refresh` 200 with exactly one `token_refresh` audit row whose `user_id` resolves to the signed-in user and whose `resource_id` equals the `session_id` in the reissued token; a cookie-authenticated unsafe request without a CSRF header refused)
 - [ ] Org-Admin permission save/retrieve, including Client DMS permissions.
 - [ ] Document upload, view, download, share, and authorization denial.
 - [ ] Contract upload, ingestion status, clause extraction, search, Q&A, and appraisal.
@@ -354,7 +354,7 @@ Current score evidence:
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **65/100** against a target of
+The current production launch-readiness score is **66/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -387,7 +387,7 @@ stale rendering, not withdrawn evidence.)
 | --- | ---: | ---: |
 | Gate 1: CI And Local Test Baseline | 10.00 / 15 | 4 / 6 |
 | Gate 2: Live Integration Baseline | 10.00 / 10 | 6 / 6 |
-| Gate 3: Browser E2E Coverage | 0.00 / 12 | 0 / 9 |
+| Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
 | Gate 5: Upload And Content Safety | 6.00 / 10 | 3 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 6.67 / 10 | 4 / 6 |
@@ -395,7 +395,7 @@ stale rendering, not withdrawn evidence.)
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
 
-Total: **65 / 100** against a target of 85.
+Total: **66 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 

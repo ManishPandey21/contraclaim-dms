@@ -37,7 +37,7 @@ here is `EXECUTABLE` and names an artefact that exists.
 
 | # | Bullet | Intended property | Executable evidence | Current coverage | Missing coverage |
 |---|---|---|---|---|---|
-| 1 | Login, logout, session refresh, and CSRF behavior. | A browser session can be established and ended; a refresh keeps the same session; an unsafe cookie-authenticated request without a matching CSRF token is refused. | `client/e2e/staging/session-authentication.spec.ts` | `EXECUTABLE` | Written from the server's own contracts and **not yet executed against a deployment** - R-A8J had no staging window. The bullet stays unticked until a run produces the result. |
+| 1 | Login, logout, session refresh, and CSRF behavior. | A browser session can be established and ended; a refresh keeps the same session; an unsafe cookie-authenticated request without a matching CSRF token is refused. | `client/e2e/staging/session-authentication.spec.ts` | `EXECUTABLE` | **Executed against a deployment in R-A8Q Stage B, 2026-09-08: 4/4 passed** over TLS, unmocked, under `CONTRACLAIM_STAGING_E2E=1`. The refresh half was measured beyond the spec's own assertions: one `token_refresh` audit row, its user resolving to the signed-in account, its `resource_id` equal to the reissued token's `session_id`. The bullet is ticked. |
 | 2 | Org-Admin permission save/retrieve, including Client DMS permissions. | An org-admin changes a role's permissions in the browser, the change persists across a reload, and the Client DMS permissions are among those offered. | — | `MISSING` | Needs an org-admin account on staging and a disposable role, so the run leaves no permanent grant behind. Neither exists yet. |
 | 3 | Document upload, view, download, share, and authorization denial. | A document uploaded in the browser is viewable and downloadable by its owner, and a user outside its scope is refused rather than shown an empty page. | — | `MISSING` | Needs two accounts in different scopes and a disposable document, plus a teardown that removes it - the drill must not accumulate staging documents. |
 | 4 | Contract upload, ingestion status, clause extraction, search, Q&A, and appraisal. | The contract workflow completes against real ingestion, a real vector store and a real model. | `client/e2e/contract-workflows.spec.ts` | `MOCKED` | The existing spec routes `**/api/**` to fixtures, so it proves the UI's own states and nothing about the deployment. Real ingestion also costs model tokens, which the run has to budget for. |
@@ -49,7 +49,7 @@ here is `EXECUTABLE` and names an artefact that exists.
 
 ## What this means for the score
 
-Two bullets are `EXECUTABLE`, and one of those (9) is partial. Five are `MISSING`.
+Two bullets are `EXECUTABLE`, and one of those (9) is partial. Five are `MISSING`. Bullet 1 has now been executed against a deployment and is ticked; bullet 9 stays partial.
 One (4) has only mocked evidence. One (7) is blocked behind a product decision
 rather than behind a test.
 
