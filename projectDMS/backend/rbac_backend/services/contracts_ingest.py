@@ -524,7 +524,16 @@ class MarkerService:
             return None
 
         if result.returncode != 0:
-            logger.warning("Marker failed (code=%s): %s", result.returncode, result.stderr)
+            # Marker's stderr is derived from the document it was asked to
+            # convert - a parse warning can quote the clause it choked on - so
+            # it is treated as extracted content and never logged verbatim.
+            # The exit code and the last line's shape are what a failure is
+            # actually diagnosed from; the full stderr stays with the process.
+            logger.warning(
+                "Marker failed (code=%s, stderr_length=%s)",
+                result.returncode,
+                len(result.stderr or ""),
+            )
             return None
 
         markdown_path = self._pick_markdown(output_dir)
