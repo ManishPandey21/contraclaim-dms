@@ -329,6 +329,44 @@ MongoDB, Redis, and recent backend exception signatures. Set
 `REQUIRE_FRESH_BACKUP=true` to make the backup check a hard post-deploy gate;
 without it a backup that will not restore is a warning rather than a failure.
 
+### 6.1 The edge check has two modes, and neither is the other's default
+
+Production and staging do not have the same edge, and the verifier must not
+pretend they do. `scripts/lib/edge_target.sh` resolves the mode from
+`DEPLOY_VERIFY_MODE`, or failing that from `ENVIRONMENT`, and **refuses**
+(exit 2, reported as a `FAIL`) when neither says. There is no default, because
+both defaults are wrong: guessing staging hands production the staging
+exemption, and guessing production makes every staging run demand DNS it is
+designed not to have.
+
+| | production | staging |
+|---|---|---|
+| edge URL | **`PUBLIC_BASE_URL`, required** | `STAGING_EDGE_BASE_URL`, else `PUBLIC_BASE_URL`, required |
+| TLS | required | required |
+| public DNS name | **required** | **not required** — loopback and RFC 1918 are the staging topology |
+| may address a production host | n/a | **no** — refused against `PRODUCTION_PUBLIC_HOSTS` |
+| unset edge | **FAIL** | **FAIL** |
+
+The rule that matters most is the last row. It used to read "skip": the check
+was wrapped in `if [[ -n "$PUBLIC_BASE_URL" ]]`, so a production run with the
+variable unset reported the same `10 PASS, 0 failures` as one that reached the
+public edge and got 200. The single control over the surface every user arrives
+through was the one control that could disappear without saying so.
+
+Staging's exemption is from **public DNS only**. It still needs an edge, and it
+still needs TLS: `AUTH_COOKIE_SECURE=true` means no session cookie survives
+plain HTTP, which is why R-A8Q had to stand up a TLS terminator before Gate 3
+bullet 1 could be measured at all. Declare `PRODUCTION_PUBLIC_HOSTS` for any
+staging run on the production host — without it the "staging pointed at
+production" refusal cannot fire, and the plan line says `production_hosts=none-declared`
+so the operator can see that rather than assume otherwise.
+
+Every rule above has a test in
+`backend/rbac_backend/tests/test_deploy_edge_verification.py`, including the
+negative controls: a production edge on loopback, a private range, a single
+container label or an internal-only suffix is refused, and so is a staging edge
+that names a production host.
+
 ## 7. Scheduler Ownership
 
 Only one process should run scheduled jobs in production. In

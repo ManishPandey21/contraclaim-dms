@@ -24,6 +24,14 @@ fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 # shellcheck source=scripts/lib/env_file.sh
 . "$ROOT_DIR/scripts/lib/env_file.sh"
 
+# Which edge must answer, and what "answer" means for this deployment. The check
+# below used to be conditional on PUBLIC_BASE_URL being set, so an unset variable
+# silently skipped the only control over the surface users arrive through - while
+# a staging stack, which by design has no public DNS, could satisfy it only by
+# pointing at production. See scripts/lib/edge_target.sh.
+# shellcheck source=scripts/lib/edge_target.sh
+. "$ROOT_DIR/scripts/lib/edge_target.sh"
+
 
 resolve_python_bin() {
   if [[ -n "$PYTHON_BIN" ]]; then
@@ -147,8 +155,22 @@ else
   fi
 fi
 
-if [[ -n "$PUBLIC_BASE_URL" ]]; then
-  http_check "${PUBLIC_BASE_URL%/}/health" "Public gateway health responded"
+# The edge, in the mode this deployment is actually in. A plan that cannot be
+# resolved is a FAILURE: "we could not work out which edge to check" and "the
+# edge answered 200" must never produce the same exit code.
+if edge_plan=$(edge_verification_plan 2>/tmp/edge_plan.err); then
+  edge_url=""
+  edge_mode=""
+  for edge_field in $edge_plan; do
+    case "$edge_field" in
+      url=*) edge_url=${edge_field#url=} ;;
+      mode=*) edge_mode=${edge_field#mode=} ;;
+    esac
+  done
+  pass "Edge verification plan: $edge_plan"
+  http_check "${edge_url}/health" "${edge_mode} edge health responded (${edge_url})"
+else
+  fail "Edge verification could not be resolved: $(tr -d '' </tmp/edge_plan.err | tail -n 1)"
 fi
 
 database_url=$(get_env DATABASE_URL)
