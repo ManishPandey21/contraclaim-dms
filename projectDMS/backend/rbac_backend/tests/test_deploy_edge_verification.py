@@ -343,6 +343,44 @@ def test_production_mode_ignores_an_unedited_placeholder() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_the_plan_does_not_report_a_list_production_never_consults() -> None:
+    """Printing the list in production mode reads as "checked against these".
+
+    It is not checked against anything there — the rule governs staging only. A
+    plan line that names a control it did not apply is the same shape of claim as
+    a backup reported `ok` because its mtime was fresh.
+    """
+    result = run_plan(
+        mode="production",
+        public_base_url="https://web.contraclaim.com",
+        production_public_hosts="web.contraclaim.com",
+    )
+    assert result.returncode == 0, result.stderr
+    assert field(result.stdout, "production_hosts") == "not-applicable"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("https://[fd12:3456:789a::1]", id="ula-four-hex-groups"),
+        pytest.param("https://[fd1::1]", id="ula-short-first-group"),
+        pytest.param("https://[fc00::1]", id="ula-fc00"),
+        pytest.param("https://[fe80::1]", id="link-local"),
+    ],
+)
+def test_production_refuses_every_ipv6_private_shape(url: str) -> None:
+    """`fd??:` needed exactly two hex digits, so `fd1::1` slipped through as public."""
+    result = run_plan(mode="production", public_base_url=url)
+    assert result.returncode == REFUSED, result.stdout
+    assert "not a public" in result.stderr
+
+
+def test_a_public_ipv6_address_is_still_public() -> None:
+    """The widened glob must not swallow global unicast, or it stops being a rule."""
+    result = run_plan(mode="production", public_base_url="https://[2001:db8::1]")
+    assert result.returncode == 0, result.stderr
+
+
 def test_the_staging_template_placeholder_is_the_one_the_library_refuses() -> None:
     """Two spellings of the same placeholder is a control that does not fire."""
     template = (REPO_ROOT / ".env.staging.example").read_text(encoding="utf-8")

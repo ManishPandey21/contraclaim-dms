@@ -52,6 +52,13 @@ structurally by `backend/rbac_backend/tests/test_gate3_staging_fixtures.py`:
   refuses any target listed in `E2E_PRODUCTION_HOSTS`, re-checked per write rather
   than once at import.
 
+A teardown context is built by `newFixtureContext`, not by
+`playwright.request.newContext()` directly: a bare context inherits **nothing**
+from `playwright.config.ts` — not `baseURL`, not `ignoreHTTPSErrors` — so every
+relative path in the harness would be an invalid URL and the staging TLS
+terminator's certificate would be refused. The teardown would then fail for a
+reason that has nothing to do with whether the state was removed.
+
 Required environment, all listed in `.env.staging.example`: `E2E_BASE_URL`,
 `E2E_RUN_ID`, `E2E_PRODUCTION_HOSTS`, `E2E_STAGING_ORG_ID`,
 `E2E_STAGING_PROJECT_ID`, and three credential pairs — the owner

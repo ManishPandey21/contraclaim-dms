@@ -36,7 +36,7 @@
  * with no staging window; this module and the specs that use it are the
  * executable artefacts bullets 2 and 3 have never had, and no bullet is ticked.
  */
-import type { APIRequestContext } from "@playwright/test";
+import type { APIRequestContext, PlaywrightWorkerArgs } from "@playwright/test";
 
 import { BASE_URL, requireStagingEnvironment } from "./staging-target";
 
@@ -142,6 +142,29 @@ export function assertWriteIsTenantSafe(payload: {
         `the run tag ${RUN_TAG}, or cleanup cannot tell it apart from real data`
     );
   }
+}
+
+/**
+ * A standalone request context that reaches the same stack the tests do.
+ *
+ * `playwright.request.newContext()` inherits **nothing** from
+ * `playwright.config.ts` - not `baseURL`, not `ignoreHTTPSErrors`. A context
+ * built without them turns every relative path in this module into an invalid
+ * URL, and a staging TLS terminator with a self-signed certificate into a
+ * connection error. The teardown would then fail for a reason that has nothing
+ * to do with whether the state was removed.
+ *
+ * It is a function here rather than two identical option bags in two specs, so a
+ * third spec cannot be written without them.
+ */
+export async function newFixtureContext(
+  playwright: PlaywrightWorkerArgs["playwright"]
+): Promise<APIRequestContext> {
+  assertTargetIsNotProduction();
+  return playwright.request.newContext({
+    baseURL: BASE_URL,
+    ignoreHTTPSErrors: process.env.E2E_IGNORE_HTTPS_ERRORS === "1",
+  });
 }
 
 // --------------------------------------------------------------------------- #

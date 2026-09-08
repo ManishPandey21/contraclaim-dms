@@ -185,6 +185,40 @@ def test_every_fixture_spec_tears_itself_down(spec: Path) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_a_standalone_request_context_carries_the_target(source: str) -> None:
+    """`playwright.request.newContext()` inherits NOTHING from playwright.config.ts.
+
+    Not `baseURL`, not `ignoreHTTPSErrors`. A teardown context built without them
+    turns every relative path in the harness into an invalid URL, and a staging
+    TLS terminator with a self-signed certificate into a connection error - so
+    the teardown fails for a reason that has nothing to do with whether the state
+    was removed, and the run reports state left behind that was never there.
+    """
+    body = _function_body(source, "newFixtureContext")
+    assert "baseURL" in body, "the standalone context has no baseURL"
+    assert "ignoreHTTPSErrors" in body, (
+        "the standalone context does not accept the staging terminator's certificate"
+    )
+    assert "assertTargetIsNotProduction" in body, (
+        "a context can now be opened against production without the target check"
+    )
+
+
+@pytest.mark.parametrize("spec", FIXTURE_SPECS, ids=lambda path: path.name)
+def test_no_spec_builds_its_own_bare_request_context(spec: Path) -> None:
+    """One place decides how a standalone context is built, or two will disagree."""
+    text = spec.read_text(encoding="utf-8")
+    assert "playwright.request.newContext(" not in text, (
+        f"{spec.name} builds its own request context instead of calling "
+        "newFixtureContext(); a bare context has no baseURL and no TLS exemption"
+    )
+    if "newContext" in text or "playwright" in text:
+        assert "newFixtureContext" in text, (
+            f"{spec.name} takes the playwright worker fixture without using the shared "
+            "context helper"
+        )
+
+
 @pytest.mark.parametrize("spec", FIXTURE_SPECS, ids=lambda path: path.name)
 def test_no_fixture_spec_mocks_the_api(spec: Path) -> None:
     """The whole reason R-A8I's 33 green tests earned no checkbox."""

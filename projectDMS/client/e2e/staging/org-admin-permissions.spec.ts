@@ -34,6 +34,7 @@ import {
   RUN_TAG,
   cleanupRunOwned,
   ensureDisposableRole,
+  newFixtureContext,
   readRolePermissions,
   setRolePermissions,
   signIn,
@@ -51,7 +52,7 @@ test.describe("Gate 3 bullet 2 - org-admin permission save/retrieve", () => {
   test.afterAll(async ({ playwright }) => {
     // A run that died before this point is cleaned by re-invoking the teardown
     // with the same E2E_RUN_ID; that is why the tag is an input.
-    const context = await playwright.request.newContext();
+    const context = await newFixtureContext(playwright);
     try {
       const session = await signIn(context, ADMIN[0], ADMIN[1]);
       const report = await cleanupRunOwned(session);

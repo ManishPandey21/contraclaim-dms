@@ -98,22 +98,42 @@ edge_host_is_non_public() {
 
   case "$host" in
     localhost | localhost.* | *.localhost) return 0 ;;
-    ::1 | 0:0:0:0:0:0:0:1 | fe80:* | fc??:* | fd??:*) return 0 ;;
+  esac
+
+  # An IPv6 literal is decided by its range and NOTHING else, and it is decided
+  # first. The dot rule at the bottom of this function would otherwise refuse
+  # every IPv6 address - they contain no dots - so `2001:db8::1` was being
+  # rejected as "not a public DNS name". The `fd??:` shape also missed a short
+  # first group: `fd1::1` is a unique-local address and `fd??:` needs exactly two
+  # hex digits before the colon.
+  case "$host" in
+    *:*)
+      case "$host" in
+        ::1 | 0:0:0:0:0:0:0:1) return 0 ;;
+        fe80:* | fe8*:* | fe9*:* | fea*:* | feb*:*) return 0 ;;   # link-local fe80::/10
+        fc*:* | fd*:*) return 0 ;;                                 # unique-local fc00::/7
+        *) return 1 ;;                                             # global unicast
+      esac
+      ;;
+  esac
+
+  case "$host" in
     127.*) return 0 ;;
     10.*) return 0 ;;
     192.168.*) return 0 ;;
     169.254.*) return 0 ;;
+    # 0.0.0.0/8, "this network". No public name begins `0.`; the over-refusal is
+    # in the safe direction and would only ever reject a wildcard bind address.
     0.0.0.0 | 0.*) return 0 ;;
     # RFC 1918 172.16.0.0/12 - the second octet, not a prefix match, because
     # 172.200.x is public and `172.2*` would swallow it.
     172.1[6-9].* | 172.2[0-9].* | 172.3[01].*) return 0 ;;
-    # Names that resolve only inside a network, and the container-network single
-    # labels compose creates (`gateway`, `backend`).
+    # Names that resolve only inside a network.
     *.local | *.internal | *.localdomain | *.home.arpa | *.lan | *.intranet) return 0 ;;
   esac
 
-  # A single label with no dot is a container or /etc/hosts name, never a public
-  # DNS name.
+  # A single label with no dot is a container or /etc/hosts name (`gateway`,
+  # `backend`), never a public DNS name.
   case "$host" in
     *.*) return 1 ;;
     *) return 0 ;;
@@ -218,9 +238,14 @@ edge_verification_plan() {
     return $?
   fi
 
+  # Reported, not just applied. A plan line naming a control it did NOT consult
+  # reads as "checked against these" - the same shape of claim as a backup
+  # reported `ok` because its mtime was fresh.
+  local reported_hosts="${production_hosts:-none-declared}"
   local public_dns_required="not-required"
   if [[ "$mode" == "production" ]]; then
     public_dns_required="required"
+    reported_hosts="not-applicable"
     if edge_host_is_non_public "$host"; then
       _edge_refuse "production edge ${url} is not a public DNS name (${host}). The gateway answers on its own network, so this passes while every real user is reaching a different address"
       return $?
@@ -237,5 +262,5 @@ edge_verification_plan() {
   fi
 
   printf 'mode=%s url=%s tls=required public_dns=%s production_hosts=%s\n' \
-    "$mode" "$url" "$public_dns_required" "${production_hosts:-none-declared}"
+    "$mode" "$url" "$public_dns_required" "$reported_hosts"
 }

@@ -34,6 +34,7 @@ import {
   RUN_TAG,
   cleanupRunOwned,
   ensureDisposableDocument,
+  newFixtureContext,
   signIn,
 } from "./fixtures";
 import { requireStagingEnvironment } from "./staging-target";
@@ -47,7 +48,7 @@ const REFUSALS = [403, 404];
 
 test.describe("Gate 3 bullet 3 - document lifecycle and authorization denial", () => {
   test.afterAll(async ({ playwright }) => {
-    const context = await playwright.request.newContext();
+    const context = await newFixtureContext(playwright);
     try {
       const session = await signIn(context, OWNER[0], OWNER[1]);
       const report = await cleanupRunOwned(session);
@@ -89,7 +90,7 @@ test.describe("Gate 3 bullet 3 - document lifecycle and authorization denial", (
     const owner = await signIn(request, OWNER[0], OWNER[1]);
     const document = await ensureDisposableDocument(owner, "lifecycle");
 
-    const outsiderContext = await playwright.request.newContext();
+    const outsiderContext = await newFixtureContext(playwright);
     try {
       const outsider = await signIn(outsiderContext, OUTSIDER[0], OUTSIDER[1]);
 

@@ -21,9 +21,9 @@ ordering from here, and re-derive every number.
 | P1 | Owner authorisation for a production cutover | **NOT GIVEN** |
 | P2 | Maintenance window booked, with a reserve | **NOT BOOKED** — book 5–6 h, see §2 |
 | P3 | Release branch reaches a deployable branch | **OPEN** — local only, not pushed to either remote |
-| P4 | Readiness ≥ 85 for Gate 9 | **OPEN** — 66/100 |
+| P4 | Readiness ≥ 85 for Gate 9 | **OPEN** — 68/100 |
 | P5 | FalkorDB `/data` cutover sequenced with the deploy | **PLANNED, NOT EXECUTED** — `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` |
-| P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — see §13 |
+| P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — confirmed at §8; the standing decisions are listed at the end of this file |
 
 P4 is a Gate 9 condition, not a cutover condition. A deploy can technically
 proceed below 85; **Gate 9 cannot close**, and the release is then deployed
@@ -107,8 +107,9 @@ in writing before §3.
 
 ## 8. S3 decision, confirmed
 
-- [ ] The owner confirms or revises the standing acceptance in §13 **before** the
-      stop, not after. Nothing here changes an AWS resource.
+- [ ] The owner confirms or revises the standing acceptance **before** the stop,
+      not after — the question and its three options are in
+      `docs/READINESS_CONVERGENCE.md` §6. Nothing here changes an AWS resource.
 
 ## 9. Time gates and the production stop
 
@@ -137,6 +138,13 @@ in writing before §3.
       `Clause`, `Letter` — re-derived before the stop and matched after.
 
 ## 12. Credential rotation
+
+> **Ordering note.** This checklist lists rotation before the image deployment,
+> and `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §4.19 sequences it after
+> the new backup has been taken, validated and restore-proved (§4.16 – §4.18).
+> **The cutover document wins for everything between §10 and §12 here.** Rotating
+> last means a rotation failure cannot be confused with a data-move failure, and
+> it costs nothing: the consumers are recreated once either way.
 
 - [ ] Rotate `FALKORDB_PASSWORD` **after** parity holds, so a rotation failure is
       not tangled with a data-move failure.

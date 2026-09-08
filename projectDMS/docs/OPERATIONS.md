@@ -344,7 +344,7 @@ designed not to have.
 | edge URL | **`PUBLIC_BASE_URL`, required** | `STAGING_EDGE_BASE_URL`, else `PUBLIC_BASE_URL`, required |
 | TLS | required | required |
 | public DNS name | **required** | **not required** — loopback and RFC 1918 are the staging topology |
-| may address a production host | n/a | **no** — refused against `PRODUCTION_PUBLIC_HOSTS` |
+| may address a production host | n/a — the plan reports `production_hosts=not-applicable`, because a line naming a control it did not consult reads as "checked against these" | **no** — refused against `PRODUCTION_PUBLIC_HOSTS` |
 | unset edge | **FAIL** | **FAIL** |
 
 The rule that matters most is the last row. It used to read "skip": the check
