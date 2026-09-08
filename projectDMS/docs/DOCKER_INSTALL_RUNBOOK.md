@@ -454,7 +454,18 @@ directory (`/FalkorDB`) inside the container's writable layer while the backup
 archived the volume mounted at `/data` — which was empty. On a host that has
 been running the old configuration the graph is still in the old container's
 layer, and the new configuration will come up with an empty `/data`. Move the
-state across **before** recreating the container:
+state across **before** recreating the container.
+
+> **For the production cutover, follow
+> [PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md](PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md),
+> not the recipe below.** The recipe is correct for a host you can afford to get
+> wrong, and it has one property production cannot accept: step 3's
+> `docker compose up -d falkordb` **recreates the service container and removes
+> the old one**, taking the writable layer — the graph's only on-host copy — with
+> it. After that step a rollback has nothing to start and can only restore. The
+> cutover document keeps the original container object alive for the whole
+> acceptance period, and seeds `/data` from a validated, restore-proved rescue
+> archive rather than from a hand-run `docker cp`.
 
 ```bash
 # 1. flush to disk, then stop writers
