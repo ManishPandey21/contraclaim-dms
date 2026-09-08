@@ -144,6 +144,27 @@ edge_verification_mode() {
   _edge_refuse "cannot decide which edge to verify: set DEPLOY_VERIFY_MODE to 'production' or 'staging' (ENVIRONMENT=${label:-<unset>} does not say)"
 }
 
+#: The marker `.env.staging.example` ships instead of the real hostnames.
+#:
+#: It cannot ship them: `test_staging_compose.py` refuses a tracked staging
+#: template that names the production host, and it is right to — a template that
+#: ships one is a copy-paste away from pointing staging at production, which is
+#: the exact failure `PRODUCTION_PUBLIC_HOSTS` exists to prevent. The cost is an
+#: operator who never edits the placeholder, whose refusal list then matches
+#: nothing while the plan line reports it as declared. A control that is present,
+#: green and inert is worse than an absent one, so this is refused rather than
+#: treated as a hostname.
+EDGE_HOST_PLACEHOLDER="REPLACE-WITH"
+
+_edge_is_placeholder() {
+  local value
+  value=$(_edge_lower "$1")
+  case "$value" in
+    *"$(_edge_lower "$EDGE_HOST_PLACEHOLDER")"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 #: Is this host one of the declared production hosts?
 _edge_host_is_production() {
   local host=$1 declared=$2 candidate
@@ -205,6 +226,10 @@ edge_verification_plan() {
       return $?
     fi
   else
+    if [[ -n "$production_hosts" ]] && _edge_is_placeholder "$production_hosts"; then
+      _edge_refuse "PRODUCTION_PUBLIC_HOSTS is still the ${EDGE_HOST_PLACEHOLDER}... placeholder from .env.staging.example (${production_hosts}). It would match no host, so the staging-pointed-at-production refusal could never fire while the plan reported the list as declared. Put the real production hostnames in .env.staging, or unset it and accept that the rule cannot fire"
+      return $?
+    fi
     if _edge_host_is_production "$host" "$production_hosts"; then
       _edge_refuse "staging edge ${url} addresses a production host (${host}). A staging run pointed there measures production and files the result as staging evidence"
       return $?

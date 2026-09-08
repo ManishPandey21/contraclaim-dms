@@ -37,6 +37,7 @@ guessing "production" would make every staging run demand public DNS.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -303,6 +304,60 @@ def test_the_production_host_refusal_needs_no_configuration_to_be_safe() -> None
     result = run_plan(mode="staging", staging_edge_base_url="https://web.contraclaim.com")
     assert result.returncode == 0, result.stderr
     assert field(result.stdout, "production_hosts") == "none-declared"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "REPLACE-WITH-PRODUCTION-HOSTNAMES",
+        "replace-with-production-hostnames",
+        "web.example.com,REPLACE-WITH-PRODUCTION-HOSTNAMES",
+    ],
+)
+def test_staging_refuses_a_production_host_list_that_is_still_a_placeholder(value: str) -> None:
+    """`.env.staging.example` cannot carry the real hostnames, so it carries a placeholder.
+
+    `test_staging_compose.py` refuses a tracked staging template that names the
+    production host, and it is right to: a template that ships one is a
+    copy-paste away from pointing staging at production. The cost is that an
+    operator who never edits the placeholder gets a list that matches nothing —
+    a control that is present, green, and inert. That is worse than an absent
+    one, because the plan line would report it as declared.
+    """
+    result = run_plan(
+        mode="staging",
+        staging_edge_base_url="https://127.0.0.1:8443",
+        production_public_hosts=value,
+    )
+    assert result.returncode == REFUSED, result.stdout
+    assert "placeholder" in result.stderr
+
+
+def test_production_mode_ignores_an_unedited_placeholder() -> None:
+    """The list only governs staging, so it must not block a production run."""
+    result = run_plan(
+        mode="production",
+        public_base_url="https://web.contraclaim.com",
+        production_public_hosts="REPLACE-WITH-PRODUCTION-HOSTNAMES",
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_staging_template_placeholder_is_the_one_the_library_refuses() -> None:
+    """Two spellings of the same placeholder is a control that does not fire."""
+    template = (REPO_ROOT / ".env.staging.example").read_text(encoding="utf-8")
+    library = LIB.read_text(encoding="utf-8")
+    match = re.search(r"^PRODUCTION_PUBLIC_HOSTS=(.+)$", template, re.M)
+    assert match, "the staging template no longer declares PRODUCTION_PUBLIC_HOSTS"
+    declared = match.group(1).strip()
+    assert "REPLACE-WITH" in declared, (
+        f"the staging template now ships a literal value ({declared!r}); "
+        "test_staging_compose.py refuses one that names the production host"
+    )
+    assert "REPLACE-WITH" in library, (
+        "the library no longer recognises the placeholder the template ships, so an "
+        "unedited staging environment would carry an inert refusal list"
+    )
 
 
 # --------------------------------------------------------------------------- #

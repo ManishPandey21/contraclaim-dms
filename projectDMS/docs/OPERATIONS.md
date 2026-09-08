@@ -361,6 +361,18 @@ staging run on the production host — without it the "staging pointed at
 production" refusal cannot fire, and the plan line says `production_hosts=none-declared`
 so the operator can see that rather than assume otherwise.
 
+`.env.staging.example` ships `PRODUCTION_PUBLIC_HOSTS=REPLACE-WITH-PRODUCTION-HOSTNAMES`
+and **not** the real hostnames, because
+`test_staging_compose.py::test_the_staging_template_exists_and_carries_no_real_value`
+refuses a tracked staging template that names the production host — a template
+that ships one is a copy-paste away from pointing staging at production, which is
+the failure this variable exists to prevent. The cost of a placeholder is an
+operator who never edits it, whose refusal list then matches nothing while the
+plan reports it as declared. A control that is present, green and inert is worse
+than an absent one, so `edge_target.sh` **refuses** an unedited placeholder in
+staging mode rather than treating it as a hostname. Production mode ignores the
+list entirely.
+
 Every rule above has a test in
 `backend/rbac_backend/tests/test_deploy_edge_verification.py`, including the
 negative controls: a production edge on loopback, a private range, a single
