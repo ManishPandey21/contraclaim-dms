@@ -167,16 +167,44 @@ jobs:
     needs: [backend-checks, frontend-checks]
     steps:
       - uses: actions/checkout@v4
+      # The job built all five images and then scanned all five, and on
+      # 2026-09-09 it died on the first scan with
+      # `write /tmp/trivy-.../docker-export-...: no space left on device` -
+      # Trivy exports a layer to disk to analyse it, and by then five images
+      # were already resident. Nothing about the images had changed; the job had
+      # simply outgrown a hosted runner. Restructured to build, scan and drop
+      # one image at a time, so peak disk holds one image rather than five.
+      #
+      # Coverage is identical: the same five builds, the same client
+      # package-manager class check, and the same five scans at CRITICAL,HIGH
+      # with `exit-code: 1`. Nothing was excluded to make it fit.
+      - name: Reclaim runner disk
+        # A hosted runner ships ~25 GB of toolchains this job never uses. Freed
+        # before the first build rather than between failures.
+        run: |
+          set -euo pipefail
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          docker system prune -af --volumes || true
+          df -h / | tail -1
       # langgraph, graphiti and docling are profile-gated in compose, but their
       # Python runtime is still built on every change so a 3.12 incompatibility
       # cannot stay hidden until an operator enables the profile.
-      - name: Build application images
-        run: |
-          docker build -t projectdms-backend:${{ github.sha }} projectDMS/backend
-          docker build -t projectdms-client:${{ github.sha }} projectDMS/client
-          docker build -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
-          docker build -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
-          docker build -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
+      - name: Build the backend image
+        run: docker build -t projectdms-backend:${{ github.sha }} projectDMS/backend
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: projectdms-backend:${{ github.sha }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Drop the backend image
+        run: docker image rm projectdms-backend:${{ github.sha }}
+      - name: Build the client image
+        run: docker build -t projectdms-client:${{ github.sha }} projectDMS/client
       - name: Client runtime image carries no package manager
         # The client image serves static files with `node scripts/serve-dist.mjs`.
         # node:*-slim bundles npm, corepack and yarn, and npm's vendored
@@ -211,31 +239,6 @@ jobs:
           done
           docker run --rm --entrypoint node "$image" --version
           echo "OK: runtime image has node, no package manager, no builder artefacts"
-      # `@0.24.0` stopped resolving - "unable to find version" - and the job
-      # failed at Set up job, before a single image was scanned. Every published
-      # tag on aquasecurity/trivy-action is `v`-prefixed; the unprefixed form
-      # this workflow used resolves for no version at all, checked against the
-      # git-refs API rather than assumed.
-      #
-      # `v0.33.1` then failed differently, and that second failure is why this
-      # is `v0.36.0`. That action tag defaults to Trivy `v0.65.0` but installs
-      # it with `contrib/install.sh` checked out from the trivy repository's
-      # `main` branch, not from the pinned tag. The current installer resolved
-      # the tag - "found version: 0.65.0" - and then failed fetching its asset
-      # 0.2s later, before a single image was scanned. An action release travels
-      # with a default scanner version its own installer path is exercised
-      # against, so pinning the action pins both; `v0.36.0` defaults to Trivy
-      # `v0.70.0`. Still an exact release and never a moving tag: an image scan
-      # whose scanner version changes silently is one whose result cannot be
-      # compared with the last.
-      - name: Scan images
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: projectdms-backend:${{ github.sha }}
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
       - name: Scan client image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -244,6 +247,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Drop the client image
+        run: docker image rm projectdms-client:${{ github.sha }}
+      - name: Build the LangGraph image
+        run: docker build -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
       - name: Scan LangGraph image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -252,6 +259,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Drop the LangGraph image
+        run: docker image rm projectdms-langgraph:${{ github.sha }}
+      - name: Build the Graphiti image
+        run: docker build -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
       - name: Scan Graphiti image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -260,6 +271,10 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Drop the Graphiti image
+        run: docker image rm projectdms-graphiti:${{ github.sha }}
+      - name: Build the Docling image
+        run: docker build -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
       - name: Scan Docling image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -268,3 +283,5 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+      - name: Drop the Docling image
+        run: docker image rm projectdms-docling:${{ github.sha }}
