@@ -197,6 +197,122 @@ def test_a_route_the_parser_cannot_place_fails_rather_than_disappears(generator)
     ], rows
 
 
+def test_an_unresolvable_path_fails_even_when_the_route_has_children(generator) -> None:
+    """R-A8T. The self-closing and with-children spellings must agree.
+
+    `<Route path={ROUTES.ADMIN} .../>` already raised, because a leaf the parser
+    cannot place is a route escaping the denominator. The *same* declaration
+    with children fell through to the layout branch instead: the parent vanished
+    from the inventory and its children were re-parented onto the root, so a
+    child `kid` was recorded as `/kid` rather than under the constant's path.
+    Silently - which is worse than either a raise or a wrong count alone,
+    because the total still looked plausible.
+    """
+    with pytest.raises(generator.UnresolvableRoute):
+        generator.parse_routes(
+            "<Routes><Route path={ROUTES.ADMIN} element={<AdminPage />}>"
+            '<Route path="kid" element={<KidPage />} /></Route></Routes>'
+        )
+
+    # A genuine layout - no `path=` attribute at all - is still legitimate.
+    rows = generator.parse_routes(
+        "<Routes><Route element={<MainLayout />}>"
+        '<Route path="inside" element={<InsidePage />} /></Route></Routes>'
+    )
+    assert [row["route"] for row in rows] == ["/inside"], rows
+
+
+def test_a_sibling_jsx_attribute_does_not_become_the_page(generator) -> None:
+    """R-A8T. `_element_expression` read to the end of the tag, not to its brace.
+
+    So a route with an `errorElement` was attributed to the error page, and the
+    row was then matched against the wrong `PAGE_STATES` declaration. Wrong
+    coverage claimed for the wrong screen, with the count unchanged.
+    """
+    rows = generator.parse_routes(
+        '<Routes><Route path="ee" element={<RealPage />} '
+        "errorElement={<ErrPage />} /></Routes>"
+    )
+    assert [(row["route"], row["page"]) for row in rows] == [("/ee", "RealPage")], rows
+
+    # Attribute order must not matter either.
+    rows = generator.parse_routes(
+        '<Routes><Route errorElement={<ErrPage />} path="ee2" '
+        "element={<RealPage />} /></Routes>"
+    )
+    assert [(row["route"], row["page"]) for row in rows] == [("/ee2", "RealPage")], rows
+
+
+def test_a_plain_block_comment_is_not_a_route(generator) -> None:
+    """R-A8T. The JSX comment spelling was stripped; the plain one was not.
+
+    A commented-out route was counted as live, which demands coverage for a
+    screen that does not exist. The gentler direction of the same defect, and
+    still a denominator that is not the router.
+    """
+    rows = generator.parse_routes(
+        "<Routes>/* <Route path=\"ghost\" element={<GhostPage />} /> */"
+        '<Route path="real" element={<RealPage />} /></Routes>'
+    )
+    assert [row["route"] for row in rows] == ["/real"], rows
+
+
+#: Routes owing an empty or loading state that name an existing error test,
+#: measured on 2026-09-09 (R-A8T). A ratchet, not a target.
+ERROR_TESTS_LOCATED_ON_2026_09_09 = 36
+
+
+def test_the_relocated_error_coverage_does_not_shrink(inventory) -> None:
+    """Bullet 8's amendment relocated the error state; this is what holds it there.
+
+    The amendment moved the error-state requirement to the component and
+    mocked-E2E layer. Relocation is only honest while the destination exists, and
+    the gate document's prose claimed error behaviour was "still tested" when 49
+    of the 85 applicable routes name no error test at all. The number is now
+    stated there, and this ratchet stops the other 36 being deleted afterwards
+    - which would satisfy the amendment's letter by emptying it.
+
+    The floor is deliberately the measurement and not a round number: raising it
+    is a real improvement someone should bank here.
+    """
+    applicable = [
+        row
+        for row in inventory["routes"]
+        if row["empty_state_applicable"] or row["loading_state_applicable"]
+    ]
+    located = [
+        row
+        for row in applicable
+        if row["error_test_location"] and "MISSING" not in row["error_test_location"]
+    ]
+    assert applicable, "no route owes an empty or loading state; the ratchet is vacuous"
+    assert len(located) >= ERROR_TESTS_LOCATED_ON_2026_09_09, (
+        f"{len(located)} of {len(applicable)} applicable routes name an error "
+        f"test; {ERROR_TESTS_LOCATED_ON_2026_09_09} did on 2026-09-09. Bullet 8's "
+        "amendment relocated the error-state requirement rather than deleting it, "
+        "so the destination may not shrink"
+    )
+
+
+def test_the_tracked_inventory_survives_the_end_of_file_hook(inventory) -> None:
+    """The artefact must be a fixed point of `pre-commit run --all-files`.
+
+    It was not. `render_markdown` appended a blank line and `print` added
+    another newline, so the checked-in file ended in a blank line,
+    `end-of-file-fixer` rewrote it, and the hook set exited 1 - failing
+    `backend-checks`, which is the CI leg Gate 1 bullet 6 is waiting on. Nobody
+    saw it because `pre-commit` is not installed on the development host, so the
+    hook that would have caught it is the same hook the gate is blocked on.
+    """
+    raw = INVENTORY.read_bytes()
+    assert raw.endswith(b"\n"), "the inventory does not end with a newline"
+    assert not raw.endswith(b"\n\n"), (
+        "the inventory ends with a blank line, so `end-of-file-fixer` will "
+        "rewrite it and `pre-commit run --all-files` will exit 1 in CI"
+    )
+    assert not raw.endswith(b"\r\n\r\n"), "same, with CRLF endings"
+
+
 def test_the_tracked_inventory_matches_a_fresh_run(generator, inventory) -> None:
     """The artefact is checked in so reviewers can read it; it must not go stale."""
     assert INVENTORY.is_file(), (

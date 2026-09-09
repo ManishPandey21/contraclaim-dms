@@ -39,7 +39,7 @@ import {
   setRolePermissions,
   signIn,
 } from "./fixtures";
-import { requireStagingEnvironment } from "./staging-target";
+import { requireStagingEnvironment, stagingTeardownHasWork } from "./staging-target";
 
 /** One Client DMS permission, chosen because it is in the group the bullet names. */
 const CLIENT_DMS_PERMISSION = "dms.document.share";
@@ -50,6 +50,12 @@ const SCOPE = ["E2E_STAGING_ORG_ID"] as const;
 
 test.describe("Gate 3 bullet 2 - org-admin permission save/retrieve", () => {
   test.afterAll(async ({ playwright }) => {
+    // Nothing ran, so there is nothing run-owned to remove. Without this the
+    // hook builds a fixture context with no target and throws, turning a
+    // clean skip into a failed `npm run test:e2e`.
+    if (!stagingTeardownHasWork()) {
+      return;
+    }
     // A run that died before this point is cleaned by re-invoking the teardown
     // with the same E2E_RUN_ID; that is why the tag is an input.
     const context = await newFixtureContext(playwright);

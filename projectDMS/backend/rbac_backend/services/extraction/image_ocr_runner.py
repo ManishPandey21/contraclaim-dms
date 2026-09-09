@@ -56,7 +56,14 @@ class TesseractImageOcrRunner:
             raise ImageOcrRunnerError("Standalone image OCR timed out") from exc
 
         if process.returncode != 0:
+            # The exit code and the size, never the text. Tesseract's stderr is
+            # produced while reading the customer's image and can quote what it
+            # choked on, so this message is document-derived - the same channel
+            # R-A8S closed in `contracts_ingest.py` for Marker. An exception
+            # message is a log line as soon as any caller logs it, which is why
+            # the guard now reads `raise` arguments as well as logging calls.
             raise ImageOcrRunnerError(
-                stderr.decode("utf-8", errors="replace")[:500]
+                "Standalone image OCR failed "
+                f"(exit={process.returncode}, stderr_bytes={len(stderr or b'')})"
             )
         return stdout.decode("utf-8", errors="replace").strip()

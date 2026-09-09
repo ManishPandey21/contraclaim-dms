@@ -143,7 +143,17 @@ class AIAssistantController:
             cached_result = await self.cache_service.get(cache_key)
 
             if cached_result:
-                logger.info(f"Cache hit for search query: {query[:50]}...")
+                # The digest, not the query. `observability/service.py::
+                # _redact_query` already reduces this exact value to
+                # `[redacted len=N]`, so the repository's own position is that
+                # a search query is sensitive; this line rendered 50 characters
+                # of it at INFO. The digest is already computed above and is
+                # what makes a cache hit diagnosable.
+                logger.info(
+                    "Cache hit for search query digest=%s len=%s",
+                    query_digest,
+                    len(query),
+                )
                 return VectorSearchResponse(**cached_result, cached_results=True)
 
             # Perform search

@@ -40,7 +40,7 @@ import {
   newFixtureContext,
   signIn,
 } from "./fixtures";
-import { requireStagingEnvironment } from "./staging-target";
+import { requireStagingEnvironment, stagingTeardownHasWork } from "./staging-target";
 
 const AUTHOR = ["E2E_STAGING_EMAIL", "E2E_STAGING_PASSWORD"] as const;
 const APPROVER = ["E2E_APPROVER_EMAIL", "E2E_APPROVER_PASSWORD"] as const;
@@ -52,6 +52,12 @@ const PDF_MAGIC = Buffer.from("%PDF", "utf-8");
 
 test.describe("Gate 3 bullet 7 - arbitration drafting and approval chain", () => {
   test.afterAll(async ({ playwright }) => {
+    // Nothing ran, so there is nothing run-owned to remove. Without this the
+    // hook builds a fixture context with no target and throws, turning a
+    // clean skip into a failed `npm run test:e2e`.
+    if (!stagingTeardownHasWork()) {
+      return;
+    }
     const context = await newFixtureContext(playwright);
     try {
       const session = await signIn(context, AUTHOR[0], AUTHOR[1]);

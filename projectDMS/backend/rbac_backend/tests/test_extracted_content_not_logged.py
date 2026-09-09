@@ -35,6 +35,7 @@ banned `len(text)` would be routed around within a week.
 from __future__ import annotations
 
 import ast
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -58,6 +59,16 @@ SCANNED_PATHS = (
     RBAC_BACKEND / "services" / "contracts_ingest.py",
     RBAC_BACKEND / "services" / "metadata_processor_service.py",
     RBAC_BACKEND / "services" / "ocr_service.py",
+    # Added in R-A8T. `routers/ai_assistant.py:146` rendered 50 characters of a
+    # search query at INFO while `observability/service.py::_redact_query`
+    # reduced the identical value to `[redacted len=N]` - so the repository
+    # already held that this string is sensitive, and the module sat in neither
+    # the guard's scope nor its declared hand-checked boundary. These three are
+    # the query/answer surface: they consume extracted content rather than
+    # producing it, which is the same reason `retrieval/` is here.
+    RBAC_BACKEND / "routers" / "ai_assistant.py",
+    RBAC_BACKEND / "routers" / "retrieval_engine.py",
+    RBAC_BACKEND / "services" / "ai_service.py",
 )
 
 LOG_LEVELS = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
@@ -109,6 +120,8 @@ METADATA_SUFFIXES = (
     "_id",
     "_ids",
     "_uuid",
+    "_uid",
+    "_uids",
     "_key",
     "_keys",
     "_type",
@@ -254,6 +267,48 @@ def violations(source: str, label: str = "<source>") -> List[str]:
                 problems.append(
                     f"{label}:{node.lineno}: logger.{level} would render {name!r}, "
                     "which can carry extracted document content"
+                )
+    return problems
+
+
+def raise_violations(source: str, label: str = "<source>") -> List[str]:
+    """One message per `raise` whose exception would carry extracted content.
+
+    The complement of `violations`, and the gap R-A8T's review found. The
+    logging validator inspects the arguments of logging calls; an exception
+    reaches a log through a *different* door - `logger.exception(...)` renders a
+    traceback, `logger.warning("...: %s", exc)` renders the message, and neither
+    call site names anything content-shaped. So a guard that reads only logging
+    arguments certifies a tree in which
+
+        raise ValueError(f"reranker LLM returned no JSON array: {raw[:200]!r}")
+
+    is caught seventy lines later by
+
+        logger.warning("Reranker (%s) failed; ...: %s", self.provider, exc)
+
+    and the passage text the model echoed goes to the log. That was live in
+    `retrieval/reranker.py` - inside `SCANNED_PATHS`, invisible to the guard
+    that certified Gate 5 bullet 5.
+
+    Deliberately not restricted to exceptions we know are logged: which caller
+    logs which exception is not a property this file can check, and "nothing
+    logs it today" is the same kind of luck the route parser was relying on.
+    """
+    problems: List[str] = []
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise) or node.exc is None:
+            continue
+        arguments: List[ast.expr] = []
+        if isinstance(node.exc, ast.Call):
+            arguments = list(node.exc.args) + [kw.value for kw in node.exc.keywords]
+        for argument in arguments:
+            for name in _content_references(argument):
+                problems.append(
+                    f"{label}:{node.lineno}: raise would carry {name!r}, which can "
+                    "carry extracted document content into any log that renders "
+                    "the exception"
                 )
     return problems
 
@@ -461,6 +516,68 @@ def test_no_extraction_module_logs_extracted_content() -> None:
     )
 
 
+def test_no_extraction_module_raises_with_extracted_content() -> None:
+    """The class fix for F-A8T-2. Three real channels, found by running this.
+
+    `retrieval/reranker.py` embedded the model's reply - its answer to a prompt
+    carrying 600 characters of each passage - in a `ValueError` that
+    `RerankerService.rerank` logs at WARNING.
+    `services/extraction/image_ocr_runner.py` and `ocrmypdf_runner.py` put up to
+    500 characters of an OCR tool's stderr/stdout into their exceptions, which
+    is the identical channel R-A8S closed in `contracts_ingest.py` for Marker.
+    All three now carry an exit code and a length.
+    """
+    problems: List[str] = []
+    for path in _scanned_modules():
+        problems.extend(
+            raise_violations(
+                path.read_text(encoding="utf-8"),
+                str(path.relative_to(RBAC_BACKEND.parents[1])),
+            )
+        )
+    assert not problems, (
+        "an exception in the extraction trees would carry document content, and "
+        "an exception message reaches the log of whichever caller renders it:\n"
+        + "\n".join(problems)
+    )
+
+
+RAISE_LEAK_SHAPES = [
+    pytest.param('raise ValueError(f"bad clause: {text}")', "text", id="f-string"),
+    pytest.param('raise RuntimeError("failed: %s" % chunk)', "chunk", id="percent"),
+    pytest.param("raise OcrError(stderr.decode()[:500])", "stderr", id="sliced-stderr"),
+    pytest.param('raise ValueError("no array: " + raw[:200])', "raw", id="concatenation"),
+    pytest.param("raise ParseError(detail=extracted_text)", "extracted_text", id="keyword"),
+]
+
+
+@pytest.mark.parametrize("snippet,expected", RAISE_LEAK_SHAPES)
+def test_each_raise_leak_shape_is_caught(snippet: str, expected: str) -> None:
+    found = raise_violations(snippet)
+    assert found, f"the raise validator did not catch: {snippet}"
+    assert any(expected in message for message in found), found
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param(
+            'raise ValueError(f"exit={code} stderr_bytes={len(stderr)}")', id="lengths"
+        ),
+        pytest.param("raise ClauseNotFoundError(clause_uid)", id="an-identifier"),
+        pytest.param('raise OcrError(f"failed after {page_count} pages")', id="a-count"),
+        pytest.param("raise ValueError(text_sha256)", id="a-digest"),
+        pytest.param("raise", id="a-bare-reraise"),
+    ],
+)
+def test_the_raise_validator_does_not_ban_metadata(snippet: str) -> None:
+    """Same reason as the logging half: a guard that banned `len(text)` would be
+    disabled rather than obeyed. `clause_uid` is an identifier, and `_uid` was
+    added to the metadata suffixes for it - a validator correction, not a code
+    change."""
+    assert raise_violations(snippet) == []
+
+
 # --------------------------------------------------------------------------- #
 # B. The runtime control
 # --------------------------------------------------------------------------- #
@@ -542,25 +659,95 @@ def test_a_real_chunking_run_does_not_log_its_input() -> None:
     assert not leaked, f"extracted content reached the logs: {leaked}"
 
 
-def test_an_extraction_failure_does_not_quote_the_document() -> None:
-    """Exception text is the channel the static guard is weakest on.
+def _reranker_results(text: str):
+    """One candidate carrying `text` where `rerank` looks for a passage.
 
-    `logger.exception(...)` renders a traceback, and a traceback renders the
-    exception's own message. A parser that raises `ValueError(f"bad clause:
-    {text}")` leaks through a log call that names nothing content-shaped.
+    `rerank` reads `payload["text_enriched"] or payload["text"] or snippet`, so
+    the marker is placed in `text` - the field a real Qdrant hit carries.
     """
-    logger = logging.getLogger("rbac_backend.tests.extraction_failure")
+    from rbac_backend.retrieval.models import SearchResult  # noqa: PLC0415
+
+    return [
+        SearchResult(
+            document_id="doc-1",
+            chunk_id="doc-1:0",
+            score=0.9,
+            snippet=text,
+            payload={"text": text},
+        )
+    ]
+
+
+def test_an_extraction_failure_does_not_quote_the_document() -> None:
+    """The exception channel, driven through the real code that had the defect.
+
+    **This test used to prove nothing.** It raised
+    `ValueError("clause parse failed at offset 41")` - a hand-written constant
+    with no marker in it - and then asserted the marker was absent from the
+    logs. The assertion was true by construction, and would have stayed true if
+    every exception in the codebase quoted the document. It was the only thing
+    standing between F-A8T-2 and Gate 5 bullet 5's tick.
+
+    It now drives `RerankerService.rerank` with a backend LLM that echoes the
+    passage text back instead of returning a JSON array. That is the exact
+    production path: the reply reaches `LLMRerankerBackend.score`, which raises,
+    and `rerank` catches and logs the exception at WARNING. The marker must
+    reach the prompt (or the run proves nothing) and must not reach any log.
+    """
+    from rbac_backend.retrieval.reranker import (  # noqa: PLC0415
+        LLMRerankerBackend,
+        RerankerService,
+    )
+
+    class _EchoingLLM:
+        """The failure mode: a model that repeats its prompt instead of scoring."""
+
+        def __init__(self) -> None:
+            self.saw_the_marker = False
+
+        async def generate(self, prompt: str, **_: object) -> str:
+            self.saw_the_marker = SYNTHETIC_SECRET in prompt
+            # Brackets are stripped so the reply cannot accidentally parse as
+            # the JSON array the backend is looking for. Echoing the prompt
+            # verbatim let `[1] <passage>` be read as a valid one-element score
+            # array, and no exception was raised at all - which the "was it
+            # logged" assertion below caught, and a weaker test would not have.
+            echoed = prompt.replace("[", "(").replace("]", ")")
+            # Passages first, so a reply the code truncates - it used to embed
+            # `raw[:200]` - still carries the marker. Echoing the prompt in its
+            # own order put 200 characters of instructions in front of the
+            # document text, and the runtime control passed against the very
+            # defect it exists to catch.
+            marker_first = echoed[echoed.index("Passages:") :]
+            return f"{marker_first} -- I cannot score these."
+
+    llm = _EchoingLLM()
+    service = RerankerService(
+        LLMRerankerBackend(llm), enabled=True, provider="llm", top_n=5
+    )
+    results = _reranker_results(f"Clause 14.1 {SYNTHETIC_SECRET} shall apply.")
+
     handler = _capture_all_logging()
     try:
-        try:
-            raise ValueError("clause parse failed at offset 41")
-        except ValueError:
-            logger.exception("Ingestion job %s failed", "job-1")
+        returned = asyncio.run(service.rerank("what does clause 14.1 say", results))
     finally:
         logging.getLogger().removeHandler(handler)
 
+    assert llm.saw_the_marker, (
+        "the marker never reached the reranker prompt, so its absence from the "
+        "logs proves nothing - the control measured nothing"
+    )
     assert handler.seen, "nothing was captured, so the control measured nothing"
-    assert not [line for line in handler.seen if SYNTHETIC_SECRET in line]
+    assert any("Reranker" in line for line in handler.seen), (
+        "the reranker failure was not logged, so this run did not exercise the "
+        f"channel: {handler.seen}"
+    )
+    assert returned == results, "a backend failure must return the input ordering"
+
+    leaked = [line for line in handler.seen if SYNTHETIC_SECRET in line]
+    assert not leaked, (
+        f"the passage text reached a log through the exception message: {leaked}"
+    )
 
 
 def test_the_capture_handler_would_notice_a_leak() -> None:

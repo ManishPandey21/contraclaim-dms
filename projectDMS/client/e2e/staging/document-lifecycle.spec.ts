@@ -37,7 +37,7 @@ import {
   newFixtureContext,
   signIn,
 } from "./fixtures";
-import { requireStagingEnvironment } from "./staging-target";
+import { requireStagingEnvironment, stagingTeardownHasWork } from "./staging-target";
 
 const OWNER = ["E2E_STAGING_EMAIL", "E2E_STAGING_PASSWORD"] as const;
 const OUTSIDER = ["E2E_OUTSIDER_EMAIL", "E2E_OUTSIDER_PASSWORD"] as const;
@@ -48,6 +48,12 @@ const REFUSALS = [403, 404];
 
 test.describe("Gate 3 bullet 3 - document lifecycle and authorization denial", () => {
   test.afterAll(async ({ playwright }) => {
+    // Nothing ran, so there is nothing run-owned to remove. Without this the
+    // hook builds a fixture context with no target and throws, turning a
+    // clean skip into a failed `npm run test:e2e`.
+    if (!stagingTeardownHasWork()) {
+      return;
+    }
     const context = await newFixtureContext(playwright);
     try {
       const session = await signIn(context, OWNER[0], OWNER[1]);

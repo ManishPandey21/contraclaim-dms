@@ -260,12 +260,22 @@ PAGE_STATES: Dict[str, PageStates] = {
 
 
 def _strip_comments(source: str) -> str:
-    """Remove JSX `{/* ... */}` blocks and whole-line `//` comments.
+    """Remove `{/* ... */}` and `/* ... */` blocks, and whole-line `//` comments.
 
-    Both appear in `routes.tsx` and both contain angle brackets and the word
-    `path`, which the tag scanner would otherwise read as route declarations.
+    All three appear in `routes.tsx` and all three can contain angle brackets
+    and the word `path`, which the tag scanner would otherwise read as route
+    declarations.
+
+    The bare `/* ... */` form was added in R-A8T. A commented-out route in the
+    JSX spelling was correctly ignored; the same route commented out in the
+    plain-TypeScript spelling was parsed as a live one and inflated the
+    denominator. A false *inclusion* is the gentler direction - it demands
+    coverage for a route that does not exist rather than excusing one that does
+    - but the inventory is supposed to be derived from the router, and a comment
+    is not the router.
     """
     source = re.sub(r"\{/\*.*?\*/\}", "", source, flags=re.S)
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
     kept = []
     for line in source.splitlines():
         if line.lstrip().startswith("//"):
@@ -372,10 +382,41 @@ def _is_index_route(tag: str) -> bool:
 
 
 def _element_expression(tag: str) -> str:
-    element = tag.find("element=")
-    if element == -1:
+    """The `element={...}` attribute's own value, and nothing after it.
+
+    This used to return everything from `element=` to the end of the tag, so a
+    sibling attribute that also holds JSX was read as part of the page. R-A8T's
+    review demonstrated it with `errorElement`:
+
+        <Route path="ee" element={<RealPage/>} errorElement={<ErrPage/>}/>
+
+    resolved to page `ErrPage`, because `_page_component` takes the last
+    component it sees. The row then carried the wrong page name, and the
+    `PAGE_STATES` declaration it was matched against was the wrong one - a
+    silent mis-attribution rather than a failure.
+
+    The match is anchored on `element=` at an attribute boundary so that
+    `errorElement=` and `lazyElement=` do not satisfy it, and the value is read
+    to its matching brace.
+    """
+    match = re.search(r"(?:^|[\s{])element=", tag)
+    if match is None:
         return ""
-    return tag[element:]
+    start = tag.find("{", match.end() - 1)
+    if start == -1:
+        # `element=<Page/>` without braces, or a string value. Take the rest of
+        # the tag, which is what the old behaviour did for every case.
+        return tag[match.end():]
+    depth = 0
+    for index in range(start, len(tag)):
+        char = tag[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return tag[start : index + 1]
+    return tag[start:]
 
 
 def _page_component(element: str) -> Optional[str]:
@@ -469,6 +510,18 @@ def parse_routes(source: str, *, strict: bool = True) -> List[dict]:
                         "page": page,
                     }
                 )
+        elif "path=" in _top_level_attributes(tag) and strict:
+            # A Route that DECLARES a path the parser could not read - a
+            # constant, a call, anything but a literal. R-A8T's review found
+            # this reached the layout branch below when the Route had children:
+            # the parent vanished from the inventory and every child was
+            # re-parented onto the root, so `<Route path={ROUTES.ADMIN}>` with a
+            # child `kid` produced `/kid`. The self-closing spelling of the same
+            # construct already raised; this makes the two agree.
+            raise UnresolvableRoute(
+                "a Route declares a path the inventory cannot resolve to a "
+                f"literal: {tag.strip()[:160]}"
+            )
         elif self_closing and strict:
             # A leaf Route with no path and no index cannot be placed. Silently
             # dropping it is how a route escapes the denominator.
@@ -611,7 +664,11 @@ def render_markdown(inventory: dict) -> str:
                 ),
             )
         )
-    lines.append("")
+    # No trailing blank line. `print()` supplies the single final newline the
+    # redirect writes, and `end-of-file-fixer` strips anything past it - which
+    # made `pre-commit run --all-files` modify the tracked artefact and exit 1,
+    # failing the CI leg Gate 1 bullet 6 depends on. The hook had never been
+    # run locally, so the generator and the hook disagreed unnoticed.
     return "\n".join(lines)
 
 

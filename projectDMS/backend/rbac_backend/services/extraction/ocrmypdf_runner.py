@@ -63,8 +63,14 @@ class OcrMyPdfRunner:
             timeout=self.timeout,
         )
         if result.returncode != 0:
+            # Exit code and lengths, not the streams themselves. OCRmyPDF reads
+            # the customer's PDF, so both channels can quote its text. Same
+            # class as the Marker stderr channel closed in R-A8S.
             raise OcrRunnerError(
-                (result.stderr or result.stdout or "OCRmyPDF batch failed").strip()[:500]
+                "OCRmyPDF batch failed "
+                f"(exit={result.returncode}, "
+                f"stderr_chars={len(result.stderr or '')}, "
+                f"stdout_chars={len(result.stdout or '')})"
             )
 
         return await asyncio.to_thread(

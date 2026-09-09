@@ -5,6 +5,7 @@ from ..core.security import get_current_user, CurrentUser
 from ..schemas.profile import ProfileRead, ProfileUpdate, ChangePassword
 from ..services.user_service import UserService
 from ..services.upload_streaming import read_upload_within_limit
+from ..utils.file_validation import sniff_mime_from_bytes
 
 router = APIRouter(tags=["profiles"])
 
@@ -142,9 +143,21 @@ async def upload_profile_photo(
             detail="Profile photo must be 5MB or less.",
         )
 
+    # The check above the read is on the client's DECLARED `Content-Type`, which
+    # is a claim and not a measurement - the same trust this repository refuses
+    # to place in a file extension. This one is sniffed from the bytes, and it
+    # is also the type that goes into the stored data URL, so the record cannot
+    # assert a type the content does not have.
+    sniffed = sniff_mime_from_bytes(content, file.filename)
+    if sniffed not in ALLOWED_IMAGE_MIME_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Only image files are allowed (jpeg, png, webp, gif).",
+        )
+
     import base64
 
-    data_url = f"data:{file.content_type};base64,{base64.b64encode(content).decode('utf-8')}"
+    data_url = f"data:{sniffed};base64,{base64.b64encode(content).decode('utf-8')}"
     if len(data_url.encode("utf-8")) > 7 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,

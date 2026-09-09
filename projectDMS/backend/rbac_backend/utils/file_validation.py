@@ -38,6 +38,19 @@ def sniff_mime_from_bytes(data: bytes, filename: Optional[str] = None) -> str:
     if len(data) >= 3 and data[0] == 0xFF and data[1] == 0xD8 and data[2] == 0xFF:
         return "image/jpeg"
 
+    # GIF - "GIF87a" or "GIF89a". Added in R-A8T with WebP below, because
+    # `routers/profiles.py` allows both and had no way to check them: it
+    # trusted the client's declared `Content-Type` instead, which is the
+    # extension-trust bypass in a different field. Neither type appears in any
+    # other allowlist in this backend, so recognising them here widens nothing
+    # except the surface that asked for them.
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "image/gif"
+
+    # WebP - a RIFF container whose form type at offset 8 is "WEBP".
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+
     # Heuristic text detector: reject if any NUL bytes,
     # then try decode and ensure mostly printable characters.
     if b"\x00" not in data:

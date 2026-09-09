@@ -21,7 +21,7 @@ ordering from here, and re-derive every number.
 | P1 | Owner authorisation for a production cutover | **NOT GIVEN** |
 | P2 | Maintenance window booked, with a reserve | **NOT BOOKED** — book 5–6 h, see §2 |
 | P3 | Release branch reaches a deployable branch | **OPEN** — local only, not pushed to either remote |
-| P4 | Readiness ≥ 85 for Gate 9 | **OPEN** — 68/100 |
+| P4 | Readiness ≥ 85 for Gate 9 | **OPEN** — re-derive with `scripts/production_readiness_score.py`; a figure quoted here goes stale the moment a bullet is ticked, and this row carried the pre-R-A8S 68 for a phase after it stopped being true |
 | P5 | FalkorDB `/data` cutover sequenced with the deploy | **PLANNED, NOT EXECUTED** — `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` |
 | P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — confirmed at §8; the standing decisions are listed at the end of this file |
 

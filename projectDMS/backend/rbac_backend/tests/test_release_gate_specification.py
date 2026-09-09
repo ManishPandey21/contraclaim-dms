@@ -617,6 +617,67 @@ def test_the_current_score_is_stated_somewhere(gate_text: str) -> None:
     )
 
 
+#: The scorer's whole verdict vocabulary, longest first so "Ready with
+#: Conditions" is not read as "Ready".
+VERDICTS = ("Ready with Conditions", "Not Ready", "Ready")
+
+
+def stated_current_verdicts(text: str) -> List[tuple[str, str]]:
+    """(verdict, line) for every line offering a verdict as the CURRENT one.
+
+    Scoped like `stated_current_scores`: a line recording what the verdict was
+    at some past phase is history, not a claim, and the document legitimately
+    carries several.
+    """
+    found = []
+    for line in text.splitlines():
+        low = line.lower()
+        if "current" not in low or "verdict" not in low:
+            continue
+        for verdict in VERDICTS:
+            if verdict.lower() in low:
+                found.append((verdict, line.strip()))
+                break
+    return found
+
+
+def test_no_line_claims_a_current_verdict_the_script_does_not_compute(
+    gate_text: str,
+) -> None:
+    """The verdict drifted where the score could not, because nothing watched it.
+
+    R-A8S moved the computed verdict from Not Ready to Ready with Conditions and
+    the document went on saying Not Ready in two places, one of them its own
+    header. That is the safe direction - and a document that reports two
+    different verdicts depending on where you read is the defect the score
+    guards exist for, pointed at the other field.
+    """
+    computed = _score_result()["verdict"]
+    stated = stated_current_verdicts(gate_text)
+    assert stated, "the document no longer states a current verdict"
+    wrong = [entry for entry in stated if entry[0] != computed]
+    assert not wrong, (
+        f"the script computes verdict {computed!r}, and these lines state "
+        "something else:\n" + "\n".join(f"  {v!r} in: {line}" for v, line in wrong)
+    )
+
+
+def test_the_verdict_rule_reads_the_longest_match_first() -> None:
+    """Otherwise "Ready with Conditions" is silently accepted as "Ready"."""
+    assert stated_current_verdicts("Current verdict: Ready with Conditions.") == [
+        ("Ready with Conditions", "Current verdict: Ready with Conditions.")
+    ]
+    assert stated_current_verdicts("Current verdict: Not Ready.") == [
+        ("Not Ready", "Current verdict: Not Ready.")
+    ]
+
+
+def test_the_verdict_rule_ignores_a_historical_verdict() -> None:
+    """A document that cannot record what the verdict used to be is worse."""
+    line = "Verdict recorded **as at Phase 8**: Not Ready. (Superseded.)"
+    assert stated_current_verdicts(line) == []
+
+
 GATE_TABLE_ROW = re.compile(
     r"^\|\s*(Gate \d+:[^|]+?)\s*\|\s*([\d.]+)\s*/\s*(\d+)\s*\|\s*(\d+)\s*/\s*(\d+)\s*\|$"
 )

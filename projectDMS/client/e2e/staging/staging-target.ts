@@ -24,6 +24,25 @@ export const STRICT = ["1", "true", "yes", "on"].includes(
 
 export const targetsDeployedStack = Boolean(BASE_URL);
 
+/**
+ * Whether a suite-level hook has anything to do.
+ *
+ * `test.afterAll` runs even when every test in its group skipped, and the
+ * staging teardowns build a fixture context to enumerate run-owned state. With
+ * no `E2E_BASE_URL` that construction throws by design - the fixtures refuse to
+ * act without a target - so the hook turned a clean skip into ten failures on
+ * an ordinary run. `npm run test:e2e` is a `frontend-checks` step, so the first
+ * CI run this branch ever gets would have failed on it, in the leg Gate 1
+ * bullet 6 depends on.
+ *
+ * A teardown with no target has nothing to clean, because nothing ran. Under
+ * `STRICT` the tests themselves already fail loudly for the same missing value,
+ * so nothing is being swallowed here.
+ */
+export function stagingTeardownHasWork(): boolean {
+  return targetsDeployedStack;
+}
+
 function read(name: string): string {
   return (process.env[name] ?? "").trim();
 }

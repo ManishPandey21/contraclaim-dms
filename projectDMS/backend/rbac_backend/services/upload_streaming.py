@@ -91,6 +91,51 @@ async def read_upload_within_limit(
     return b"".join(chunks)
 
 
+def read_file_within_limit(handle, max_size_bytes: int) -> bytes:
+    """The synchronous sibling of `read_upload_within_limit`.
+
+    For the call sites that hold `UploadFile.file` - the spooled handle - rather
+    than the async wrapper, and so cannot await. It reads the same way for the
+    same reason: chunk by chunk, refusing on the byte that crosses the cap,
+    never `handle.read()` followed by a measurement.
+
+    Written because `POST /api/documents/bulk-upload` takes **two** upload
+    parameters and measured only one. The route caps `files` by count and by
+    total size; `csv_file` is a separate parameter nothing measured, and
+    `bulk_upload_service.read_csv_from_upload_file` read it whole with
+    `upload_file.file.read()` and then `.decode()`d it, so the process could
+    hold two copies of a body bounded only by the gateway's
+    `client_max_body_size 200m`. F-A8S-4 closed six such sites through the async
+    helper; this one kept its own shape and survived, which is the argument for
+    fixing at a seam rather than at a list of call sites.
+
+    The handle is rewound before and after, so a caller that reads it again gets
+    the whole body.
+    """
+    limit = max(1, int(max_size_bytes))
+    chunk_size = max(1, int(getattr(settings, "UPLOAD_STREAM_CHUNK_SIZE_MB", 1))) * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+
+    try:
+        handle.seek(0)
+    except Exception:
+        pass
+    while True:
+        chunk = handle.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+    try:
+        handle.seek(0)
+    except Exception:
+        pass
+    return b"".join(chunks)
+
+
 @dataclass
 class SpooledUpload:
     filename: str

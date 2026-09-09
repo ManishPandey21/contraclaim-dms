@@ -164,7 +164,7 @@ the useful thing this re-derivation says: the next phase is not a coding phase.
 | 7 | **G9 b4** — staging smoke after restore drill | 1.333 | **STAGING** | a restore in the same window, smoke after it | **YES** (or one substitute from item 8) |
 | 8 | **G3 b3 / G3 b7 / G3 b9** — document lifecycle, arbitration drafting, viewport matrix | 1.333 each | **STAGING** | b3 needs the SMTP-sink decision for its share leg; b7 needs an approver account; b9 needs b2 and b3 first | substitutable for items 6–7, one for one |
 | 9 | **G9 b1, b2, b6** — blockers closed, risks accepted, owner sign-off | 1.333 each | OWNER | b1 is downstream of everything; b2 is one consolidated acceptance document; b6 is a named human | not on the shortest path, but b2 is cheap and offline |
-| — | **G9 b5** — readiness score ≥ 85 | 1.333 | — | the score itself | **excluded.** Counting it towards reaching 85 is circular |
+| — | **G9 b5** — readiness score ≥ 85 | 1.333 | — | the score itself | **excluded.** Counting it towards reaching 85 is circular — and since R-A8T that exclusion is enforced by a test rather than observed by convention (§5a) |
 
 **The shortest route, priced.**
 
@@ -255,6 +255,44 @@ same promotion:**
 **Gate 9 is not run in this phase and must not be.** Four of its six bullets have
 no evidence at all, and one of those (b6) cannot be produced by any process in
 this repository.
+
+### 5a. Scoreability audit - may a Gate 9 bullet earn points before Gate 9 is entered?
+
+Asked and answered mechanically in release programme R-A8T, because the shortest
+route to the target runs through two Gate 9 bullets and a wrong answer either
+blocks a legitimate route or manufactures points.
+
+**Determined from two sources, not from a reading.** The preamble sentence is
+scoped to *promotion* (`PRODUCTION_READINESS_RELEASE_GATE.md` line 28:
+"Production promotion is blocked until all gates are checked"), and
+`scripts/production_readiness_score.py` implements **no** entry condition, gate
+ordering or cross-gate blocking - `calculate()` multiplies each gate's weight by
+its own checked/total ratio and nothing else. A repository-wide grep finds that
+sentence in exactly two documents and in no test or script. **Gate 9 is the last
+gate to be satisfied; it is not a gate that has to be entered.**
+
+| Gate 9 bullet | Property it asserts | Executable before entry? | Scoreable before entry? | Why | Source |
+|---|---|---|---|---|---|
+| **b1** critical blockers closed | no row in the Critical Blocker Register is Open | **NO** | **NO** | it is defined over the register, and P0-008's required resolution names the readiness rerun and the owner sign-off - so it is downstream of b5 as well | blocker register; `test_gate9_scoreability.py::test_gate9_bullet_1_is_not_ticked_while_a_blocker_is_open` |
+| **b2** high-severity risks fixed or explicitly accepted | one consolidated owner acceptance | **YES** - offline, an owner act | **YES** | its wording names no other gate, and the scorer conditions it on nothing | gate text; scorer |
+| **b3** staging smoke after deploy | `post_deploy_verify.sh` green after the release images are deployed to staging | **YES** | **YES** | it is a measurement against a deployment, not a summary of the other gates | gate text; `scripts/post_deploy_verify.sh` |
+| **b4** staging smoke after restore drill | restore, then smoke, in that order, in one run | **YES** | **YES** | same - independent executable evidence | gate text; `scripts/mongo_restore.sh` + `post_deploy_verify.sh` |
+| **b5** readiness score at or above target | the score itself | not executed - read | **NO - self-referential** | **reproduced**: from raw 84.000, the value the route below reaches, ticking b5 alone yields raw 85.333 and flips the verdict to Ready. The bullet that asserts the threshold is the bullet that crosses it | scorer; `test_gate9_scoreability.py::test_gate9_bullet_5_is_not_self_fulfilling` |
+| **b6** release owner signs off | a named human, a date, a signed statement | **YES** | **YES** | a human act with no gate dependency in its wording | gate text |
+
+**Disposition: outcome A for b3 and b4** - they are independent readiness
+evidence and may legitimately score before Gate 9 sign-off, so the route below
+stands. **b5 is the single exception**, and it was a live defect rather than a
+theoretical one: nothing mechanical prevented the circular tick, only a
+convention written in a receipt. It is now enforced, with a negative control, and
+the gate document states the rule beside the checkbox.
+
+**b5 was not deleted.** Removing it would shrink Gate 9's denominator from 6 to 5
+and lift every other Gate 9 bullet from 1.333 to 1.600 - a denominator change
+that pays 0.267 points per bullet for no measurement. Guarded by
+`test_gate9_still_has_six_scored_bullets`.
+
+**The audit paid zero points.** The scorer read the same value before and after.
 
 ---
 

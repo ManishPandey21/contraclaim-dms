@@ -52,13 +52,41 @@ def _fresh_install_bullet():
 
 
 def _registered_migrations() -> int:
-    """Migration modules on disk, which is what `--list` enumerates."""
-    return len(
-        [
-            path
-            for path in MIGRATIONS.glob("v*.py")
-            if path.name not in {"__init__.py", "catalog.py", "runner.py"}
-        ]
+    """The catalogue the runner enumerates - not a filename glob over it.
+
+    This counted `MIGRATIONS.glob("v*.py")`, which is a proxy and not the thing.
+    R-A8T's review found the tell: the exclusion set `{__init__.py, catalog.py,
+    runner.py}` can never match `v*.py`, so the glob and the intent behind it
+    were written at different times. A twentieth migration whose module name did
+    not begin with `v` would leave the pin unmoved and let the Gate 6 tick be
+    inherited by a migration the fresh-database run never saw - which is exactly
+    what this pin exists to prevent.
+
+    `catalog.MIGRATIONS` is what `python -m rbac_backend.scripts.migrate_database
+    --list` walks, so it is the only count that can expire the tick correctly.
+    """
+    from rbac_backend.migrations import catalog  # noqa: PLC0415
+
+    return len(catalog.MIGRATIONS)
+
+
+def test_the_catalogue_and_the_modules_on_disk_agree() -> None:
+    """Anti-vacuity for the count above, in both directions.
+
+    If the catalogue and the migration modules ever disagree, one of them is
+    lying about what a fresh database would receive, and the number this file
+    pins would be measuring the wrong population.
+    """
+    on_disk = {
+        path.stem
+        for path in MIGRATIONS.glob("v*.py")
+        if path.name not in {"__init__.py", "catalog.py", "runner.py"}
+    }
+    assert on_disk, "no migration modules found; the glob no longer matches anything"
+    assert len(on_disk) == _registered_migrations(), (
+        f"{len(on_disk)} migration modules on disk but "
+        f"{_registered_migrations()} entries in catalog.MIGRATIONS - one of them "
+        "is not what the runner applies"
     )
 
 

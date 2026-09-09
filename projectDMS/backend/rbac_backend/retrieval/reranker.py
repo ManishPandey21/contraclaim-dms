@@ -60,7 +60,18 @@ class LLMRerankerBackend:
         )
         match = re.search(r"\[[\s\S]*\]", raw or "")
         if not match:
-            raise ValueError(f"reranker LLM returned no JSON array: {raw[:200]!r}")
+            # The reply is the model's answer to a prompt carrying up to 600
+            # characters of each retrieved passage, so a model that echoes its
+            # input puts customer contract text in this message - and
+            # `RerankerService.score` logs the exception verbatim at WARNING.
+            # The static guard inspects logging-call arguments, not `raise`
+            # arguments, so it could not see this one. The class fix is
+            # `test_extracted_content_not_logged.py::
+            # test_no_extraction_module_raises_with_extracted_content`.
+            # Length, not content.
+            raise ValueError(
+                f"reranker LLM returned no JSON array (reply_length={len(raw or '')})"
+            )
         scores = json.loads(match.group(0))
         if not isinstance(scores, list) or len(scores) != len(passages):
             raise ValueError("reranker LLM returned wrong-length score array")

@@ -2,7 +2,7 @@
 
 Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 74/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
-Current verdict: Not Ready for production.
+Current verdict: **Ready with Conditions**, which is the scorer's own term for the current checkbox state and not a promotion decision. Production promotion remains blocked: Gate 9 has no bullet earned and the target is not met.
 
 This document is the tracked release-control checklist for moving Contraclaim DMS from the current hardening branch to a production candidate. Until every launch gate below is satisfied, feature work should be frozen except for production-readiness fixes, test fixes, security fixes, operational hardening, and documentation needed to prove readiness.
 
@@ -313,11 +313,27 @@ enforces *completeness* - a router page with no declaration fails, and a
 declaration naming no page fails - and says so rather than implying it verifies
 the judgement.
 
-**Security and reliability equivalence.** No control is removed. Error-state
-behaviour is still required and still tested; empty and loading states are now
-required of a named set rather than of an unnamed one, which is a higher bar than
-"every route" was in practice, because "every route" was measured against
-nothing.
+**Security and reliability equivalence, corrected in R-A8T.** Empty and loading
+states are now required of a named set rather than an unnamed one, which is a
+higher bar than "every route" was in practice, because "every route" was
+measured against nothing. That half stands.
+
+**The error-state half was overstated and is restated here with the
+measurement.** The claim was "still required and still tested". Counted from a
+fresh `scripts/gate3_route_inventory.py --format json` run: of the **85** routes
+owing an empty or loading state, **36** name an existing error test and **49**
+- across **42** distinct page components - are recorded `MISSING - no
+fault-injection coverage yet`. So for the majority of the applicable set the
+error-state requirement was relocated to coverage that does not exist yet. The
+inventory has always said `MISSING` row by row; the prose above it did not say
+how many, which is the kind of true-in-detail, false-in-summary claim this
+programme exists to catch.
+
+**What is now enforced rather than described:**
+`test_gate3_route_inventory.py::test_the_relocated_error_coverage_does_not_shrink`
+holds the located count at or above the 36 measured on 2026-09-09, so the
+relocation cannot be quietly emptied out; the 49 remaining are Gate 3 bullet 8's
+outstanding work and are enumerated in the inventory.
 
 **Owner approval: APPROVED FOR `release/contraclaim-rc1` (option 8-C).** Not
 generalised beyond it. **No point is earned by this amendment**: the bullet stays
@@ -376,9 +392,9 @@ re-derives the distinction on every run, so it cannot quietly stop being true.
 
 - [x] `ANTIVIRUS_ENABLED=true` in production. Enforced by `Settings.validate_runtime_configuration`: production refuses to boot when antivirus is disabled unless `ANTIVIRUS_REQUIRED_IN_PRODUCTION=false` is set as a recorded override. Proven by `test_config_validation.py::test_production_validation_requires_antivirus_enabled` and `::test_production_validation_allows_explicit_antivirus_opt_out`.
 - [x] `CLAMAV_FAIL_OPEN=false` in production. Enforced by startup validation; proven by `test_config_validation.py::test_production_validation_rejects_antivirus_fail_open`.
-- [x] Upload MIME, extension, size, and concurrency limits are validated. evidence: backend/rbac_backend/tests/test_upload_limit_enforcement.py (R-A8S 2026-09-09: 21 passed. Boundary at the configured cap, one byte below / exactly / one byte over; a forged `Content-Length` refused because the limit counts bytes actually read; the refusal trips mid-stream and leaves no spool file. Bulk count and total size at and over `BULK_UPLOAD_MAX_FILES` / `BULK_UPLOAD_MAX_SIZE_MB`; the (N+1)th concurrent upload refused with 429 per user and per organisation. Both upload surfaces driven end to end and asserted at **413** - F-A8S-2, the document surface answered 500 and the contract surface 422 before this phase. F-A8S-4, found reviewing this tick: six further upload sites read the whole body into memory - `bank_guarantees.py`, `key_dates.py` and `deep_planning.py` with **no application-level size limit at all**, and `profiles.py`, `folder_structure.py` and the contract chunk endpoint with one applied *after* the read. All six now go through `read_upload_within_limit`, and an AST guard fails any router that reads an upload unbounded)
+- [x] Upload MIME, extension, size, and concurrency limits are validated. evidence: backend/rbac_backend/tests/test_upload_limit_enforcement.py (R-A8S 2026-09-09: 21 passed. Boundary at the configured cap, one byte below / exactly / one byte over; a forged `Content-Length` refused because the limit counts bytes actually read; the refusal trips mid-stream and leaves no spool file. Bulk count and total size at and over `BULK_UPLOAD_MAX_FILES` / `BULK_UPLOAD_MAX_SIZE_MB`; the (N+1)th concurrent upload refused with 429 per user and per organisation. Both upload surfaces driven end to end and asserted at **413** - F-A8S-2, the document surface answered 500 and the contract surface 422 before this phase. F-A8S-4, found reviewing this tick: six further upload sites read the whole body into memory - `bank_guarantees.py`, `key_dates.py` and `deep_planning.py` with **no application-level size limit at all**, and `profiles.py`, `folder_structure.py` and the contract chunk endpoint with one applied *after* the read. All six now go through `read_upload_within_limit`. **R-A8T re-reviewed this tick and found a seventh, plus the reason the guard could not see it. F-A8T-1: `POST /api/documents/bulk-upload` takes TWO upload parameters. The route caps `files` by count and total size and never measured `csv_file`, and `services/bulk_upload_service.read_csv_from_upload_file` read that one with `upload_file.file.read()` and then `.decode()`d it - two resident copies of a body bounded only by the gateway. The guard matched only `ast.Name.read()` in `routers/`, so an attribute chain in `services/` was invisible to it. `read_file_within_limit` is the synchronous sibling of the async seam and the CSV read now uses it; the method's `except Exception` tail, which rewrote every failure as `ValueError("CSV processing failed")`, now re-raises `HTTPException` first, so the refusal stays a 413. The guard is widened to `routers/`, `services/` and `utils/`, catches `x.file.read()` and `List[UploadFile]` loop variables, and has three synthetic controls proving it catches each shape. F-A8T-4, the MIME half: `routers/profiles.py` validated `file.content_type` - the client's own header - and wrote it into the stored `data:` URL. It now sniffs the bytes and stores the sniffed type, and GIF and WebP signatures were added to `sniff_mime_from_bytes` so the allowlist it enforces can actually be measured. 44 tests)
 - [x] Contract uploads fail closed when ClamAV is unavailable. `routers/contracts.py` and `routers/documents.py` reject with HTTP 400 when `scan_file` returns not-clean; `AntivirusService` returns not-clean when the daemon is unreachable with `fail_open=false` (`test_antivirus_service.py::test_scan_offline_fail_closed`, `::test_scan_clamav_error_fail_closed`). In production the scan branch is always active because antivirus is required.
-- [x] Sensitive extracted text is not logged. evidence: backend/rbac_backend/tests/test_extracted_content_not_logged.py (R-A8S 2026-09-09: 26 passed. An AST guard over every logging call in the ingestion and extraction trees - positional, f-string, `%`, `.format`, concatenation, slices, method calls and `extra={}` - with metadata logging explicitly preserved; plus a runtime control that pushes a distinctive marker through the real chunker with the root logger captured at DEBUG and finds it in the chunks and in no log line, field or traceback. It found one real channel: Marker's subprocess stderr, now logged as a length. The guard's scope is the ingestion and extraction trees; seven further modules that handle document-derived text were checked by hand in R-A8S with no real finding, and are named in `CHECKED_BY_HAND_OUTSIDE_THE_GUARD` so that widening the guard is a deliberate act)
+- [x] Sensitive extracted text is not logged. evidence: backend/rbac_backend/tests/test_extracted_content_not_logged.py (R-A8S 2026-09-09: 26 passed. An AST guard over every logging call in the ingestion and extraction trees - positional, f-string, `%`, `.format`, concatenation, slices, method calls and `extra={}` - with metadata logging explicitly preserved; plus a runtime control that pushes a distinctive marker through the real chunker with the root logger captured at DEBUG and finds it in the chunks and in no log line, field or traceback. It found one real channel: Marker's subprocess stderr, now logged as a length. The guard's scope is the ingestion and extraction trees; seven further modules that handle document-derived text were checked by hand in R-A8S with no real finding, and are named in `CHECKED_BY_HAND_OUTSIDE_THE_GUARD` so that widening the guard is a deliberate act. **R-A8T re-reviewed this tick and found three more channels and one vacuous test.** F-A8T-2: the guard read the arguments of logging calls and not of `raise` statements, so `retrieval/reranker.py` - inside the guard's own scope - could put the model's reply (its answer to a prompt carrying 600 characters of each retrieved passage) into a `ValueError` that `RerankerService.rerank` logs verbatim at WARNING. `services/extraction/image_ocr_runner.py` and `ocrmypdf_runner.py` did the same with up to 500 characters of an OCR tool's stderr/stdout. All three now carry an exit code and a length, and `raise_violations` is the class fix. F-A8T-3: the one test that claimed to cover the exception channel raised a hand-written constant containing no marker, so its assertion was true by construction; it now drives `RerankerService.rerank` with a backend that echoes the passages, and asserts the marker reached the prompt before asserting it reached no log. F-A8T-5: `routers/ai_assistant.py` logged 50 characters of a search query at INFO while `observability/service.py::_redact_query` reduced the identical value to `[redacted len=N]`; it now logs the digest and the length, and the query surface - `ai_assistant.py`, `retrieval_engine.py`, `services/ai_service.py` - is inside the guard's scope rather than outside both it and the declared boundary. 38 tests)
 
 ### Gate 6: Database, Migrations, And Seeds
 
@@ -483,13 +499,44 @@ time. No production S3 architecture change is authorised in this phase.
 - [ ] Readiness score target is 85 or higher.
 - [ ] Release owner signs off.
 
+**Gate 9 scoreability - what the preamble's blocking sentence does and does not
+say.** "Production promotion is blocked until all gates are checked", under
+`## Launch Gates` above, is a condition on **promotion**. It is not a condition
+on scoring. `scripts/production_readiness_score.py` implements no entry
+conditions, no gate ordering and no cross-gate blocking: it counts checked
+bullets per gate section and weights them, and nothing else. So a Gate 9 bullet
+that has its own executable evidence earns its points when that evidence exists,
+whether or not the other gates are complete. Bullets 3 and 4 are staging
+measurements of exactly that kind. Gate 9 is the last gate to be *satisfied*; it
+is not a gate that has to be *entered*.
+
+**Bullet 5 is the one exception, because it is self-referential.** It asserts
+the readiness figure itself, so counting it towards reaching the threshold it
+asserts is circular. Reproduced mechanically in release programme R-A8T: from a
+raw 84.000 - which is where the shortest projected route lands - ticking bullet
+5 and nothing else produces raw 85.333 and flips the verdict to Ready. Bullet 5
+may therefore be ticked only once the figure computed **with bullet 5 unticked**
+already meets the target. `backend/rbac_backend/tests/test_gate9_scoreability.py`
+enforces that, and reproduces the circular tick against a synthetic document so
+the guard has a negative control.
+
+**Bullet 5 is not removed.** Deleting it would shrink Gate 9's denominator from
+6 to 5 and raise every other Gate 9 bullet from 1.333 to 1.600 points - a
+denominator change that pays points, which is the one thing this programme
+refuses to do.
+
+**Bullet 1 inherits the same constraint through the blocker register.** P0-008's
+required resolution names the readiness rerun and the owner sign-off, so bullet
+1 must not be ticked while any row in the Current Critical Blocker Register is
+still Open. That is enforced rather than described.
+
 Current score evidence:
 
 - Current production launch-readiness score is **74/100** (re-derived by
   `scripts/production_readiness_score.py`, release programme R-A8R, 2026-09-08).
   The figure recorded here through Phase 8 was 32/100 and had not been re-derived
   since.
-- Current verdict: **Not Ready**.
+- Current verdict: **Ready with Conditions**.
 - Score target: **85/100**.
 - Scoring script: `python scripts/production_readiness_score.py`.
 - Final audit record: `docs/PRODUCTION_READINESS_FINAL_AUDIT.md`.
@@ -895,7 +942,7 @@ If host `mongosh` is installed but cannot resolve Docker service names from `DAT
 - [x] Added deterministic readiness scoring script: `scripts/production_readiness_score.py`.
 - [x] Recorded final production-readiness audit: `docs/PRODUCTION_READINESS_FINAL_AUDIT.md`.
 - [x] Launch-readiness score calculated from launch-gate evidence **as at Phase 8**: 32/100. (Superseded — re-derived as 74/100 in R-A8S. Read the readiness-score section above, not this line.)
-- [x] Current verdict remains **Not Ready**.
+- [x] Verdict recorded **as at Phase 8**: Not Ready. (Superseded - the scorer computes Ready with Conditions at the current state. Read the readiness section above, not this line.)
 - [x] Pending blockers are recorded by phase.
 - [x] Critical blocker register includes final staging deploy/smoke/restore/sign-off gap as `P0-008`.
 - [x] Score script compile validation passed: `python -m py_compile scripts/production_readiness_score.py`.

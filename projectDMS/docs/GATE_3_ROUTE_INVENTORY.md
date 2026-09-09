@@ -137,4 +137,3 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/upload` | GET | yes | `UploadPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/users` | GET | yes | `UsersPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/variations` | GET | yes | `VariationRegisterPage` | yes | yes | MISSING - no fault-injection coverage yet |
-

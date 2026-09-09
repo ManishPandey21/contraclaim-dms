@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Any
 from pathlib import Path
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from fastapi import UploadFile, BackgroundTasks  # needed at runtime (used in annotations and instantiation)
+from fastapi import HTTPException, UploadFile, BackgroundTasks  # needed at runtime (used in annotations and instantiation)
 
 from ..core.security import CurrentUser  # for type hints
 from ..models.document import (
@@ -22,6 +22,7 @@ from ..core.database import get_database
 from ..core.config import settings
 from .metadata_processor_service import MetadataProcessorService
 from .document_service import DocumentService
+from .upload_streaming import read_file_within_limit
 
 # Add imports for CSV encoding handling
 import pandas as pd
@@ -131,9 +132,15 @@ class BulkUploadService:
         """Read CSV from FastAPI UploadFile with encoding detection"""
 
         try:
-            # Read file content as bytes
-            file_content = upload_file.file.read()
-            upload_file.file.seek(0)  # Reset file position
+            # Read file content as bytes, capped WHILE reading rather than after.
+            # `POST /api/documents/bulk-upload` measures `files`; `csv_file` is a
+            # second upload parameter it never measured, so an unbounded
+            # `.file.read()` here held a body bounded only by the gateway - and
+            # the `.decode()` below then held a second copy of it.
+            file_content = read_file_within_limit(
+                upload_file.file,
+                max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024,
+            )
 
             # Detect encoding
             detected_encoding = self.detect_csv_encoding(file_content, user_provided_encoding)
@@ -172,6 +179,14 @@ class BulkUploadService:
             # If all encodings fail, raise descriptive error
             raise ValueError(f"CSV processing failed: Unable to decode uploaded file with any supported encoding. Please save your CSV as UTF-8 format or contact support.")
 
+        except HTTPException:
+            # A refusal, not a processing failure. `UploadTooLargeError` is an
+            # `HTTPException(413)`; letting it reach the tail below would rewrite
+            # a policy decision as "CSV processing failed", which is F-A8S-2 in a
+            # different costume - the caller could not tell a refusal from an
+            # outage. Re-raised as a group ahead of the generic handler, the
+            # shape `docs/AUTHZ.md` and the router guard already require.
+            raise
         except Exception as e:
             logger.error(f"Failed to process uploaded CSV file: {str(e)}")
             if 'utf-8' in str(e) and 'decode' in str(e):
