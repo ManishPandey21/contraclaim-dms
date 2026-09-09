@@ -215,12 +215,21 @@ jobs:
       # failed at Set up job, before a single image was scanned. Every published
       # tag on aquasecurity/trivy-action is `v`-prefixed; the unprefixed form
       # this workflow used resolves for no version at all, checked against the
-      # git-refs API rather than assumed. `v0.33.1` exists and still declares
-      # image-ref / format / exit-code / ignore-unfixed / severity. Pinned to an
-      # exact release, never a moving tag: an image scan that silently changes
-      # scanner version is an image scan whose result cannot be compared.
+      # git-refs API rather than assumed.
+      #
+      # `v0.33.1` then failed differently, and that second failure is why this
+      # is `v0.36.0`. That action tag defaults to Trivy `v0.65.0` but installs
+      # it with `contrib/install.sh` checked out from the trivy repository's
+      # `main` branch, not from the pinned tag. The current installer resolved
+      # the tag - "found version: 0.65.0" - and then failed fetching its asset
+      # 0.2s later, before a single image was scanned. An action release travels
+      # with a default scanner version its own installer path is exercised
+      # against, so pinning the action pins both; `v0.36.0` defaults to Trivy
+      # `v0.70.0`. Still an exact release and never a moving tag: an image scan
+      # whose scanner version changes silently is one whose result cannot be
+      # compared with the last.
       - name: Scan images
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-backend:${{ github.sha }}
           format: table
@@ -228,7 +237,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan client image
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-client:${{ github.sha }}
           format: table
@@ -236,7 +245,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan LangGraph image
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-langgraph:${{ github.sha }}
           format: table
@@ -244,7 +253,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan Graphiti image
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-graphiti:${{ github.sha }}
           format: table
@@ -252,7 +261,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan Docling image
-        uses: aquasecurity/trivy-action@v0.33.1
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: projectdms-docling:${{ github.sha }}
           format: table
