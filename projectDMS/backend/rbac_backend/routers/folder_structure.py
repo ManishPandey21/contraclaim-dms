@@ -15,6 +15,7 @@ import uuid
 from ..core.security import get_current_user, CurrentUser, authorize_scope
 from ..core.database import get_db
 from ..core.config import settings
+from ..services.upload_streaming import read_upload_within_limit
 from ..services.folder_service import FolderService
 from ..services.s3_service import S3Service
 from ..services.authorization_service import AuthorizationService
@@ -183,8 +184,12 @@ class FolderController:
                     status.HTTP_404_NOT_FOUND
                 )
 
-            # File validation
-            content = await file.read()
+            # File validation. Capped while reading: `_validate_file_content`
+            # still checks the size, but it used to be the only check and it ran
+            # after the whole body was resident.
+            content = await read_upload_within_limit(
+                file, max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+            )
             validation_result = await self._validate_file_content(
                 content, file.filename, safe_extension
             )

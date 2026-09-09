@@ -274,17 +274,30 @@ def _strip_comments(source: str) -> str:
     return "\n".join(kept)
 
 
+QUOTES = "\"'`"
+
+
 def _end_of_open_tag(source: str, start: int) -> Tuple[int, bool]:
     """Index just past the `>` closing the tag opened at `start`, and self-closing.
 
-    Attribute values contain `>` - `element={<Page />}` - so the scan tracks
-    brace depth and only accepts a `>` seen at depth zero.
+    Two things put a `>` where it does not close a tag: an attribute value that
+    nests JSX (`element={<Page />}`), and a quoted value that contains one
+    (`path="a>b"`). The scan therefore tracks brace depth *and* quote state, and
+    accepts a `>` only outside both. Without the quote half it desyncs on the
+    first such attribute and every route after it is lost - silently, which is
+    the one failure mode this whole inventory exists to prevent.
     """
     depth = 0
+    quote: Optional[str] = None
     index = start
     while index < len(source):
         char = source[index]
-        if char == "{":
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in QUOTES:
+            quote = char
+        elif char == "{":
             depth += 1
         elif char == "}":
             depth -= 1
@@ -295,18 +308,67 @@ def _end_of_open_tag(source: str, start: int) -> Tuple[int, bool]:
     raise ValueError(f"unterminated tag opened at offset {start}")
 
 
-def _attribute_path(tag: str) -> Optional[str]:
-    """The `path="..."` of a `<Route>` opening tag, ignoring nested elements.
+def _top_level_attributes(tag: str) -> str:
+    """The tag's own attributes, with every `{...}` expression blanked out.
 
-    `<Route path="tasks" element={<RoleGuard path="/tasks" ...>` has two
-    `path=` attributes and only the first belongs to the Route.
+    `<Route path="tasks" element={<RoleGuard path="/tasks" ...>}>` has two
+    `path=` attributes and only the first belongs to the Route. Truncating at
+    `element=` was the previous answer and it was wrong in one direction:
+    `<Route element={<Page />} path="eps" />` is legal JSX and its path was
+    dropped. Blanking the braced expressions instead is order-independent.
     """
-    body = tag
-    element = body.find("element=")
-    if element != -1:
-        body = body[:element]
-    match = re.search(r'\bpath\s*=\s*"([^"]*)"', body)
-    return match.group(1) if match else None
+    out = []
+    depth = 0
+    quote: Optional[str] = None
+    for char in tag:
+        if quote is not None:
+            out.append(" " if depth else char)
+            if char == quote:
+                quote = None
+            continue
+        if char in QUOTES and depth == 0:
+            quote = char
+            out.append(char)
+            continue
+        if char == "{":
+            depth += 1
+            out.append(" ")
+            continue
+        if char == "}":
+            depth = max(0, depth - 1)
+            out.append(" ")
+            continue
+        out.append(" " if depth else char)
+    return "".join(out)
+
+
+#: `path="a"`, `path='a'` and a template literal are all legal, and all three
+#: were parser blind spots until the R-A8S self-review probed for them.
+_PATH_RE = re.compile(
+    r"""\bpath\s*=\s*(?:"([^"]*)"|'([^']*)'|\{\s*`([^`]*)`\s*\})"""
+)
+
+#: `<Route index element={...} />` renders at its parent's path and carries no
+#: `path` of its own, so a parser keyed on `path=` drops it entirely.
+_INDEX_RE = re.compile(r"\bindex\b\s*(?:=\s*\{?\s*true\s*\}?)?(?=[\s/>])")
+
+
+def _attribute_path(tag: str) -> Optional[str]:
+    """The `path=` of a `<Route>` opening tag, in any of its legal spellings."""
+    match = _PATH_RE.search(_top_level_attributes(tag))
+    if match:
+        return next(group for group in match.groups() if group is not None)
+    # A template literal lives inside braces, which `_top_level_attributes`
+    # blanks, so it is matched against the raw tag - and only when there is no
+    # top-level `path=` to prefer.
+    match = _PATH_RE.search(tag)
+    if match and match.group(3) is not None:
+        return match.group(3)
+    return None
+
+
+def _is_index_route(tag: str) -> bool:
+    return _INDEX_RE.search(_top_level_attributes(tag)) is not None
 
 
 def _element_expression(tag: str) -> str:
@@ -343,8 +405,24 @@ class RouteRow:
     error_test_location: Optional[str]
 
 
-def parse_routes(source: str) -> List[dict]:
-    """Every `<Route>` with a `path`, with its resolved path and auth context."""
+class UnresolvableRoute(ValueError):
+    """A `<Route>` the parser cannot place, raised rather than skipped.
+
+    Skipping is the dangerous option: a route the parser does not understand
+    would simply be absent from the denominator, and absent is exactly what
+    "silently escapes" means. So a leaf `<Route>` that declares neither a `path`
+    nor `index` fails the run, and the guard that regenerates the inventory
+    fails with it.
+    """
+
+
+def parse_routes(source: str, *, strict: bool = True) -> List[dict]:
+    """Every routable `<Route>`, with its resolved path and auth context.
+
+    A `<Route>` is routable when it declares a `path` or is an `index` route. A
+    `<Route>` with children and no `path` is a layout - it contributes an auth
+    context and nothing else, which is correct and is not an error.
+    """
     source = _strip_comments(source)
     rows: List[dict] = []
     #: (accumulated path, authenticated) for each open `<Route>` ancestor.
@@ -371,19 +449,33 @@ def parse_routes(source: str) -> List[dict]:
         element = _element_expression(tag)
         authenticated = parent_auth or (AUTH_WRAPPER in element)
         declared = _attribute_path(tag)
+        is_index = declared is None and _is_index_route(tag)
         full = _join(parent_path, declared) if declared is not None else parent_path
 
-        if declared is not None:
+        if declared is not None or is_index:
             page = _page_component(element)
-            if page is not None:
+            if page is None:
+                if strict:
+                    raise UnresolvableRoute(
+                        "a Route declares a path but no page component could be "
+                        f"identified from its element: {tag.strip()[:160]}"
+                    )
+            else:
                 rows.append(
                     {
-                        "route": full,
+                        "route": full or "/",
                         "method": "GET",
                         "auth_required": authenticated,
                         "page": page,
                     }
                 )
+        elif self_closing and strict:
+            # A leaf Route with no path and no index cannot be placed. Silently
+            # dropping it is how a route escapes the denominator.
+            raise UnresolvableRoute(
+                "a self-closing Route declares neither a path nor index, so it "
+                f"cannot be placed in the inventory: {tag.strip()[:160]}"
+            )
 
         if not self_closing:
             stack.append((full, authenticated))

@@ -323,6 +323,136 @@ def test_the_size_limit_still_refuses_from_the_service_layer() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The in-memory upload paths (F-A8S-4)
+# --------------------------------------------------------------------------- #
+#
+# Not every upload spools to disk. A CSV import, a profile photo and the deep
+# planning text analyser want the whole body in memory, and five call sites did
+# `await file.read()` to get it. Three of them - `bank_guarantees.py`,
+# `key_dates.py`, `deep_planning.py` - had **no application-level size limit at
+# all**, so the only bound was the gateway's `client_max_body_size 200m`. Two -
+# `profiles.py`, `folder_structure.py` - had a limit and applied it *after* the
+# read, which bounds what is stored and not what the process holds.
+#
+# Reviewing the Gate 5 bullet 3 tick is what found them: the bullet says "upload
+# ... size ... limits are validated" and says nothing about only the spooled
+# paths counting.
+
+
+@pytest.mark.parametrize(
+    "delta, allowed",
+    [
+        pytest.param(-1, True, id="one-byte-below-max"),
+        pytest.param(0, True, id="exactly-max"),
+        pytest.param(1, False, id="one-byte-over-max"),
+    ],
+)
+async def test_the_in_memory_read_is_capped_at_its_boundary(delta: int, allowed: bool) -> None:
+    from rbac_backend.services.upload_streaming import read_upload_within_limit
+
+    limit = 4096
+    upload = _LyingUpload("rows.csv", b"a" * (limit + delta))
+
+    if allowed:
+        assert len(await read_upload_within_limit(upload, limit)) == limit + delta
+        return
+
+    with pytest.raises(UploadTooLargeError):
+        await read_upload_within_limit(upload, limit)
+
+
+async def test_the_in_memory_read_refuses_before_buffering_the_whole_body() -> None:
+    """The distinction the fix is about.
+
+    `await file.read()` followed by `len(content) > cap` refuses the request and
+    still held the body. Counting the bytes the fake was asked for proves this
+    one does not.
+    """
+    from rbac_backend.services.upload_streaming import read_upload_within_limit
+
+    chunk = max(1, int(getattr(settings, "UPLOAD_STREAM_CHUNK_SIZE_MB", 1))) * 1024 * 1024
+    body = b"a" * (chunk * 3)
+
+    class _Counting(_LyingUpload):
+        def __init__(self) -> None:
+            super().__init__("big.csv", body)
+            self.bytes_served = 0
+
+        async def read(self, size: int = -1) -> bytes:
+            piece = await super().read(size)
+            self.bytes_served += len(piece)
+            return piece
+
+    upload = _Counting()
+    with pytest.raises(UploadTooLargeError):
+        await read_upload_within_limit(upload, 1024)
+
+    assert upload.bytes_served < len(body), (
+        "the whole body was read before the cap refused it, which is the defect "
+        "this helper replaced"
+    )
+
+
+def test_no_router_reads_an_upload_without_a_cap() -> None:
+    """The class-level guard. A sixth uncapped call site must not be able to land.
+
+    Written as an AST walk rather than a substring search: `await file.read()`
+    can be spelled several ways, and the property is "an upload is read whole
+    with no limit", not "this exact string appears".
+    """
+    import ast
+
+    offenders = []
+    for path in sorted(ROUTERS.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        # Which parameters of this module's functions are uploads?
+        upload_names = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for argument in node.args.args + node.args.kwonlyargs:
+                    annotation = ast.unparse(argument.annotation) if argument.annotation else ""
+                    if "UploadFile" in annotation:
+                        upload_names.add(argument.arg)
+        if not upload_names:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "read":
+                continue
+            target = func.value
+            if not isinstance(target, ast.Name) or target.id not in upload_names:
+                continue
+            # A bounded read passes a chunk size; an unbounded one takes the lot.
+            if not node.args:
+                offenders.append(f"{path.name}:{node.lineno}: {target.id}.read()")
+
+    assert not offenders, (
+        "these routers read an upload whole with no size limit, so the only bound "
+        "on what the process holds is the gateway's client_max_body_size:\n  "
+        + "\n  ".join(offenders)
+        + "\nUse services.upload_streaming.read_upload_within_limit instead."
+    )
+
+
+def test_the_in_memory_helper_is_actually_used_by_the_paths_that_need_it() -> None:
+    """Otherwise the guard above is satisfied by deleting the uploads."""
+    for name in (
+        "bank_guarantees.py",
+        "key_dates.py",
+        "deep_planning.py",
+        "profiles.py",
+        "folder_structure.py",
+    ):
+        source = (ROUTERS / name).read_text(encoding="utf-8")
+        assert "read_upload_within_limit" in source, (
+            f"{name} no longer bounds its in-memory upload read"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Bulk: count and total size, from the configured limits
 # --------------------------------------------------------------------------- #
 

@@ -7,6 +7,8 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 
 from ..core.database import get_db
+from ..core.config import settings
+from ..services.upload_streaming import read_upload_within_limit
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
 from ..models.bank_guarantee import (
@@ -82,7 +84,12 @@ async def _read_csv(file: UploadFile) -> bytes:
     filename = (file.filename or "").lower()
     if filename and not filename.endswith(".csv"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Upload a .csv file")
-    content = await file.read()
+    # Capped while reading, not after. This used to be `await file.read()` with
+    # no limit at all, so the only bound on what the process held was the
+    # gateway's `client_max_body_size`.
+    content = await read_upload_within_limit(
+        file, max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+    )
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV file is empty")
     return content

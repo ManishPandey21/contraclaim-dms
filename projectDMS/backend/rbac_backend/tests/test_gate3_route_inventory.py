@@ -105,14 +105,96 @@ def test_the_parser_sees_every_route_the_router_declares(inventory) -> None:
     That guard counts `<Route ... path="...">` with a regex. If the Python parser
     resolves fewer paths than the regex finds, it is dropping routes - which is
     precisely the failure this whole module exists to prevent.
+
+    The regex is **not** an independent check for every route form: it shares the
+    parser's old blind spots (single quotes, template literals, `index`). It is a
+    floor, not a ceiling, and `test_the_parser_has_no_blind_spot_a_route_could_hide_in`
+    is what covers the rest.
     """
     source = ROUTES_TSX.read_text(encoding="utf-8")
     declared = re.findall(r'<Route\b[^>]*?\bpath="([^"]+)"', source)
     assert declared, "the regex cross-check found no routes at all"
-    assert inventory["route_count"] == len(declared), (
-        f"the generator resolved {inventory['route_count']} routes but the router "
-        f"declares {len(declared)}"
+    assert inventory["route_count"] >= len(declared), (
+        f"the generator resolved {inventory['route_count']} routes but the "
+        f"double-quoted regex alone finds {len(declared)} - the parser is dropping routes"
     )
+
+
+@pytest.mark.parametrize(
+    "label, snippet, expected",
+    [
+        pytest.param(
+            "index-route",
+            '<Routes><Route path="parent" element={<AlphaPage />}>'
+            "<Route index element={<BetaPage />} /></Route></Routes>",
+            [("/parent", "AlphaPage"), ("/parent", "BetaPage")],
+            id="index-route-renders-at-its-parents-path",
+        ),
+        pytest.param(
+            "single-quoted",
+            "<Routes><Route path='beta' element={<BetaPage />} /></Routes>",
+            [("/beta", "BetaPage")],
+            id="single-quoted-path",
+        ),
+        pytest.param(
+            "template-literal",
+            "<Routes><Route path={`gamma`} element={<GammaPage />} /></Routes>",
+            [("/gamma", "GammaPage")],
+            id="template-literal-path",
+        ),
+        pytest.param(
+            "gt-in-value",
+            '<Routes><Route path="a>b" element={<DeltaPage />} />'
+            '<Route path="after" element={<AfterPage />} /></Routes>',
+            [("/a>b", "DeltaPage"), ("/after", "AfterPage")],
+            id="a-gt-inside-a-quoted-value-does-not-desync-the-scan",
+        ),
+        pytest.param(
+            "element-first",
+            '<Routes><Route element={<EpsilonPage />} path="eps" /></Routes>',
+            [("/eps", "EpsilonPage")],
+            id="element-declared-before-path",
+        ),
+        pytest.param(
+            "commented-out",
+            '<Routes>{/* <Route path="ghost" element={<GhostPage />} /> */}</Routes>',
+            [],
+            id="a-commented-out-route-is-not-a-route",
+        ),
+    ],
+)
+def test_the_parser_has_no_blind_spot_a_route_could_hide_in(
+    generator, label: str, snippet: str, expected: list
+) -> None:
+    """Every one of these dropped a route silently until R-A8S probed for it.
+
+    A route form the parser does not understand is a route absent from the
+    denominator, which is the exact failure the inventory exists to prevent - and
+    it is invisible, because nothing counts what was never seen.
+    """
+    rows = generator.parse_routes(snippet)
+    assert [(row["route"], row["page"]) for row in rows] == expected, rows
+
+
+def test_a_route_the_parser_cannot_place_fails_rather_than_disappears(generator) -> None:
+    """The rule that makes the list above a floor rather than a whitelist.
+
+    New route forms will keep arriving. The parser cannot be taught all of them
+    in advance, so the fallback has to be a failure, not a skip.
+    """
+    with pytest.raises(generator.UnresolvableRoute):
+        generator.parse_routes(
+            '<Routes><Route element={<MysteryPage />} /></Routes>'
+        )
+
+    # A layout route - children, no path - is legitimate and must not trip it.
+    rows = generator.parse_routes(
+        "<Routes><Route element={<ProtectedRoute><MainLayout /></ProtectedRoute>}>"
+        '<Route path="inside" element={<InsidePage />} /></Route></Routes>'
+    )
+    assert rows == [
+        {"route": "/inside", "method": "GET", "auth_required": True, "page": "InsidePage"}
+    ], rows
 
 
 def test_the_tracked_inventory_matches_a_fresh_run(generator, inventory) -> None:

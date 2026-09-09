@@ -95,6 +95,16 @@ carries 413 from the seam that makes the decision — the shape
 `UploadConcurrencyLimiter` already uses for 429 — so all three call sites answer
 413 without any of them being edited.
 
+**F-A8S-4, found by reviewing the tick rather than the code.** The bullet says
+"upload ... size ... limits are validated" and says nothing about only the
+spooled paths counting. Six more upload surfaces read the whole body into memory:
+`bank_guarantees.py`, `key_dates.py` and `deep_planning.py` with **no
+application-level limit at all** (bounded only by the gateway's
+`client_max_body_size 200m`), and `profiles.py`, `folder_structure.py` and the
+contract chunk endpoint with one applied *after* the read — which bounds what is
+stored, not what the process holds. All six now use `read_upload_within_limit`,
+and an AST guard fails any router that reads an `UploadFile` unbounded.
+
 ### Gate 6 — Database, migrations and seeds (1.667 remaining)
 
 | Bullet | Weight | Status | Intended property | Existing evidence | Why not scored | Type | Minimum next action |
@@ -129,6 +139,7 @@ All six are downstream. See §5.
 | The R-A4 lint correction paragraph | **DOCUMENTATION ONLY**, stale — replaced with the current measurement |
 | "Current production launch-readiness score: **32/100**" (Gate 9 block), the same figure in blocker P0-008, and the rendered gate table's Gate 1 row and total | **DOCUMENTATION ONLY**, stale. The drift guard's regex could not see any of them — a colon instead of "is", and spaces around the slash. Guard extended, with three mutation proofs |
 | Gate 3 bullet 8's "every production route" | **AMENDED** in R-A8S under owner decision 8-C. Unsatisfiable in two independent ways: an error state needs the API to fail on demand under a gate that accepts only unmocked staging runs, over a denominator that named no route set |
+| The first cut of the route parser (**F-A8S-5**) | **FIXED in R-A8S before the inventory was trusted.** The two-axis review fed it synthetic routers and it dropped six route forms silently: an `index` route, a single-quoted `path`, a template-literal `path`, a `>` inside a quoted attribute value (which also desynced the scan, losing every route after it), and `element=` declared before `path=`. None appears in `routes.tsx` today, which is luck rather than a property — and the cross-check against the client's own `routeInventory.test.ts` regex could not have caught it, because that regex shares the same blind spots. The parser now tracks quote state, blanks braced expressions instead of truncating at `element=`, reads all three path spellings and resolves index routes; and a leaf `<Route>` it cannot place now **raises** rather than skips. The inventory is unchanged at 92/85/59/85, so this was hardening and not a recount |
 | The Gate 3 evidence matrix's row 7 (`MISSING`, "cannot be earned before that decision changes") | **WRONG, corrected in R-A8S.** It cited `ARBITRATION_ENGINE_*`, which governs the LangGraph workflow engine and not the drafting surface the bullet names. The bullet is satisfiable in staging today, in deterministic mode, at zero model cost |
 
 ---

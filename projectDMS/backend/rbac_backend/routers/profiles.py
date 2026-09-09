@@ -4,6 +4,7 @@ from ..core.database import get_db
 from ..core.security import get_current_user, CurrentUser
 from ..schemas.profile import ProfileRead, ProfileUpdate, ChangePassword
 from ..services.user_service import UserService
+from ..services.upload_streaming import read_upload_within_limit
 
 router = APIRouter(tags=["profiles"])
 
@@ -126,7 +127,9 @@ async def upload_profile_photo(
             detail="Only image files are allowed (jpeg, png, webp, gif).",
         )
 
-    content = await file.read()
+    # Capped while reading. The 5 MB rule below used to run *after* the whole
+    # body was resident, so it bounded what was stored and not what was held.
+    content = await read_upload_within_limit(file, MAX_PROFILE_PHOTO_SIZE_BYTES)
     if not content:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

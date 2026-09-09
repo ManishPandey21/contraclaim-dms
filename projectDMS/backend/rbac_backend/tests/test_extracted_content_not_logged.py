@@ -396,6 +396,44 @@ def test_the_scanned_tree_is_real() -> None:
         assert expected in names, f"{expected} is not in the scanned set"
 
 
+#: Modules that handle document-derived text but sit OUTSIDE `SCANNED_PATHS`,
+#: checked by hand in R-A8S. Each was run through `violations()` and produced no
+#: real finding; `document_service.py`'s two hits are a cascade-cleanup dict of
+#: counts, booleans and error strings that happens to be named `summary`.
+#:
+#: They are listed rather than scanned because the guard would need a per-line
+#: exemption to accept that dict, and a guard carrying hand-written exemptions is
+#: weaker than one with an honest, stated boundary. This constant IS the stated
+#: boundary: extending the guard's reach means moving a name from here into
+#: `SCANNED_PATHS`, which is a deliberate act rather than a silent one.
+CHECKED_BY_HAND_OUTSIDE_THE_GUARD = (
+    "services/document_service.py",
+    "services/metadata.py",
+    "services/data_sync.py",
+    "services/duplicate_detection_service.py",
+    "services/chronology.py",
+    "services/evidence_graph_service.py",
+    "observability/service.py",
+)
+
+
+def test_the_declared_scope_boundary_is_real() -> None:
+    """The modules named as out-of-scope must exist and must not also be in scope.
+
+    A boundary that names a file which does not exist, or which the guard
+    already covers, records nothing. Both have happened to inventories in this
+    repository before.
+    """
+    scanned = {path.resolve() for path in _scanned_modules()}
+    for rel in CHECKED_BY_HAND_OUTSIDE_THE_GUARD:
+        path = RBAC_BACKEND / rel
+        assert path.is_file(), f"the declared scope boundary names a missing file: {rel}"
+        assert path.resolve() not in scanned, (
+            f"{rel} is listed as outside the guard and is also scanned by it; one "
+            "of the two is wrong"
+        )
+
+
 def test_the_scanned_tree_contains_logging_calls() -> None:
     """Otherwise the guard below is vacuously green."""
     total = 0

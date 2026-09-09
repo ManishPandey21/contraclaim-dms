@@ -8,6 +8,7 @@ from pydantic import BaseModel, field_validator
 import logging
 from openai import OpenAI, RateLimitError
 from ..core.config import settings
+from ..services.upload_streaming import read_upload_within_limit
 from ..core import templates
 from ..core.constants import OPENAI_MODELS
 from ..services.policy_service import PolicyService
@@ -1065,8 +1066,11 @@ async def analyze_document(
             project_id=proj_id,
         )
 
-        # Read file content
-        content = await file.read()
+        # Read file content, capped while reading. This had no application-level
+        # size limit at all before R-A8S.
+        content = await read_upload_within_limit(
+            file, max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024
+        )
         text_content = content.decode('utf-8', errors='ignore')
 
         # Extract key points and clauses

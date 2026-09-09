@@ -48,6 +48,49 @@ class UploadTooLargeError(HTTPException):
         self.max_size_bytes = int(max_size_bytes)
 
 
+async def read_upload_within_limit(
+    upload: UploadFile,
+    max_size_bytes: int,
+) -> bytes:
+    """Read a small upload into memory, refusing it on the byte that crosses the cap.
+
+    For the paths that legitimately want the whole body in memory - a CSV import,
+    a profile photo, a pasted text document - where spooling to disk buys
+    nothing. What it does not do is `await upload.read()` and then measure, which
+    is what five call sites used to do:
+
+    * `bank_guarantees.py`, `key_dates.py` and `deep_planning.py` had **no
+      application-level size limit at all**, so the only bound was the gateway's
+      `client_max_body_size 200m`;
+    * `profiles.py` and `folder_structure.py` had a limit and applied it *after*
+      buffering, so a 200 MB body was already resident before the 5 MB rule
+      refused it.
+
+    A limit enforced after the read is not a limit on what the process holds. The
+    refusal here is the same `UploadTooLargeError` the streaming path raises, so
+    every upload surface answers 413 for the same condition.
+    """
+    limit = max(1, int(max_size_bytes))
+    chunk_size = max(1, int(getattr(settings, "UPLOAD_STREAM_CHUNK_SIZE_MB", 1))) * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+
+    await upload.seek(0)
+    while True:
+        chunk = await upload.read(chunk_size)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+    try:
+        await upload.seek(0)
+    except Exception:
+        pass
+    return b"".join(chunks)
+
+
 @dataclass
 class SpooledUpload:
     filename: str

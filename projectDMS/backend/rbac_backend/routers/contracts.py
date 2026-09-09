@@ -45,6 +45,7 @@ from ..services.upload_limits import upload_concurrency_limiter
 from ..services.upload_streaming import (
     SpooledUpload,
     inspect_existing_file,
+    read_upload_within_limit,
     spool_upload_file,
     validate_spooled_upload,
 )
@@ -514,11 +515,13 @@ async def upload_contract_chunk(
         resource_type="contract_upload",
         audit=False,
     )
-    chunk_bytes = await chunk.read()
+    # Capped while reading. This was `await chunk.read()` followed by a length
+    # check, so an oversize chunk was already resident when it was refused - the
+    # limit bounded what was stored, not what the process held. The refusal is
+    # still 413, now from the same seam every other upload path uses.
+    chunk_bytes = await read_upload_within_limit(chunk, max_chunk_size_bytes)
     await chunk.seek(0)
     chunk_sha256 = hashlib.sha256(chunk_bytes).hexdigest()
-    if len(chunk_bytes) > max_chunk_size_bytes:
-        raise ContractError("Chunk exceeds the maximum allowed chunk size", status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
     safe_filename = sanitize_filename(filename)
     if session_doc.get("document_id"):
