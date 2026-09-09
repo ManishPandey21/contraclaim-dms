@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
   security-events: write
+  # R-A8T, from the first run this repository ever gave this branch.
+  # `gitleaks-action@v2` calls `GET /repos/{owner}/{repo}/pulls/{n}/commits` to
+  # scope a pull-request scan, and without this it answers
+  # `403 Resource not accessible by integration` and the job dies before
+  # scanning anything - a red `secret-scan` that had found nothing either way.
+  # Read-only, and the narrowest scope that makes the call succeed.
+  pull-requests: read
 
 env:
   PYTHON_VERSION: "3.12"
@@ -204,8 +211,16 @@ jobs:
           done
           docker run --rm --entrypoint node "$image" --version
           echo "OK: runtime image has node, no package manager, no builder artefacts"
+      # `@0.24.0` stopped resolving - "unable to find version" - and the job
+      # failed at Set up job, before a single image was scanned. Every published
+      # tag on aquasecurity/trivy-action is `v`-prefixed; the unprefixed form
+      # this workflow used resolves for no version at all, checked against the
+      # git-refs API rather than assumed. `v0.33.1` exists and still declares
+      # image-ref / format / exit-code / ignore-unfixed / severity. Pinned to an
+      # exact release, never a moving tag: an image scan that silently changes
+      # scanner version is an image scan whose result cannot be compared.
       - name: Scan images
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: projectdms-backend:${{ github.sha }}
           format: table
@@ -213,7 +228,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan client image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: projectdms-client:${{ github.sha }}
           format: table
@@ -221,7 +236,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan LangGraph image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: projectdms-langgraph:${{ github.sha }}
           format: table
@@ -229,7 +244,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan Graphiti image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: projectdms-graphiti:${{ github.sha }}
           format: table
@@ -237,7 +252,7 @@ jobs:
           ignore-unfixed: true
           severity: CRITICAL,HIGH
       - name: Scan Docling image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.33.1
         with:
           image-ref: projectdms-docling:${{ github.sha }}
           format: table

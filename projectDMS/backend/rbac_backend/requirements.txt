@@ -1,7 +1,14 @@
 aiosmtplib==5.1.2
 annotated-types==0.7.0
 razorpay==1.4.2
-anyio==4.8.0
+# Raised in R-A8T to close four CVEs pip-audit reported against the transitive
+# httpx2 / httpcore2 (CVE-2026-84379, -84380, -84382, -84381). The fix is
+# httpx2 2.12.0, which needs anyio>=4.10, which needs a newer
+# typing_extensions, which needs a newer idna. All four floors were floated
+# together and the resolver converged on the versions pinned here; each is a
+# minor bump inside its own major. Recorded as exact pins because this file
+# pins everything - a floor here would let the audited set drift.
+anyio==4.15.1
 bcrypt==4.2.1
 APScheduler==3.10.4
 beanie==1.29.0
@@ -28,8 +35,18 @@ fastapi-mail==1.6.6
 greenlet==3.1.1
 h11==0.16.0
 httpcore==1.0.9
+# Transitive, and pinned here because pip-audit reported four CVEs against
+# the versions the resolver chose (httpx2 2.3.0 / httpcore2 2.3.0):
+# CVE-2026-84379, -84380 (fixed 2.11.0), -84382 (fixed 2.12.0) and
+# CVE-2026-84381 in httpcore2 (fixed 2.10.0). It arrives through
+# langsmith (httpx2<3,>=2), genai-prices and starlette[full]; nothing
+# declares an upper bound below 2.12.0, and httpx2 2.12.0 pins
+# httpcore2==2.12.0, so one pin closes all four. Distinct package from
+# httpx/httpcore above, which stay where they are.
+httpcore2==2.12.0
 httpx==0.28.1
-idna==3.15
+httpx2==2.12.0
+idna==3.19
 img2pdf==0.6.1
 inflection==0.5.1
 iniconfig==2.0.0
@@ -85,7 +102,7 @@ tomli==2.2.1
 tqdm==4.67.1
 typing-inspect==0.9.0
 typing-inspection==0.4.2
-typing_extensions==4.15.0
+typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.34.0
 wrapt==1.17.3
