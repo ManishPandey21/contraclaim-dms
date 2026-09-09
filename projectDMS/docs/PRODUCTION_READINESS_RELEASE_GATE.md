@@ -1,6 +1,6 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 74/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 78/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
 Current verdict: **Ready with Conditions**, which is the scorer's own term for the current checkbox state and not a promotion decision. Production promotion remains blocked: Gate 9 has no bullet earned and the target is not met.
 
@@ -34,7 +34,7 @@ Production promotion is blocked until all gates are checked.
 - [x] `npm run lint` passes in `client`. evidence: client/package.json (release programme R-A8R, 2026-09-08: `npm run lint` -> `eslint . --max-warnings=0`, eslint v9.39.4, **exit 0, no output**, against `release/contraclaim-rc1` at `c66a1ef`)
 - [x] `npm test -- --run` passes in `client`.
 - [x] `npm run build` passes in `client`.
-- [ ] GitHub Actions passes for backend, frontend, dependency scans, and Docker image scans.
+- [x] GitHub Actions passes for backend, frontend, dependency scans, and Docker image scans. evidence: .github/workflows/ci.yml (release programme R-A8T, 2026-09-09: run [34376328409](https://github.com/ManishPandey21/contraclaim-dms/actions/runs/34376328409) on `60f196c7c810`, event `pull_request` from PR [contraclaim-dms#20](https://github.com/ManishPandey21/contraclaim-dms/pull/20), **all five jobs green in one run** - `backend-checks` (pre-commit over the whole tree, `compileall`, the full backend suite) 3m51s, `frontend-checks` (toolchain recorded, `npm ci`, lockfile unchanged, lint, vitest, Playwright chromium, build) 5m04s, `dependency-scan` (`pip-audit` with exactly one recorded no-fix id, `npm audit --audit-level=high`) 1m13s, `docker-build-and-scan` (five image builds, the client package-manager class check, five Trivy scans at CRITICAL,HIGH with `exit-code: 1`) 12m30s, and `secret-scan` 13s. This is the first Actions run that has ever executed against this branch, and it took four attempts to get here: F-A8T-6 `pre-commit` rewrote a tracked artefact, F-A8T-11 ten Playwright staging tests errored instead of skipping, F-A8T-12 `gitleaks-action` was refused the PR-commits API without `pull-requests: read`, F-A8T-13 the pinned Trivy action tag no longer resolved and its successor could not install its own default scanner, F-A8T-14 four CVEs in the transitive `httpx2`/`httpcore2`, and F-A8T-15 the image job exhausted the runner's disk. The first two were found and fixed locally before the first push; the rest are what this run bought)
 
 Correction history for the lint box, because it has been wrong in both directions.
 
@@ -386,7 +386,7 @@ re-derives the distinction on every run, so it cannot quietly stop being true.
 - [x] Permission seed drift tests pass.
 - [ ] Production Org-Admin permissions are manually validated in staging/prod.
 - [x] No real `.env` or secret files are tracked.
-- [ ] Secret scan passes.
+- [x] Secret scan passes. evidence: .gitleaks.toml (release programme R-A8T, 2026-09-09: `secret-scan` green in run [34376328409](https://github.com/ManishPandey21/contraclaim-dms/actions/runs/34376328409) on `60f196c7c810` - `gitleaks/gitleaks-action@v2` with `fetch-depth: 0`, so the whole history was scanned, against the root `.gitleaks.toml` whose allowlists exempt specific non-secret VALUES and never a directory. The repository is user-owned rather than organisation-owned, checked from the API, so no `GITLEAKS_LICENSE` applies - R-A8S flagged that as a risk to verify from the run rather than assume, and this is the verification. F-A8T-12: the job's first attempt died 403 `Resource not accessible by integration` calling the PR-commits API, because the workflow granted no `pull-requests` scope; it scanned nothing and its red meant nothing. `pull-requests: read` added)
 
 ### Gate 5: Upload And Content Safety
 
@@ -532,8 +532,9 @@ still Open. That is enforced rather than described.
 
 Current score evidence:
 
-- Current production launch-readiness score is **74/100** (re-derived by
-  `scripts/production_readiness_score.py`, release programme R-A8R, 2026-09-08).
+- Current production launch-readiness score is **78/100** (re-derived by
+  `scripts/production_readiness_score.py`, release programme R-A8T, 2026-09-09,
+  after the first green Actions run closed Gate 1 bullet 6 and Gate 4 bullet 10).
   The figure recorded here through Phase 8 was 32/100 and had not been re-derived
   since.
 - Current verdict: **Ready with Conditions**.
@@ -545,18 +546,18 @@ Current score evidence:
 
 | ID | Status | Blocker | Evidence | Required resolution |
 | --- | --- | --- | --- | --- |
-| P0-001 | Resolved locally | Backend suite is red | Original full backend run observed 6 failures in `test_llamaindex_service.py`; Phase 1 local rerun now reports 462 passed, 7 skipped | Confirm in GitHub Actions |
+| P0-001 | Resolved | Backend suite is red | Original full backend run observed 6 failures in `test_llamaindex_service.py`; Phase 1 local rerun now reports 462 passed, 7 skipped | Confirmed in GitHub Actions - run 34376328409, `backend-checks` green on `60f196c` (R-A8T, 2026-09-09) |
 | P0-002 | Open | Live AI/vector/graph integrations are skipped by default | `RUN_EXTERNAL_INTEGRATION_TESTS=1` required for live tests | Add a staging live-integration release gate and capture results |
 | P0-003 | Partially mitigated | Browser E2E incomplete | Phase 5 adds Playwright coverage for contract upload/search/Q&A/appraisal, but auth/session, document workflows, timeline, chronology, arbitration, and broad empty/error/mobile coverage remain uncovered | Expand E2E harness to all launch-critical workflows |
 | P0-004 | Resolved locally | Migration discipline incomplete | Phase 3 adds `rbac_backend.migrations`, `schema_migrations` ledger, RBAC seed digesting, and `python -m rbac_backend.scripts.migrate_database` dry-run/apply support | Run against staging/fresh MongoDB and confirm in CI/release evidence |
 | P0-005 | Resolved (code) | Upload antivirus can be disabled | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py` | Deploy ClamAV in staging and capture a live infected/clean scan as final Gate 5 proof |
 | P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box |
 | P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
-| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 74/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
+| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 78/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **74/100** against a target of
+The current production launch-readiness score is **78/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -587,17 +588,17 @@ stale rendering, not withdrawn evidence.)
 
 | Gate | Score | Checked |
 | --- | ---: | ---: |
-| Gate 1: CI And Local Test Baseline | 12.50 / 15 | 5 / 6 |
+| Gate 1: CI And Local Test Baseline | 15.00 / 15 | 6 / 6 |
 | Gate 2: Live Integration Baseline | 10.00 / 10 | 6 / 6 |
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
-| Gate 4: Security And RBAC | 12.00 / 15 | 8 / 10 |
+| Gate 4: Security And RBAC | 13.50 / 15 | 9 / 10 |
 | Gate 5: Upload And Content Safety | 10.00 / 10 | 5 / 5 |
 | Gate 6: Database, Migrations, And Seeds | 8.33 / 10 | 5 / 6 |
 | Gate 7: Deployment And Environment | 10.00 / 10 | 7 / 7 |
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
 | Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
 
-Total: **74 / 100** against a target of 85.
+Total: **78 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 

@@ -5,7 +5,9 @@ Re-derived mechanically on 2026-09-09 (release programme R-A8S) from
 [PRODUCTION_READINESS_RELEASE_GATE.md](PRODUCTION_READINESS_RELEASE_GATE.md) at
 release HEAD. Nothing here is copied from a receipt.
 
-**Score: 74/100. Target: 85. Verdict: Ready with Conditions. Gate 9: OPEN.**
+**Score: 78/100. Target: 85. Verdict: Ready with Conditions. Gate 9: OPEN.**
+
+Re-derived at the R-A8T state. The branch has now been **pushed to both remotes** and carries a **draft pull request** opened solely to obtain CI evidence; it is **not merged and not deployed**. [Run 34376328409](https://github.com/ManishPandey21/contraclaim-dms/actions/runs/34376328409) is green on all five jobs, which closed **Gate 1 bullet 6** (+2.500) and **Gate 4 bullet 10** (+1.500) - the two push-gated bullets, and the last points available without a deployment.
 
 The score moved 68 → 74 in R-A8S, from three bullets and no staging window:
 
@@ -32,26 +34,29 @@ at 9. Bullet 7's proposed withdrawal was **refused on the evidence** — see §2
 
 | Gate | Weight | Checked | Points | Per bullet | Remaining |
 |---|---:|---:|---:|---:|---:|
-| 1 CI and local test baseline | 15 | 5/6 | 12.50 | 2.500 | 2.500 |
+| 1 CI and local test baseline | 15 | **6/6** | **15.00** | — | **0** |
 | 2 Live integration | 10 | 6/6 | 10.00 | — | 0 |
 | 3 Browser E2E | 12 | 1/9 | 1.33 | 1.333 | 10.667 |
-| 4 Security and RBAC | 15 | 8/10 | 12.00 | 1.500 | 3.000 |
+| 4 Security and RBAC | 15 | **9/10** | **13.50** | 1.500 | **1.500** |
 | 5 Upload and content safety | 10 | **5/5** | **10.00** | — | **0** |
 | 6 Database, migrations, seeds | 10 | **5/6** | **8.33** | 1.667 | **1.667** |
 | 7 Deployment | 10 | 7/7 | 10.00 | — | 0 |
 | 8 Backup / restore / rollback | 10 | 8/8 | 10.00 | — | 0 |
 | 9 Final review | 8 | 0/6 | 0.00 | 1.333 | 8.000 |
-| **Total** | **100** | | **74.17 raw → 74** | | **25.83** |
+| **Total** | **100** | | **78.17 raw → 78** | | **21.83** |
 
 **Weighted points needed for 85.** The scorer rounds with `round()`, which is
 banker's rounding, so **84.5 displays as 84**. The requirement is therefore
 **raw > 84.50**, i.e. **more than 10.333 further points** — not 11, and not 10.5.
 
-Every remaining bullet outside Gates 3 and 9 is worth **7.167** in total
-(G1 b6 2.500, G4 b8 1.500, G4 b10 1.500, G6 b3 1.667). That is less than 10.333,
-so **Gate 3 or Gate 9 bullets are unavoidable on every route to 85** — and Gate 9
-bullet 5 ("readiness score ≥ 85") cannot be one of them, because counting it
-towards reaching 85 is circular.
+**Weighted points needed for 85, re-derived at 78.167.** The requirement is still
+raw > 84.50, so **more than 6.333 further points**.
+
+Every remaining bullet outside Gates 3 and 9 is worth **3.167** in total
+(G4 b8 1.500, G6 b3 1.667). That is less than 6.333, so **Gate 3 or Gate 9
+bullets remain unavoidable on every route to 85** — and Gate 9 bullet 5
+("readiness score ≥ 85") cannot be one of them, because counting it towards
+reaching 85 is circular, which since R-A8T is enforced rather than observed (§5a).
 
 **Every remaining offline bullet is now closed.** Nothing left on the board can
 be earned without either a push or a deployment.
@@ -149,14 +154,16 @@ All six are downstream. See §5.
 Re-derived on 2026-09-09 at the R-A8S final state. **Base raw 74.167. The
 requirement is raw > 84.50, so more than 10.333 further points.**
 
-**Every offline bullet is gone.** R-A8S closed the last three (G5 b3, G5 b5,
-G6 b2). Nothing remaining can be earned without a push or a deployment, which is
-the useful thing this re-derivation says: the next phase is not a coding phase.
+**Every offline bullet is gone, and the push is done.** R-A8S closed the last
+three offline bullets (G5 b3, G5 b5, G6 b2); R-A8T closed the two push-gated ones
+(G1 b6, G4 b10). Nothing remaining can be earned without a deployment, except
+Gate 9 bullet 2, which is an owner acceptance document. **The next phase is a
+staging window.**
 
 | # | Item | Points | OFFLINE / PUSH / STAGING | Dependency | Required for 85? |
 |---|---|---:|---|---|---|
-| 1 | **G1 b6** — GitHub Actions green on the release commit | 2.500 | **PUSH** | the branch reaching a remote | **YES** — it is the largest single bullet left and needs no window |
-| 2 | **G4 b10** — secret scan passes | 1.500 | **PUSH** | the same push; `gitleaks` is not installed on the dev host | **YES** — same run, no extra cost |
+| — | ~~G1 b6 — GitHub Actions green on the release commit~~ | 2.500 | **PUSH** | — | **EARNED in R-A8T** — [run 34376328409](https://github.com/ManishPandey21/contraclaim-dms/actions/runs/34376328409), all five jobs green on `60f196c` |
+| — | ~~G4 b10 — secret scan passes~~ | 1.500 | **PUSH** | — | **EARNED in R-A8T** — `secret-scan` green in the same run |
 | 3 | **G3 b2** — org-admin permission save/retrieve | 1.333 | **STAGING** | `org-admin-permissions.spec.ts` (exists), a staging stack, `E2E_ORG_ADMIN_*` | **YES** — it carries item 4 |
 | 4 | **G4 b8** — production Org-Admin permissions validated | 1.500 | **STAGING** | *the same execution as item 3* | **YES** — 2.833 points from one spec run is the best ratio on the board |
 | 5 | **G6 b3** — production-copy restore, then migrate | 1.667 | **STAGING** | a production Mongo archive | **YES** — the largest staging bullet |
@@ -168,10 +175,12 @@ the useful thing this re-derivation says: the next phase is not a coding phase.
 
 **The shortest route, priced.**
 
+Every row below the first was produced by running the scorer against a copy of the
+gate document with exactly those boxes ticked, not by adding the numbers up.
+
 | Step | Points | Running raw | Displays |
 |---|---:|---:|---|
-| start | — | 74.167 | 74 |
-| push + CI green (G1 b6, G4 b10) | +4.000 | 78.167 | 78 |
+| ~~start~~ 74.167 → **push + CI green (G1 b6, G4 b10)** | +4.000 | **78.167** | **78** ← *here* |
 | one spec run (G3 b2 + G4 b8) | +2.833 | 81.000 | 81 |
 | production-copy restore then migrate (G6 b3) | +1.667 | 82.667 | 83 |
 | staging deploy smoke (G9 b3) | +1.333 | 84.000 | **84** |
@@ -186,6 +195,15 @@ non-Gate-3 items only total 7.167.
 two of G3 b3 / G3 b7 / G3 b9 / G9 b3 / G9 b4). Substituting G9 b2 — an owner
 acceptance document, not a staging run — for one of the last two brings it to
 four, and is the only offline substitution left on the board.
+
+**This is the minimum path to the 85 target, which is not the minimum path to
+Gate 9 eligibility, and the two must not be conflated.** The Launch Gates preamble
+blocks promotion until *all* gates are checked, and the gate weights sum to 100, so
+*all gates checked* is exactly **100/100** — pinned by
+`test_gate9_scoreability.py::test_every_gate_checked_is_a_score_of_one_hundred`.
+Reaching 85 therefore leaves eight Gate 3 bullets, one Gate 4 bullet, one Gate 6
+bullet and up to six Gate 9 bullets outstanding. **85 is a milestone; it is never
+the binding constraint at promotion time.** §4 prices the rest.
 
 **What changed from the R-A8R projection.** That projection assumed Gate 3
 bullets 7 and 8 might both be withdrawn, shrinking Gate 3's denominator to 7 and
