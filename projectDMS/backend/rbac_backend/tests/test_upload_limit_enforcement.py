@@ -871,6 +871,65 @@ async def test_a_forged_content_length_buys_the_webhook_nothing() -> None:
     assert refused.value.status_code == 413
 
 
+async def test_the_bounded_body_is_byte_identical_to_what_request_body_returns() -> None:
+    """A webhook signature is computed over the raw body.
+
+    Stripe and Razorpay both HMAC the exact bytes they sent. A seam that
+    normalised, re-encoded or dropped a chunk boundary would keep every size
+    test green and make every real webhook fail its signature check - a
+    self-inflicted outage on an endpoint no test in this repository signs.
+    """
+    from starlette.requests import Request  # noqa: PLC0415
+
+    from rbac_backend.services.upload_streaming import (  # noqa: PLC0415
+        read_request_body_within_limit,
+    )
+
+    payload = b'{"id":"evt_1","data":{"object":{"amount":1999}}}\n\x00\xff'
+
+    def _make_request():
+        chunks = [payload[:10], payload[10:30], payload[30:]]
+        sent = iter(chunks)
+
+        async def receive():
+            try:
+                return {"type": "http.request", "body": next(sent), "more_body": True}
+            except StopIteration:
+                return {"type": "http.request", "body": b"", "more_body": False}
+
+        scope = {"type": "http", "method": "POST", "headers": [], "path": "/x"}
+        return Request(scope, receive)
+
+    assert await _make_request().body() == payload, "the fake transport is wrong"
+    assert await read_request_body_within_limit(_make_request(), len(payload) * 4) == payload
+
+
+async def test_the_bounded_body_is_cached_so_a_later_read_still_works() -> None:
+    """`Request.stream()` raises `RuntimeError("Stream consumed")` once it is
+    exhausted. Caching the way `Request.body()` does keeps this a drop-in
+    replacement, so a second reader gets the body rather than an error that
+    looks nothing like the size limit that consumed the stream."""
+    from starlette.requests import Request  # noqa: PLC0415
+
+    from rbac_backend.services.upload_streaming import (  # noqa: PLC0415
+        read_request_body_within_limit,
+    )
+
+    payload = b"signed-payload"
+    sent = iter([payload])
+
+    async def receive():
+        try:
+            return {"type": "http.request", "body": next(sent), "more_body": True}
+        except StopIteration:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request({"type": "http", "method": "POST", "headers": [], "path": "/x"}, receive)
+
+    assert await read_request_body_within_limit(request, 1024) == payload
+    assert await request.body() == payload
+
+
 def test_the_webhook_route_reads_its_body_through_the_bounded_seam() -> None:
     """Read from the source, because the property is about the deployed route.
 

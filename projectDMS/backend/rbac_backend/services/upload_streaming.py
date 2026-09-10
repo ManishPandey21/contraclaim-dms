@@ -118,7 +118,21 @@ async def read_request_body_within_limit(request, max_size_bytes: int) -> bytes:
         if total > limit:
             raise UploadTooLargeError(limit)
         chunks.append(chunk)
-    return b"".join(chunks)
+
+    body = b"".join(chunks)
+    # Cache it the way `Request.body()` does, so this is a drop-in replacement
+    # rather than a one-shot. Starlette's `stream()` yields a cached `_body`
+    # when one exists and raises `RuntimeError("Stream consumed")` when the
+    # stream is gone; without this line a *later* `await request.body()` - a
+    # signature check, a debug dump, a second dependency - would hit that
+    # RuntimeError, and the failure would look nothing like the size limit that
+    # actually consumed the stream. The bytes are identical to what `body()`
+    # would have returned, which is what keeps a webhook signature verifiable.
+    try:
+        request._body = body
+    except Exception:  # pragma: no cover - a Request shape without the slot
+        pass
+    return body
 
 
 def read_file_within_limit(handle, max_size_bytes: int) -> bytes:
