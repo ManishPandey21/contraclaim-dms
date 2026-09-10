@@ -91,6 +91,36 @@ async def read_upload_within_limit(
     return b"".join(chunks)
 
 
+async def read_request_body_within_limit(request, max_size_bytes: int) -> bytes:
+    """Read a raw request body, refusing it on the byte that crosses the cap.
+
+    `await request.body()` holds the whole request before anything can object to
+    its size, and it is the one upload channel that carries no `UploadFile` at
+    all - which is why the Gate 5 guard, built around `UploadFile`, was green
+    over `POST /api/billing/webhooks/{provider}` while that route did exactly
+    that. The webhook is **intentionally unauthenticated**, so the only bound on
+    what an anonymous caller could make the process hold was the gateway's
+    `client_max_body_size 200m`.
+
+    `request.stream()` is an async iterator over the transport, so the refusal
+    happens during the read rather than after it. The refusal is the same
+    `UploadTooLargeError` every other upload surface raises, so the answer is
+    413 and not a 500 (F-A8S-2).
+    """
+    limit = max(1, int(max_size_bytes))
+    chunks: list[bytes] = []
+    total = 0
+
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise UploadTooLargeError(limit)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def read_file_within_limit(handle, max_size_bytes: int) -> bytes:
     """The synchronous sibling of `read_upload_within_limit`.
 

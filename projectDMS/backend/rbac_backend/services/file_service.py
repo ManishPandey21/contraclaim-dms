@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..core.config import settings
+from .upload_streaming import read_upload_within_limit
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +211,16 @@ class SecureFileService(FileService):
         target_dir = self._target_dir(organization_id, project_id)
         target_path = target_dir / Path(stored_filename or filename).name
 
-        data = await upload_file.read()
-        await upload_file.seek(0)
+        # Bounded, not `await upload_file.read()`. The parameter is unannotated,
+        # which is exactly why the Gate 5 upload guard could not see this read
+        # (R-A8U, F-A8T2-5): it watched parameters whose *annotation* mentioned
+        # `UploadFile`. Nothing calls this method today, so the fix closes a
+        # class rather than a live bypass - and an unreachable whole-body read
+        # is one caller away from being a reachable one.
+        data = await read_upload_within_limit(
+            upload_file,
+            max(1, int(settings.GENERAL_UPLOAD_MAX_FILE_SIZE_MB)) * 1024 * 1024,
+        )
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, target_path.write_bytes, data)
@@ -239,8 +249,12 @@ class SecureFileService(FileService):
         chunk_folder.mkdir(parents=True, exist_ok=True)
         chunk_path = chunk_folder / f"{chunk_index:05d}.part"
 
-        data = await chunk_file.read()
-        await chunk_file.seek(0)
+        # Same class as `store_file` above, and the same unannotated shape. A
+        # chunk is bounded by the contract upload's own per-chunk cap.
+        data = await read_upload_within_limit(
+            chunk_file,
+            max(1, int(settings.CONTRACT_UPLOAD_MAX_CHUNK_SIZE_MB)) * 1024 * 1024,
+        )
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, chunk_path.write_bytes, data)

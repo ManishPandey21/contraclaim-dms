@@ -152,6 +152,12 @@ class Settings(BaseSettings):
     UPLOAD_STREAM_CHUNK_SIZE_MB: int = Field(default=1, validation_alias="UPLOAD_STREAM_CHUNK_SIZE_MB")
     UPLOAD_VALIDATION_SAMPLE_BYTES: int = Field(default=8192, validation_alias="UPLOAD_VALIDATION_SAMPLE_BYTES")
     GENERAL_UPLOAD_MAX_FILE_SIZE_MB: int = Field(default=100, validation_alias="GENERAL_UPLOAD_MAX_FILE_SIZE_MB")
+    # The one upload channel that carries no `UploadFile`. `POST
+    # /api/billing/webhooks/{provider}` is intentionally unauthenticated and
+    # read the whole request body before anything could object to its size;
+    # a provider webhook payload is a few kilobytes of JSON, so 256 KB is
+    # generous and still four hundred times tighter than the gateway's 200 MB.
+    WEBHOOK_MAX_BODY_SIZE_KB: int = Field(default=256, validation_alias="WEBHOOK_MAX_BODY_SIZE_KB")
     # 0 means "no attempt boundary". A positive value bounds the OCR pages one
     # attempt will run; the remainder is DEFERRED and re-claimed, never dropped.
     DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT: int = Field(

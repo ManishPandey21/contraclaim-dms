@@ -23,6 +23,7 @@ Three properties matter more than the arithmetic:
 
 from __future__ import annotations
 
+import re
 import tempfile
 from types import SimpleNamespace
 from pathlib import Path
@@ -38,11 +39,16 @@ from rbac_backend.services.upload_streaming import (
     validate_spooled_upload,
 )
 
-RBAC_BACKEND = Path(__file__).resolve().parents[1]
-ROUTERS = RBAC_BACKEND / "routers"
-#: Trees where an upload can be read. F-A8T-1 was in `services/`, which the
-#: first cut of the class guard did not look at.
-UPLOAD_TREES = (ROUTERS, RBAC_BACKEND / "services", RBAC_BACKEND / "utils")
+# R-A8U moved the static analyser into `upload_surface` so that the inventory in
+# `test_upload_route_inventory.py` and this bullet's guard cannot drift apart:
+# one answers "which routes must be bounded" and the other "is anything
+# unbounded", and they have to agree about what an upload is.
+from rbac_backend.tests.upload_surface import (
+    RBAC_BACKEND,
+    ROUTERS,
+    scan_upload_trees,
+    uncapped_upload_reads,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,94 +410,23 @@ async def test_the_in_memory_read_refuses_before_buffering_the_whole_body() -> N
     )
 
 
-def uncapped_upload_reads(source: str, label: str = "<source>") -> list:
-    """Every place `source` reads an upload whole with no size limit.
-
-    An AST walk rather than a substring search, because the property is "an
-    upload is read whole with no limit" and not "this exact string appears".
-
-    Three shapes, because R-A8T's review found the first cut saw only one:
-
-    * ``await file.read()`` - the original;
-    * ``file.file.read()`` - the *synchronous* spooled handle. This is F-A8T-1.
-      `POST /api/documents/bulk-upload` takes two upload parameters, caps
-      `files` and never measured `csv_file`, and
-      `bulk_upload_service.read_csv_from_upload_file` read that one with
-      `upload_file.file.read()` before decoding it. The guard that certified
-      Gate 5 bullet 3 matched only `ast.Name.read()`, so the attribute chain was
-      invisible to it;
-    * the loop variable of ``for f in files:`` where `files` is a
-      `List[UploadFile]` parameter - the shape a bulk endpoint naturally uses.
-
-    A call with arguments is treated as bounded: it is asking for a chunk. That
-    is deliberately generous - a chunk loop with no running total still passes -
-    and it is the honest boundary of a static check. The runtime boundary tests
-    above are what cover the counting.
-    """
-    import ast
-
-    tree = ast.parse(source)
-    watched = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for argument in node.args.args + node.args.kwonlyargs:
-                annotation = ast.unparse(argument.annotation) if argument.annotation else ""
-                if "UploadFile" in annotation:
-                    watched.add(argument.arg)
-    if not watched:
-        return []
-    # A loop over a watched collection yields watched items.
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.target, ast.Name):
-            iterated = ast.unparse(node.iter)
-            if any(name in iterated for name in watched):
-                watched.add(node.target.id)
-
-    offenders = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr != "read":
-            continue
-        if node.args:  # a chunk size was asked for
-            continue
-        target = func.value
-        if isinstance(target, ast.Name) and target.id in watched:
-            offenders.append(f"{label}:{node.lineno}: {target.id}.read()")
-        elif (
-            isinstance(target, ast.Attribute)
-            and target.attr == "file"
-            and isinstance(target.value, ast.Name)
-            and target.value.id in watched
-        ):
-            offenders.append(f"{label}:{node.lineno}: {target.value.id}.file.read()")
-    return offenders
-
-
 def test_nothing_reads_an_upload_without_a_cap() -> None:
-    """The class-level guard, over routers AND services."""
-    offenders = []
-    for tree_root in UPLOAD_TREES:
-        for path in sorted(tree_root.rglob("*.py")):
-            if "__pycache__" in path.parts:
-                continue
-            offenders.extend(
-                uncapped_upload_reads(
-                    # utf-8-sig: four service modules carry a BOM, which Python
-                    # strips on import and `ast.parse` refuses. Read the way the
-                    # interpreter does, or the guard skips them with a crash.
-                    path.read_text(encoding="utf-8-sig"),
-                    str(path.relative_to(RBAC_BACKEND)),
-                )
-            )
+    """The class-level guard, over routers AND services.
+
+    R-A8U replaced the guard's body with `upload_surface.uncapped_upload_reads`,
+    which measures the property rather than three spellings of it. See that
+    module for what F-A8T2-5 and F-A8T2-6 were, and what "bounded" now means.
+    """
+    offenders = scan_upload_trees()
 
     assert not offenders, (
-        "these read an upload whole with no size limit, so the only bound on "
-        "what the process holds is the gateway's client_max_body_size:\n  "
+        "these materialise an upload body with no defensible size limit, so the "
+        "only bound on what the process holds is the gateway's "
+        "client_max_body_size:\n  "
         + "\n  ".join(offenders)
-        + "\nUse services.upload_streaming.read_upload_within_limit (async) or "
-        "read_file_within_limit (the spooled handle) instead."
+        + "\nUse services.upload_streaming.read_upload_within_limit (async), "
+        "read_file_within_limit (the spooled handle) or "
+        "read_request_body_within_limit (a raw Request) instead."
     )
 
 
@@ -510,6 +445,67 @@ UNCAPPED_SHAPES = [
         "        await f.read()\n",
         id="a-loop-variable",
     ),
+    # ---- R-A8U: the shapes the review found the guard could not see --------- #
+    pytest.param(
+        "async def r(self, upload_file, name):\n    return await upload_file.read()\n",
+        id="an-unannotated-parameter-F-A8T2-5",
+    ),
+    pytest.param(
+        "async def r(self, csv_file):\n    return csv_file.file.read()\n",
+        id="an-unannotated-spooled-handle-F-A8T2-5",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n    return await file.read(-1)\n",
+        id="read-minus-one-F-A8T2-6",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n    return await file.read(None)\n",
+        id="read-none-F-A8T2-6",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n    return await file.read(size=-1)\n",
+        id="read-keyword-minus-one",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n"
+        "    handle = file\n"
+        "    return await handle.read()\n",
+        id="a-simple-alias",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n"
+        "    a = file\n"
+        "    b = a\n"
+        "    c = b\n"
+        "    return await c.read()\n",
+        id="a-three-hop-alias",
+    ),
+    pytest.param(
+        "async def r(file: UploadFile):\n"
+        "    handle = file.file\n"
+        "    return handle.read()\n",
+        id="the-spooled-handle-through-an-alias",
+    ),
+    pytest.param(
+        "async def r(files: List[UploadFile]):\n    return await files[0].read()\n",
+        id="an-indexed-upload",
+    ),
+    pytest.param(
+        "async def r(files: List[UploadFile]):\n"
+        "    for index, f in enumerate(files):\n"
+        "        await f.read()\n",
+        id="an-enumerated-loop-variable",
+    ),
+    pytest.param(
+        "async def r(files: List[UploadFile]):\n"
+        "    bodies = [await f.read() for f in files]\n"
+        "    return bodies\n",
+        id="a-comprehension-variable",
+    ),
+    pytest.param(
+        "async def r(request: Request):\n    return await request.body()\n",
+        id="a-whole-request-body",
+    ),
 ]
 
 
@@ -517,11 +513,37 @@ UNCAPPED_SHAPES = [
 def test_each_uncapped_shape_is_caught(snippet: str) -> None:
     """Without these the widened guard could be green because it looks at nothing.
 
-    The middle one is the defect the first cut of this guard could not see, and
-    it was live in `services/bulk_upload_service.py` while Gate 5 bullet 3 was
-    ticked.
+    The first three were R-A8T's. The rest are R-A8U's, one per form the
+    independent review demonstrated the old guard walking past.
     """
-    assert uncapped_upload_reads(snippet), f"not caught: {snippet!r}"
+    assert uncapped_upload_reads(snippet, cap_bytes=1024 * 1024), f"not caught: {snippet!r}"
+
+
+def test_a_fixed_read_larger_than_the_configured_cap_is_caught() -> None:
+    """A number is not a limit if it is bigger than the limit.
+
+    `await file.read(1_000_000_000)` asked for a size, so the old guard's
+    `if node.args: continue` accepted it. It reads a gigabyte.
+    """
+    snippet = "async def r(file: UploadFile):\n    return await file.read(1000000000)\n"
+    found = uncapped_upload_reads(snippet, cap_bytes=8 * 1024 * 1024)
+    assert found, "a fixed read far larger than the configured cap was accepted"
+    assert "configured cap" in found[0], found
+
+
+def test_the_cap_the_guard_compares_against_is_the_configured_one() -> None:
+    """The same principle as `test_the_routers_pass_the_configured_limit`.
+
+    A guard that hard-coded 100 MB would keep passing after somebody set
+    `GENERAL_UPLOAD_MAX_FILE_SIZE_MB=100000`.
+    """
+    snippet = "async def r(file: UploadFile):\n    return await file.read(4096)\n"
+    assert uncapped_upload_reads(snippet, cap_bytes=1024), (
+        "a 4 KB read was accepted against a 1 KB cap"
+    )
+    assert uncapped_upload_reads(snippet, cap_bytes=8192) == [], (
+        "a 4 KB read was refused against an 8 KB cap"
+    )
 
 
 @pytest.mark.parametrize(
@@ -540,10 +562,69 @@ def test_each_uncapped_shape_is_caught(snippet: str) -> None:
             "    return await read_upload_within_limit(file, 1024)\n",
             id="the-seam",
         ),
+        pytest.param(
+            "async def r(file: UploadFile):\n"
+            "    while True:\n"
+            "        chunk = await file.read(chunk_size)\n"
+            "        if not chunk:\n"
+            "            break\n",
+            id="a-streaming-bounded-loop",
+        ),
+        pytest.param(
+            "async def r(file: UploadFile):\n"
+            "    body = await read_upload_within_limit(file, cap)\n"
+            "    return body.read\n",
+            id="bytes-from-the-seam-are-not-tainted",
+        ),
+        pytest.param(
+            "async def r(request: Request):\n"
+            "    return await read_request_body_within_limit(request, 1024)\n",
+            id="the-request-seam",
+        ),
+        pytest.param(
+            "def r(path):\n"
+            "    with open(path, 'rb') as handle:\n"
+            "        return handle.read()\n",
+            id="a-local-file-is-not-an-upload",
+        ),
     ],
 )
 def test_the_guard_does_not_ban_a_bounded_read(snippet: str) -> None:
-    assert uncapped_upload_reads(snippet) == []
+    """The false-positive boundary. A guard that banned the correct seam, or a
+    plain local file read, would be routed around rather than obeyed."""
+    assert uncapped_upload_reads(snippet, cap_bytes=1024 * 1024) == []
+
+
+def test_removing_a_routes_size_guard_turns_the_class_guard_red() -> None:
+    """The mutation control, run against the real router source.
+
+    `documents.py` is read from disk, its `spool_upload_file(...)` call rewritten
+    into the bare `await file.read()` it replaced, and the guard re-run over the
+    mutated text. A guard that stayed green here would be certifying nothing -
+    which is precisely what the pre-R-A8U guard did for `read(-1)` and for an
+    unannotated parameter.
+    """
+    original = (ROUTERS / "documents.py").read_text(encoding="utf-8-sig")
+    assert uncapped_upload_reads(original, "documents.py") == [], (
+        "documents.py is already reported by the guard, so this control cannot "
+        "tell a mutation from the baseline"
+    )
+
+    mutated = re.sub(
+        r"await spool_upload_file\((\w+)[^)]*\)",
+        r"await \1.read()",
+        original,
+        count=1,
+    )
+    assert mutated != original, (
+        "the mutation did not apply, so this control proves nothing - the same "
+        "way R-A8T Part 2's first `mongo_restore` control did not"
+    )
+
+    assert uncapped_upload_reads(mutated, "documents.py(mutated)"), (
+        "removing the size guard from a real upload route left the class guard "
+        "green"
+    )
 
 
 def test_the_in_memory_helper_is_actually_used_by_the_paths_that_need_it() -> None:
@@ -707,6 +788,131 @@ def test_the_bulk_csv_read_answers_413_rather_than_a_processing_failure() -> Non
     with pytest.raises(UploadTooLargeError) as excinfo:
         BulkUploadService().read_csv_from_upload_file(oversize)
     assert excinfo.value.status_code == 413
+
+
+# --------------------------------------------------------------------------- #
+# The raw-request seam: `read_request_body_within_limit` (R-A8U)
+# --------------------------------------------------------------------------- #
+#
+# `POST /api/billing/webhooks/{provider}` is intentionally unauthenticated - the
+# payment provider calls it, not a logged-in user - and it did
+# `raw_body = await request.body()`. That materialises the whole request before
+# anything can object to its size, so an anonymous caller decided how much the
+# process held, bounded only by the gateway's `client_max_body_size 200m`.
+#
+# The Gate 5 upload guard was green over it for the reason F-A8T2-5 names: the
+# guard was built around `UploadFile` parameters and this route has none.
+
+
+class _StreamingRequest:
+    """A `Request`-shaped object that yields its body in transport-sized chunks.
+
+    Like `_LyingUpload`, it advertises a size it does not honour, so an
+    implementation that starts trusting `content-length` is caught here.
+    """
+
+    def __init__(self, body: bytes, *, chunk: int = 4096, declared_size: int = 1) -> None:
+        self._body = body
+        self._chunk = chunk
+        self.headers = {"content-length": str(declared_size)}
+        self.chunks_served = 0
+
+    async def stream(self):
+        for offset in range(0, len(self._body), self._chunk):
+            piece = self._body[offset : offset + self._chunk]
+            self.chunks_served += 1
+            yield piece
+
+
+@pytest.mark.parametrize(
+    "delta, allowed",
+    [
+        pytest.param(-1, True, id="one-byte-below-max"),
+        pytest.param(0, True, id="exactly-max"),
+        pytest.param(1, False, id="one-byte-over-max"),
+    ],
+)
+async def test_the_raw_request_read_is_capped_at_its_boundary(delta: int, allowed: bool) -> None:
+    from rbac_backend.services.upload_streaming import read_request_body_within_limit
+
+    limit = 4096
+    request = _StreamingRequest(b"a" * (limit + delta), chunk=512)
+
+    if allowed:
+        assert len(await read_request_body_within_limit(request, limit)) == limit + delta
+        return
+
+    with pytest.raises(UploadTooLargeError):
+        await read_request_body_within_limit(request, limit)
+
+
+async def test_the_raw_request_read_refuses_before_buffering_the_whole_body() -> None:
+    """The distinction the fix is about, measured the same way as the others."""
+    from rbac_backend.services.upload_streaming import read_request_body_within_limit
+
+    body = b"a" * (256 * 1024)
+    request = _StreamingRequest(body, chunk=4096)
+
+    with pytest.raises(UploadTooLargeError):
+        await read_request_body_within_limit(request, 1024)
+
+    assert request.chunks_served * 4096 < len(body), (
+        "the whole body was streamed before the cap refused it"
+    )
+
+
+async def test_a_forged_content_length_buys_the_webhook_nothing() -> None:
+    """The header says one byte; the transport delivers a megabyte."""
+    from rbac_backend.services.upload_streaming import read_request_body_within_limit
+
+    request = _StreamingRequest(b"a" * (1024 * 1024), chunk=8192, declared_size=1)
+    with pytest.raises(UploadTooLargeError) as refused:
+        await read_request_body_within_limit(request, 4096)
+    assert refused.value.status_code == 413
+
+
+def test_the_webhook_route_reads_its_body_through_the_bounded_seam() -> None:
+    """Read from the source, because the property is about the deployed route.
+
+    A runtime test that constructed its own bounded read would stay green after
+    somebody put `await request.body()` back.
+    """
+    source = (ROUTERS / "billing_webhooks.py").read_text(encoding="utf-8")
+    assert "read_request_body_within_limit" in source, (
+        "the billing webhook no longer bounds its request body"
+    )
+    assert "raw_body = await request.body()" not in source, (
+        "the billing webhook is back to materialising the whole request body"
+    )
+    assert "settings.WEBHOOK_MAX_BODY_SIZE_KB" in source, (
+        "the webhook body cap is no longer read from configuration"
+    )
+    assert int(settings.WEBHOOK_MAX_BODY_SIZE_KB) > 0, (
+        "the configured webhook body cap is not a positive number of kilobytes"
+    )
+
+
+def test_the_unannotated_service_reads_are_bounded_at_their_seam() -> None:
+    """F-A8T2-5's three live sites, pinned so they cannot regress.
+
+    None of the three has a caller today. That is the reason they were not fixed
+    inside R-A8T Part 2's spent window, and it is not a reason to leave them: an
+    unreachable whole-body read is one caller away from a reachable one, and the
+    guard that was supposed to see them could not.
+    """
+    services = RBAC_BACKEND / "services"
+    file_service = (services / "file_service.py").read_text(encoding="utf-8")
+    assert "data = await upload_file.read()" not in file_service
+    assert "data = await chunk_file.read()" not in file_service
+    assert file_service.count("read_upload_within_limit") >= 2, (
+        "FileService.store_file / store_chunk no longer bound their reads"
+    )
+
+    s3 = (services / "s3_service.py").read_text(encoding="utf-8")
+    assert 'file.read() if hasattr(file, "read")' not in s3
+    assert "read_file_within_limit" in s3, (
+        "S3Service.upload_file no longer bounds the handle it is given"
+    )
 
 
 # --------------------------------------------------------------------------- #
