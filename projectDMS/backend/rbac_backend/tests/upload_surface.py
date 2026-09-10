@@ -563,26 +563,6 @@ def _parameter_annotations(node: ast.AST) -> Dict[str, str]:
     return found
 
 
-def _self_class_annotations(frame: _Frame) -> Dict[str, str]:
-    """`self.x` attributes are not parameters, so a method's own delegates fall
-    back to name resolution. Recorded here so the reason is stated rather than
-    silently absent."""
-    return _parameter_annotations(frame.node)
-
-
-def _module_functions(tree: ast.Module) -> Dict[str, List[ast.AST]]:
-    """Every function and method in the module, by its own name.
-
-    Kept because `test_upload_route_inventory` asserts against it directly; the
-    real resolution lives in `CallGraph`.
-    """
-    found: Dict[str, List[ast.AST]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            found.setdefault(node.name, []).append(node)
-    return found
-
-
 def _router_prefix(tree: ast.Module) -> str:
     """The `APIRouter(prefix=...)` this module's routes hang under.
 
