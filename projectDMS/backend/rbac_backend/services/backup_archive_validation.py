@@ -69,6 +69,34 @@ EMPTY = "EMPTY"
 #: AOF. Redis writes "REDIS" followed by a four-digit version.
 RDB_MAGIC = b"REDIS"
 
+#: How many leading bytes each candidate payload is read for. An RDB file opens
+#: `REDIS` followed by a four-digit ASCII version (`REDIS0011`), so five bytes
+#: prove only that something wrote the word - a five-byte file containing
+#: exactly `REDIS` matched the magic and certified VALID.
+RDB_HEAD_BYTES = 9
+
+#: The smallest byte count an RDB file can honestly have: the nine-byte header,
+#: the one-byte `0xFF` end-of-file opcode, and the eight-byte CRC64 trailer.
+#: Anything shorter cannot be restored, whatever it begins with.
+RDB_MIN_BYTES = 18
+
+#: The members an `appendonlydir/` must actually carry. Redis writes a manifest
+#: plus a base file and zero or more incrementals; a directory holding only a
+#: manifest, a README or any other passenger restores nothing. Accepting "any
+#: non-empty file under appendonlydir/" certified exactly that.
+AOF_PAYLOAD_SUFFIXES = (".base.rdb", ".base.aof", ".incr.aof")
+
+
+def _is_restorable_rdb(head: bytes, size: int) -> bool:
+    """Does this look like an RDB snapshot rather than the word `REDIS`?"""
+
+    if size < RDB_MIN_BYTES:
+        return False
+    if head[: len(RDB_MAGIC)] != RDB_MAGIC:
+        return False
+    version = head[len(RDB_MAGIC) : RDB_HEAD_BYTES]
+    return len(version) == 4 and version.isdigit()
+
 _AOF_DIRECTORY = "appendonlydir"
 
 
@@ -141,7 +169,7 @@ def _read_members(path: Path) -> tuple[list[ArchiveMember], dict[str, bytes]]:
             if info.isreg() and info.size > 0 and name.endswith(".rdb"):
                 handle = tar.extractfile(info)
                 if handle is not None:
-                    heads[name] = handle.read(len(RDB_MAGIC))
+                    heads[name] = handle.read(RDB_HEAD_BYTES)
     return members, heads
 
 
@@ -192,9 +220,12 @@ def _validate_redis_persistence(
     if root_rdb is not None:
         if not root_rdb.is_file or root_rdb.size <= 0:
             rdb_problem = "dump.rdb is present but empty"
-        elif heads.get("dump.rdb", b"") != RDB_MAGIC:
+        elif not _is_restorable_rdb(heads.get("dump.rdb", b""), root_rdb.size):
             rdb_problem = (
-                f"dump.rdb does not begin with the {RDB_MAGIC.decode()} magic; it is not an RDB snapshot"
+                f"dump.rdb is not a restorable RDB snapshot: it must open with the "
+                f"{RDB_MAGIC.decode()} magic followed by a four-digit version and be at "
+                f"least {RDB_MIN_BYTES} bytes (header, EOF opcode and CRC64), and it is "
+                f"{root_rdb.size} byte(s)"
             )
         else:
             rdb_ok = True
@@ -202,13 +233,29 @@ def _validate_redis_persistence(
     aof_problem = ""
     aof_ok = False
     if aof_payload:
+        # "Any non-empty file under appendonlydir/" is not a payload. A manifest
+        # alone, or a README a helper script dropped there, satisfied that and
+        # certified an archive with nothing to replay.
+        restorable = [
+            m
+            for m in aof_payload
+            if m.name.endswith(AOF_PAYLOAD_SUFFIXES)
+        ]
         bad_base = [
             m.name
-            for m in aof_payload
-            if m.name.endswith(".base.rdb") and heads.get(m.name, b"") != RDB_MAGIC
+            for m in restorable
+            if m.name.endswith(".base.rdb") and not _is_restorable_rdb(heads.get(m.name, b""), m.size)
         ]
         if bad_base:
-            aof_problem = f"AOF base file(s) without the RDB magic: {', '.join(sorted(bad_base))}"
+            aof_problem = (
+                f"AOF base file(s) that are not restorable RDB snapshots: {', '.join(sorted(bad_base))}"
+            )
+        elif not restorable:
+            aof_problem = (
+                f"{_AOF_DIRECTORY}/ carries no replayable member: expected at least one "
+                f"file ending {', '.join(AOF_PAYLOAD_SUFFIXES)}, found only "
+                f"{', '.join(sorted(m.name for m in aof_payload))}"
+            )
         else:
             aof_ok = True
 

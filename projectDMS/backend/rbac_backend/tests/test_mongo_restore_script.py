@@ -1022,3 +1022,62 @@ def test_credentials_in_the_tools_output_are_redacted_before_being_printed(
         "the URI was removed entirely rather than redacted; the operator still "
         "needs to see which host was contacted"
     )
+
+
+# --------------------------------------------------------------------------- #
+# F-A8T2-3 - the production refusal was a case-SENSITIVE literal substring.
+#
+# `*"replicaSet=${PRODUCTION_REPLICA_SET}"*` matched one spelling. MongoDB
+# connection-string options are case-insensitive, so `?replicaset=rs0` is the
+# same production connection and walked straight past it. A member addressed
+# directly with `directConnection=true` names no replica set at all, so the
+# option check could not see it either - and the comment at the top of the
+# script claims both cases are covered.
+# --------------------------------------------------------------------------- #
+
+
+def test_f_a8t2_3_a_lowercase_production_replica_set_is_refused(harness) -> None:
+    result = harness(uri="mongodb://m:27017/?replicaset=rs0", db="contraclaim_staging")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "production replica set rs0" in result.stderr
+    assert "mongorestore" not in result.stub_log
+
+
+def test_f_a8t2_3b_a_mixed_case_production_replica_set_is_refused(harness) -> None:
+    result = harness(uri="mongodb://m:27017/?ReplicaSet=RS0", db="contraclaim_staging")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "production replica set rs0" in result.stderr
+
+
+def test_f_a8t2_3c_a_direct_connection_to_a_production_member_is_refused(harness) -> None:
+    """No replica set is named, so the host is the only thing that can say."""
+
+    result = harness(
+        uri="mongodb://mongo1:27017/?directConnection=true", db="contraclaim_staging"
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "names no replica set" in result.stderr
+    assert "mongorestore" not in result.stub_log
+
+
+def test_f_a8t2_3d_the_production_database_name_is_still_refused(harness) -> None:
+    result = harness(uri=STAGING_URI, db="contraclaim")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "production database" in result.stderr
+
+
+def test_f_a8t2_3e_the_staging_replica_set_is_still_allowed(harness) -> None:
+    """The affirmative half: the staging URI names mongo1 too, and must pass.
+
+    The compose SERVICE name is identical in both stacks, which is why the host
+    rule fires only on a URI that names no replica set at all.
+    """
+
+    result = harness(uri=STAGING_URI, db=STAGING_DB)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "mongorestore" in result.stub_log

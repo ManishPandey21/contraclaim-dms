@@ -84,6 +84,10 @@ ALLOW_PRODUCTION_RESTORE=${ALLOW_PRODUCTION_RESTORE:-}
 #: replica set is still a production connection, so both are checked.
 PRODUCTION_DATABASES=${PRODUCTION_DATABASES:-"contraclaim"}
 PRODUCTION_REPLICA_SET=${PRODUCTION_REPLICA_SET:-"rs0"}
+#: The production replica-set members by container hostname. A restore aimed at
+#: one of these with `directConnection=true` names no replica set, so the option
+#: check above is blind to it.
+PRODUCTION_HOSTS=${PRODUCTION_HOSTS:-"mongo1 mongo2 mongo3 contraclaim-mongo1-1 contraclaim-mongo2-1 contraclaim-mongo3-1"}
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -133,8 +137,36 @@ for name in $PRODUCTION_DATABASES; do
   fi
 done
 
-if [[ -z "$production_reason" && "${MONGO_URI}" == *"replicaSet=${PRODUCTION_REPLICA_SET}"* ]]; then
+# MongoDB connection-string options are case-insensitive, so the refusal has to
+# be too. `replicaSet=rs0` was matched literally and `?replicaset=rs0` - the same
+# connection, accepted by every driver - walked straight past it. Both sides are
+# lowercased before the comparison.
+uri_lower=${MONGO_URI,,}
+rs_lower=${PRODUCTION_REPLICA_SET,,}
+
+if [[ -z "$production_reason" && "${uri_lower}" == *"replicaset=${rs_lower}"* ]]; then
   production_reason="the URI names the production replica set ${PRODUCTION_REPLICA_SET}"
+fi
+
+# A production member addressed directly carries no replica-set option at all -
+# `directConnection=true` against `mongo1` is a production connection that the
+# option check above cannot see.
+#
+# The compose SERVICE name is the same in both stacks (`mongo1` is a staging
+# member too, on the staging network), so a host match alone cannot separate
+# them. What can: a URI that names its replica set has already been checked
+# against the production one above and passed. So this rule fires only on a URI
+# that names NO replica set - the genuinely ambiguous case - and its remedy is
+# to say which set is meant rather than to widen the list.
+if [[ -z "$production_reason" && "${uri_lower}" != *"replicaset="* ]]; then
+  for host in $PRODUCTION_HOSTS; do
+    host_lower=${host,,}
+    [[ -z "$host_lower" ]] && continue
+    if [[ "${uri_lower}" == *"@${host_lower}:"* || "${uri_lower}" == *"//${host_lower}:"*        || "${uri_lower}" == *",${host_lower}:"* || "${uri_lower}" == *"@${host_lower}/"*        || "${uri_lower}" == *"//${host_lower}/"* ]]; then
+      production_reason="the URI addresses ${host} and names no replica set, so it cannot be told apart from the production member of that name; add replicaSet=<set> to say which stack is meant"
+      break
+    fi
+  done
 fi
 
 if [[ -n "$production_reason" ]]; then

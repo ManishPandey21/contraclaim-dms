@@ -238,12 +238,29 @@ def assess(
     if not rendered_name:
         findings.refuse("the rendered configuration declares no project name")
 
-    for selected in _project_names_in_argv(argv):
-        if selected != name:
+    # The command that RUNS must select the project that was CHECKED. Refusing
+    # only a command whose `-p` disagrees leaves the first failure mode this
+    # module exists to stop wide open: a command carrying no `-p` at all selects
+    # nothing, so the disagreement loop never runs, the guard reports PASS and
+    # then executes it. `docker compose -f docker-compose.prod.yml down -v` and
+    # `rm -rf /opt/contraclaim-dms` both have that shape. Silence is not
+    # agreement, so an unnamed project is refused rather than passed over.
+    if argv:
+        selected_projects = _project_names_in_argv(argv)
+        if not selected_projects:
             findings.refuse(
-                f"the command line targets project '{selected}' while the checked "
-                f"project is '{name or '<unset>'}'"
+                "the command line selects no compose project (no -p/--project-name), "
+                "so nothing ties it to the checked project "
+                f"'{name or '<unset>'}'; compose would derive the project from the "
+                "working directory and a non-compose command is not bounded by the "
+                "render at all"
             )
+        for selected in selected_projects:
+            if selected != name:
+                findings.refuse(
+                    f"the command line targets project '{selected}' while the checked "
+                    f"project is '{name or '<unset>'}'"
+                )
 
     # Enumerate against the project that was ASKED for, not the one that was
     # rendered: a mismatch is already a refusal, and deriving names from the

@@ -61,6 +61,12 @@ export function isRunOwned(name: unknown): boolean {
   return typeof name === "string" && name.includes(RUN_TAG);
 }
 
+/**
+ * The marker `.env.staging.example` ships instead of the real hostnames, kept
+ * identical to `scripts/lib/edge_target.sh`'s so the two controls cannot drift.
+ */
+const EDGE_HOST_PLACEHOLDER = "replace-with";
+
 /** Hostnames that are production. A fixture run may never address one. */
 function productionHosts(): string[] {
   return (process.env.E2E_PRODUCTION_HOSTS ?? "")
@@ -86,7 +92,28 @@ export function assertTargetIsNotProduction(): void {
   } catch {
     throw new Error(`E2E_BASE_URL is not a URL: ${BASE_URL}`);
   }
-  if (productionHosts().includes(host)) {
+  // An empty denylist refuses nothing. `E2E_PRODUCTION_HOSTS` has no default and
+  // appears in no `requireStagingEnvironment(...)` list, so with the variable
+  // unset this function ran, matched nothing and returned - and the fixtures
+  // would have created, and then DELETED, run-owned rows against whatever
+  // `E2E_BASE_URL` named. A control that is present, green and inert is worse
+  // than an absent one; the same rule `edge_target.sh` applies to its
+  // `REPLACE-WITH` placeholder.
+  const declared = productionHosts();
+  if (declared.length === 0) {
+    throw new Error(
+      "E2E_PRODUCTION_HOSTS is unset or empty, so the production refusal below " +
+        "would match no host and could never fire. Set it to the production " +
+        `hostnames before pointing the fixtures at ${host}.`
+    );
+  }
+  if (declared.some((candidate) => candidate.includes(EDGE_HOST_PLACEHOLDER))) {
+    throw new Error(
+      `E2E_PRODUCTION_HOSTS is still the ${EDGE_HOST_PLACEHOLDER}... placeholder ` +
+        "from .env.staging.example. It would match no host while reading as declared."
+    );
+  }
+  if (declared.includes(host)) {
     throw new Error(
       `refusing to seed fixtures against ${host}: it is listed in E2E_PRODUCTION_HOSTS. ` +
         "A fixture run pointed at production writes to production and files the result " +

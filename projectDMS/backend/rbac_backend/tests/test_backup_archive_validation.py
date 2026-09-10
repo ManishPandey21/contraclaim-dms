@@ -336,3 +336,77 @@ def test_the_shell_verifier_fails_closed_without_an_interpreter(tmp_path: Path) 
 
     assert result.returncode != 0
     assert "python" in result.stderr.lower()
+
+
+# --------------------------------------------------------------------------- #
+# F-A8T2-2 - `redis-persistence` certified payloads that cannot be restored.
+#
+# `rdb_ok` compared the five-byte `REDIS` magic and nothing else, so a five-byte
+# file containing exactly that word validated. `aof_ok` was true for ANY
+# non-empty member under `appendonlydir/` when no `*.base.rdb` was present, so a
+# manifest alone - or a README a helper script dropped there - validated.
+#
+# This is the profile `falkordb_rescue_archive.sh` certifies its output through,
+# and a valid rescue archive is a NO-GO gate before every same-host outage. An
+# archive that certifies VALID and restores nothing is the exact silent success
+# the module exists to prevent.
+# --------------------------------------------------------------------------- #
+
+
+def test_f_a8t2_2_a_five_byte_dump_rdb_is_refused(tmp_path: Path) -> None:
+    """The word `REDIS` is not an RDB snapshot."""
+
+    archive = write_archive(tmp_path / "magic-only.tar.gz", {"./dump.rdb": b"REDIS"})
+
+    verdict = validate_archive(archive, profile="redis-persistence")
+
+    assert verdict.status != "VALID"
+    assert "restorable RDB snapshot" in verdict.detail
+
+
+def test_f_a8t2_2b_a_dump_rdb_without_a_version_is_refused(tmp_path: Path) -> None:
+    """`REDISxxxx` carries the magic but no four-digit version."""
+
+    payload = b"REDIS" + b"abcd" + b"\xff" + b"\x00" * 8
+    archive = write_archive(tmp_path / "no-version.tar.gz", {"./dump.rdb": payload})
+
+    verdict = validate_archive(archive, profile="redis-persistence")
+
+    assert verdict.status != "VALID"
+
+
+def test_f_a8t2_2c_an_appendonlydir_of_passengers_is_refused(tmp_path: Path) -> None:
+    """A non-empty directory is not a replayable AOF."""
+
+    archive = write_archive(
+        tmp_path / "aof-junk.tar.gz", {"./appendonlydir/README.txt": b"hello"}
+    )
+
+    verdict = validate_archive(archive, profile="redis-persistence")
+
+    assert verdict.status != "VALID"
+    assert "no replayable member" in verdict.detail
+
+
+def test_f_a8t2_2d_an_appendonlydir_of_manifest_alone_is_refused(tmp_path: Path) -> None:
+    """The manifest names files; it is not one of them."""
+
+    archive = write_archive(
+        tmp_path / "aof-manifest-only.tar.gz",
+        {"./appendonlydir/appendonly.aof.manifest": AOF_MEMBERS["./appendonlydir/appendonly.aof.manifest"]},
+    )
+
+    verdict = validate_archive(archive, profile="redis-persistence")
+
+    assert verdict.status != "VALID"
+    assert "no replayable member" in verdict.detail
+
+
+def test_f_a8t2_2e_the_genuine_shapes_are_still_valid(tmp_path: Path) -> None:
+    """The affirmative half - neither real artefact may be caught by the fix."""
+
+    rdb = write_archive(tmp_path / "rdb.tar.gz", {"./dump.rdb": RDB_BYTES})
+    aof = write_archive(tmp_path / "aof.tar.gz", dict(AOF_MEMBERS))
+
+    assert validate_archive(rdb, profile="redis-persistence").status == "VALID"
+    assert validate_archive(aof, profile="redis-persistence").status == "VALID"

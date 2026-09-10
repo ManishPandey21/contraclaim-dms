@@ -533,6 +533,44 @@ def test_the_cli_refuses_and_does_not_run_the_command(
 
 
 def test_the_cli_allows_and_runs_the_command(guard: ModuleType, tmp_path: Path) -> None:
+    """The affirmative half of the CLI: an allowed command really is executed.
+
+    The command carries `-p <staging project>` because the guard now requires
+    the executed command to select the checked project. Python ignores trailing
+    arguments after `-c`, so they reach `sys.argv` and the guard alike without
+    changing what runs. Before F-A8T2-1 this test used a command that named no
+    project at all - and so asserted, as intended behaviour, the very bypass
+    that let `docker compose -f docker-compose.prod.yml down -v` through.
+    """
+
+    rendered = tmp_path / "rendered.json"
+    rendered.write_text(json.dumps(_rendered()), encoding="utf-8")
+    witness = tmp_path / "witness"
+
+    result = _run_cli(
+        [
+            "--project",
+            STAGING_PROJECT,
+            "--rendered-config",
+            str(rendered),
+            "--",
+            sys.executable,
+            "-c",
+            f"open({str(witness)!r}, 'w').write('ran')",
+            "-p",
+            STAGING_PROJECT,
+        ]
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert witness.read_text(encoding="utf-8") == "ran"
+
+
+def test_f_a8t2_1e_the_cli_refuses_and_does_not_run_a_command_naming_no_project(
+    guard: ModuleType, tmp_path: Path
+) -> None:
+    """End to end, through the real script: refused AND nothing executed."""
+
     rendered = tmp_path / "rendered.json"
     rendered.write_text(json.dumps(_rendered()), encoding="utf-8")
     witness = tmp_path / "witness"
@@ -550,8 +588,8 @@ def test_the_cli_allows_and_runs_the_command(guard: ModuleType, tmp_path: Path) 
         ]
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert witness.read_text(encoding="utf-8") == "ran"
+    assert result.returncode == guard.EXIT_REFUSED, result.stdout + result.stderr
+    assert not witness.exists(), "the guard refused and ran the command anyway"
 
 
 def test_the_cli_refuses_an_unreadable_rendered_configuration(
@@ -667,3 +705,70 @@ def test_the_staging_override_would_pass_its_own_guard(guard: ModuleType) -> Non
 
     assert verdict.allowed, _refusals(verdict)
     assert "contraclaim-stg_falkordb_data" in verdict.owned_volumes
+
+
+# --------------------------------------------------------------------------- #
+# F-A8T2-1 - the command that RUNS must select the project that was CHECKED.
+#
+# `_project_names_in_argv` returned [] for a command carrying no `-p`, the
+# disagreement loop never ran, and the guard reported PASS and then executed it.
+# That is the FIRST failure mode the module's own docstring names. Reproduced
+# against the real script: `-- python -c "print('EXECUTED')"` printed EXECUTED
+# and exited 0.
+# --------------------------------------------------------------------------- #
+
+
+def test_f_a8t2_1_a_command_that_names_no_project_is_refused(guard: ModuleType) -> None:
+    """Silence is not agreement: no `-p` ties the command to nothing."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_staging_named_render(STAGING_PROJECT),
+        argv=["docker", "compose", "-f", "docker-compose.prod.yml", "down", "-v"],
+    )
+
+    assert not verdict.allowed
+    assert "selects no compose project" in _refusals(verdict)
+
+
+def test_f_a8t2_1b_a_non_compose_command_is_refused(guard: ModuleType) -> None:
+    """`rm -rf` names no project either, and the render does not bound it."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_staging_named_render(STAGING_PROJECT),
+        argv=["rm", "-rf", "/opt/contraclaim-dms/projectDMS"],
+    )
+
+    assert not verdict.allowed
+    assert "selects no compose project" in _refusals(verdict)
+
+
+def test_f_a8t2_1c_the_correct_staging_teardown_is_still_allowed(guard: ModuleType) -> None:
+    """The affirmative half: the real invocation must not be caught by the fix."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_staging_named_render(STAGING_PROJECT),
+        argv=[
+            "docker", "compose", "-p", STAGING_PROJECT,
+            "-f", "docker-compose.prod.yml",
+            "-f", "docker-compose.mongo-replicaset.yml",
+            "-f", "docker-compose.staging.yml",
+            "down", "-v",
+        ],
+    )
+
+    assert verdict.allowed, _refusals(verdict)
+
+
+def test_f_a8t2_1d_an_empty_command_is_still_a_pure_check(guard: ModuleType) -> None:
+    """No command means "just assess"; the new rule must not turn that into a refusal."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_staging_named_render(STAGING_PROJECT),
+        argv=[],
+    )
+
+    assert verdict.allowed, _refusals(verdict)
