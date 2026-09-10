@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -1022,8 +1023,20 @@ class RetrievalService:
         )
         for q, resp in zip(queries, responses):
             if isinstance(resp, Exception):
+                # The digest and a length, not the query and not the exception
+                # text. `observability/service.py::_redact_query` reduces this
+                # exact value to `[redacted len=N]`, so the repository's own
+                # position is that a search query is sensitive - and `%r` of it
+                # at WARNING is the identical channel R-A8T closed in
+                # `routers/ai_assistant.py`. The exception was rendered whole
+                # too, and a retrieval failure can quote what it was searching.
+                # R-A8U, found by giving the Gate 5 bullet 5 guard dataflow.
                 logger.warning(
-                    "Contract evidence retrieval failed for query %r: %s", q, resp
+                    "Contract evidence retrieval failed: query_digest=%s "
+                    "query_len=%s error_type=%s",
+                    hashlib.sha256(str(q).encode("utf-8")).hexdigest()[:16],
+                    len(str(q)),
+                    type(resp).__name__,
                 )
                 continue
             for res in resp.results:

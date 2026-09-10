@@ -12,13 +12,25 @@ replaces a search query with `[redacted len=N]`). It did not establish anything
 about extraction, which is the larger surface. This module covers both halves
 the bullet needs:
 
-**A. A static guard.** Every logging call in the ingestion and extraction trees
-is parsed and its arguments inspected. An argument that evaluates to extracted
-content fails; an argument that evaluates to a length, a count, an identifier,
-a status or a path does not. The validator is a pure function over source, and
-it is exercised against synthetic modules that break exactly one rule, because a
-guard asserted only against the real tree would pass just as happily if it
-checked nothing.
+**A. A static guard.** Every logging call and every `raise` in the ingestion and
+extraction trees is parsed and its arguments inspected. An argument that
+evaluates to extracted content fails; an argument that evaluates to a length, a
+count, an identifier, a status or a path does not. The validator is a pure
+function over source, and it is exercised against synthetic modules that break
+exactly one rule, because a guard asserted only against the real tree would pass
+just as happily if it checked nothing.
+
+**R-A8U gave it dataflow (F-A8T2-7).** Until then both matchers asked only
+whether the expression handed to the sink was content-shaped, so one assignment
+defeated either - `message = extracted_text; logger.info(message)`. A bounded,
+per-function taint model now follows content through assignment, tuple
+unpacking, `for`/`with`/comprehension targets, f-strings, `%`, `.format`,
+concatenation, dict fields and exception wrapping. It declassifies only through
+the metadata suffixes, the reducing calls and the boolean prefixes listed below,
+each of which is a written rule rather than an inference. Running it found one
+real channel: `retrieval/service.py::_retrieve_contract_evidence` rendered a raw
+contract-QA sub-query with `%r` at WARNING - the same channel R-A8T closed in
+`routers/ai_assistant.py`, in a module already inside this guard's scope.
 
 **B. A runtime control.** A synthetic document carrying a distinctive marker is
 pushed through the real chunking and enrichment path with logging captured at
@@ -89,6 +101,11 @@ CONTENT_WORDS = {
     "excerpts",
     "paragraph",
     "paragraphs",
+    # The reranker prompt carries 600 characters of each retrieved passage,
+    # and the guard's own docstring called that leaked content while
+    # `passage` was absent from this set (F-A8T2-7).
+    "passage",
+    "passages",
     "clause",
     "clauses",
     "ocr",
@@ -98,9 +115,14 @@ CONTENT_WORDS = {
     "raw",
     "payload",
     "answer",
+    "answers",
     "summary",
     "query",
+    # The plural was missing, and `for q, resp in zip(queries, responses)` in
+    # `retrieval/service.py` is exactly the shape that hides behind it.
+    "queries",
     "prompt",
+    "prompts",
     "stdout",
     "stderr",
 }
@@ -159,12 +181,173 @@ METADATA_SUFFIXES = (
 
 #: Calls that reduce content to a measurement. `len(text)` is the metadata the
 #: bullet explicitly permits.
-SAFE_CALLS = {"len", "bool", "type", "id", "hash", "repr_length", "sorted", "int", "float"}
+SAFE_CALLS = {
+    "len",
+    "bool",
+    "type",
+    "id",
+    "hash",
+    "repr_length",
+    "sorted",
+    "int",
+    "float",
+    # Reductions, added with the taint model in R-A8U. Without them
+    # `digest = sha256(text).hexdigest()` taints `digest`, and a guard that
+    # bans logging a digest is a guard that gets switched off.
+    "sha256",
+    "md5",
+    "blake2b",
+    "hexdigest",
+    "digest",
+    "startswith",
+    "endswith",
+    "isdigit",
+    "count",
+    "index",
+    "_redact_query",
+}
 
 
 # --------------------------------------------------------------------------- #
 # The validator - pure, so synthetic modules can break it one rule at a time
 # --------------------------------------------------------------------------- #
+
+
+#: Names that describe content without carrying it, spelled as a predicate so
+#: the taint model can use the same rule the identifier test uses. Assigning
+#: `text_sha256 = sha256(text).hexdigest()` is a *declassification*: the name
+#: asserts a digest, and the guard takes the assertion. That is a stated,
+#: reviewable boundary; the alternative - tainting every name downstream of any
+#: content - reports `page_count` and gets the guard switched off.
+def _is_metadata_identifier(name: str | None) -> bool:
+    if not name:
+        return False
+    return name.lower().lstrip("_").endswith(METADATA_SUFFIXES)
+
+
+def _own_nodes(scope: ast.AST):
+    """Every node in `scope` that is not inside a nested function.
+
+    Scope matters. The first cut of this model was module-wide and
+    flow-insensitive together, so a local named `value` in one function
+    inherited the content another function had put in *its* `value`. That
+    reported eleven metadata log lines - page numbers, missing scope-key names,
+    a processing status - and a guard that reports eleven correct lines is a
+    guard that gets deleted rather than obeyed.
+    """
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _own_nodes(child)
+
+
+def _unpack(target: ast.AST, value: ast.AST) -> List[tuple]:
+    """Pair a binding target with the expression it binds, positionally.
+
+    `for q, resp in zip(queries, responses)` binds `q` from `queries` and `resp`
+    from `responses`. Treating the whole `zip(...)` as one source taints both,
+    which is how an exception object came to be reported as document content.
+    `enumerate(x)` binds an index and an element; the index is a number.
+    """
+    if isinstance(target, ast.Tuple):
+        elements: List[ast.expr] = []
+        if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+            elements = list(value.elts)
+        elif isinstance(value, ast.Call):
+            callee = _final_identifier(value.func)
+            if callee == "zip" and len(value.args) == len(target.elts):
+                elements = list(value.args)
+            elif callee == "enumerate" and len(target.elts) == 2:
+                elements = [ast.Constant(value=0), value.args[0] if value.args else value]
+            elif callee == "items" and len(target.elts) == 2:
+                elements = [ast.Constant(value=""), value.func]
+        if elements:
+            pairs: List[tuple] = []
+            for sub_target, sub_value in zip(target.elts, elements):
+                pairs.extend(_unpack(sub_target, sub_value))
+            return pairs
+    return [(target, value)]
+
+
+class ContentTaint:
+    """Names in one scope that can hold extracted document content.
+
+    **F-A8T2-7.** Both matchers were single-expression name checks with no
+    dataflow, so one assignment defeated either:
+
+        detail = f"...{raw[:200]!r}"
+        raise ValueError(detail)
+
+    `detail` is not a content word, so `raise_violations` saw nothing; and had
+    the sink been `logger.info(detail)` neither would `violations`. No live leak
+    was behind it - R-A8T Part 1's three fixes hold - but Gate 5 bullet 5 claims
+    that extracted text is not logged, and a matcher that one rename defeats
+    does not measure that.
+
+    The model is **per function scope**, flow-insensitive within it, and
+    conservative in the safe direction: a name ever assigned from content inside
+    one function is treated as holding content everywhere in that function. It
+    is bounded on purpose - `SCANNED_PATHS` is the release-critical ingestion
+    and extraction surface, not the whole backend - and it declassifies only
+    through the metadata suffixes and the reducing calls, both listed above
+    rather than inferred.
+    """
+
+    def __init__(self, scope: ast.AST, base: Iterable[str] = ()) -> None:
+        self.tainted: set = set(base)
+        self._propagate(scope)
+
+    def _propagate(self, scope: ast.AST) -> None:
+        # A fixpoint: `a = text; b = a; c = b` needs three passes, and the
+        # single-pass version is defeated by exactly the indirection F-A8T2-7
+        # demonstrated.
+        for _ in range(8):
+            grew = False
+            for node in _own_nodes(scope):
+                for target, value in self._assignments(node):
+                    if not self._carries_content(value):
+                        continue
+                    for name in self._bound_names(target):
+                        if _is_metadata_identifier(name) or name in self.tainted:
+                            continue
+                        self.tainted.add(name)
+                        grew = True
+            if not grew:
+                return
+
+    @staticmethod
+    def _assignments(node: ast.AST) -> List[tuple]:
+        pairs: List[tuple] = []
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                pairs.extend(_unpack(target, node.value))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            pairs.extend(_unpack(node.target, node.value))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            pairs.extend(_unpack(node.target, node.iter))
+        elif isinstance(node, ast.comprehension):
+            pairs.extend(_unpack(node.target, node.iter))
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            pairs.extend(_unpack(node.optional_vars, node.context_expr))
+        return pairs
+
+    @staticmethod
+    def _bound_names(target: ast.AST) -> List[str]:
+        return [child.id for child in ast.walk(target) if isinstance(child, ast.Name)]
+
+    def _carries_content(self, node: ast.AST) -> bool:
+        return bool(_content_references(node, self.tainted))
+
+
+def _scopes(tree: ast.Module) -> List[tuple]:
+    """`(scope_node, taint)` for the module body and every function in it."""
+    module_taint = ContentTaint(tree)
+    found: List[tuple] = [(tree, module_taint)]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append((node, ContentTaint(node, base=module_taint.tainted)))
+    return found
 
 
 def _final_identifier(node: ast.AST) -> str | None:
@@ -181,11 +364,37 @@ def _final_identifier(node: ast.AST) -> str | None:
     return None
 
 
+#: Prefixes that make a name a decision rather than a value.
+#: `use_enriched_text` is a boolean flag whose name contains `text`, and
+#: treating it as content tainted a `SearchRequest`, then the responses built
+#: from it, then the exception object one of those responses turned out to be -
+#: a four-hop false positive from one adjective.
+BOOLEAN_PREFIXES = (
+    "use_",
+    "is_",
+    "has_",
+    "had_",
+    "can_",
+    "should_",
+    "enable_",
+    "enabled_",
+    "allow_",
+    "with_",
+    "without_",
+    "include_",
+    "require_",
+    "skip_",
+    "force_",
+)
+
+
 def _is_content_identifier(name: str | None) -> bool:
     if not name:
         return False
     lowered = name.lower().lstrip("_")
     if lowered.endswith(METADATA_SUFFIXES):
+        return False
+    if lowered.startswith(BOOLEAN_PREFIXES):
         return False
     if lowered in CONTENT_WORDS:
         return True
@@ -193,13 +402,19 @@ def _is_content_identifier(name: str | None) -> bool:
     return any(part in CONTENT_WORDS for part in parts)
 
 
-def _content_references(node: ast.AST) -> List[str]:
+def _content_references(node: ast.AST, tainted: Iterable[str] = ()) -> List[str]:
     """Every content-bearing identifier this expression would render.
 
     Descends through f-strings, `%` formatting, `.format(...)`, concatenation
     and containers, and stops at a call that reduces its argument to a
     measurement.
+
+    `tainted` is the set `ContentTaint` derived for the module: names that are
+    not content-shaped themselves but hold content because something assigned it
+    to them. Passing an empty set gives the pre-R-A8U behaviour, which is what
+    the taint model's own fixpoint starts from.
     """
+    carriers = set(tainted)
     found: List[str] = []
 
     def walk(current: ast.AST) -> None:
@@ -211,6 +426,20 @@ def _content_references(node: ast.AST) -> List[str]:
                 for argument in list(current.args) + [kw.value for kw in current.keywords]:
                     walk(argument)
                 return
+            if (
+                callee == "get"
+                and current.args
+                and isinstance(current.args[0], ast.Constant)
+                and isinstance(current.args[0].value, str)
+            ):
+                # `doc.get("processing_status")` names a field the same way
+                # `doc["processing_status"]` does. Walking into `doc` instead
+                # reported the holder of every metadata field, which is the
+                # mistake the Subscript branch below already avoids.
+                key = current.args[0].value
+                if _is_content_identifier(key):
+                    found.append(key)
+                return
             for argument in list(current.args) + [kw.value for kw in current.keywords]:
                 walk(argument)
             # `x.strip()`, `x[:80]`-style access still renders `x`.
@@ -219,7 +448,9 @@ def _content_references(node: ast.AST) -> List[str]:
             return
         if isinstance(current, (ast.Name, ast.Attribute, ast.Subscript)):
             name = _final_identifier(current)
-            if _is_content_identifier(name):
+            if _is_content_identifier(name) or (
+                name in carriers and not _is_metadata_identifier(name)
+            ):
                 found.append(name)
             # An attribute renders the attribute, not its container:
             # `extraction.ocr_failed_pages` is a count even though `extraction`
@@ -254,21 +485,23 @@ def violations(source: str, label: str = "<source>") -> List[str]:
     """One message per logging call that would render extracted content."""
     problems: List[str] = []
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        level = _is_logging_call(node)
-        if level is None:
-            continue
-        arguments = list(node.args)
-        arguments += [kw.value for kw in node.keywords if kw.arg == "extra"]
-        for argument in arguments:
-            for name in _content_references(argument):
-                problems.append(
-                    f"{label}:{node.lineno}: logger.{level} would render {name!r}, "
-                    "which can carry extracted document content"
-                )
-    return problems
+    for scope, taint in _scopes(tree):
+        carriers = taint.tainted
+        for node in _own_nodes(scope):
+            if not isinstance(node, ast.Call):
+                continue
+            level = _is_logging_call(node)
+            if level is None:
+                continue
+            arguments = list(node.args)
+            arguments += [kw.value for kw in node.keywords if kw.arg == "extra"]
+            for argument in arguments:
+                for name in _content_references(argument, carriers):
+                    problems.append(
+                        f"{label}:{node.lineno}: logger.{level} would render {name!r}, "
+                        "which can carry extracted document content"
+                    )
+    return sorted(set(problems))
 
 
 def raise_violations(source: str, label: str = "<source>") -> List[str]:
@@ -297,20 +530,26 @@ def raise_violations(source: str, label: str = "<source>") -> List[str]:
     """
     problems: List[str] = []
     tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Raise) or node.exc is None:
-            continue
-        arguments: List[ast.expr] = []
-        if isinstance(node.exc, ast.Call):
-            arguments = list(node.exc.args) + [kw.value for kw in node.exc.keywords]
-        for argument in arguments:
-            for name in _content_references(argument):
-                problems.append(
-                    f"{label}:{node.lineno}: raise would carry {name!r}, which can "
-                    "carry extracted document content into any log that renders "
-                    "the exception"
-                )
-    return problems
+    for scope, taint in _scopes(tree):
+        carriers = taint.tainted
+        for node in _own_nodes(scope):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            arguments: List[ast.expr] = []
+            if isinstance(node.exc, ast.Call):
+                arguments = list(node.exc.args) + [kw.value for kw in node.exc.keywords]
+            elif isinstance(node.exc, ast.Name):
+                # `error = ValueError(f"...{text}"); raise error` - the wrapper
+                # form the review's example used (F-A8T2-7).
+                arguments = [node.exc]
+            for argument in arguments:
+                for name in _content_references(argument, carriers):
+                    problems.append(
+                        f"{label}:{node.lineno}: raise would carry {name!r}, which "
+                        "can carry extracted document content into any log that "
+                        "renders the exception"
+                    )
+    return sorted(set(problems))
 
 
 # --------------------------------------------------------------------------- #
@@ -410,6 +649,203 @@ def test_metadata_logging_is_not_banned(snippet: str) -> None:
     """The guard must leave useful logging alone, or it will be deleted."""
     source = "import logging\nlogger = logging.getLogger(__name__)\n" + snippet + "\n"
     assert violations(source, "metadata") == []
+
+
+# --------------------------------------------------------------------------- #
+# F-A8T2-7: the indirection the pre-R-A8U matchers could not follow
+# --------------------------------------------------------------------------- #
+
+
+INDIRECT_LEAK_SHAPES = [
+    pytest.param(
+        "def f(extracted_text):\n"
+        "    message = extracted_text\n"
+        "    logger.info(message)\n",
+        "message",
+        id="the-reviewers-example-simple-assignment",
+    ),
+    pytest.param(
+        "def f(text):\n"
+        "    a = text\n"
+        "    b = a\n"
+        "    c = b\n"
+        "    logger.debug('%s', c)\n",
+        "c",
+        id="a-three-hop-alias",
+    ),
+    pytest.param(
+        "def f(raw):\n"
+        "    detail = f'reranker returned no JSON array: {raw[:200]!r}'\n"
+        "    logger.warning(detail)\n",
+        "detail",
+        id="an-f-string-into-a-local",
+    ),
+    pytest.param(
+        "def f(page_text):\n"
+        "    head, tail = page_text[:10], page_text[10:]\n"
+        "    logger.info('%s', tail)\n",
+        "tail",
+        id="tuple-assignment",
+    ),
+    pytest.param(
+        "def f(chunk):\n"
+        "    payload = {'body': chunk}\n"
+        "    logger.info('wrote %s', payload)\n",
+        "payload",
+        id="a-dict-field",
+    ),
+    pytest.param(
+        "def f(ocr_text):\n"
+        "    note = 'ocr said: ' + ocr_text\n"
+        "    logger.error(note)\n",
+        "note",
+        id="concatenation-into-a-local",
+    ),
+    pytest.param(
+        "def f(document_text):\n"
+        "    line = 'body {}'.format(document_text)\n"
+        "    logger.info('%s', line)\n",
+        "line",
+        id="str-format-into-a-local",
+    ),
+    pytest.param(
+        "def f(passages):\n"
+        "    for passage in passages:\n"
+        "        note = passage\n"
+        "        logger.debug(note)\n",
+        "note",
+        id="a-loop-variable-then-an-alias",
+    ),
+    pytest.param(
+        "def f(clauses):\n"
+        "    rendered = [c for c in clauses]\n"
+        "    logger.info('%s', rendered)\n",
+        "rendered",
+        id="a-comprehension",
+    ),
+    pytest.param(
+        "def f(snippet):\n"
+        "    with open(snippet) as handle:\n"
+        "        logger.info('%s', snippet)\n",
+        "snippet",
+        id="content-under-a-with",
+    ),
+]
+
+
+@pytest.mark.parametrize("snippet, expected", INDIRECT_LEAK_SHAPES)
+def test_each_indirect_leak_shape_is_caught(snippet: str, expected: str) -> None:
+    """The class fix for F-A8T2-7.
+
+    Every one of these was green before R-A8U, because both matchers asked only
+    whether the *expression handed to the sink* was content-shaped. One
+    assignment answered no.
+    """
+    source = "import logging\nlogger = logging.getLogger(__name__)\n" + snippet
+    found = violations(source, "indirect")
+    assert any(expected in message for message in found), (
+        f"expected {expected!r} to be reported; got {found}"
+    )
+
+
+def test_an_exception_wrapped_through_a_local_is_caught() -> None:
+    """`error = ValueError(f"...{text}"); raise error` - the wrapper form.
+
+    `raise_violations` read the arguments of the `raise` expression, so a
+    `raise` of a plain name carried nothing it could see.
+    """
+    source = (
+        "def f(extracted_text):\n"
+        "    error = ValueError(f'bad clause: {extracted_text}')\n"
+        "    raise error\n"
+    )
+    found = raise_violations(source, "wrapped")
+    assert found, "an exception built into a local and then raised was not reported"
+
+
+INDIRECT_METADATA_SHAPES = [
+    pytest.param(
+        "def f(text):\n"
+        "    text_len = len(text)\n"
+        "    logger.info('chars=%s', text_len)\n",
+        id="a-length-through-a-local",
+    ),
+    pytest.param(
+        "import hashlib\n"
+        "def f(text):\n"
+        "    text_sha256 = hashlib.sha256(text.encode()).hexdigest()\n"
+        "    logger.info('digest=%s', text_sha256)\n",
+        id="a-digest-through-a-local",
+    ),
+    pytest.param(
+        "def f(request):\n"
+        "    flag = request.use_enriched_text\n"
+        "    logger.info('enriched=%s', flag)\n",
+        id="a-boolean-flag-named-after-content",
+    ),
+    pytest.param(
+        "def f(doc):\n"
+        "    logger.info('state=%s', doc.get('processing_status'))\n",
+        id="a-status-field-read-with-get",
+    ),
+    pytest.param(
+        "def f(chunks):\n"
+        "    chunk_count = len(chunks)\n"
+        "    total = chunk_count\n"
+        "    logger.info('wrote %s', total)\n",
+        id="a-count-carried-two-hops",
+    ),
+    pytest.param(
+        "def one(text):\n"
+        "    value = text\n"
+        "    return value\n"
+        "def two(page_number):\n"
+        "    value = page_number\n"
+        "    logger.info('page=%s', value)\n",
+        id="the-same-local-name-in-two-functions",
+    ),
+]
+
+
+@pytest.mark.parametrize("snippet", INDIRECT_METADATA_SHAPES)
+def test_the_taint_model_does_not_ban_metadata(snippet: str) -> None:
+    """The false-positive boundary, and it is not theoretical.
+
+    The first cut of the taint model was module-wide rather than per function,
+    and it reported eleven correct metadata log lines in the real tree - page
+    numbers, a list of missing scope-key names, a processing status. The last
+    case here is that defect, reduced: two functions, one local name.
+    """
+    source = "import logging\nlogger = logging.getLogger(__name__)\n" + snippet
+    assert violations(source, "metadata") == []
+
+
+def test_the_taint_model_is_what_makes_the_guard_red() -> None:
+    """The mutation control for the dataflow itself.
+
+    Run the same module with the taint model empty - which is what the
+    pre-R-A8U matcher was - and the leak disappears. That is the defect, stated
+    as a measurement rather than as prose.
+    """
+    source = (
+        "import logging\n"
+        "logger = logging.getLogger(__name__)\n"
+        "def f(extracted_text):\n"
+        "    message = extracted_text\n"
+        "    logger.info(message)\n"
+    )
+    assert violations(source, "with-dataflow"), "the guard no longer follows an assignment"
+
+    tree = ast.parse(source)
+    call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _is_logging_call(node) is not None
+    )
+    assert _content_references(call.args[0], ()) == [], (
+        "this control is not reproducing the defect: the pre-R-A8U matcher would "
+        "have caught this shape too, so its RED proves nothing"
+    )
 
 
 def test_a_non_logging_call_is_ignored() -> None:
@@ -747,6 +1183,45 @@ def test_an_extraction_failure_does_not_quote_the_document() -> None:
     leaked = [line for line in handler.seen if SYNTHETIC_SECRET in line]
     assert not leaked, (
         f"the passage text reached a log through the exception message: {leaked}"
+    )
+
+
+def test_the_runtime_control_catches_an_indirect_leak_from_the_real_chunker() -> None:
+    """The runtime mutation for F-A8T2-7.
+
+    `test_a_real_chunking_run_does_not_log_its_input` asserts an absence, and an
+    absence is worth exactly what the control proving it would notice a presence
+    is worth. `test_the_capture_handler_would_notice_a_leak` covers the direct
+    shape with a hand-written string. This one takes the marker **out of the
+    real chunker's output**, moves it to a second name the way a careless debug
+    line would, logs it through the logger the ingestion package uses, and
+    requires the control to find it.
+
+    At runtime the direct/indirect distinction does not exist - a rendered
+    string is a rendered string - and that is the point: the indirection is
+    invisible to a static matcher and fully visible to this one, so the two
+    halves of the bullet cover different things rather than the same thing
+    twice.
+    """
+    from rbac_backend.ingestion.chunker import chunk_text  # noqa: PLC0415
+
+    document = f"1. Preliminary.\n\n2. The Contractor shall {SYNTHETIC_SECRET} apply."
+    logger = logging.getLogger("rbac_backend.ingestion.chunker")
+
+    handler = _capture_all_logging()
+    try:
+        chunks = list(chunk_text("d", "o", "p", document, 512, 32))
+        for chunk in chunks:
+            message = chunk.text_original
+            logger.debug(message)
+    finally:
+        logging.getLogger().removeHandler(handler)
+
+    assert chunks, "the chunker produced nothing, so the mutation planted nothing"
+    leaked = [line for line in handler.seen if SYNTHETIC_SECRET in line]
+    assert leaked, (
+        "the runtime control did not notice chunk text that reached the log "
+        "through a second name, so its silence in the test above proves nothing"
     )
 
 
