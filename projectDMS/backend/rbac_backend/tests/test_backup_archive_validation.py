@@ -236,13 +236,76 @@ def test_unexpected_extra_files_are_allowed(tmp_path: Path) -> None:
     assert validate_archive(archive, profile="redis-persistence").status == VALID
 
 
-def test_no_contract_at_all_verifies_only_that_the_archive_reads(tmp_path: Path) -> None:
+def test_no_contract_at_all_still_refuses_an_archive_with_no_payload(
+    tmp_path: Path,
+) -> None:
+    """F-A8T2-8. **This test asserted the defect as intended behaviour.**
+
+    It built an archive holding nothing but the `./` directory entry that
+    `tar -czf` over an empty directory writes, ran the bare contract over it and
+    asserted VALID. `operations_health.py` always supplies a contract, so no
+    automated caller could reach the hole - but this is the CLI an operator
+    reaches for to check a rescue archive by hand before an outage, and "this
+    archive restores nothing" must not read as VALID under any invocation.
+
+    The bare contract is now the weakest claim that is still a claim about
+    recoverability: readable, **and** holding at least one non-empty regular file.
+    """
     archive = write_archive(tmp_path / "bare.tar.gz", {}, directories=("./",))
+
+    verdict = validate_archive(archive)
+
+    assert verdict.status == INVALID_CONTENT
+    assert verdict.contract == "readable"
+    assert "restores nothing" in verdict.detail
+
+
+def test_no_contract_at_all_verifies_only_that_the_archive_reads(tmp_path: Path) -> None:
+    """The legitimate purpose of the bare contract survives.
+
+    An archive carrying real content and no declared expectation is still VALID:
+    the bare contract has never claimed to know *what* should be in an archive,
+    only that something is.
+    """
+    archive = write_archive(tmp_path / "bare.tar.gz", {"./anything.dat": b"payload"})
 
     verdict = validate_archive(archive)
 
     assert verdict.status == VALID
     assert verdict.contract == "readable"
+
+
+def test_a_zero_entry_tarball_is_refused_by_the_bare_contract(tmp_path: Path) -> None:
+    """The reviewer's exact reproduction: an archive with no members at all."""
+    archive = write_archive(tmp_path / "nothing.tar.gz", {})
+
+    verdict = validate_archive(archive)
+
+    assert verdict.status == INVALID_CONTENT
+    assert verdict.member_count == 0
+
+
+def test_an_archive_of_only_empty_files_is_refused_by_the_bare_contract(
+    tmp_path: Path,
+) -> None:
+    """A zero-byte member is a name, not a payload - the same rule `--require`
+    has always applied, now applied when nothing was required."""
+    archive = write_archive(tmp_path / "hollow.tar.gz", {"./dump.rdb": b""})
+
+    verdict = validate_archive(archive)
+
+    assert verdict.status == INVALID_CONTENT
+
+
+def test_the_cli_exits_non_zero_for_a_payload_free_archive(tmp_path: Path) -> None:
+    """The half that made this a hazard rather than a note: exit 0 and the word
+    VALID on stdout are what an operator or a shell script reads."""
+    archive = write_archive(tmp_path / "bare.tar.gz", {}, directories=("./",))
+
+    result = _run_validator(str(archive))
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "VALID:" not in result.stdout
 
 
 # -------------------------------------------------------------- the CLI seam

@@ -181,11 +181,19 @@ jobs:
       - name: Reclaim runner disk
         # A hosted runner ships ~25 GB of toolchains this job never uses. Freed
         # before the first build rather than between failures.
+        #
+        # `${AGENT_TOOLSDIRECTORY:-}` and not `$AGENT_TOOLSDIRECTORY`
+        # (F-A8T2-9): under `set -u` an unset variable aborts the step on the
+        # expansion itself, before `|| true` can see it. That fails closed - the
+        # job goes red rather than green with a full disk - but it fails for a
+        # reason nobody would recognise, and the runner image is free to stop
+        # exporting the variable at any time. An empty argument to `rm -rf` is
+        # harmless and is covered by the `|| true` that was always there for it.
         run: |
           set -euo pipefail
           df -h / | tail -1
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-}" || true
           docker system prune -af --volumes || true
           df -h / | tail -1
       # langgraph, graphiti and docling are profile-gated in compose, but their

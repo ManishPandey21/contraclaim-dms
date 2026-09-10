@@ -19,14 +19,17 @@ This module is the single answer. Every one of those callers now routes here.
 
 Three ways to state a contract, and they compose:
 
-    validate_archive(path)                                  # readable only
+    validate_archive(path)                                  # readable, non-empty
     validate_archive(path, require=("*a", "*b"))            # every pattern
     validate_archive(path, any_of=("*a", "*b"))             # at least one
     validate_archive(path, profile="redis-persistence")     # semantic
 
 A pattern is satisfied only by a **non-empty regular file**. That single rule is
 what closes the empty-`appendonlydir/` hole in the generic modes, and it is why
-`require` and `any_of` are safe to expose rather than only the profile.
+`require` and `any_of` are safe to expose rather than only the profile. Since
+R-A8U the *bare* form applies the same rule with no pattern to match: an archive
+holding no non-empty regular file restores nothing, whatever was expected of it
+(F-A8T2-8).
 """
 
 from __future__ import annotations
@@ -365,6 +368,30 @@ def validate_archive(
         return PROFILES[profile](target, members, heads)
 
     listed = tuple(member.name for member in members[:50])
+
+    # F-A8T2-8. With no profile, no `--require` and no `--any-of`, the verdict
+    # was "it is a readable gzip tarball" and a **zero-entry** archive - or one
+    # holding nothing but the `./` directory `tar -czf` over an empty directory
+    # writes - printed VALID and exited 0. `operations_health.py` always supplies
+    # a contract, so this was a CLI hazard rather than an automated hole; it is
+    # still the CLI an operator reaches for when checking a rescue archive by
+    # hand before an outage, and "this archive restores nothing" must not read
+    # as VALID under any invocation. The bare contract is now "readable, and it
+    # holds at least one non-empty regular file": the weakest claim that is
+    # still a claim about recoverability.
+    if not any(member.is_file and member.size > 0 for member in members):
+        return ArchiveVerdict(
+            status=INVALID_CONTENT,
+            contract=contract,
+            detail=(
+                "the archive is readable and holds no non-empty regular file, so "
+                "it restores nothing. Declare a --profile, --require or --any-of "
+                "contract if a specific payload is expected."
+            ),
+            path=str(target),
+            member_count=len(members),
+            members=listed,
+        )
 
     missing = [pattern for pattern in require if not _matches(members, pattern)]
     if missing:

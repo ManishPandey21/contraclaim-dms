@@ -564,3 +564,46 @@ def test_the_reachability_guard_backing_the_acceptance_exists() -> None:
         "save_maxent_params",
     } - set(guard.VULNERABLE_APIS)
     assert not missing, f"the guard no longer checks for {sorted(missing)}"
+
+
+# ------------------------------------------------- R-A8U / F-A8T2-9
+#
+# The disk-reclaim step of `docker-build-and-scan` runs under
+# `set -euo pipefail`. Under `set -u` an *unset* variable aborts the step on the
+# expansion itself, before the `|| true` that was written to cover exactly this
+# can see it. It fails closed - the job goes red rather than green with a full
+# disk - so no false green was ever possible, and that is why it is a LOW
+# finding rather than a blocker. It still fails for a reason nobody would
+# recognise, and the runner image is free to stop exporting the variable.
+
+
+def _reclaim_step() -> dict:
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job in workflow["jobs"].values():
+        for step in job.get("steps", []):
+            if "Reclaim runner disk" in str(step.get("name", "")):
+                return step
+    raise AssertionError("the disk-reclaim step is gone from the workflow")
+
+
+def test_the_disk_reclaim_step_still_runs_strictly() -> None:
+    """The strictness is deliberate; the fix must not have removed it."""
+    script = _reclaim_step()["run"]
+    assert "set -euo pipefail" in script, (
+        "the disk-reclaim step no longer runs strictly, which is a bigger change "
+        "than the one F-A8T2-9 asked for"
+    )
+
+
+def test_every_variable_the_disk_reclaim_step_expands_has_a_default() -> None:
+    """No bare `$VAR` may survive in a `set -u` step whose failure mode is a
+    cryptic abort. `${VAR:-}` is the fix and `${VAR}` is not."""
+    script = _reclaim_step()["run"]
+    bare = re.findall(r'\$(?!\{)(?![({])([A-Za-z_][A-Za-z0-9_]*)', script)
+    assert not bare, f"these expand without a default under `set -u`: {sorted(set(bare))}"
+
+    braced = re.findall(r'\$\{([A-Za-z_][A-Za-z0-9_]*)([^}]*)\}', script)
+    undefaulted = [name for name, rest in braced if not rest.startswith((":-", ":=", ":?", "-"))]
+    assert not undefaulted, (
+        f"these expand without a default under `set -u`: {sorted(set(undefaulted))}"
+    )

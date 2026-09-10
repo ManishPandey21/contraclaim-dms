@@ -72,6 +72,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--now", help="Override the clock. Testing and replay only.")
     parser.add_argument(
+        "--allow-simulated-clock",
+        action="store_true",
+        help=(
+            "Permit --now in --confirm mode. Required, because --confirm is the "
+            "gate that runs immediately before a production stop."
+        ),
+    )
+    parser.add_argument(
         "--max-authorization-age-seconds",
         type=int,
         default=DEFAULT_MAX_AUTHORIZATION_AGE_SECONDS,
@@ -81,6 +89,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--confirm", help="Re-decide from an authorization document written earlier.")
     parser.add_argument("--json", action="store_true", help="Machine-readable verdict.")
     args = parser.parse_args(argv)
+
+    # F-A8T2-10. `--confirm` is the last gate before the stop command: it exists
+    # to re-read the clock at the moment of the decision. `--now` in that mode
+    # turns a NO-GO into a GO with one flag, and while the fabricated instant is
+    # written into the emitted evidence - so it is auditable after the fact - an
+    # audit trail is not a gate. Simulating the clock here is now a deliberate
+    # act that has to be spelled out, and the issuing mode (which stamps an
+    # expiry that `--confirm` will re-check anyway) is untouched, so replaying a
+    # window in a test costs nothing extra.
+    if args.confirm and args.now and not args.allow_simulated_clock:
+        print("NO-GO", file=sys.stderr)
+        print(
+            "  --now was supplied in --confirm mode without --allow-simulated-clock. "
+            "The confirmation gate re-reads the clock immediately before a "
+            "production stop; a fabricated instant there is a GO nobody measured.",
+            file=sys.stderr,
+        )
+        return NO_GO
 
     try:
         if args.confirm:

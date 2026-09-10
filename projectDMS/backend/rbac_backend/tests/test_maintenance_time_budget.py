@@ -356,11 +356,15 @@ def test_the_cli_round_trips_an_authorization_and_refuses_it_once_stale(
     stored = json.loads(token.read_text(encoding="utf-8"))
     assert stored["window_end"] == WINDOW_END.isoformat()
 
+    # `--allow-simulated-clock` is required in `--confirm` mode since R-A8U
+    # (F-A8T2-10). This test is exactly the legitimate case the flag exists for:
+    # it replays a window rather than standing in front of a production stop.
     fresh = _run(
         "--confirm",
         str(token),
         "--now",
         (WINDOW_END - timedelta(minutes=299)).isoformat(),
+        "--allow-simulated-clock",
     )
     assert fresh.returncode == 0, fresh.stderr
 
@@ -369,6 +373,7 @@ def test_the_cli_round_trips_an_authorization_and_refuses_it_once_stale(
         str(token),
         "--now",
         (WINDOW_END - timedelta(minutes=294)).isoformat(),
+        "--allow-simulated-clock",
     )
     assert stale.returncode == 2
     assert "NO-GO" in stale.stdout + stale.stderr
@@ -401,3 +406,89 @@ def test_the_authorization_carries_no_secret_material(tmp_path: Path) -> None:
         "max_age_seconds",
         "verdict",
     }
+
+
+# ------------------------------------------------------- R-A8U / F-A8T2-10
+
+
+def _issue_token(tmp_path: Path) -> Path:
+    token = tmp_path / "authorization.json"
+    issued = _run(
+        "--window-end",
+        WINDOW_END.isoformat(),
+        "--recovery-reserve-minutes",
+        str(RESERVE),
+        "--execution-budget-minutes",
+        str(BUDGET),
+        "--now",
+        (WINDOW_END - timedelta(minutes=300)).isoformat(),
+        "--max-authorization-age-seconds",
+        "86400",
+        "--emit-authorization",
+        str(token),
+    )
+    assert issued.returncode == 0, issued.stderr
+    return token
+
+
+def test_confirm_refuses_a_simulated_clock_unless_it_is_declared(tmp_path: Path) -> None:
+    """F-A8T2-10, the finding.
+
+    `--confirm` is the gate that runs immediately before the production stop -
+    its whole purpose is to re-read the clock at the moment of the decision. A
+    `--now` there turns a NO-GO into a GO. The fabricated instant does reach the
+    emitted evidence, so it was auditable; an audit trail is a record of a
+    decision, not a control over it.
+    """
+    token = _issue_token(tmp_path)
+
+    refused = _run(
+        "--confirm",
+        str(token),
+        "--now",
+        (WINDOW_END - timedelta(minutes=299)).isoformat(),
+    )
+
+    assert refused.returncode == 2, refused.stdout + refused.stderr
+    assert "NO-GO" in refused.stdout + refused.stderr
+    assert "--allow-simulated-clock" in refused.stdout + refused.stderr
+
+
+def test_confirm_allows_a_simulated_clock_when_it_is_declared(tmp_path: Path) -> None:
+    """The flag is a declaration, not a prohibition: replay still works."""
+    token = _issue_token(tmp_path)
+
+    allowed = _run(
+        "--confirm",
+        str(token),
+        "--now",
+        (WINDOW_END - timedelta(minutes=299)).isoformat(),
+        "--allow-simulated-clock",
+    )
+
+    assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+
+
+def test_confirm_against_the_real_clock_needs_no_flag(tmp_path: Path) -> None:
+    """The production invocation is unchanged.
+
+    A fix that made the runbook's own command fail would be a worse defect than
+    the one it closed. `WINDOW_END` is in the past, so the real clock returns
+    NO-GO - which is the point: the gate decided, rather than refusing to parse.
+    """
+    token = _issue_token(tmp_path)
+
+    decided = _run("--confirm", str(token))
+
+    assert decided.returncode in (0, 2)
+    assert "--allow-simulated-clock" not in decided.stdout + decided.stderr
+
+
+def test_issuing_a_window_still_accepts_a_simulated_clock(tmp_path: Path) -> None:
+    """Only the confirmation gate is tightened.
+
+    Issuing stamps an expiry that `--confirm` re-checks against the real clock,
+    so a simulated `now` at issue time buys nothing on its own.
+    """
+    token = _issue_token(tmp_path)
+    assert token.is_file()
