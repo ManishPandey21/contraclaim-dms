@@ -23,6 +23,7 @@ Three properties matter more than the arithmetic:
 
 from __future__ import annotations
 
+import ast
 import re
 import tempfile
 from types import SimpleNamespace
@@ -1119,3 +1120,275 @@ async def test_an_empty_upload_is_refused() -> None:
         assert result.error == "File is empty"
     finally:
         await spooled.cleanup()
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U second review: reads that never spell `.read()`, and a one-word rename #
+# --------------------------------------------------------------------------- #
+
+
+R_A8U_ESCAPES = [
+    pytest.param(
+        "async def r(req: Request):\n    return await req.body()\n",
+        id="a-request-parameter-not-called-request",
+    ),
+    pytest.param(
+        "async def r(request: Request):\n    return await request.form()\n",
+        id="request-form-parses-a-multipart-body-whole",
+    ),
+    pytest.param(
+        "async def r(incoming: Request):\n    return await incoming.json()\n",
+        id="request-json-reads-the-body-whole",
+    ),
+    pytest.param(
+        "import shutil\n"
+        "def r(file: UploadFile, dst):\n"
+        "    shutil.copyfileobj(file.file, dst)\n",
+        id="copyfileobj-drains-the-spooled-handle",
+    ),
+    pytest.param(
+        "def r(file: UploadFile):\n    return file.file.readlines()\n",
+        id="readlines",
+    ),
+    pytest.param(
+        "def r(file: UploadFile):\n    return file.file.getvalue()\n",
+        id="getvalue",
+    ),
+    pytest.param(
+        'def r(file: UploadFile):\n    return b"".join(file.file)\n',
+        id="join-iterates-the-handle",
+    ),
+    pytest.param(
+        "def r(file: UploadFile):\n    return list(file.file)\n",
+        id="list-iterates-the-handle",
+    ),
+    pytest.param(
+        "def r(file: UploadFile):\n"
+        "    for line in file.file:\n"
+        "        pass\n",
+        id="a-for-loop-over-the-handle",
+    ),
+    pytest.param(
+        "def r(file: UploadFile):\n"
+        "    handle = file.file\n"
+        "    return handle.readlines()\n",
+        id="a-handle-through-an-alias",
+    ),
+    pytest.param(
+        "class S:\n"
+        "    def r(self, upload_file):\n"
+        "        self.handle = upload_file.file\n"
+        "        return self.handle.getvalue()\n",
+        id="a-handle-stashed-on-self",
+    ),
+]
+
+
+@pytest.mark.parametrize("snippet", R_A8U_ESCAPES)
+def test_each_r_a8u_escape_is_caught(snippet: str) -> None:
+    """Every one of these was measured returning `[]` by the second review.
+
+    The first is the sharpest: the whole-request channel was recognised by
+    asking whether the rendered receiver contained the word "request", so
+    `async def r(req: Request)` defeated it with a one-word rename. It is read
+    from the annotation now.
+    """
+    assert uncapped_upload_reads(snippet, cap_bytes=1024 * 1024), f"not caught: {snippet!r}"
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param(
+            "async def r(files: List[UploadFile]):\n"
+            "    for f in files:\n"
+            "        await f.read(1024)\n",
+            id="iterating-a-list-of-uploads-is-not-draining-a-body",
+        ),
+        pytest.param(
+            "async def r(files: List[UploadFile]):\n"
+            "    for index, f in enumerate(files):\n"
+            "        await f.read(1024)\n",
+            id="enumerating-a-list-of-uploads",
+        ),
+        pytest.param(
+            "def r(rows):\n    return list(rows)\n",
+            id="listing-something-that-is-not-an-upload",
+        ),
+        pytest.param(
+            "async def r(request: Request):\n    return request.headers.get('x')\n",
+            id="a-request-consulted-for-headers-only",
+        ),
+        pytest.param(
+            "class S:\n"
+            "    def r(self, upload_file):\n"
+            "        self.name = upload_file.filename\n"
+            "        return self.name\n",
+            id="an-attribute-that-is-not-the-handle",
+        ),
+    ],
+)
+def test_the_r_a8u_rules_do_not_ban_the_normal_shapes(snippet: str) -> None:
+    """The false-positive boundary, and it is load-bearing.
+
+    The first cut of the drain rule treated any iteration of a tainted value as
+    draining a body, and reported six correct bulk-upload `for f in files:`
+    loops - a list of objects, not a stream. Only a *handle* drains.
+
+    `self.name = upload_file.filename` is the other half: binding the bare
+    `self` made every `self.<anything>.read()` in a module a finding.
+    """
+    assert uncapped_upload_reads(snippet, cap_bytes=1024 * 1024) == []
+
+
+def test_a_route_declared_with_a_keyword_path_is_still_in_the_inventory() -> None:
+    """`@router.post(path="/x")` is the same route written differently, and
+    `if not decorator.args: continue` dropped it silently."""
+    from rbac_backend.tests import upload_surface  # noqa: PLC0415
+
+    module = ast.parse(
+        "from fastapi import APIRouter, UploadFile\n"
+        "router = APIRouter(prefix='/p')\n"
+        "@router.post(path='/x')\n"
+        "async def h(file: UploadFile):\n"
+        "    return await file.read()\n"
+    )
+    found = [item for node in ast.walk(module) for item in upload_surface._route_decorators(node, "/p")]
+    assert ("POST", "/p/x") in found, found
+
+
+def test_no_module_in_the_package_root_reads_an_upload_unbounded() -> None:
+    """The one directory `UPLOAD_TREES` does not scan.
+
+    `rbac_backend/documents.py` holds two `await file.read()` calls on routes
+    that look exactly like the real ones. The module is deliberately dead and
+    pinned unimportable by `test_canonical_document_lookup.py`, so there is no
+    live bypass - but it sits where neither the guard nor the inventory looks,
+    and it is the only `APIRouter(` outside `routers/`. This states the
+    boundary as a measurement: every *other* top-level module in the package
+    root is scanned, and the dead one must stay dead.
+    """
+    dead = RBAC_BACKEND / "documents.py"
+    assert dead.is_file(), "the dead module moved; re-derive this boundary"
+
+    offenders: list = []
+    for path in sorted(RBAC_BACKEND.glob("*.py")):
+        if path.name == "documents.py":
+            continue
+        offenders.extend(
+            uncapped_upload_reads(path.read_text(encoding="utf-8-sig"), path.name)
+        )
+    assert not offenders, (
+        "a module in the package root materialises an upload body with no limit, "
+        "where neither UPLOAD_TREES nor the router inventory looks:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_dead_root_document_module_is_still_unimportable() -> None:
+    """If anyone repairs that import, both guards stay green over two unbounded
+    reads. This is what makes the exclusion above safe rather than convenient."""
+    import importlib  # noqa: PLC0415
+
+    with pytest.raises(Exception):
+        importlib.import_module("rbac_backend.documents")
+
+
+def test_add_api_route_is_not_used_by_any_router() -> None:
+    """The inventory parses decorators. `router.add_api_route("/x", handler,
+    methods=["POST"])` registers the same route and would not appear in it.
+
+    Nothing uses it today. This is the cheap way to keep that true: adding the
+    first one fails here, where the message says what else has to change.
+    """
+    offenders = [
+        str(path.relative_to(RBAC_BACKEND))
+        for path in sorted(ROUTERS.rglob("*.py"))
+        if "__pycache__" not in path.parts
+        and "add_api_route" in path.read_text(encoding="utf-8-sig")
+    ]
+    assert not offenders, (
+        "these register routes without a decorator, which the upload inventory "
+        f"parses and would therefore not see: {offenders}. Teach "
+        "upload_surface.upload_routes about the shape in the same commit."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U: a refusal has to say what the limit was, and cost what it says        #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "cap, rendered",
+    [
+        pytest.param(5 * 1024 * 1024, "5MB", id="megabytes"),
+        pytest.param(256 * 1024, "256KB", id="kilobytes"),
+        pytest.param(1024, "1KB", id="exactly-one-kilobyte"),
+        pytest.param(512, "512 bytes", id="bytes"),
+    ],
+)
+def test_the_refusal_names_a_size_the_caller_can_act_on(cap: int, rendered: str) -> None:
+    """`size // (1024 * 1024)` renders **"0MB"** for every cap below a megabyte.
+
+    R-A8U introduced the first sub-megabyte caps on this service - the webhook
+    body, the public telemetry and credential bodies - so this stopped being
+    cosmetic: a provider or an operator reading "0MB" cannot tell what the limit
+    is, and the natural next step is to assume the service is broken.
+    """
+    error = UploadTooLargeError(cap)
+    assert error.status_code == 413
+    assert rendered in str(error.detail), error.detail
+    assert "0MB" not in str(error.detail)
+
+
+def test_the_webhook_cap_is_large_enough_for_a_real_provider_payload() -> None:
+    """A refused webhook is a LOST BILLING EVENT, not a rejected upload.
+
+    Razorpay `subscription.charged` and Stripe `invoice.*` payloads with many
+    line items or large `metadata` can exceed 256 KB, which was the first cap
+    R-A8U shipped. The provider retries, the retries are refused identically,
+    and after the retry window the event is gone - and the idempotency design
+    cannot recover an event that was never recorded. 1 MB is still three orders
+    below the gateway's 200 MB.
+    """
+    assert int(settings.WEBHOOK_MAX_BODY_SIZE_KB) >= 1024, (
+        "the webhook body cap is below 1 MB; a large provider payload would be "
+        "refused, retried, refused again and lost"
+    )
+
+
+def test_a_zero_body_cap_is_refused_by_configuration() -> None:
+    """`WEBHOOK_MAX_BODY_SIZE_KB=0` is the natural spelling for "no limit".
+
+    Downstream it became `max(1, 0)` = **one byte**, which 413s every webhook
+    there is. A cap that means the opposite of what it says must not load.
+    """
+    from pydantic import ValidationError  # noqa: PLC0415
+
+    from rbac_backend.core.config import Settings  # noqa: PLC0415
+
+    for field in (
+        "WEBHOOK_MAX_BODY_SIZE_KB",
+        "PUBLIC_TELEMETRY_MAX_BODY_SIZE_KB",
+        "PUBLIC_AUTH_MAX_BODY_SIZE_KB",
+    ):
+        with pytest.raises(ValidationError):
+            Settings.model_fields[field].annotation  # noqa: B018
+            Settings(**{field: 0}, _env_file=None)
+
+
+def test_the_billing_webhook_says_so_when_it_drops_an_event() -> None:
+    """The generic 413 in the request log does not name the billing channel.
+
+    Read from the source rather than from a mock: the point is that the deployed
+    route logs it, and a runtime test that built its own logger would stay green
+    after the line was deleted.
+    """
+    source = (ROUTERS / "billing_webhooks.py").read_text(encoding="utf-8")
+    assert "UploadTooLargeError" in source, (
+        "the billing webhook no longer distinguishes an oversize refusal"
+    )
+    assert "REFUSED as oversize" in source, (
+        "an oversize webhook is dropped with no billing-channel signal"
+    )

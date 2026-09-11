@@ -71,6 +71,25 @@ UPLOAD_PARAMETER_NAMES = frozenset(
     }
 )
 
+#: Calls and forms that consume a whole file-like object without ever spelling
+#: `.read()`. R-A8U's second review listed every one of these as escaping the
+#: guard, and each of them holds or copies the entire body.
+DRAINING_CALLS = frozenset(
+    {
+        "copyfileobj",   # shutil.copyfileobj(upload.file, dst)
+        "readlines",     # upload.file.readlines()
+        "readall",
+        "getvalue",      # the SpooledTemporaryFile's own buffer
+        "read_bytes",
+        "writelines",
+    }
+)
+
+#: Request methods that materialise the whole body without an `UploadFile`.
+#: `.body()` was the only one checked; `.form()` parses a multipart body into
+#: memory and `.json()` reads it whole before parsing.
+REQUEST_BODY_CALLS = frozenset({"body", "form", "json"})
+
 #: The seams that own the size decision. A call to one of these IS the limit.
 BOUNDED_READ_SEAMS = frozenset(
     {
@@ -189,7 +208,25 @@ def _base_name(node: ast.AST) -> Optional[str]:
 
 
 def _bound_names(target: ast.AST) -> Set[str]:
-    return {child.id for child in ast.walk(target) if isinstance(child, ast.Name)}
+    """The names an assignment target binds.
+
+    `self.handle = file` binds `handle`, not `self`. Walking every `ast.Name`
+    bound the bare `self`, so every `self.<anything>.read()` in the module was
+    then reported - safe in direction and useless in practice, which is the
+    other way a guard gets deleted.
+    """
+    if isinstance(target, ast.Attribute):
+        return {target.attr}
+    if isinstance(target, ast.Subscript):
+        return _bound_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        found: Set[str] = set()
+        for element in target.elts:
+            found |= _bound_names(element)
+        return found
+    if isinstance(target, ast.Starred):
+        return _bound_names(target.value)
+    return {target.id} if isinstance(target, ast.Name) else set()
 
 
 def _constant_int(node: ast.AST) -> Optional[int]:
@@ -254,8 +291,55 @@ class UploadTaint:
 
     def __init__(self, tree: ast.Module) -> None:
         self.tainted: Set[str] = set()
+        #: Names that hold a *file handle* rather than an upload or a list of
+        #: them. `handle = upload.file` is a handle; `files: List[UploadFile]`
+        #: is a collection. The distinction decides whether iterating the name
+        #: drains a body or just walks a list, and conflating the two reported
+        #: every bulk-upload `for f in files:` loop in the codebase.
+        self.handles: Set[str] = set()
         self._seed_parameters(tree)
         self._propagate(tree)
+        self._find_handles(tree)
+
+    def _find_handles(self, tree: ast.Module) -> None:
+        for _ in range(4):
+            grew = False
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    pairs = [(target, node.value) for target in node.targets]
+                elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+                    pairs = [(node.target, node.value)]
+                elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                    pairs = [(node.optional_vars, node.context_expr)]
+                else:
+                    continue
+                for target, value in pairs:
+                    if not self.is_handle(value):
+                        continue
+                    for name in _bound_names(target):
+                        if name not in self.handles:
+                            self.handles.add(name)
+                            grew = True
+            if not grew:
+                return
+
+    def is_handle(self, node: ast.AST) -> bool:
+        """Does this expression evaluate to a file handle holding an upload?
+
+        `upload.file` is the spooled handle; a name assigned from one is too.
+        A `List[UploadFile]` parameter is not, and neither is an `UploadFile`:
+        those are consumed through their own `read`, which `read_is_bounded`
+        already judges.
+        """
+        if isinstance(node, ast.Attribute):
+            if node.attr == "file":
+                return self.holds_an_upload(node.value)
+            # `self.handle = upload.file` binds the ATTRIBUTE, so `self.handle`
+            # is the handle. `_bound_names` records it the same way.
+            return node.attr in self.handles
+        if isinstance(node, ast.Name):
+            return node.id in self.handles
+        return False
 
     def _seed_parameters(self, tree: ast.Module) -> None:
         for node in ast.walk(tree):
@@ -321,6 +405,9 @@ class UploadTaint:
             if callee in {"enumerate", "zip", "list", "tuple", "iter", "reversed", "sorted"}:
                 return any(self.holds_an_upload(argument) for argument in node.args)
             return False
+        if isinstance(node, ast.Attribute) and node.attr in self.tainted:
+            # `self.upload = file` binds `upload`, not `self`.
+            return True
         if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
             return _base_name(node) in self.tainted
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -353,22 +440,56 @@ def uncapped_upload_reads(
 
     tree = ast.parse(source)
     taint = UploadTaint(tree)
+    # Which names hold a `Request`, read from the ANNOTATION and not from the
+    # spelling. `"request" in rendered.lower()` missed `req: Request` - a
+    # one-word rename defeated the whole-request channel.
+    requests = _request_holding_names(tree)
     offenders: List[str] = []
 
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Call):
             continue
 
-        if node.func.attr == "body" and not node.args:
-            rendered = ast.unparse(node.func.value)
-            if "request" in rendered.lower():
+        callee = (
+            node.func.attr
+            if isinstance(node.func, ast.Attribute)
+            else getattr(node.func, "id", None)
+        )
+
+        # `shutil.copyfileobj(upload.file, dst)`, `b"".join(upload.file)` and
+        # friends: the body is consumed whole and `.read()` never appears.
+        #
+        # Only a *handle* counts. `for f in files:` over a `List[UploadFile]`
+        # walks a list of objects, not a body, and treating the two alike
+        # reported six correct bulk-upload loops.
+        if callee in DRAINING_CALLS or callee in {"join", "list", "tuple", "iter"}:
+            arguments = list(node.args) + [kw.value for kw in node.keywords]
+            if isinstance(node.func, ast.Attribute) and callee in DRAINING_CALLS:
+                arguments.append(node.func.value)
+            drained = next(
+                (argument for argument in arguments if taint.is_handle(argument)), None
+            )
+            if drained is not None:
                 offenders.append(
-                    f"{label}:{node.lineno}: {rendered}.body() materialises the whole "
-                    "request body with no size limit"
+                    f"{label}:{node.lineno}: {ast.unparse(drained)} is consumed whole "
+                    f"by {callee}() with no size limit"
                 )
             continue
 
-        if node.func.attr != "read":
+        if not isinstance(node.func, ast.Attribute):
+            continue
+
+        if callee in REQUEST_BODY_CALLS and not node.args:
+            base = _base_name(node.func.value)
+            rendered = ast.unparse(node.func.value)
+            if base in requests or "request" in rendered.lower():
+                offenders.append(
+                    f"{label}:{node.lineno}: {rendered}.{callee}() materialises the "
+                    "whole request body with no size limit"
+                )
+            continue
+
+        if callee != "read":
             continue
         if not taint.holds_an_upload(node.func.value):
             continue
@@ -378,7 +499,37 @@ def uncapped_upload_reads(
                 f"{label}:{node.lineno}: {ast.unparse(node.func.value)}.{why_not}"
             )
 
-    return offenders
+    # A `for line in upload.file:` loop drains the handle. A `for f in files:`
+    # loop over a `List[UploadFile]` does not, which is why only handles count.
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.AsyncFor)) and taint.is_handle(node.iter):
+            offenders.append(
+                f"{label}:{node.lineno}: {ast.unparse(node.iter)} is iterated to "
+                "exhaustion with no size limit"
+            )
+
+    return sorted(set(offenders))
+
+
+def _request_holding_names(tree: ast.Module) -> Set[str]:
+    """Every parameter annotated as a `Request`, anywhere in the module.
+
+    Annotation, not spelling. The first cut asked whether the rendered receiver
+    contained the word "request", so `async def r(req: Request)` was invisible -
+    a one-word rename defeating the entire whole-request channel.
+    """
+    found: Set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        arguments = (
+            list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs)
+        )
+        for argument in arguments:
+            annotation = ast.unparse(argument.annotation) if argument.annotation else ""
+            if "Request" in annotation and "UploadFile" not in annotation:
+                found.add(argument.arg)
+    return found
 
 
 def scan_upload_trees(trees: Sequence[Path] = UPLOAD_TREES) -> List[str]:
@@ -595,9 +746,16 @@ def _route_decorators(node: ast.AST, prefix: str = "") -> Iterable[Tuple[str, st
         func = decorator.func
         if not isinstance(func, ast.Attribute) or func.attr.lower() not in HTTP_METHODS:
             continue
-        if not decorator.args:
+        first: ast.expr | None = decorator.args[0] if decorator.args else None
+        if first is None:
+            # `@router.post(path="/x")` is the same route written differently,
+            # and `if not decorator.args: continue` dropped it silently.
+            for keyword in decorator.keywords:
+                if keyword.arg == "path":
+                    first = keyword.value
+                    break
+        if first is None:
             continue
-        first = decorator.args[0]
         if isinstance(first, ast.Constant) and isinstance(first.value, str):
             yield func.attr.upper(), prefix + first.value
         else:
@@ -883,7 +1041,10 @@ def upload_routes(routers: Path = ROUTERS, graph: Optional[CallGraph] = None) ->
         graph = CallGraph((routers, RBAC_BACKEND / "services", RBAC_BACKEND / "utils"))
 
     routes: List[UploadRoute] = []
-    for path in sorted(routers.glob("*.py")):
+    # `rglob`, not `glob`: a router in a subdirectory is still a router.
+    for path in sorted(routers.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
         source = path.read_text(encoding="utf-8-sig")
         tree = ast.parse(source)
         taint = UploadTaint(tree)

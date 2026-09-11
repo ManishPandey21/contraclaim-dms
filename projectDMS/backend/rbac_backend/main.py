@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
 from .core.csrf import validate_unsafe_cookie_request
+from .core.public_body_limit import PublicBodyLimitMiddleware, public_body_caps
 from .routers import (
     ai_assistant,
     arbitration_drafting,
@@ -121,6 +122,15 @@ _loop_handler_installed = False
 
 # Distributed tracing (opt-in; no-op unless OTEL_ENABLED + libs installed).
 setup_tracing(app)
+
+# Outermost of the application middlewares, so it runs before anything builds a
+# `Request` or parses a body. An unauthenticated caller decided how much this
+# process held on four routes; see `core/public_body_limit.py` for which, and
+# why a pure-ASGI middleware rather than four handler rewrites.
+app.add_middleware(
+    PublicBodyLimitMiddleware,
+    caps=public_body_caps(settings),
+)
 
 app.add_middleware(
     CORSMiddleware,

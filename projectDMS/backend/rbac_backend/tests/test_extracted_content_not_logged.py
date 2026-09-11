@@ -330,23 +330,86 @@ class ContentTaint:
             pairs.extend(_unpack(node.target, node.iter))
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
             pairs.extend(_unpack(node.optional_vars, node.context_expr))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            # `parts.append(text)` / `buf.extend(chunks)` / `store.add(snippet)`
+            # put content into a container without ever assigning to it. The
+            # container then holds content, and `logger.info(parts)` renders it.
+            if node.func.attr in {"append", "extend", "add", "insert", "update"}:
+                arguments = list(node.args) + [kw.value for kw in node.keywords]
+                for argument in arguments:
+                    pairs.append((node.func.value, argument))
         return pairs
 
     @staticmethod
     def _bound_names(target: ast.AST) -> List[str]:
-        return [child.id for child in ast.walk(target) if isinstance(child, ast.Name)]
+        """The names an assignment binds.
+
+        `self.buffer = text` binds `buffer`, not `self` - and binding `self`
+        taints nothing useful, because `_final_identifier(self.buffer)` answers
+        `buffer`. A parser or enricher stashing page text on the instance was
+        the one realistic shape the second review found escaping.
+        """
+        if isinstance(target, ast.Attribute):
+            return [target.attr]
+        if isinstance(target, ast.Subscript):
+            return ContentTaint._bound_names(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            found: List[str] = []
+            for element in target.elts:
+                found.extend(ContentTaint._bound_names(element))
+            return found
+        if isinstance(target, ast.Starred):
+            return ContentTaint._bound_names(target.value)
+        return [target.id] if isinstance(target, ast.Name) else []
 
     def _carries_content(self, node: ast.AST) -> bool:
         return bool(_content_references(node, self.tainted))
 
 
+def _attribute_carriers(tree: ast.Module) -> set:
+    """Attribute names assigned content anywhere in the module.
+
+    An instance attribute is not function-scoped. `self.buffer = page_text` in
+    one method and `logger.info(self.buffer)` in another is the realistic shape
+    of this leak - a parser stashing page text on the instance - and strict
+    per-function scoping cannot see across the two.
+
+    Attribute names are a much narrower namespace than locals, so carrying them
+    module-wide does not reintroduce the `value`-in-two-functions false positive
+    that per-function scoping was introduced to fix. It is a deliberate,
+    stated widening of exactly one binding form.
+    """
+    carriers: set = set()
+    for _ in range(6):
+        grew = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                pairs = [(target, node.value) for target in node.targets]
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+                pairs = [(node.target, node.value)]
+            else:
+                continue
+            for target, value in pairs:
+                if not isinstance(target, ast.Attribute):
+                    continue
+                if _is_metadata_identifier(target.attr) or target.attr in carriers:
+                    continue
+                if _content_references(value, carriers):
+                    carriers.add(target.attr)
+                    grew = True
+        if not grew:
+            break
+    return carriers
+
+
 def _scopes(tree: ast.Module) -> List[tuple]:
     """`(scope_node, taint)` for the module body and every function in it."""
     module_taint = ContentTaint(tree)
-    found: List[tuple] = [(tree, module_taint)]
+    base = set(module_taint.tainted) | _attribute_carriers(tree)
+    found: List[tuple] = [(tree, ContentTaint(tree, base=base))]
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            found.append((node, ContentTaint(node, base=module_taint.tainted)))
+            found.append((node, ContentTaint(node, base=base)))
     return found
 
 
@@ -427,11 +490,25 @@ def _content_references(node: ast.AST, tainted: Iterable[str] = ()) -> List[str]
                     walk(argument)
                 return
             if (
-                callee == "get"
+                callee in {"get", "getattr"}
                 and current.args
                 and isinstance(current.args[0], ast.Constant)
                 and isinstance(current.args[0].value, str)
+            ) or (
+                # `getattr(resp, "status_code", None)` names the field in its
+                # SECOND argument. Walking into `resp` instead reported the
+                # holder of a status code as document content - the same mistake
+                # the `.get("key")` and Subscript branches already avoid.
+                callee == "getattr"
+                and len(current.args) >= 2
+                and isinstance(current.args[1], ast.Constant)
+                and isinstance(current.args[1].value, str)
             ):
+                if callee == "getattr" and len(current.args) >= 2:
+                    key = current.args[1].value
+                    if _is_content_identifier(key):
+                        found.append(key)
+                    return
                 # `doc.get("processing_status")` names a field the same way
                 # `doc["processing_status"]` does. Walking into `doc` instead
                 # reported the holder of every metadata field, which is the
@@ -468,14 +545,69 @@ def _content_references(node: ast.AST, tainted: Iterable[str] = ()) -> List[str]
     return found
 
 
-def _is_logging_call(call: ast.Call) -> str | None:
-    """The level name if this is a logging call, else None."""
+#: Sinks that are not loggers and reach a log or a console anyway.
+#: `warnings.warn` is captured by `logging.captureWarnings`, and `print` writes
+#: to the container's stdout, which is what the log shipper collects. Neither
+#: was a sink before R-A8U.
+NON_LOGGER_SINKS = {"print", "warn", "warn_explicit"}
+
+
+def _logger_aliases(tree: ast.Module) -> set:
+    """Every name bound to a `logging.getLogger(...)` result.
+
+    `_is_logging_call` required the receiver's own NAME to contain "log", so
+    `audit = logging.getLogger(__name__)` then `audit.info(text)` was not a
+    logging call at all. Two live modules could have used that spelling; none
+    does, which is why this is a guard fix rather than a leak.
+    """
+    found: set = set()
+    for node in ast.walk(tree):
+        targets: List[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        if _final_identifier(value.func) not in {"getLogger", "get_logger", "bind"}:
+            continue
+        for target in targets:
+            for name in ContentTaint._bound_names(target):
+                found.add(name)
+    return found
+
+
+def _is_logging_call(call: ast.Call, aliases: Iterable[str] = ()) -> str | None:
+    """The level name if this is a logging call, else None.
+
+    Three shapes the first cut could not see, all reported by the second
+    independent review and all confirmed absent from `SCANNED_PATHS` today:
+
+    * `logging.getLogger(__name__).info(text)` - the receiver is a *call*, so
+      `_final_identifier` answered None;
+    * `audit.info(text)` where `audit = logging.getLogger(...)` - the receiver's
+      name does not contain "log";
+    * `print(text)` and `warnings.warn(f"{text}")` - not loggers, and both reach
+      the place the logs are collected from.
+    """
     func = call.func
+    callee = _final_identifier(func)
+    if callee in NON_LOGGER_SINKS:
+        return str(callee)
     if not isinstance(func, ast.Attribute) or func.attr.lower() not in LOG_LEVELS:
         return None
+    # `logging.getLogger(__name__).info(...)` - the receiver IS the logger.
+    if isinstance(func.value, ast.Call):
+        if _final_identifier(func.value.func) in {"getLogger", "get_logger", "bind"}:
+            return func.attr.lower()
     target = _final_identifier(func.value)
     if target is None:
         return None
+    if target in set(aliases):
+        return func.attr.lower()
     if "log" not in target.lower():
         return None
     return func.attr.lower()
@@ -485,16 +617,25 @@ def violations(source: str, label: str = "<source>") -> List[str]:
     """One message per logging call that would render extracted content."""
     problems: List[str] = []
     tree = ast.parse(source)
+    aliases = _logger_aliases(tree)
     for scope, taint in _scopes(tree):
         carriers = taint.tainted
         for node in _own_nodes(scope):
             if not isinstance(node, ast.Call):
                 continue
-            level = _is_logging_call(node)
+            level = _is_logging_call(node, aliases)
             if level is None:
                 continue
             arguments = list(node.args)
-            arguments += [kw.value for kw in node.keywords if kw.arg == "extra"]
+            # EVERY keyword, not just `extra`. A structured logger takes
+            # `log.info("event", body=text)`, and `logger.info(msg,
+            # exc_info=text)` renders its argument too; restricting the set to
+            # `extra=` was a guess about which library is in use.
+            arguments += [
+                kw.value
+                for kw in node.keywords
+                if kw.arg not in {"stacklevel", "stack_info", "category"}
+            ]
             for argument in arguments:
                 for name in _content_references(argument, carriers):
                     problems.append(
@@ -930,10 +1071,11 @@ def test_the_scanned_tree_contains_logging_calls() -> None:
     total = 0
     for path in _scanned_modules():
         tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = _logger_aliases(tree)
         total += sum(
             1
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and _is_logging_call(node) is not None
+            if isinstance(node, ast.Call) and _is_logging_call(node, aliases) is not None
         )
     assert total >= 50, f"only {total} logging calls found in the extraction trees"
 
@@ -1258,3 +1400,180 @@ def test_the_query_redaction_that_already_existed_still_holds() -> None:
     assert redacted is not None
     assert SYNTHETIC_SECRET not in redacted
     assert re.fullmatch(r"\[redacted len=\d+\]", redacted), redacted
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U second review: sinks and assignment forms with no dataflow behind them #
+# --------------------------------------------------------------------------- #
+#
+# The first taint model closed F-A8T2-7's indirection. A second independent
+# review measured nine further shapes returning `[]`, and confirmed by grep that
+# **none of them exists in SCANNED_PATHS today** - every logger there is
+# `logger = logging.getLogger(__name__)`, there is no `print(`, no structlog and
+# no `self.<x> = text`. So these are guard-class fixes, not leaks, and they are
+# recorded that way.
+
+
+R_A8U_SINK_SHAPES = [
+    pytest.param(
+        "class P:\n"
+        "    def run(self, page_text):\n"
+        "        self.buffer = page_text\n"
+        "    def report(self):\n"
+        "        logger.info(self.buffer)\n",
+        "buffer",
+        id="content-stashed-on-self",
+    ),
+    pytest.param(
+        "def f(text):\n"
+        "    parts = []\n"
+        "    parts.append(text)\n"
+        "    logger.info('%s', parts)\n",
+        "parts",
+        id="content-appended-to-a-list",
+    ),
+    pytest.param(
+        "def f(chunks):\n"
+        "    buf = []\n"
+        "    buf.extend(chunks)\n"
+        "    logger.debug(buf)\n",
+        "buf",
+        id="content-extended-into-a-list",
+    ),
+    pytest.param(
+        "import logging\n"
+        "def f(extracted_text):\n"
+        "    logging.getLogger(__name__).info(extracted_text)\n",
+        "extracted_text",
+        id="an-inline-getLogger",
+    ),
+    pytest.param(
+        "import logging\n"
+        "audit = logging.getLogger('audit')\n"
+        "def f(ocr_text):\n"
+        "    audit.warning(ocr_text)\n",
+        "ocr_text",
+        id="a-logger-whose-name-does-not-contain-log",
+    ),
+    pytest.param(
+        "def f(text):\n    log.info('event', body=text)\n",
+        "text",
+        id="a-structured-keyword-that-is-not-extra",
+    ),
+    pytest.param(
+        "def f(text):\n    logger.warning('failed', exc_info=text)\n",
+        "text",
+        id="exc_info-renders-its-argument",
+    ),
+    pytest.param(
+        "import warnings\n"
+        "def f(document_text):\n"
+        "    warnings.warn(f'odd clause: {document_text}')\n",
+        "document_text",
+        id="warnings-warn-is-captured-by-logging",
+    ),
+    pytest.param(
+        "def f(snippet):\n    print(snippet)\n",
+        "snippet",
+        id="print-reaches-the-container-stdout",
+    ),
+]
+
+
+@pytest.mark.parametrize("snippet, expected", R_A8U_SINK_SHAPES)
+def test_each_r_a8u_sink_shape_is_caught(snippet: str, expected: str) -> None:
+    source = "import logging\nlogger = logging.getLogger(__name__)\nlog = logger\n" + snippet
+    found = violations(source, "r-a8u")
+    assert any(expected in message for message in found), (
+        f"expected {expected!r} to be reported; got {found}"
+    )
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        pytest.param(
+            "class P:\n"
+            "    def run(self, page_count):\n"
+            "        self.pages = page_count\n"
+            "    def report(self):\n"
+            "        logger.info(self.pages)\n",
+            id="a-count-stashed-on-self",
+        ),
+        pytest.param(
+            "def f(chunk_count):\n"
+            "    counts = []\n"
+            "    counts.append(chunk_count)\n"
+            "    logger.info('%s', counts)\n",
+            id="counts-appended-to-a-list",
+        ),
+        pytest.param(
+            "def f(document_id):\n    print(document_id)\n",
+            id="printing-an-identifier",
+        ),
+        pytest.param(
+            "def f(text):\n    logger.info('chars=%s', len(text), stacklevel=2)\n",
+            id="stacklevel-is-not-a-rendered-argument",
+        ),
+    ],
+)
+def test_the_r_a8u_sink_rules_do_not_ban_metadata(snippet: str) -> None:
+    """The boundary again. `self.pages = page_count` binds `pages`, which is a
+    count; binding the bare `self` would have made every `self.*` a finding."""
+    source = "import logging\nlogger = logging.getLogger(__name__)\n" + snippet
+    assert violations(source, "r-a8u-metadata") == []
+
+
+def test_binding_the_attribute_and_not_the_object_is_what_makes_this_work() -> None:
+    """State the mechanism as a measurement, not as a comment.
+
+    `self.buffer = text` must bind `buffer`. Binding `self` taints nothing
+    useful, because `_final_identifier(self.buffer)` answers `buffer` - so the
+    guard would look up the wrong name and find nothing.
+    """
+    target = ast.parse("self.buffer = x").body[0].targets[0]
+    assert ContentTaint._bound_names(target) == ["buffer"]
+
+    nested = ast.parse("a, (b, c) = x").body[0].targets[0]
+    assert sorted(ContentTaint._bound_names(nested)) == ["a", "b", "c"]
+
+
+def test_getattr_names_the_field_in_its_second_argument() -> None:
+    """R-A8U. `getattr(resp, "status_code", None)` is a status code.
+
+    The redaction in `retrieval/service.py` lost the exception's status code
+    along with the query text, so a Qdrant 401 and a Qdrant timeout became
+    identical in the log - and a Qdrant 401 is what the vector-loss incident was
+    diagnosed from. Putting the status back required the guard to stop reading
+    `getattr`'s first argument as the value.
+    """
+    safe = (
+        "import logging\n"
+        "logger = logging.getLogger(__name__)\n"
+        "def f(resp):\n"
+        "    logger.warning('status=%s', getattr(resp, 'status_code', None))\n"
+    )
+    assert violations(safe, "getattr-metadata") == []
+
+    leaky = (
+        "import logging\n"
+        "logger = logging.getLogger(__name__)\n"
+        "def f(result):\n"
+        "    logger.warning('%s', getattr(result, 'extracted_text', ''))\n"
+    )
+    assert violations(leaky, "getattr-content"), (
+        "getattr naming a content field was not reported"
+    )
+
+
+def test_the_contract_evidence_failure_still_carries_a_diagnosis() -> None:
+    """A redaction that deletes the signal is a different defect, not a fix."""
+    source = (RBAC_BACKEND / "retrieval" / "service.py").read_text(encoding="utf-8")
+    assert "query_digest=%s" in source, "the contract-evidence failure no longer logs a digest"
+    assert "error_status=%s" in source, (
+        "the contract-evidence failure no longer records the status code, so a "
+        "Qdrant 401 and a Qdrant timeout read identically"
+    )
+    assert 'failed for query %r' not in source, (
+        "the raw contract-QA sub-query is being rendered again"
+    )

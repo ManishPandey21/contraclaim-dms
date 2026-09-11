@@ -88,7 +88,10 @@ export function assertTargetIsNotProduction(): void {
   }
   let host: string;
   try {
-    host = new URL(BASE_URL).hostname.toLowerCase();
+    // The trailing dot is stripped here too: `https://contraclaim.com./` is the
+    // same site and `hostname` keeps the dot, so a denylist entry never matched
+    // it and an allowlist entry never would either.
+    host = new URL(BASE_URL).hostname.toLowerCase().replace(/\.$/, "");
   } catch {
     throw new Error(`E2E_BASE_URL is not a URL: ${BASE_URL}`);
   }
@@ -120,6 +123,51 @@ export function assertTargetIsNotProduction(): void {
         "as staging evidence."
     );
   }
+  // R-A8U. Everything above is a DENYLIST, and `staging_teardown_guard.py:52`
+  // states the rule for exactly this situation: "an allowlist of one, not a
+  // denylist - a denylist only refuses the names somebody thought of". The file
+  // that actually issues the DELETEs was the one using the denylist. Measured
+  // against `E2E_PRODUCTION_HOSTS=contraclaim.com`, all of these passed:
+  //
+  //     https://www.contraclaim.com      a CNAME of the same site
+  //     https://contraclaim.com.         trailing dot, DNS-equivalent
+  //     https://203.0.113.10             the production IP
+  //
+  // So the target must now be the declared staging host and nothing else.
+  const staging = stagingHost();
+  if (host !== staging) {
+    throw new Error(
+      `refusing to seed fixtures against ${host}: E2E_STAGING_HOST declares ` +
+        `${staging}. This is an allowlist of one - a denylist only refuses the ` +
+        "hostnames somebody thought of, and www., a trailing dot and a bare IP " +
+        "address all reach production without appearing on one."
+    );
+  }
+}
+
+/**
+ * The one host a fixture run may address.
+ *
+ * Trailing dots are stripped before comparison because `contraclaim.com.` and
+ * `contraclaim.com` resolve to the same site, and a control that treats them as
+ * different names is a control with a hole in it.
+ */
+export function stagingHost(): string {
+  const value = (process.env.E2E_STAGING_HOST ?? "").trim().toLowerCase();
+  if (!value) {
+    throw new Error(
+      "E2E_STAGING_HOST is not set. The fixtures refuse to guess which host is " +
+        "staging: a denylist of production hostnames cannot cover www., a " +
+        "trailing dot or a bare IP address, so the target is declared instead."
+    );
+  }
+  if (value.includes(EDGE_HOST_PLACEHOLDER)) {
+    throw new Error(
+      `E2E_STAGING_HOST is still the ${EDGE_HOST_PLACEHOLDER}... placeholder ` +
+        "from .env.staging.example."
+    );
+  }
+  return value.replace(/\.$/, "");
 }
 
 /** The organisation every fixture object must belong to. */
@@ -536,6 +584,30 @@ export interface CleanupReport {
  * reported rather than swallowed, because a teardown that reports success while
  * leaving state behind is how staging accumulates it.
  */
+/**
+ * Is this row one the fixtures may delete?
+ *
+ * Two conditions, not one. R-A8U's review found cleanup deleting by name tag
+ * alone: `assertWriteIsTenantSafe` pins every *create* to
+ * `E2E_STAGING_ORG_ID`, and the *delete* side compared nothing. The session
+ * holds `platform.role.manage` step-up, so `GET /api/documents` and
+ * `GET /api/roles` return rows beyond the fixture organisation, and two runs
+ * that share an operator-supplied `E2E_RUN_ID` in different organisations
+ * delete each other's rows.
+ *
+ * A row that declares no organisation is left alone rather than deleted: an
+ * unknown owner is not this run's owner.
+ */
+function isRunOwnedByFixtureTenant(row: any, name: unknown): boolean {
+  if (!isRunOwned(name)) {
+    return false;
+  }
+  const owner = String(
+    row?.organizationId ?? row?.organization_id ?? row?.orgId ?? row?.org_id ?? ""
+  ).trim();
+  return owner !== "" && owner === fixtureOrganizationId();
+}
+
 export async function cleanupRunOwned(session: FixtureSession): Promise<CleanupReport> {
   assertTargetIsNotProduction();
   const report: CleanupReport = { runTag: RUN_TAG, deleted: [], failed: [] };
@@ -548,7 +620,7 @@ export async function cleanupRunOwned(session: FixtureSession): Promise<CleanupR
     const rows: any[] = body.documents ?? body.items ?? [];
     for (const row of rows) {
       const letterNo = row?.letterNo ?? row?.letter_no;
-      if (!isRunOwned(letterNo)) {
+      if (!isRunOwnedByFixtureTenant(row, letterNo)) {
         continue;
       }
       const id = String(row._id ?? row.id);
@@ -570,7 +642,7 @@ export async function cleanupRunOwned(session: FixtureSession): Promise<CleanupR
     const body = await drafts.json();
     const rows: any[] = Array.isArray(body) ? body : (body.drafts ?? body.items ?? []);
     for (const row of rows) {
-      if (!isRunOwned(row?.title)) {
+      if (!isRunOwnedByFixtureTenant(row, row?.title)) {
         continue;
       }
       const id = String(row._id ?? row.id);
@@ -590,7 +662,7 @@ export async function cleanupRunOwned(session: FixtureSession): Promise<CleanupR
     const body = await roles.json();
     const rows: any[] = Array.isArray(body) ? body : (body.roles ?? []);
     for (const row of rows) {
-      if (!isRunOwned(row?.name)) {
+      if (!isRunOwnedByFixtureTenant(row, row?.name)) {
         continue;
       }
       const id = String(row._id ?? row.id);

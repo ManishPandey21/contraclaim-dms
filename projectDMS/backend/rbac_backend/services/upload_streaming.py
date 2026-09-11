@@ -18,6 +18,22 @@ from ..utils.file_validation import sniff_mime_from_bytes
 from ..utils.validation import sanitize_filename
 
 
+def _human_size(size_bytes: int) -> str:
+    """A size an operator can act on.
+
+    `size_bytes // (1024 * 1024)` renders **"0MB"** for every cap below a
+    megabyte, and R-A8U introduced the first sub-megabyte caps on this service
+    (the 256 KB webhook body). A refusal that cannot say what the limit is
+    sends the caller back to guess.
+    """
+    size = int(size_bytes)
+    if size >= 1024 * 1024:
+        return f"{size // (1024 * 1024)}MB"
+    if size >= 1024:
+        return f"{size // 1024}KB"
+    return f"{size} bytes"
+
+
 class UploadTooLargeError(HTTPException):
     """A refusal, raised as one, at the seam that discovers it.
 
@@ -42,7 +58,7 @@ class UploadTooLargeError(HTTPException):
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=(
                 "Upload exceeds the maximum allowed file size "
-                f"({max_size_bytes // (1024 * 1024)}MB)"
+                f"({_human_size(max_size_bytes)})"
             ),
         )
         self.max_size_bytes = int(max_size_bytes)

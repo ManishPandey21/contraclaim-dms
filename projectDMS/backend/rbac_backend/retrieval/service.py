@@ -1031,12 +1031,18 @@ class RetrievalService:
                 # `routers/ai_assistant.py`. The exception was rendered whole
                 # too, and a retrieval failure can quote what it was searching.
                 # R-A8U, found by giving the Gate 5 bullet 5 guard dataflow.
+                # The status code as well as the type. Rendering only
+                # `type(resp).__name__` made a Qdrant 401 and a Qdrant timeout
+                # identical in the log - and a Qdrant 401 is precisely what the
+                # vector-loss incident was diagnosed from. A status code is a
+                # number; it carries none of the query.
                 logger.warning(
                     "Contract evidence retrieval failed: query_digest=%s "
-                    "query_len=%s error_type=%s",
+                    "query_len=%s error_type=%s error_status=%s",
                     hashlib.sha256(str(q).encode("utf-8")).hexdigest()[:16],
                     len(str(q)),
                     type(resp).__name__,
+                    getattr(resp, "status_code", None),
                 )
                 continue
             for res in resp.results:

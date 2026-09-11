@@ -157,7 +157,22 @@ class Settings(BaseSettings):
     # read the whole request body before anything could object to its size;
     # a provider webhook payload is a few kilobytes of JSON, so 256 KB is
     # generous and still four hundred times tighter than the gateway's 200 MB.
-    WEBHOOK_MAX_BODY_SIZE_KB: int = Field(default=256, validation_alias="WEBHOOK_MAX_BODY_SIZE_KB")
+    # 1 MB, not 256 KB. A Razorpay `subscription.charged` or a Stripe
+    # `invoice.*` with many line items or large `metadata` can exceed 256 KB,
+    # and a refused webhook is a **lost billing event**: the provider retries,
+    # the retries are refused identically, and after the retry window the event
+    # is gone. `ge=1` because `WEBHOOK_MAX_BODY_SIZE_KB=0` - the natural
+    # spelling for "no limit" - became `max(1, 0)` = one byte downstream, which
+    # 413s every webhook there is.
+    WEBHOOK_MAX_BODY_SIZE_KB: int = Field(default=1024, ge=1, validation_alias="WEBHOOK_MAX_BODY_SIZE_KB")
+    # The other endpoints an unauthenticated caller can reach. FastAPI
+    # materialises and parses a declared body model before the handler runs, so
+    # a per-field `max_length` and an IP rate limiter both decide after the
+    # memory has been held; `core/public_body_limit.py` decides before.
+    # Telemetry: `ClientErrorReport`'s own field caps total about 21 KB.
+    PUBLIC_TELEMETRY_MAX_BODY_SIZE_KB: int = Field(default=64, ge=1, validation_alias="PUBLIC_TELEMETRY_MAX_BODY_SIZE_KB")
+    # Credentials: an email and a password.
+    PUBLIC_AUTH_MAX_BODY_SIZE_KB: int = Field(default=16, ge=1, validation_alias="PUBLIC_AUTH_MAX_BODY_SIZE_KB")
     # 0 means "no attempt boundary". A positive value bounds the OCR pages one
     # attempt will run; the remainder is DEFERRED and re-claimed, never dropped.
     DOCUMENT_OCR_MAX_PAGES_PER_ATTEMPT: int = Field(
