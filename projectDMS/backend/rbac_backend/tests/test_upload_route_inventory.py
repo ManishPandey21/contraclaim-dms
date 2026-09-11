@@ -333,3 +333,55 @@ def test_the_dataclass_reports_unclassifiable_honestly() -> None:
     for field in ("read_method", "limit_source", "limit_before_read", "persistence_before_limit"):
         broken = UploadRoute(**{**clean.__dict__, field: UNCLASSIFIABLE})
         assert not broken.is_classifiable, field
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U: the one body-reading surface this inventory deliberately does not own #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_websocket_surface_is_exactly_the_one_that_was_reviewed() -> None:
+    """A websocket reads client-supplied messages and is not an HTTP route.
+
+    `routers/ws.py::websocket_notifications` does `await websocket.receive_text()`
+    with no application-level bound. It is **not** a hole of the same shape as
+    the four unauthenticated HTTP routes:
+
+    * it authenticates first - the JWT (or the auth cookie) is decoded and a
+      `user_id` established before the receive loop is ever entered, so an
+      anonymous caller cannot reach the read at all;
+    * uvicorn bounds a websocket message at its `ws_max_size`, 16 MB by default,
+      and this deployment does not raise it (no `ws_max_size` appears anywhere in
+      the backend, the Dockerfile or the compose files).
+
+    So it is **documented debt**, not a finding, and this test is what keeps that
+    statement true: it fails if a second websocket endpoint appears, or if this
+    one stops authenticating before it reads. Bounding it properly means a
+    per-message cap at the uvicorn layer, which is a deployment change rather
+    than a code one and belongs in its own phase.
+    """
+    sources = {
+        path.name: path.read_text(encoding="utf-8-sig")
+        for path in sorted(ROUTERS.rglob("*.py"))
+        if "__pycache__" not in path.parts
+    }
+
+    declaring = sorted(name for name, text in sources.items() if "@router.websocket" in text)
+    assert declaring == ["ws.py"], (
+        "a new websocket endpoint has appeared. A websocket reads client-supplied "
+        "messages and no upload guard here covers it; review its size bound and "
+        f"add it to this test in the same commit: {declaring}"
+    )
+
+    ws = sources["ws.py"]
+    auth_at = min(ws.index("jwt.decode"), ws.index("if not user_id"))
+    read_at = ws.index("receive_text")
+    assert auth_at < read_at, (
+        "the notifications websocket now reads from the client before it "
+        "establishes a user, which makes it an unauthenticated unbounded read"
+    )
+
+    assert "ws_max_size" not in ws, (
+        "ws.py now names ws_max_size; the 16 MB uvicorn default this debt is "
+        "recorded against may no longer be what applies"
+    )
