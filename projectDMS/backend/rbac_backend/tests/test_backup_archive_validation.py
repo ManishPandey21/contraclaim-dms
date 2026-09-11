@@ -473,3 +473,24 @@ def test_f_a8t2_2e_the_genuine_shapes_are_still_valid(tmp_path: Path) -> None:
 
     assert validate_archive(rdb, profile="redis-persistence").status == "VALID"
     assert validate_archive(aof, profile="redis-persistence").status == "VALID"
+
+
+def test_a_declared_contract_keeps_its_own_refusal_message(tmp_path: Path) -> None:
+    """R-A8U's first cut of F-A8T2-8 replaced it, and CI caught that.
+
+    The zero-payload rule belongs to the BARE contract. With `--require` or
+    `--any-of` in hand, the contract's own message names the entries it wanted -
+    `test_deployment_config.py` asserts the `any-of` refusal says "none of the
+    accepted entries are present" - and a generic "restores nothing" in its
+    place tells the operator strictly less.
+    """
+    archive = write_archive(tmp_path / "empty.tar.gz", {}, directories=("./",))
+
+    verdict = validate_archive(archive, any_of=("*dump.rdb", "*appendonlydir*"))
+
+    assert verdict.status == INVALID_CONTENT
+    assert "none of the accepted entries are present" in verdict.detail
+
+    required = validate_archive(archive, require=("*dump.rdb",))
+    assert required.status == INVALID_CONTENT
+    assert "absent or empty" in required.detail

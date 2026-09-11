@@ -379,7 +379,15 @@ def validate_archive(
     # as VALID under any invocation. The bare contract is now "readable, and it
     # holds at least one non-empty regular file": the weakest claim that is
     # still a claim about recoverability.
-    if not any(member.is_file and member.size > 0 for member in members):
+    #
+    # Only when NOTHING was declared. With a `--require`/`--any-of` contract in
+    # hand, that contract's own message names the entries it wanted, and CI
+    # caught this generic one replacing it: `test_deployment_config.py` asserts
+    # the `any-of` refusal says "none of the accepted entries are present".
+    # A refusal that stops saying what was expected is a worse refusal.
+    if not require and not any_of and not any(
+        member.is_file and member.size > 0 for member in members
+    ):
         return ArchiveVerdict(
             status=INVALID_CONTENT,
             contract=contract,
