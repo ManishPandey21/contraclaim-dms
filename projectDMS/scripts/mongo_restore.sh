@@ -82,12 +82,40 @@ ALLOW_PRODUCTION_RESTORE=${ALLOW_PRODUCTION_RESTORE:-}
 #: Names that mean production. `contraclaim` is the production database; `rs0` is
 #: the production replica set. A staging database name reached over the production
 #: replica set is still a production connection, so both are checked.
-PRODUCTION_DATABASES=${PRODUCTION_DATABASES:-"contraclaim"}
-PRODUCTION_REPLICA_SET=${PRODUCTION_REPLICA_SET:-"rs0"}
+DEFAULT_PRODUCTION_DATABASES="contraclaim"
+DEFAULT_PRODUCTION_REPLICA_SET="rs0"
+DEFAULT_PRODUCTION_HOSTS="mongo1 mongo2 mongo3 contraclaim-mongo1-1 contraclaim-mongo2-1 contraclaim-mongo3-1"
+
+PRODUCTION_DATABASES=${PRODUCTION_DATABASES:-$DEFAULT_PRODUCTION_DATABASES}
+PRODUCTION_REPLICA_SET=${PRODUCTION_REPLICA_SET:-$DEFAULT_PRODUCTION_REPLICA_SET}
 #: The production replica-set members by container hostname. A restore aimed at
 #: one of these with `directConnection=true` names no replica set, so the option
 #: check above is blind to it.
-PRODUCTION_HOSTS=${PRODUCTION_HOSTS:-"mongo1 mongo2 mongo3 contraclaim-mongo1-1 contraclaim-mongo2-1 contraclaim-mongo3-1"}
+PRODUCTION_HOSTS=${PRODUCTION_HOSTS:-$DEFAULT_PRODUCTION_HOSTS}
+
+# R-A8U / F-A8U-6. All three lists above are `${VAR:-default}`, so
+# `PRODUCTION_DATABASES=none PRODUCTION_HOSTS=none PRODUCTION_REPLICA_SET=none`
+# disables every refusal below - and unlike ALLOW_PRODUCTION_RESTORE it printed
+# nothing, so the evidence file recorded a clean run. A gate whose denylist the
+# caller can empty silently is not a gate. Narrowing it is now an explicit act
+# that is refused unless declared, and it is always echoed.
+denylist_overridden=""
+[[ "$PRODUCTION_DATABASES"   != "$DEFAULT_PRODUCTION_DATABASES"   ]] && denylist_overridden+="PRODUCTION_DATABASES "
+[[ "$PRODUCTION_REPLICA_SET" != "$DEFAULT_PRODUCTION_REPLICA_SET" ]] && denylist_overridden+="PRODUCTION_REPLICA_SET "
+[[ "$PRODUCTION_HOSTS"       != "$DEFAULT_PRODUCTION_HOSTS"       ]] && denylist_overridden+="PRODUCTION_HOSTS "
+if [[ -n "$denylist_overridden" ]]; then
+  if [[ "${ALLOW_PRODUCTION_DENYLIST_OVERRIDE:-}" != "1" && "${ALLOW_PRODUCTION_DENYLIST_OVERRIDE:-}" != "true" ]]; then
+    echo "REFUSED: the production denylist was narrowed by the caller (${denylist_overridden%% })." >&2
+    echo "These names are what stands between this restore and the production database." >&2
+    echo "Set ALLOW_PRODUCTION_DENYLIST_OVERRIDE=1 to declare it deliberate; the override" >&2
+    echo "is then recorded in the evidence." >&2
+    exit 1
+  fi
+  echo "WARNING: production denylist narrowed by the caller (${denylist_overridden%% })."
+fi
+echo "PRODUCTION_DATABASES=${PRODUCTION_DATABASES}"
+echo "PRODUCTION_REPLICA_SET=${PRODUCTION_REPLICA_SET}"
+echo "PRODUCTION_HOSTS=${PRODUCTION_HOSTS}"
 
 if [[ $# -lt 1 ]]; then
   usage
@@ -130,6 +158,25 @@ fi
 # --------------------------------------------------------------------------- #
 
 production_reason=""
+
+# R-A8U / F-A8U-5, a BLOCKER. `MONGO_DB` is validated as a literal here and
+# consumed as a namespace PATTERN at `--nsInclude="${MONGO_DB}.*"`. Inside
+# `[[ x == y ]]` the RIGHT side is the pattern, so `MONGO_DB='*'` compares
+# literally against "contraclaim" and does not match - and then restores
+# `--nsInclude="*.*"`, every namespace the archive carries, including
+# `contraclaim.*`, with no refusal, no ALLOW_PRODUCTION_RESTORE and no warning
+# line in the evidence. The post-restore verification agrees with it, because
+# `[[ "$ns" == "${MONGO_DB}."* ]]` puts the same unescaped value on the pattern
+# side. A database name is an identifier; glob metacharacters in one mean the
+# operator is not naming a database.
+if [[ "${MONGO_DB}" == *[!A-Za-z0-9_-]* ]]; then
+  echo "REFUSED: MONGO_DB='${MONGO_DB}' is not a database name." >&2
+  echo "It is interpolated into --nsInclude=\"\${MONGO_DB}.*\", where mongorestore treats" >&2
+  echo "* and ? as wildcards: '*' would restore every namespace in the archive, including" >&2
+  echo "the production database, past every check below. Use letters, digits, _ and - only." >&2
+  exit 1
+fi
+
 for name in $PRODUCTION_DATABASES; do
   if [[ "${MONGO_DB}" == "${name}" ]]; then
     production_reason="database ${MONGO_DB} is the production database"
@@ -144,7 +191,33 @@ done
 uri_lower=${MONGO_URI,,}
 rs_lower=${PRODUCTION_REPLICA_SET,,}
 
-if [[ -z "$production_reason" && "${uri_lower}" == *"replicaset=${rs_lower}"* ]]; then
+# R-A8U / F-A8U-7. Connection-string option VALUES are percent-encoded, and every
+# driver `url.QueryUnescape`s them before use: `?replicaSet=%72s0` is
+# `replicaSet=rs0` at connect time and walked past a literal substring test. The
+# option value is decoded before it is compared, and the comparison is against
+# the parsed option rather than against the whole URI.
+uri_query=""
+case "$uri_lower" in
+  *\?*) uri_query=${uri_lower#*\?} ;;
+esac
+
+percent_decode() {
+  # Pure bash: %XX -> the byte it names. `printf %b` reads \xNN.
+  local raw=$1
+  printf '%b' "${raw//%/\\x}"
+}
+
+uri_replica_set=""
+if [[ -n "$uri_query" ]]; then
+  IFS='&' read -r -a _uri_opts <<< "$uri_query"
+  for _opt in "${_uri_opts[@]}"; do
+    case "$_opt" in
+      replicaset=*) uri_replica_set=$(percent_decode "${_opt#replicaset=}") ;;
+    esac
+  done
+fi
+
+if [[ -z "$production_reason" && -n "$uri_replica_set" && "${uri_replica_set,,}" == "${rs_lower}" ]]; then
   production_reason="the URI names the production replica set ${PRODUCTION_REPLICA_SET}"
 fi
 
@@ -158,14 +231,40 @@ fi
 # against the production one above and passed. So this rule fires only on a URI
 # that names NO replica set - the genuinely ambiguous case - and its remedy is
 # to say which set is meant rather than to widen the list.
-if [[ -z "$production_reason" && "${uri_lower}" != *"replicaset="* ]]; then
-  for host in $PRODUCTION_HOSTS; do
-    host_lower=${host,,}
-    [[ -z "$host_lower" ]] && continue
-    if [[ "${uri_lower}" == *"@${host_lower}:"* || "${uri_lower}" == *"//${host_lower}:"*        || "${uri_lower}" == *",${host_lower}:"* || "${uri_lower}" == *"@${host_lower}/"*        || "${uri_lower}" == *"//${host_lower}/"* ]]; then
-      production_reason="the URI addresses ${host} and names no replica set, so it cannot be told apart from the production member of that name; add replicaSet=<set> to say which stack is meant"
-      break
-    fi
+#
+# R-A8U / F-A8U-8. The host rules were five substring patterns, every one of them
+# requiring a `:` or `/` immediately after the hostname. A port is optional in a
+# connection string, so all of these addressed production and matched none of
+# them:
+#
+#     mongodb://admin:pw@mongo1,mongo2,mongo3/admin     (host followed by `,`)
+#     mongodb://admin:pw@mongo1                          (host at end of string)
+#     mongodb://mongo1?directConnection=true             (host followed by `?`)
+#
+# The authority is parsed now instead: strip the scheme, cut at the first `/` or
+# `?`, drop credentials at the last `@`, split the host list on `,`, drop each
+# `:port`. The comparison is then an exact hostname match and no delimiter can
+# be spelled around.
+uri_authority=${uri_lower#*://}
+uri_authority=${uri_authority%%/*}
+uri_authority=${uri_authority%%\?*}
+uri_authority=${uri_authority##*@}
+
+if [[ -z "$production_reason" && -z "$uri_replica_set" ]]; then
+  IFS=',' read -r -a _uri_hosts <<< "$uri_authority"
+  for _uri_host in "${_uri_hosts[@]}"; do
+    _uri_host=${_uri_host%%:*}
+    _uri_host=${_uri_host#[}
+    _uri_host=${_uri_host%]}
+    [[ -z "$_uri_host" ]] && continue
+    for host in $PRODUCTION_HOSTS; do
+      host_lower=${host,,}
+      [[ -z "$host_lower" ]] && continue
+      if [[ "$_uri_host" == "$host_lower" ]]; then
+        production_reason="the URI addresses ${host} and names no replica set, so it cannot be told apart from the production member of that name; add replicaSet=<set> to say which stack is meant"
+        break 2
+      fi
+    done
   done
 fi
 

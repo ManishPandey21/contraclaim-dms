@@ -404,6 +404,9 @@ $STG config --format json > /tmp/staging-rendered.json
 python3 scripts/staging_teardown_guard.py \
   --project contraclaim-stg \
   --rendered-config /tmp/staging-rendered.json \
+  --compose-file docker-compose.prod.yml \
+  --compose-file docker-compose.mongo-replicaset.yml \
+  --compose-file docker-compose.staging.yml \
   -- $STG down -v --remove-orphans
 ```
 
@@ -414,13 +417,28 @@ unless **all** of the following hold:
   `contraclaim`, an empty `COMPOSE_PROJECT_NAME`, and any unrecognised name are
   all refused;
 * the rendered configuration names that same project;
-* the command line after `--` selects that same project;
+* the command after `--` **is** a `docker compose ... down` — R-A8U found the
+  old project rule satisfied by a decoy: `bash -c 'rm -rf /opt/contraclaim-dms'
+  -p contraclaim-stg` reported PASS and executed, because `bash -c CMD ARG` runs
+  `CMD` with `$0=ARG` and nothing checked what the command was;
+* the command selects that same project **before its subcommand** — a `-p` after
+  `down` is an argument to `down` and selects nothing;
+* the command's own `-f` set equals the `--compose-file` set that produced the
+  render — otherwise the guard inspects one configuration and authorises
+  another, and a staging render says nothing about
+  `-f docker-compose.prod.yml down -v`;
+* the render declares at least one volume or network — every rule below iterates
+  a mapping, so a 27-byte `{"name": "contraclaim-stg"}` satisfied all of them;
 * every declared volume and network resolves to a name under
   `contraclaim-stg_`, whether that name comes from the project prefix or from a
   pinned `name:`;
 * no volume or network is `external` — an external resource is attached by its
   literal name and survives `down -v`, so a disposable stack must own everything
-  it names.
+  it names;
+* no service bind-mounts a path under `/opt/contraclaim-dms`. `down -v` never
+  removes a bind mount, so this is not about teardown: a staging stack attached
+  to a production path reads and writes production data for the whole rehearsal,
+  and the volume and network rules see none of it.
 
 It decides over the *rendered* configuration rather than over the command line,
 because `external:` and a pinned `name:` are invisible in the command and are how

@@ -1081,3 +1081,196 @@ def test_f_a8t2_3e_the_staging_replica_set_is_still_allowed(harness) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "mongorestore" in result.stub_log
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U: what a second independent review found in the production refusal      #
+# --------------------------------------------------------------------------- #
+#
+# R-A8T Part 2 fixed the case-sensitivity of this refusal and the
+# `directConnection` blind spot. A second review, on the fix, found four more -
+# one of them a BLOCKER that walks past every rule at once. Each was reproduced
+# against the real script before a line changed.
+
+
+def test_f_a8u_5_a_glob_database_name_is_refused(harness) -> None:
+    """**BLOCKER.** `MONGO_DB` was validated as a literal and consumed as a
+    namespace *pattern*.
+
+    Inside `[[ x == y ]]` the RIGHT side is the pattern, so `MONGO_DB='*'`
+    compares literally against `contraclaim`, does not match, and reaches
+    `--nsInclude="*.*"` - every namespace the archive carries, including
+    `contraclaim.*`, restored into whatever the URI points at, with no refusal,
+    no `ALLOW_PRODUCTION_RESTORE` and no warning line in the evidence. The
+    post-restore verification agrees with it, because line 511 puts the same
+    unescaped value on the pattern side of its own comparison.
+    """
+    result = harness(db="*", env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "not a database name" in result.stderr
+    assert result.stub_log == "", "mongorestore was invoked with a wildcard namespace"
+
+
+@pytest.mark.parametrize(
+    "database",
+    [
+        pytest.param("*", id="star"),
+        pytest.param("contraclai?", id="question-mark"),
+        pytest.param("[c]ontraclaim", id="bracket-class"),
+        pytest.param("contraclaim.other", id="a-dot-crosses-the-namespace-separator"),
+        pytest.param("contra claim", id="whitespace"),
+        pytest.param("contraclaim;drop", id="a-shell-metacharacter"),
+    ],
+)
+def test_f_a8u_5_only_an_identifier_is_accepted_as_a_database_name(
+    harness, database: str
+) -> None:
+    """A database name is an identifier. Anything else means the operator is not
+    naming a database, and the value is interpolated into a namespace pattern."""
+    result = harness(db=database, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "not a database name" in result.stderr
+    assert result.stub_log == ""
+
+
+def test_f_a8u_5_a_real_database_name_is_still_accepted(harness) -> None:
+    """The false-positive boundary: the names actually in use must pass."""
+    result = harness(db="contraclaim_staging", env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param(
+            "mongodb://admin:pw@mongo1,mongo2,mongo3/admin", id="host-followed-by-comma"
+        ),
+        pytest.param("mongodb://admin:pw@mongo1", id="host-at-end-of-string"),
+        pytest.param(
+            "mongodb://mongo1?directConnection=true", id="host-followed-by-query"
+        ),
+        pytest.param(
+            "mongodb://admin:pw@mongo2,mongo1/admin", id="production-member-second"
+        ),
+        pytest.param("mongodb://admin:pw@MONGO1/admin", id="uppercase-host"),
+    ],
+)
+def test_f_a8u_8_a_portless_production_host_is_refused(harness, uri: str) -> None:
+    """The host rules were five substring patterns, each requiring a `:` or `/`
+    immediately after the hostname.
+
+    A port is optional in a connection string, so every URI here addresses a
+    production replica-set member and matched none of the five. The authority is
+    parsed now - scheme stripped, path and query cut, credentials dropped, host
+    list split on `,`, `:port` removed - and the comparison is an exact hostname
+    match, which no delimiter can be spelled around.
+    """
+    result = harness(uri=uri, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "names no replica set" in result.stderr
+    assert result.stub_log == ""
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param(
+            "mongodb://mongo1:27017/?replicaSet=%72s0", id="percent-encoded-r"
+        ),
+        pytest.param("mongodb://mongo1:27017/?replicaSet=r%73%30", id="two-encoded"),
+        pytest.param("mongodb://mongo1:27017/?replicaSet=RS0", id="uppercase"),
+        pytest.param("mongodb://mongo1:27017/?replicaset=rs0", id="lowercase-key"),
+    ],
+)
+def test_f_a8u_7_a_percent_encoded_production_replica_set_is_refused(
+    harness, uri: str
+) -> None:
+    """Option VALUES are percent-encoded and every driver unescapes them.
+
+    `?replicaSet=%72s0` is `replicaSet=rs0` at connect time and walked past a
+    literal substring test - and worse, its mere presence disabled the direct-
+    member host rule as well, so one encoded character defeated both at once.
+    """
+    result = harness(uri=uri, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "rs0" in result.stderr
+    assert result.stub_log == ""
+
+
+def test_f_a8u_7_a_staging_replica_set_against_a_shared_host_is_still_allowed(
+    harness,
+) -> None:
+    """The remedy the refusal prints has to work.
+
+    `mongo1` is a compose service name in both stacks, so a host match alone
+    cannot separate them. A URI that names its set has already been checked
+    against `rs0`; saying which stack is meant is the documented way through,
+    and it must not have been closed by the parsing fix.
+    """
+    result = harness(
+        uri="mongodb://mongo1:27017/?replicaSet=rsstg",
+        env={"RESTORE_EXEC_CONTEXT": "host"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_f_a8u_6_narrowing_the_denylist_is_refused_unless_declared(harness) -> None:
+    """Every list was `${VAR:-default}`, so the caller could empty all three.
+
+    Unlike `ALLOW_PRODUCTION_RESTORE`, which prints
+    `WARNING: production restore explicitly authorised`, this left **no** trace:
+    the evidence file recorded a clean run of a gate that had been switched off.
+    """
+    result = harness(
+        uri=PRODUCTION_URI,
+        db=PRODUCTION_DB,
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "PRODUCTION_DATABASES": "none",
+            "PRODUCTION_REPLICA_SET": "none",
+            "PRODUCTION_HOSTS": "none",
+        },
+    )
+
+    assert result.returncode != 0
+    assert "denylist was narrowed" in result.stderr
+    assert result.stub_log == ""
+
+
+def test_f_a8u_6_a_declared_override_runs_and_says_so(harness) -> None:
+    """A gate, not a wall - and the declaration reaches the evidence."""
+    result = harness(
+        env={"RESTORE_EXEC_CONTEXT": "host", "PRODUCTION_HOSTS": "mongo9"},
+    )
+
+    assert result.returncode != 0
+    assert "denylist was narrowed" in result.stderr
+
+    declared = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "PRODUCTION_HOSTS": "mongo9",
+            "ALLOW_PRODUCTION_DENYLIST_OVERRIDE": "1",
+        },
+    )
+
+    assert declared.returncode == 0, declared.stdout + declared.stderr
+    assert "denylist narrowed by the caller (PRODUCTION_HOSTS)" in declared.stdout
+
+
+def test_f_a8u_6_the_effective_denylist_reaches_the_evidence(harness) -> None:
+    """An operator reading the transcript can see what the gate was comparing
+    against. Without this the override warning is the only signal, and a
+    *narrowed* list that happens to equal the default prints nothing at all."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PRODUCTION_DATABASES=contraclaim" in result.stdout
+    assert "PRODUCTION_REPLICA_SET=rs0" in result.stdout
+    assert "PRODUCTION_HOSTS=mongo1 mongo2 mongo3" in result.stdout

@@ -69,6 +69,24 @@ def guard() -> ModuleType:
     return _load_guard()
 
 
+#: The compose files the real staging render is produced from. R-A8U requires the
+#: executed command's own `-f` set to equal the set that produced the render, so
+#: every test that supplies a command supplies these too.
+STAGING_COMPOSE_FILES = (
+    "docker-compose.prod.yml",
+    "docker-compose.mongo-replicaset.yml",
+    "docker-compose.staging.yml",
+)
+
+
+def _teardown_argv(project: str = "contraclaim-stg") -> list:
+    """The real teardown invocation, as the runbook writes it."""
+    argv = ["docker", "compose", "-p", project]
+    for name in STAGING_COMPOSE_FILES:
+        argv += ["-f", name]
+    return argv + ["down", "-v"]
+
+
 def _rendered(
     *,
     name: str = STAGING_PROJECT,
@@ -408,9 +426,12 @@ def test_a_command_line_that_targets_another_project_is_refused(
 def test_a_command_line_that_agrees_with_the_project_is_allowed(
     guard: ModuleType,
 ) -> None:
-    argv = ["docker", "compose", "-p", STAGING_PROJECT, "down", "-v"]
-
-    verdict = guard.assess(project=STAGING_PROJECT, rendered=_rendered(), argv=argv)
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
+    )
 
     assert verdict.allowed, _refusals(verdict)
 
@@ -536,34 +557,79 @@ def test_the_cli_allows_and_runs_the_command(guard: ModuleType, tmp_path: Path) 
     """The affirmative half of the CLI: an allowed command really is executed.
 
     The command carries `-p <staging project>` because the guard now requires
-    the executed command to select the checked project. Python ignores trailing
-    arguments after `-c`, so they reach `sys.argv` and the guard alike without
-    changing what runs. Before F-A8T2-1 this test used a command that named no
-    project at all - and so asserted, as intended behaviour, the very bypass
-    that let `docker compose -f docker-compose.prod.yml down -v` through.
+    the executed command to select the checked project. Before F-A8T2-1 this test
+    used a command that named no project at all - and so asserted, as intended
+    behaviour, the very bypass that let
+    `docker compose -f docker-compose.prod.yml down -v` through.
+
+    **R-A8U changed how it is driven, and the reason is the finding itself.**
+    The command it used to run was `python -c ... -p contraclaim-stg` - an
+    arbitrary program wearing a decoy project token, which is exactly the shape
+    that let `bash -c 'rm -rf /opt/contraclaim-dms' -p contraclaim-stg` report
+    PASS and execute. Only `docker compose ... down` is authorised now, and this
+    host has no docker binary to hand a test, so the affirmative is proved
+    through `main()` with `subprocess.call` intercepted: it records the exact
+    argv handed to it, which is stronger evidence than a witness file that only
+    says something ran.
     """
 
     rendered = tmp_path / "rendered.json"
     rendered.write_text(json.dumps(_rendered()), encoding="utf-8")
-    witness = tmp_path / "witness"
+    executed: List[List[str]] = []
 
-    result = _run_cli(
-        [
-            "--project",
-            STAGING_PROJECT,
-            "--rendered-config",
-            str(rendered),
-            "--",
-            sys.executable,
-            "-c",
-            f"open({str(witness)!r}, 'w').write('ran')",
-            "-p",
-            STAGING_PROJECT,
-        ]
-    )
+    original = guard.subprocess.call
+    guard.subprocess.call = lambda command, *a, **k: (executed.append(list(command)), 0)[1]
+    try:
+        code = guard.main(
+            [
+                "--project",
+                STAGING_PROJECT,
+                "--rendered-config",
+                str(rendered),
+                *[arg for name in STAGING_COMPOSE_FILES for arg in ("--compose-file", name)],
+                "--",
+                *_teardown_argv(),
+            ]
+        )
+    finally:
+        guard.subprocess.call = original
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert witness.read_text(encoding="utf-8") == "ran"
+    assert code == 0
+    assert executed == [_teardown_argv()], executed
+
+
+def test_the_cli_does_not_run_a_refused_command(guard: ModuleType, tmp_path: Path) -> None:
+    """The negative half of the same measurement.
+
+    Without this, an interception that recorded nothing would make the test
+    above pass by never executing anything at all.
+    """
+
+    rendered = tmp_path / "rendered.json"
+    rendered.write_text(json.dumps(_rendered()), encoding="utf-8")
+    executed: List[List[str]] = []
+
+    original = guard.subprocess.call
+    guard.subprocess.call = lambda command, *a, **k: (executed.append(list(command)), 0)[1]
+    try:
+        code = guard.main(
+            [
+                "--project",
+                STAGING_PROJECT,
+                "--rendered-config",
+                str(rendered),
+                *[arg for name in STAGING_COMPOSE_FILES for arg in ("--compose-file", name)],
+                "--",
+                "docker", "compose", "-p", "contraclaim",
+                *[arg for name in STAGING_COMPOSE_FILES for arg in ("-f", name)],
+                "down", "-v",
+            ]
+        )
+    finally:
+        guard.subprocess.call = original
+
+    assert code == guard.EXIT_REFUSED
+    assert executed == [], executed
 
 
 def test_f_a8t2_1e_the_cli_refuses_and_does_not_run_a_command_naming_no_project(
@@ -750,13 +816,8 @@ def test_f_a8t2_1c_the_correct_staging_teardown_is_still_allowed(guard: ModuleTy
     verdict = guard.assess(
         project=STAGING_PROJECT,
         rendered=_staging_named_render(STAGING_PROJECT),
-        argv=[
-            "docker", "compose", "-p", STAGING_PROJECT,
-            "-f", "docker-compose.prod.yml",
-            "-f", "docker-compose.mongo-replicaset.yml",
-            "-f", "docker-compose.staging.yml",
-            "down", "-v",
-        ],
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
     )
 
     assert verdict.allowed, _refusals(verdict)
@@ -769,6 +830,241 @@ def test_f_a8t2_1d_an_empty_command_is_still_a_pure_check(guard: ModuleType) -> 
         project=STAGING_PROJECT,
         rendered=_staging_named_render(STAGING_PROJECT),
         argv=[],
+    )
+
+    assert verdict.allowed, _refusals(verdict)
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U / F-A8U-3: the guard authorised a command it had never inspected       #
+# --------------------------------------------------------------------------- #
+#
+# F-A8T2-1 required the executed command to carry a `-p` naming the checked
+# project. A second independent review found that rule satisfied by a **decoy**:
+#
+#     staging_teardown_guard.py --project contraclaim-stg
+#       --rendered-config minimal.json
+#       -- bash -c 'rm -rf /opt/contraclaim-dms' -p contraclaim-stg
+#
+# `bash -c CMD ARG` runs CMD with `$0=ARG`, so the token costs nothing and the
+# command is not a compose command at all. Reproduced: PASS, exit 0, the command
+# executed. The module docstring names `rm -rf /opt/contraclaim-dms` as the
+# shape it exists to stop.
+#
+# Three rules close it, and each is tested on its own because a fix that needed
+# all three to fire would be one rename away from firing none.
+
+
+def test_f_a8u_3a_an_arbitrary_command_is_refused_however_it_names_the_project(
+    guard: ModuleType,
+) -> None:
+    """The reproduction, as an assertion."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=["bash", "-c", "rm -rf /opt/contraclaim-dms", "-p", STAGING_PROJECT],
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any("not docker compose" in refusal for refusal in verdict.refusals), _refusals(
+        verdict
+    )
+
+
+def test_f_a8u_3b_a_project_token_after_the_subcommand_selects_nothing(
+    guard: ModuleType,
+) -> None:
+    """`-p` is a compose GLOBAL option. After `down` it is an argument to `down`.
+
+    This is what made the decoy work, and it is the rule that still holds if
+    somebody widens the entrypoint allowlist later.
+    """
+
+    argv = ["docker", "compose"]
+    for name in STAGING_COMPOSE_FILES:
+        argv += ["-f", name]
+    argv += ["down", "-v", "-p", STAGING_PROJECT]
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=argv,
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any("selects no compose project" in refusal for refusal in verdict.refusals), (
+        _refusals(verdict)
+    )
+
+
+def test_f_a8u_3c_a_compose_command_that_is_not_a_teardown_is_refused(
+    guard: ModuleType,
+) -> None:
+    """`up -d` inspected as if it were `down -v` authorises the wrong thing."""
+
+    argv = ["docker", "compose", "-p", STAGING_PROJECT]
+    for name in STAGING_COMPOSE_FILES:
+        argv += ["-f", name]
+    argv += ["up", "-d"]
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=argv,
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any("no `down` verb" in refusal for refusal in verdict.refusals), _refusals(verdict)
+
+
+def test_f_a8u_3d_the_render_must_be_a_render_of_the_command_that_runs(
+    guard: ModuleType,
+) -> None:
+    """The gap underneath the decoy: nothing tied the document to the command.
+
+    A staging render says nothing whatever about
+    `docker compose -p contraclaim-stg -f docker-compose.prod.yml down -v`, whose
+    pinned and external volume names are exactly what `_effective_name` exists to
+    catch - in a file the guard never read.
+    """
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=[
+            "docker",
+            "compose",
+            "-p",
+            STAGING_PROJECT,
+            "-f",
+            "docker-compose.prod.yml",
+            "down",
+            "-v",
+        ],
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any(
+        "not the files that produced the render" in refusal for refusal in verdict.refusals
+    ), _refusals(verdict)
+
+
+def test_f_a8u_3e_a_command_with_no_declared_compose_files_is_refused(
+    guard: ModuleType,
+) -> None:
+    """Fail closed. An undeclared file set cannot be compared with anything."""
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=_rendered(),
+        argv=_teardown_argv(),
+        compose_files=(),
+    )
+
+    assert not verdict.allowed
+    assert any("no --compose-file was declared" in refusal for refusal in verdict.refusals), (
+        _refusals(verdict)
+    )
+
+
+def test_f_a8u_3f_a_render_declaring_nothing_is_refused(guard: ModuleType) -> None:
+    """The 27-byte document that satisfied every rule by being empty.
+
+    `rendered.get("volumes") or {}` yields `{}` and `_check_resources` finds no
+    fault in an empty mapping, so the guard printed
+    "volumes that will be destroyed (0)" and called it a pass.
+    """
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered={"name": STAGING_PROJECT},
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any(
+        "declares no volumes and no networks" in refusal for refusal in verdict.refusals
+    ), _refusals(verdict)
+
+
+# --------------------------------------------------------------------------- #
+# R-A8U / F-A8U-4: a bind mount reaches production without declaring anything  #
+# --------------------------------------------------------------------------- #
+
+
+def test_f_a8u_4a_a_service_bind_mounting_a_production_path_is_refused(
+    guard: ModuleType,
+) -> None:
+    """`down -v` never removes a bind mount, so this is not about teardown.
+
+    A staging service mounted at `/opt/contraclaim-dms/data` reads and writes
+    production data for the whole rehearsal, and the volumes-and-networks rules
+    see none of it because the render declares neither.
+    """
+
+    rendered = _rendered()
+    rendered["services"] = {
+        "backend": {
+            "volumes": [
+                {"type": "bind", "source": "/opt/contraclaim-dms/data", "target": "/data"}
+            ]
+        }
+    }
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=rendered,
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any("inside the production path" in refusal for refusal in verdict.refusals), (
+        _refusals(verdict)
+    )
+
+
+def test_f_a8u_4b_the_short_form_bind_mount_is_caught_too(guard: ModuleType) -> None:
+    """Compose accepts `- /host:/container`, and a render can carry either form."""
+
+    rendered = _rendered()
+    rendered["services"] = {"worker": {"volumes": ["/opt/contraclaim-dms:/app:ro"]}}
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=rendered,
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
+    )
+
+    assert not verdict.allowed
+    assert any("inside the production path" in refusal for refusal in verdict.refusals), (
+        _refusals(verdict)
+    )
+
+
+def test_f_a8u_4c_an_unrelated_bind_mount_is_not_banned(guard: ModuleType) -> None:
+    """The false-positive boundary: staging legitimately mounts its own paths."""
+
+    rendered = _rendered()
+    rendered["services"] = {
+        "backend": {"volumes": ["/opt/contraclaim-stg/uploads:/uploads"]},
+        "gateway": {
+            "volumes": [{"type": "bind", "source": "/etc/ssl/certs", "target": "/certs"}]
+        },
+    }
+
+    verdict = guard.assess(
+        project=STAGING_PROJECT,
+        rendered=rendered,
+        argv=_teardown_argv(),
+        compose_files=STAGING_COMPOSE_FILES,
     )
 
     assert verdict.allowed, _refusals(verdict)
