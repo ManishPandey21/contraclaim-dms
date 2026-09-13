@@ -105,10 +105,18 @@ class MigrationRunner:
     async def _ensure_ledger_index(self) -> None:
         await _collection(self.db, LEDGER_COLLECTION).create_index("version", unique=True, background=True)
 
-    async def applied_versions(self) -> set[str]:
+    async def applied_ledger_rows(self) -> List[Dict[str, Any]]:
+        """Every ledger document, including versions this catalogue has no code for."""
         cursor = _collection(self.db, LEDGER_COLLECTION).find({})
-        docs = await _to_list(cursor)
-        return {str(doc.get("version") or doc.get("_id")) for doc in docs if doc.get("version") or doc.get("_id")}
+        return await _to_list(cursor)
+
+    @staticmethod
+    def _ledger_version(doc: Dict[str, Any]) -> str:
+        return str(doc.get("version") or doc.get("_id") or "")
+
+    async def applied_versions(self) -> set[str]:
+        rows = await self.applied_ledger_rows()
+        return {self._ledger_version(doc) for doc in rows if self._ledger_version(doc)}
 
     def available_versions(self) -> List[str]:
         return [migration.version for migration in self.migrations]
@@ -122,7 +130,27 @@ class MigrationRunner:
         return selected
 
     async def plan(self, target: str | None = None) -> List[Dict[str, Any]]:
-        applied = await self.applied_versions()
+        """The catalogue against the ledger - in both directions (F-A8V-2).
+
+        This used to iterate the catalogue and ask the ledger only whether each
+        entry was present, so a ledger row naming a migration this deployment
+        has no code for appeared nowhere. Production carries two of them
+        (`20260730_0001`, `20260806_0001`), applied by a deployment whose code
+        has since left the line: `--list` reported 16 applied and 3 pending
+        against a ledger holding 18 rows, and did not mention the difference.
+
+        A database carrying schema effects that nothing forward-only will ever
+        re-derive is exactly what a restore-and-upgrade drill is for, so it is
+        reported. It is *only* reported: an unknown version is still ignored for
+        ordering and for execution, which is what a forward-only runner owes.
+
+        ``target`` bounds what may run, never what is said about the database -
+        otherwise the narrowest target would produce the quietest report.
+        """
+        ledger_rows = await self.applied_ledger_rows()
+        applied = {self._ledger_version(doc) for doc in ledger_rows if self._ledger_version(doc)}
+        catalogued = {migration.version for migration in self.migrations}
+
         rows = []
         for migration in self.selected_migrations(target):
             rows.append(
@@ -133,6 +161,27 @@ class MigrationRunner:
                     "status": "applied" if migration.version in applied else "pending",
                 }
             )
+
+        reported: set[str] = set()
+        for doc in ledger_rows:
+            version = self._ledger_version(doc)
+            if not version or version in catalogued or version in reported:
+                continue
+            reported.add(version)
+            rows.append(
+                {
+                    "version": version,
+                    "name": str(doc.get("name") or "<unknown>"),
+                    "description": str(
+                        doc.get("description")
+                        or "Recorded as applied by this database, but no migration with "
+                        "this version exists in this deployment's catalogue."
+                    ),
+                    "status": "applied_not_in_catalogue",
+                }
+            )
+
+        rows.sort(key=lambda row: row["version"])
         return rows
 
     async def run(self, *, apply: bool = False, target: str | None = None) -> List[MigrationResult]:
