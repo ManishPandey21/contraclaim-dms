@@ -7,22 +7,33 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# The base image lags debian-security, and `--ignore-unfixed` cannot suppress a
-# finding that HAS a fix - nor should it, because a fixed advisory against a
-# package this image ships is exactly what the gate is for.
+# `apt-get upgrade` before the install. The base image lags debian-security, and
+# `--ignore-unfixed` cannot suppress a finding that HAS a fix - nor should it,
+# because a fixed advisory against a package this image ships is exactly what
+# the gate is for.
 #
-# On 2026-09-13 the exact CI Trivy policy reported five HIGH findings against
-# this image, none from the install list below and all already fixed upstream:
-# gzip CVE-2026-41992, libpcre2-8-0 CVE-2026-86145 / CVE-2026-89161, and
-# libsqlite3-0 CVE-2026-11822 / CVE-2026-11824. The same Dockerfile was green
-# two days earlier - nothing here changed, the vulnerability database did.
+# THIS REPLACES THE BY-NAME UPGRADE LIST, and the reversal is the point.
+# On 2026-09-13 the exact CI Trivy policy went red on a tree whose Dockerfiles
+# had not changed - the vulnerability database moved. It was fixed by name,
+# twice, and came back a third time:
 #
-# Upgraded by name rather than with a blanket `apt-get upgrade`, matching
-# client/Dockerfile: the image changes only where a fix is actually needed.
-# That is an instance-level remedy for a class that gains members on Debian's
-# schedule, and the class is recorded as release debt rather than closed here.
+#   backend    5 HIGH   gzip, libpcre2-8-0 x2, libsqlite3-0 x2      (trixie)
+#   client     2 HIGH   libpcre2-8-0 x2                             (bookworm)
+#   langgraph  12       the same three, PLUS perl-base 3 CRITICAL   (trixie)
+#              (9 HIGH, 3 CRITICAL)
+#
+# Three images, three different lists, one advisory wave, one day. And the
+# backend's list was right only by accident: it escaped perl-base because its
+# own install list happens to pull a newer perl, which is not a property anyone
+# chose or could rely on. A hand-maintained list is the part of this that goes
+# stale, on Debian's schedule rather than on ours, and a release window that
+# opens days from now would find it stale again.
+#
+# `apt-get upgrade` still changes the image only where a fix is actually needed -
+# which is what the by-name comment set out to achieve. It lets apt decide which
+# packages those are instead of a human who last looked on a particular day.
 RUN apt-get update \
-    && apt-get install -y --only-upgrade gzip libpcre2-8-0 libsqlite3-0 \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \

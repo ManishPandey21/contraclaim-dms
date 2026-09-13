@@ -6,7 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+# The base image lags debian-security. Its packages are upgraded before anything
+# else is installed, so a fix Debian has already published does not ship here as
+# a fixed-but-unapplied finding. See backend/Dockerfile for why this is a
+# blanket upgrade rather than a by-name list.
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 

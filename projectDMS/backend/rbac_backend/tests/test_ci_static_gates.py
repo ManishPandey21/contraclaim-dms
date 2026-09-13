@@ -607,3 +607,106 @@ def test_every_variable_the_disk_reclaim_step_expands_has_a_default() -> None:
     assert not undefaulted, (
         f"these expand without a default under `set -u`: {sorted(set(undefaulted))}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# R-A8V / F-A8V-4 - an image that installs from apt must also upgrade from it
+# --------------------------------------------------------------------------- #
+#
+# `docker-build-and-scan` went red three times in one day on a tree whose
+# Dockerfiles had not changed. The vulnerability database moved, and the exact
+# CI Trivy policy (`--ignore-unfixed --severity CRITICAL,HIGH --exit-code 1`)
+# started reporting base-image packages that Debian had already fixed:
+#
+#   backend    5 HIGH   gzip, libpcre2-8-0 x2, libsqlite3-0 x2      (trixie)
+#   client     2 HIGH   libpcre2-8-0 x2                             (bookworm)
+#   langgraph  12       the same three, PLUS perl-base 3 CRITICAL   (trixie)
+#
+# `--ignore-unfixed` cannot suppress a finding that HAS a fix, and it should
+# not. It was fixed by name twice and came back a third time against a different
+# list - and the backend escaped `perl-base` only because its own install list
+# happens to pull a newer perl, which is not a property anyone chose.
+#
+# The list was the defect. This gate keeps the remedy from decaying back into
+# one: an image that installs packages from apt must upgrade the base's packages
+# in the same instruction, so the next advisory wave is absorbed at build time
+# rather than discovered in a release window.
+
+_APT_INSTALL = re.compile(r"apt-get\s+install\b")
+_APT_UPGRADE = re.compile(r"apt-get\s+upgrade\b")
+
+
+def _dockerfiles() -> list[Path]:
+    found = [
+        path
+        for path in (GIT_ROOT / "projectDMS").rglob("Dockerfile*")
+        if path.is_file() and "node_modules" not in path.parts
+    ]
+    assert found, "no Dockerfile was found; this gate must not pass by measuring nothing"
+    return sorted(found)
+
+
+def _apt_run_instructions(text: str) -> list[str]:
+    """Each RUN instruction, line continuations folded, that installs from apt."""
+    folded = text.replace("\\\n", " ")
+    return [
+        line
+        for line in folded.splitlines()
+        if line.lstrip().startswith("RUN ") and _APT_INSTALL.search(line)
+    ]
+
+
+def test_every_apt_install_upgrades_the_base_in_the_same_instruction() -> None:
+    offenders: list[str] = []
+    measured = 0
+    for path in _dockerfiles():
+        for instruction in _apt_run_instructions(path.read_text(encoding="utf-8")):
+            measured += 1
+            if not _APT_UPGRADE.search(instruction):
+                offenders.append(f"{path.relative_to(GIT_ROOT)}: {instruction.strip()[:110]}")
+
+    assert measured, (
+        "no apt install instruction was found in any Dockerfile. Either the images "
+        "stopped using apt or this gate stopped reading them; both mean it is "
+        "measuring nothing, which is the one outcome it must never report as a pass."
+    )
+    assert not offenders, (
+        "these images install packages from apt without upgrading the base's own "
+        "packages in the same instruction, so a fix Debian has already published "
+        "ships as a fixed-but-unapplied HIGH under the CI Trivy policy:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+def test_the_gate_would_notice_an_instruction_that_stopped_upgrading() -> None:
+    """The negative control. Without it, a regex that matches nothing would make
+    the gate above pass for every Dockerfile in the repository."""
+    without_upgrade = (
+        "FROM python:3.12-slim\n"
+        "RUN apt-get update \\\n"
+        "    && apt-get install -y --no-install-recommends curl \\\n"
+        "    && rm -rf /var/lib/apt/lists/*\n"
+    )
+    with_upgrade = without_upgrade.replace(
+        "&& apt-get install", "&& apt-get upgrade -y \\\n    && apt-get install"
+    )
+
+    bad = _apt_run_instructions(without_upgrade)
+    good = _apt_run_instructions(with_upgrade)
+
+    assert len(bad) == 1 and not _APT_UPGRADE.search(bad[0])
+    assert len(good) == 1 and _APT_UPGRADE.search(good[0])
+
+
+def test_no_dockerfile_still_carries_a_by_name_upgrade_list() -> None:
+    """`--only-upgrade <names>` is the remedy that failed. It is not forbidden
+    on principle - it is forbidden because a list of package names is a fact
+    about one day, and this repository has now been red three times proving it."""
+    offenders = [
+        str(path.relative_to(GIT_ROOT))
+        for path in _dockerfiles()
+        if "--only-upgrade" in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        "a by-name upgrade list has come back in: " + ", ".join(offenders)
+    )
