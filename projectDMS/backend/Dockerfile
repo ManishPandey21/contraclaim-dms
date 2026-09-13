@@ -7,7 +7,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# The base image lags debian-security, and `--ignore-unfixed` cannot suppress a
+# finding that HAS a fix - nor should it, because a fixed advisory against a
+# package this image ships is exactly what the gate is for.
+#
+# On 2026-09-13 the exact CI Trivy policy reported five HIGH findings against
+# this image, none from the install list below and all already fixed upstream:
+# gzip CVE-2026-41992, libpcre2-8-0 CVE-2026-86145 / CVE-2026-89161, and
+# libsqlite3-0 CVE-2026-11822 / CVE-2026-11824. The same Dockerfile was green
+# two days earlier - nothing here changed, the vulnerability database did.
+#
+# Upgraded by name rather than with a blanket `apt-get upgrade`, matching
+# client/Dockerfile: the image changes only where a fix is actually needed.
+# That is an instance-level remedy for a class that gains members on Debian's
+# schedule, and the class is recorded as release debt rather than closed here.
 RUN apt-get update \
+    && apt-get install -y --only-upgrade gzip libpcre2-8-0 libsqlite3-0 \
     && apt-get install -y --no-install-recommends \
         build-essential \
         curl \
