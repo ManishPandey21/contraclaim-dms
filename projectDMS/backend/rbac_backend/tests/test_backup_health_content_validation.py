@@ -14,6 +14,8 @@ proven.
 from __future__ import annotations
 
 import gzip
+import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -39,6 +41,55 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 BACKUP_STATUS = REPO_ROOT / "scripts" / "backup_status.py"
 
 NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+#: The age of an artifact here was a relationship between two clocks that never
+#: agreed: the fixtures are written now, so they carry the REAL mtime, while
+#: `now` is a frozen literal. `build_backup_health` reads freshness from
+#: `path.stat().st_mtime` (`operations_health.py:79`), so the age each test
+#: measured was `frozen_now - wall_clock`, which changes every day.
+#:
+#: `test_staleness_is_still_reported` passes `now = NOW + 5 days` and asserts
+#: STALE, so it held only while the wall clock was more than 26 hours before
+#: 2026-09-13T12:00Z. It went red on 2026-09-12T10:00Z, in CI, on a commit that
+#: touched nothing near it - and the tests around it, which assert *fresh*, were
+#: passing for the mirror-image reason: `NOW` sits in the past relative to a
+#: real mtime, so their age was negative and no freshness bound could ever have
+#: been exceeded. A fresh verdict that cannot go stale is not a measurement.
+#:
+#: So the mtimes are now stated rather than inherited: every fixture file is
+#: pinned to the timestamp its own NAME already claims, immediately before the
+#: measurement. Both directions then become real, and neither depends on the day
+#: the suite runs.
+_STAMP_IN_NAME = re.compile(r"-(\d{8})-(\d{6})")
+_DEFAULT_STAMP = datetime(2026, 9, 8, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def _stamp_of(path: Path) -> datetime:
+    match = _STAMP_IN_NAME.search(path.name)
+    if not match:
+        return _DEFAULT_STAMP
+    return datetime.strptime(match.group(1) + match.group(2), "%Y%m%d%H%M%S").replace(
+        tzinfo=timezone.utc
+    )
+
+
+def _freeze_mtimes(root: Path) -> Path:
+    for path in root.rglob("*"):
+        if path.is_file():
+            when = _stamp_of(path).timestamp()
+            os.utime(path, (when, when))
+    return root
+
+
+def _health(root: Path, **kwargs) -> dict:
+    """`build_backup_health` over a root whose ages are stated, not inherited.
+
+    Also makes `_latest_file`'s mtime ordering deterministic: two archives
+    written in one test can share a wall-clock mtime at the filesystem's
+    resolution, and after this they are ordered by the stamps in their names.
+    """
+    _freeze_mtimes(root)
+    return build_backup_health(str(root), **kwargs)
 
 
 def _gzip(path: Path, payload: bytes) -> Path:
@@ -88,7 +139,7 @@ def _replace_falkor_archive(tmp_path: Path) -> Path:
 
 
 def test_a_backup_root_carrying_real_archives_is_healthy(tmp_path: Path) -> None:
-    result = build_backup_health(str(_healthy_root(tmp_path)), max_age_hours=26, now=NOW)
+    result = _health(_healthy_root(tmp_path), max_age_hours=26, now=NOW)
 
     assert result["status"] == "ok"
     assert result["unhealthy_artifacts"] == []
@@ -102,7 +153,7 @@ def test_the_eighty_nine_byte_falkordb_archive_is_no_longer_ok(tmp_path: Path) -
     empty = write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
     assert empty.stat().st_size < 200, "this must be the artefact production actually produces"
 
-    result = build_backup_health(str(root), max_age_hours=26, now=NOW)
+    result = _health(root, max_age_hours=26, now=NOW)
 
     assert result["artifacts"]["falkordb-data"]["status"] == INVALID_CONTENT
     assert result["status"] == "failed"
@@ -116,7 +167,7 @@ def test_the_r_a8o_nested_rescue_archive_is_reported_as_the_wrong_root(tmp_path:
         {"FalkorDB/dump.rdb": RDB_BYTES},
     )
 
-    result = build_backup_health(str(root), max_age_hours=26, now=NOW)
+    result = _health(root, max_age_hours=26, now=NOW)
 
     assert result["artifacts"]["falkordb-data"]["status"] == INVALID_ROOT
     assert result["status"] == "failed"
@@ -128,7 +179,7 @@ def test_an_artifact_with_no_content_contract_is_unverified_never_ok(tmp_path: P
     They must not be reported with the same word as an archive that was opened
     and found to carry a graph.
     """
-    result = build_backup_health(str(_healthy_root(tmp_path)), max_age_hours=26, now=NOW)
+    result = _health(_healthy_root(tmp_path), max_age_hours=26, now=NOW)
 
     for label in ("manifest", "mongo", "backend-uploads"):
         assert result["artifacts"][label]["status"] == UNVERIFIED
@@ -139,15 +190,15 @@ def test_an_artifact_with_no_content_contract_is_unverified_never_ok(tmp_path: P
 
 def test_no_artifact_is_ever_reported_as_ok(tmp_path: Path) -> None:
     """The word that made F3 possible is gone from the per-artifact vocabulary."""
-    result = build_backup_health(str(_healthy_root(tmp_path)), max_age_hours=26, now=NOW)
+    result = _health(_healthy_root(tmp_path), max_age_hours=26, now=NOW)
 
     for artifact in result["artifacts"].values():
         assert artifact["status"] != "ok"
 
 
 def test_staleness_is_still_reported(tmp_path: Path) -> None:
-    result = build_backup_health(
-        str(_healthy_root(tmp_path)),
+    result = _health(
+        _healthy_root(tmp_path),
         max_age_hours=26,
         now=NOW + timedelta(days=5),
     )
@@ -162,7 +213,7 @@ def test_an_invalid_archive_outranks_its_freshness(tmp_path: Path) -> None:
     root = _replace_falkor_archive(tmp_path)
     write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
 
-    result = build_backup_health(str(root), max_age_hours=26, now=NOW)
+    result = _health(root, max_age_hours=26, now=NOW)
 
     assert result["artifacts"]["falkordb-data"]["status"] == INVALID_CONTENT
 
@@ -172,7 +223,7 @@ def test_a_missing_artifact_is_still_missing(tmp_path: Path) -> None:
     for path in (root / "volumes").glob("falkordb-data-*.tar.gz"):
         path.unlink()
 
-    result = build_backup_health(str(root), max_age_hours=26, now=NOW)
+    result = _health(root, max_age_hours=26, now=NOW)
 
     assert result["artifacts"]["falkordb-data"]["status"] == MISSING
     assert result["missing_artifacts"] == ["falkordb-data"]
@@ -187,7 +238,7 @@ def test_freshness_only_mode_claims_nothing_about_content(tmp_path: Path) -> Non
     root = _replace_falkor_archive(tmp_path)
     write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
 
-    result = build_backup_health(str(root), max_age_hours=26, now=NOW, verify_content=False)
+    result = _health(root, max_age_hours=26, now=NOW, verify_content=False)
 
     assert result["artifacts"]["falkordb-data"]["status"] == UNEVALUATED
     assert "falkordb-data" in result["unevaluated_artifacts"]
@@ -199,8 +250,9 @@ def test_freshness_only_mode_claims_nothing_about_content(tmp_path: Path) -> Non
 
 
 def test_the_status_cli_fails_on_an_empty_falkordb_archive(tmp_path: Path) -> None:
-    root = _replace_falkor_archive(tmp_path)
+    root = _freeze_mtimes(_replace_falkor_archive(tmp_path))
     write_empty_data_archive(root / "volumes" / "falkordb-data-20260908-020000.tar.gz")
+    _freeze_mtimes(root)
 
     result = subprocess.run(
         [sys.executable, str(BACKUP_STATUS), "--root", str(root), "--max-age-hours", "100000"],
@@ -224,8 +276,8 @@ def test_an_archive_above_the_inline_ceiling_is_unevaluated_and_unhealthy(tmp_pa
     root = _replace_falkor_archive(tmp_path)
     _tar(root / "volumes" / "falkordb-data-20260908-020000.tar.gz", {"./dump.rdb": RDB_BYTES})
 
-    result = build_backup_health(
-        str(root),
+    result = _health(
+        root,
         max_age_hours=26,
         now=NOW,
         max_inline_validation_bytes=1,
