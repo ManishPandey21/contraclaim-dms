@@ -710,3 +710,77 @@ def test_no_dockerfile_still_carries_a_by_name_upgrade_list() -> None:
     assert not offenders, (
         "a by-name upgrade list has come back in: " + ", ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------- #
+# R-A8V / F-A8V-5 - a scan that ran out of time has not found nothing
+# --------------------------------------------------------------------------- #
+#
+# `projectdms-docling` hit the trivy-action's 5-minute default and died with
+# `context deadline exceeded`. The job treated that as a failure, which is
+# right - an undecidable scan is not a pass - and the remedy is to let it reach
+# a verdict rather than to shrink what it looks for.
+#
+# The risk in that remedy is that a timeout and a waiver are edited in the same
+# place, and a relaxed `severity` or an `exit-code: "0"` would look exactly like
+# housekeeping in the diff. So the policy is pinned per step, not per file: every
+# image scan must carry the same four flags AND a bound larger than the default
+# that failed.
+
+_REQUIRED_TRIVY_POLICY = {
+    "format": "table",
+    "exit-code": "1",
+    "ignore-unfixed": True,
+    "severity": "CRITICAL,HIGH",
+}
+
+
+def _trivy_steps() -> list[dict]:
+    workflow = yaml.safe_load((GIT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        if "trivy-action" in str(step.get("uses", ""))
+    ]
+    assert steps, "no Trivy step was found in ci.yml; this gate must not pass by measuring nothing"
+    return steps
+
+
+def test_every_image_scan_keeps_the_whole_policy() -> None:
+    for step in _trivy_steps():
+        options = step["with"]
+        image = str(options.get("image-ref", "<unnamed>"))
+        for key, expected in _REQUIRED_TRIVY_POLICY.items():
+            assert options.get(key) == expected, (
+                f"{image}: trivy {key}={options.get(key)!r}, expected {expected!r}. "
+                "The image scan's policy is what makes it a gate; a scan that "
+                "ignores HIGH, or exits 0 on a finding, reports green having "
+                "decided nothing."
+            )
+
+
+def test_every_image_scan_is_given_longer_than_the_default_that_expired() -> None:
+    for step in _trivy_steps():
+        options = step["with"]
+        image = str(options.get("image-ref", "<unnamed>"))
+        timeout = str(options.get("timeout", ""))
+        assert timeout.endswith("m"), (
+            f"{image}: no explicit trivy timeout. The action's 5-minute default "
+            "expired on projectdms-docling and the scan reached no verdict."
+        )
+        assert int(timeout[:-1]) > 5, f"{image}: timeout {timeout} is not larger than the default that expired"
+
+
+def test_the_scanned_images_are_the_images_that_get_built() -> None:
+    """A policy pinned on a step that scans an image nobody builds is decoration."""
+    workflow = yaml.safe_load((GIT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    built = {
+        match.group(1)
+        for job in workflow["jobs"].values()
+        for step in job["steps"]
+        for match in [re.search(r"docker build -t (\S+?):", str(step.get("run", "")))]
+        if match
+    }
+    scanned = {str(step["with"]["image-ref"]).split(":")[0] for step in _trivy_steps()}
+    assert scanned == built, f"built but not scanned: {built - scanned}; scanned but not built: {scanned - built}"

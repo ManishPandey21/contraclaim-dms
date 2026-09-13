@@ -209,6 +209,14 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
       - name: Drop the backend image
         run: docker image rm projectdms-backend:${{ github.sha }}
       - name: Build the client image
@@ -255,6 +263,14 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
       - name: Drop the client image
         run: docker image rm projectdms-client:${{ github.sha }}
       - name: Build the LangGraph image
@@ -267,6 +283,14 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
       - name: Drop the LangGraph image
         run: docker image rm projectdms-langgraph:${{ github.sha }}
       - name: Build the Graphiti image
@@ -279,6 +303,14 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
       - name: Drop the Graphiti image
         run: docker image rm projectdms-graphiti:${{ github.sha }}
       - name: Build the Docling image
@@ -291,5 +323,13 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
+          # A scan that runs out of time has not found nothing - it has found
+          # nothing out. `projectdms-docling` hit the action's 5-minute default
+          # and died with `context deadline exceeded`, which the job correctly
+          # treated as a failure; raising the bound is what lets it reach a
+          # verdict. Nothing about the POLICY moves: --ignore-unfixed,
+          # CRITICAL,HIGH and --exit-code 1 are unchanged, so this cannot turn a
+          # finding into a pass.
+          timeout: 20m
       - name: Drop the Docling image
         run: docker image rm projectdms-docling:${{ github.sha }}
