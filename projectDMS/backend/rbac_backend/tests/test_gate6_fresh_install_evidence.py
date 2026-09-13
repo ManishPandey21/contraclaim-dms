@@ -141,7 +141,7 @@ def test_the_evidence_document_does_not_claim_the_upgrade_path() -> None:
         "bullet 3" in text.lower() and "still open" in text.lower()
     ), "the evidence document no longer distinguishes itself from the upgrade path"
 
-    upgrade_checked, _ = next(
+    upgrade_checked, upgrade_bullet = next(
         (
             (checked.lower() == "x", text)
             for checked, text in _gate6_bullets()
@@ -149,10 +149,22 @@ def test_the_evidence_document_does_not_claim_the_upgrade_path() -> None:
         ),
         (False, ""),
     )
-    assert not upgrade_checked, (
-        "Gate 6 bullet 3 is ticked. Nothing in R-A8S measured the upgrade path; if "
-        "a later phase did, it needs its own evidence document rather than this one"
+    if not upgrade_checked:
+        return
+    # R-A8W measured the upgrade path against a restored production copy. The
+    # tick is accepted only on its own evidence document, never on this one.
+    assert "GATE_6_FRESH_INSTALL_EVIDENCE.md" not in upgrade_bullet, (
+        "Gate 6 bullet 3 cites the fresh-install evidence; a restored production "
+        "copy needs its own evidence document"
     )
+    upgrade_evidence = EVIDENCE.with_name("GATE_6_UPGRADE_PATH_EVIDENCE.md")
+    assert "GATE_6_UPGRADE_PATH_EVIDENCE.md" in upgrade_bullet and upgrade_evidence.is_file(), (
+        "Gate 6 bullet 3 is ticked without naming an existing "
+        "GATE_6_UPGRADE_PATH_EVIDENCE.md, so a reviewer has nothing to open"
+    )
+    upgrade_text = upgrade_evidence.read_text(encoding="utf-8")
+    assert "SATISFIED" in upgrade_text and "R-A8W" in upgrade_text
+    assert "restored" in upgrade_text.lower() and "rsstg" in upgrade_text
 
 
 def test_the_entry_point_the_evidence_names_still_exists() -> None:

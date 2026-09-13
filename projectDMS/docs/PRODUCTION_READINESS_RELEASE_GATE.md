@@ -1,8 +1,8 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 78/100, re-derived from `scripts/production_readiness_score.py` on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 81/100 (raw 81.17, below the 85 target), re-derived from `scripts/production_readiness_score.py` on 2026-09-13 in release programme R-A8X, which withdrew Gate 9 bullet 3 because its smoke passed only after an operator replayed a failed `production_backup.sh` by hand (F-A8W-B1), and before that after the R-A8W Stage B staging execution earned Gate 6 bullet 3 and Gate 9 bullet 4 and left Gate 3 bullet 2 and Gate 4 bullet 8 open on measured failures, and before that on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
-Current verdict: **Ready with Conditions**, which is the scorer's own term for the current checkbox state and not a promotion decision. Production promotion remains blocked: Gate 9 has no bullet earned and the target is not met.
+Current verdict: **Ready with Conditions**, which is the scorer's own term for the current checkbox state and not a promotion decision. Production promotion remains blocked: Gate 9 has one of six bullets earned (the smoke after the restore drill) and the target is not met. Third-party production images carry 559 fixable CRITICAL/HIGH findings with no owner disposition (`docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md`), which blocks cutover independently of the score.
 
 This document is the tracked release-control checklist for moving Contraclaim DMS from the current hardening branch to a production candidate. Until every launch gate below is satisfied, feature work should be frozen except for production-readiness fixes, test fixes, security fixes, operational hardening, and documentation needed to prove readiness.
 
@@ -400,7 +400,7 @@ re-derives the distinction on every run, so it cannot quietly stop being true.
 
 - [x] Versioned migration/index plan exists before production promotion.
 - [x] Fresh install path is tested against real MongoDB. evidence: docs/GATE_6_FRESH_INSTALL_EVIDENCE.md (R-A8Q Stage B staging run 2026-09-08, mapped requirement-by-requirement in R-A8S: an empty `contraclaim_staging` on the live replica set `rsstg` - read back from `rs.status().set`, not merely configured - took 19 of 19 migrations via `python -m rbac_backend.scripts.migrate_database`, dry run exit 0 with `warnings: []`, second apply 0 newly applied / 19 skipped, permission catalogue 198 == 198 distinct with `uq_permissions_name` unique, and the application served Gate 2 and Gate 3 bullet 1 on that database)
-- [ ] Existing database upgrade path is tested against a staging copy.
+- [x] Existing database upgrade path is tested against a staging copy. evidence: docs/GATE_6_UPGRADE_PATH_EVIDENCE.md (mapped requirement-by-requirement against docs/GATE_6_UPGRADE_PATH_PROCEDURE.md; R-A8W Stage B staging run 2026-09-13, run `R-A8W-STAGEB-20260913T154822Z`, every procedure step executed in order: production archive `contraclaim-20260913-013001` (sha256 equal to its manifest, `gzip -t` clean) restored with every guard armed into an emptied `contraclaim_staging` on replica set `rsstg` - writers stopped, database dropped and proved at 0 collections first; restore exit 0, `STATUS=OK`, `MATCH=YES`, 47,722 documents restored, 0 failed, 0 missing collections, expected collections from the archive prelude; read back 162 collections / 47,722 documents, equal to the Stage A drill figures for that archive, and no `contraclaim` database on `rsstg`. Before any start: permissions 263 == 263 distinct, 0 duplicate groups, ledger 18; `--list` 16 applied / 2 `applied_not_in_catalogue` / 3 pending; `--fail-on-warning` dry run exit 0; apply exactly 3 (`20260906_0001` among them, no warnings, no notices); re-apply 0 applied / 19 skipped; `uq_permissions_name` present and unique, a duplicate insert refused with 11000. Backend on release image `d9eedb2cbee3` then reached `/health/ready` 200 on the restored data; after start permissions 265 == 263 + the 2 release-only names, 0 duplicate groups, 0 pending)
 - [x] Permission seeds are versioned and idempotent.
 - [x] Backfill/migration entry points support dry-run before mutation.
 - [x] Startup index creation is not the only production schema control.
@@ -494,8 +494,8 @@ time. No production S3 architecture change is authorised in this phase.
 
 - [ ] Critical blockers closed.
 - [ ] High severity risks fixed or explicitly accepted.
-- [ ] Staging smoke test passes after deploy.
-- [ ] Staging smoke test passes after restore drill.
+- [ ] Staging smoke test passes after deploy. **R-A8X disposition: NOT EARNED (withdrawn, provenance kept).** R-A8W Stage B ticked it on 2026-09-13 (run `R-A8W-STAGEB-20260913T154822Z`, release `37e79ba`, backend `d9eedb2cbee3`, client `865fd898f818`, fresh `contraclaim-stg` deploy, 19/19 migrations) on a third run of `scripts/post_deploy_verify.sh`: exit 0, 23 PASS, 0 FAIL, 1 WARN. The sequence, all kept in that evidence directory: run 1 failed one check, `/health/operations` 503, because a fresh stack had never been backed up; the release's own `scripts/production_backup.sh` was then run and **aborted** under `set -e` on the empty fresh-install uploads volume (**F-A8W-B1**), so run 2 failed the same check; an operator then replayed that script's remaining per-volume steps by hand into the same stamp (`20d-F-A8W-B1-staging-backup-completion.txt`), and run 3 passed. The release owner's R-A8X rule: a canonical smoke must pass against the deployed release without manually reconstructing a failed release script; a pass that needed one is diagnostic evidence, not certification. The bullet's own words - the smoke passes *after deploy* - describe the deployed release doing it, and here the deployed release could not produce the backup the smoke checks. F-A8W-B1 is fixed offline in R-A8X (`application-volume` backup profile, `test_backup_empty_application_volume.py`); the bullet is re-earned only by a clean canonical run in the next staging window
+- [x] Staging smoke test passes after restore drill. evidence: scripts/post_deploy_verify.sh (R-A8W Stage B 2026-09-13, same run and same release, executed after the Gate 6 bullet 3 production-copy restore and migration, same invocation: **exit 0, 22 PASS, 0 FAIL, 2 WARN** - one benign trapped bcrypt-version traceback in the backend log, and `ALLOWED_DOCUMENT_MIMES` - with the permission catalogue at 265 and superadmin holding all 198 release permissions, `/health/operations` 200 `ok`)
 - [ ] Readiness score target is 85 or higher.
 - [ ] Release owner signs off.
 
@@ -532,9 +532,13 @@ still Open. That is enforced rather than described.
 
 Current score evidence:
 
-- Current production launch-readiness score is **78/100** (re-derived by
-  `scripts/production_readiness_score.py`, release programme R-A8T, 2026-09-09,
-  after the first green Actions run closed Gate 1 bullet 6 and Gate 4 bullet 10).
+- Current production launch-readiness score is **81/100** (raw 81.17; re-derived by
+  `scripts/production_readiness_score.py`, release programme R-A8X, 2026-09-13,
+  after Gate 9 bullet 3 was withdrawn on the owner's no-manual-reconstruction rule.
+  R-A8W Stage B had recorded 82 with that bullet ticked, after Gate 6 bullet 3 and
+  Gate 9 bullet 4 were earned against staging. It
+  was 78 from R-A8T on 2026-09-09, after the first green Actions run closed Gate 1
+  bullet 6 and Gate 4 bullet 10).
   The figure recorded here through Phase 8 was 32/100 and had not been re-derived
   since.
 - Current verdict: **Ready with Conditions**.
@@ -553,11 +557,11 @@ Current score evidence:
 | P0-005 | Resolved (code) | Upload antivirus can be disabled | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py` | Deploy ClamAV in staging and capture a live infected/clean scan as final Gate 5 proof |
 | P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box |
 | P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
-| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 score remains 0/6 and the current readiness score is 78/100 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
+| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 is 1/6: R-A8W Stage B earned the smoke after the restore drill, and its smoke after deploy was withdrawn in R-A8X because it passed only after a failed release backup script was completed by hand (F-A8W-B1, fixed offline, not yet re-measured); the current readiness score is 81/100 and the owner sign-off and remaining gates are outstanding | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **78/100** against a target of
+The current production launch-readiness score is **81/100** against a target of
 **85/100**. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
@@ -579,7 +583,7 @@ is one point lower because a point that had never been earned was being counted,
 not because anything regressed.
 
 Current gate score summary, re-derived mechanically from
-`scripts/production_readiness_score.py` on 2026-09-08 (R-A8R). This table is a rendering
+`scripts/production_readiness_score.py` on 2026-09-13 (R-A8X, after Gate 9 bullet 3 was withdrawn). This table is a rendering
 of the checkboxes above and nothing else; when the two disagree, the checkboxes
 and their evidence lines are the record. (The previous copy of this table
 predated the R-A8M staging execution and still showed Gate 2 at 0/6, Gate 7 at
@@ -593,12 +597,12 @@ stale rendering, not withdrawn evidence.)
 | Gate 3: Browser E2E Coverage | 1.33 / 12 | 1 / 9 |
 | Gate 4: Security And RBAC | 13.50 / 15 | 9 / 10 |
 | Gate 5: Upload And Content Safety | 10.00 / 10 | 5 / 5 |
-| Gate 6: Database, Migrations, And Seeds | 8.33 / 10 | 5 / 6 |
+| Gate 6: Database, Migrations, And Seeds | 10.00 / 10 | 6 / 6 |
 | Gate 7: Deployment And Environment | 10.00 / 10 | 7 / 7 |
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
-| Gate 9: Final Production Readiness Review | 0.00 / 8 | 0 / 6 |
+| Gate 9: Final Production Readiness Review | 1.33 / 8 | 1 / 6 |
 
-Total: **78 / 100** against a target of 85.
+Total: **81 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 
