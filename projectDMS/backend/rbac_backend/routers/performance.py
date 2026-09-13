@@ -14,7 +14,7 @@ from ..services.authorization_service import AuthorizationService
 from ..models.performance_models import (
     HealthStatus, PerformanceMetrics, EndpointStats, JobStats
 )
-from ..utils.error_handler import handle_exceptions, PerformanceError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, PerformanceError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 from ..utils.cache_service import cache_with_ttl
@@ -91,7 +91,7 @@ class PerformanceController:
 
             return PerformanceMetrics(**metrics)
 
-        except (PerformanceError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting performance metrics: {str(e)}")
@@ -119,7 +119,7 @@ class PerformanceController:
 
             return [EndpointStats(**stat) for stat in stats]
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting endpoint performance: {str(e)}")
@@ -147,7 +147,7 @@ class PerformanceController:
 
             return slow_queries
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting slow queries: {str(e)}")
@@ -170,7 +170,7 @@ class PerformanceController:
 
             return cache_stats
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting cache stats: {str(e)}")
@@ -200,7 +200,7 @@ class PerformanceController:
                 "message": f"Cache cleared successfully. {cleared_entries} entries removed."
             }
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error clearing cache: {str(e)}")
@@ -223,7 +223,7 @@ class PerformanceController:
 
             return JobStats(**job_stats)
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error getting job stats: {str(e)}")
@@ -264,7 +264,7 @@ class PerformanceController:
 
             return {"message": f"Job {job_id} cancelled successfully"}
 
-        except (PerformanceError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Error cancelling job: {str(e)}")

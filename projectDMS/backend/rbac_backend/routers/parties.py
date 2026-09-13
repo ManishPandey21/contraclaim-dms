@@ -16,7 +16,7 @@ from ..models.party import (
     Party, PartyCreate, PartyUpdate, PartyType, PartyListResponse
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, PartyError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, PartyError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -80,7 +80,7 @@ class PartyController:
 
             return party
 
-        except (PartyError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Party creation failed: {str(e)}")
@@ -120,7 +120,7 @@ class PartyController:
                 limit=pagination["limit"]
             )
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get parties: {str(e)}")
@@ -156,7 +156,7 @@ class PartyController:
 
             return party
 
-        except (PartyError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get party {party_id}: {str(e)}")
@@ -208,7 +208,7 @@ class PartyController:
 
             return updated_party
 
-        except (PartyError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update party {party_id}: {str(e)}")
@@ -262,7 +262,7 @@ class PartyController:
 
             return {"message": "Party deleted successfully"}
 
-        except (PartyError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete party {party_id}: {str(e)}")
@@ -313,7 +313,7 @@ class PartyController:
                 "message": f"Party {party_id} successfully associated with project {project_id}"
             }
 
-        except (PartyError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to associate party with project: {str(e)}")
@@ -353,7 +353,7 @@ class PartyController:
                 limit=pagination["limit"]
             )
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get external parties: {str(e)}")

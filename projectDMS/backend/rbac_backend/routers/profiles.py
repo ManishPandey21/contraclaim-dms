@@ -6,6 +6,7 @@ from ..schemas.profile import ProfileRead, ProfileUpdate, ChangePassword
 from ..services.user_service import UserService
 from ..services.upload_streaming import read_upload_within_limit
 from ..utils.file_validation import sniff_mime_from_bytes
+from ..utils.error_handler import BaseDomainError
 
 router = APIRouter(tags=["profiles"])
 
@@ -215,7 +216,7 @@ async def change_my_password(
         return {"message": "Password changed successfully"}
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal error changing password")

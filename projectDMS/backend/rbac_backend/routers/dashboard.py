@@ -24,6 +24,7 @@ from ..core.security import (
     get_current_user,
     require_permission,
 )
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 
@@ -579,7 +580,7 @@ async def get_dashboard_stats(
             projects=projects,
         )
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to compute dashboard stats: %s", exc)

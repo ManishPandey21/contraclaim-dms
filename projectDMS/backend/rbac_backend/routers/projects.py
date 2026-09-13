@@ -4,7 +4,7 @@ from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pymongo import ReturnDocument
 
-from ..core.security import require_permission, get_current_user, build_scope_query
+from ..core.security import _normalize_roles_list, require_permission, get_current_user, build_scope_query
 from ..core.database import get_db
 from ..models.project import Project
 from ..models.representative import Representative
@@ -17,6 +17,7 @@ from ..services.permission_service import PermissionService
 from ..services.authorization_service import AuthorizationService
 from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
+from ..utils.error_handler import BaseDomainError
 
 router = APIRouter()
 permission_service = PermissionService()
@@ -199,7 +200,7 @@ async def read_projects(
         logger.info(f"Successfully serialized {len(serialized)} projects")
         return serialized
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         import logging
@@ -308,16 +309,29 @@ async def update_project(
     _: None = Depends(require_permission("projects:update")),
 ):
     await _ensure_project_access(current_user, project_id, "projects:update", db)
-    if project_update.organization_id:
-        organization = await _find_by_id(db.organizations, project_update.organization_id)
-        if not organization:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Organization with id {project_update.organization_id} not found",
-            )
     existing = await _find_by_id(db.projects, project_id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    # The access check above authorised the project's CURRENT organisation. A
+    # body naming another one would move the project into a tenant the caller
+    # was never authorised for, and the existence lookup below would answer
+    # "not found" versus success for any organisation id (R-A8X review). Only a
+    # global role may re-parent a project, and the refusal comes first.
+    requested_org = project_update.organization_id
+    current_org = existing.get("organization_id")
+    if requested_org and str(requested_org) != str(current_org or ""):
+        actor_roles = set(_normalize_roles_list(getattr(current_user, "roles", None) or []))
+        if "superadmin" not in actor_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Moving a project to another organization requires a superadmin",
+            )
+        organization = await _find_by_id(db.organizations, requested_org)
+        if not organization:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Organization with id {requested_org} not found",
+            )
     update_doc = project_update.model_dump(
         by_alias=True,
         exclude_unset=True,
@@ -377,7 +391,7 @@ async def deactivate_project(
         if not ok:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
         return {"message": "Project deactivated successfully"}
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Internal server error: {exc}")

@@ -70,7 +70,7 @@ from ..models.document import (
 from ..models.notification import NotificationContext, NotificationType
 from ..models.storage_settings import StorageProviderConfig
 from ..utils.validation import sanitize_filename
-from ..utils.error_handler import handle_exceptions, DocumentError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, DocumentError
 from ..utils.date_parser import parse_date_safely
 from ..utils.csv_validator import validate_csv_structure, parse_csv_row
 from fastapi.responses import FileResponse, Response
@@ -909,10 +909,10 @@ class DocumentController:
 
             return document
 
-        except (DocumentError, HTTPException):
+        except (BaseDomainError, HTTPException):
             try:
                 await compensate_returned_document()
-            except HTTPException:
+            except (BaseDomainError, HTTPException):
                 raise
             except Exception as cleanup_exc:
                 raise HTTPException(
@@ -927,7 +927,7 @@ class DocumentController:
             logger.error(f"Document creation failed: {str(e)}")
             try:
                 await compensate_returned_document()
-            except HTTPException:
+            except (BaseDomainError, HTTPException):
                 raise
             except Exception as cleanup_exc:
                 logger.error(
@@ -1037,7 +1037,7 @@ class DocumentController:
                 status="processing"
             )
 
-        except (DocumentError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Bulk upload initiation failed: {str(e)}")
@@ -1133,6 +1133,10 @@ class DocumentController:
 
             return validated_data
 
+        except (BaseDomainError, HTTPException):
+            # "Missing required columns" is a 400 raised in the body above; the
+            # catch-all below rewrote it as a 500 (R-A8X review).
+            raise
         except pd.errors.EmptyDataError:
             raise DocumentError("CSV file is empty", status.HTTP_400_BAD_REQUEST)
         except pd.errors.ParserError as e:
@@ -1504,7 +1508,7 @@ class DocumentController:
                 success=True,
                 row_number=0,
             )
-        except (DocumentError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("Document reprocessing failed for %s: %s", document_id, exc)
@@ -1533,7 +1537,7 @@ class DocumentController:
 
             return await self._enrich_bulk_results_with_processing_state(job_status)
 
-        except (DocumentError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get bulk upload status: {str(e)}")
@@ -1631,7 +1635,7 @@ async def controller_get_document(
 
         return await self.document_service.enrich_document(document)
 
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Document retrieval failed: {str(e)}")
@@ -1689,7 +1693,7 @@ async def controller_list_documents(
             has_previous=has_previous,
         )
 
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Document listing failed: {str(e)}")
@@ -1748,7 +1752,7 @@ async def controller_update_document(
 
         return await self.document_service.enrich_document(updated_document)
 
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except DocumentConflictError as exc:
         raise DocumentError(
@@ -1803,7 +1807,7 @@ async def controller_delete_document(
             },
         )
 
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except DocumentConflictError as exc:
         raise DocumentError(
@@ -1936,7 +1940,7 @@ async def controller_add_enclosure(
             filesize=spooled.size,
         )
 
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Enclosure addition failed: {str(e)}")
@@ -1962,7 +1966,7 @@ async def controller_list_enclosures(
         )
 
         return await self.document_service.list_enclosures(document_id)
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error("Failed to load enclosures for %s: %s", document_id, e)
@@ -1988,7 +1992,7 @@ async def controller_remove_enclosure(
         )
 
         await self.document_service.remove_enclosure(document_id, enclosure_id)
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(
@@ -2018,7 +2022,7 @@ async def controller_list_references(
         )
 
         return await self.document_service.list_references(document_id)
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error("Failed to list references for %s: %s", document_id, e)
@@ -2058,7 +2062,7 @@ async def controller_add_reference(
             reference_data,
             current_user=current_user,
         )
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error("Failed to add reference for %s: %s", document_id, e)
@@ -2084,7 +2088,7 @@ async def controller_remove_reference(
         )
 
         return await self.document_service.remove_reference(document_id, reference_id)
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error("Failed to remove reference %s from %s: %s", reference_id, document_id, e)
@@ -2140,7 +2144,7 @@ async def controller_sync_references(
             ),
             "sync": sync_result,
         }
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except ReferenceSyncError as exc:
         logger.error("Reference sync error for %s: %s", document_id, exc)
@@ -2192,7 +2196,7 @@ async def controller_link_documents(
             description=payload.description,
             current_user=current_user,
         )
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(
@@ -2222,7 +2226,7 @@ async def controller_list_linked_documents(
         )
 
         return await self.document_service.list_linked_documents(document_id)
-    except (DocumentError, HTTPException):
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error("Failed to list linked documents for %s: %s", document_id, e)
@@ -3275,7 +3279,7 @@ async def request_draft_for_document(
 
         return response_data
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to initialize draft request for document {id}: {str(e)}")

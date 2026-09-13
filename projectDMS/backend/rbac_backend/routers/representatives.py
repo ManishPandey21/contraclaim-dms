@@ -26,7 +26,7 @@ from ..models.representative import (
 from ..utils.validation import (
     validate_input, sanitize_text, validate_email, validate_phone, validate_object_id
 )
-from ..utils.error_handler import handle_exceptions, RepresentativeError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, RepresentativeError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -128,7 +128,7 @@ class RepresentativeController:
 
             return representative
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to create party representative: {str(e)}")
@@ -194,7 +194,7 @@ class RepresentativeController:
 
             return representative
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to create organization representative: {str(e)}")
@@ -275,7 +275,7 @@ class RepresentativeController:
 
             return representative
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to create project representative: {str(e)}")
@@ -318,7 +318,7 @@ class RepresentativeController:
                 limit=pagination["limit"]
             )
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get representatives: {str(e)}")
@@ -355,7 +355,7 @@ class RepresentativeController:
 
             return representatives
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get party representatives: {str(e)}")
@@ -399,7 +399,7 @@ class RepresentativeController:
 
             return representatives
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get project representatives: {str(e)}")
@@ -456,7 +456,7 @@ class RepresentativeController:
 
             return updated_rep
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update representative {representative_id}: {str(e)}")
@@ -504,7 +504,7 @@ class RepresentativeController:
 
             return {"message": "Representative deleted successfully"}
 
-        except (RepresentativeError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete representative {representative_id}: {str(e)}")

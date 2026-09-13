@@ -230,7 +230,7 @@ class UserController:
                 user=user_response
             )
 
-        except (AuthenticationError, UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Authentication failed: {str(e)}")
@@ -292,6 +292,8 @@ class UserController:
             raise
         except (ValueError, ValidationError, UserServiceError) as e:
             raise UserError(str(e), status.HTTP_400_BAD_REQUEST)
+        except (BaseDomainError, HTTPException):
+            raise
         except Exception as e:
             logger.error(f"User creation failed: {str(e)}")
             raise HTTPException(
@@ -428,6 +430,12 @@ class UserController:
             # Check authorization for this specific user
             await self.auth_service.check_user_access(current_user, existing_user, "update")
 
+            # check_user_access authorised the user's CURRENT organisation. The
+            # body can name another one, or projects of another one, and both
+            # were written unchecked - an org admin could move any user in its
+            # tenant, itself included, into a foreign tenant (R-A8X review).
+            await self._enforce_update_stays_in_scope(current_user, existing_user, update_data)
+
             # Validate update data
             validated_update = await self._validate_user_update(update_data, existing_user)
 
@@ -477,7 +485,7 @@ class UserController:
 
             return user_response
 
-        except (UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {str(e)}")
@@ -537,7 +545,7 @@ class UserController:
 
             return {"message": "User deleted successfully"}
 
-        except (UserError, HTTPException):
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete user {user_id}: {str(e)}")
@@ -561,7 +569,7 @@ class UserController:
 
             return {"message": "Logged out successfully"}
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Logout failed for user {current_user.id}: {str(e)}")
@@ -715,6 +723,56 @@ class UserController:
             validated_fields['projects'] = update_data.projects
 
         return UserUpdate(**validated_fields)
+
+    async def _enforce_update_stays_in_scope(
+        self, current_user: CurrentUser, existing_user: Any, update_data: Any
+    ) -> None:
+        """Refuse an update that moves a user outside the caller's authorised tenant.
+
+        Only a superadmin may change a user's organisation. For anyone else,
+        every project assigned must belong to the user's existing organisation.
+        The create path already refuses a foreign organisation
+        (`_validate_user_context`); this is the update-side equivalent.
+        """
+        from ..core.security import _normalize_roles_list
+
+        actor_roles = set(_normalize_roles_list(getattr(current_user, "roles", None) or []))
+        if "superadmin" in actor_roles:
+            return
+
+        existing_org = getattr(existing_user, "organization_id", None)
+        if existing_org is None and isinstance(existing_user, dict):
+            existing_org = existing_user.get("organization_id")
+        requested_org = getattr(update_data, "organization_id", None)
+        if requested_org is not None and str(requested_org) != str(existing_org or ""):
+            raise UserError(
+                "Not authorized to move a user to another organization",
+                status.HTTP_403_FORBIDDEN,
+            )
+        requested_orgs = getattr(update_data, "organizations", None)
+        if requested_orgs is not None and any(str(org) != str(existing_org or "") for org in requested_orgs):
+            raise UserError(
+                "Not authorized to grant a user another organization",
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        requested_projects = [str(project) for project in (getattr(update_data, "projects", None) or []) if project]
+        if not requested_projects:
+            return
+        from bson import ObjectId
+
+        object_ids = [ObjectId(project) for project in requested_projects if ObjectId.is_valid(project)]
+        cursor = self.user_service.db.projects.find(
+            {"_id": {"$in": [*object_ids, *requested_projects]}},
+            {"organization_id": 1},
+        )
+        found = {str(row["_id"]): str(row.get("organization_id") or "") for row in await cursor.to_list(length=None)}
+        outside = [project for project in requested_projects if found.get(project) != str(existing_org or "")]
+        if outside:
+            raise UserError(
+                "Not authorized to assign projects outside the user's organization",
+                status.HTTP_403_FORBIDDEN,
+            )
 
     async def _validate_user_context(
         self, user_data: UserCreate, current_user: CurrentUser

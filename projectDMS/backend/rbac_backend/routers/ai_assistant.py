@@ -36,7 +36,7 @@ from ..models.ai_models import (
     LangGraphLLMConfig,
 )
 from ..utils.validation import validate_input, sanitize_text
-from ..utils.error_handler import handle_exceptions
+from ..utils.error_handler import BaseDomainError, handle_exceptions
 
 # Configure structured logging
 logger = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ class AIAssistantController:
 
             return result
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Search failed for user {current_user.id}: {str(e)}")
@@ -219,7 +219,7 @@ class AIAssistantController:
 
             return result
 
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Draft generation failed: {str(e)}")
@@ -268,7 +268,7 @@ class AIAssistantController:
                 current_user,
             )
             return result
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:
             logger.error("LangGraph draft failed: %s", exc)
@@ -298,7 +298,7 @@ class AIAssistantController:
                 update={"organization_id": org_id, "project_id": project_id}
             )
             return await self.ai_service.generate_strategy_plan(scoped_request, current_user)
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as exc:  # pragma: no cover - defensive
             logger.error("LangGraph strategy plan failed: %s", exc)

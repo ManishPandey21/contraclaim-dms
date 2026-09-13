@@ -10,6 +10,7 @@ from ..services.scope_service import ScopeService
 import re
 from bson import ObjectId
 import logging
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +246,7 @@ async def search_documents(
 
         return response
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         # BUGFIX (H4): client validation errors (e.g. invalid date_from/date_to or
         # upload_type) raise HTTPException(400). Without re-raising here, the broad
         # `except Exception` below swallowed them and returned a misleading 500.
@@ -453,7 +454,7 @@ async def get_search_analytics(
             "volume_over_time": volume_data
         }
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         # Let the 403 admin gate (and any other client error) propagate instead
         # of being masked as a 500 by the broad handler below.
         raise
@@ -484,7 +485,7 @@ async def semantic_search(
             current_user=current_user
         )
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Semantic search error: {str(e)}")

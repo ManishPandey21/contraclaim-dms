@@ -20,7 +20,7 @@ from ..models.tag import (
     Subtag, SubtagCreate, SubtagUpdate, SubtagListResponse
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
-from ..utils.error_handler import handle_exceptions, TagError, AuthorizationError
+from ..utils.error_handler import BaseDomainError, handle_exceptions, TagError, AuthorizationError
 from ..utils.rate_limiter import RateLimiter
 from ..utils.audit_logger import AuditLogger
 
@@ -90,7 +90,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Tag creation failed: {str(e)}")
@@ -132,7 +132,7 @@ class TagController:
 
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get tags: {str(e)}")
@@ -177,7 +177,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get tag {tag_id}: {str(e)}")
@@ -248,7 +248,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update tag {tag_id}: {str(e)}")
@@ -315,7 +315,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete tag {tag_id}: {str(e)}")
@@ -384,7 +384,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Subtag creation failed: {str(e)}")
@@ -440,7 +440,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to get subtags for tag {tag_id}: {str(e)}")
@@ -515,7 +515,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to update subtag {subtag_id}: {str(e)}")
@@ -580,7 +580,7 @@ class TagController:
             raise
         except AuthorizationError:
             raise
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to delete subtag {subtag_id}: {str(e)}")

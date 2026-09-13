@@ -437,7 +437,7 @@ async def upload_canonical_insurance_document(
                 current_user=current_user,
                 reason="insurance_document_relationship_failed",
             )
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             # Compensation's own refusal keeps its status; masking it as 500
             # would turn a 403/404 into a fake outage.
             raise

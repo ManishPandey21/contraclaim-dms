@@ -67,4 +67,8 @@ def test_disabled_rar_is_rejected_by_validation_before_archive_exemption() -> No
 
 
 def test_domain_error_group_is_preserved() -> None:
-    assert "except (DocumentError, HTTPException)" in _create_document_source()
+    # R-A8X widened the group from (DocumentError, HTTPException) to the whole
+    # BaseDomainError family (F-A8W-B3); a strict superset, so every error the old
+    # spelling preserved is still preserved. `test_domain_error_reraise_guard.py`
+    # holds the property for every router.
+    assert "except (BaseDomainError, HTTPException)" in _create_document_source()

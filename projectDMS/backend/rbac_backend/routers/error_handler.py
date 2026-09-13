@@ -12,6 +12,8 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 import asyncio
 
+from ..utils.error_handler import BaseDomainError
+
 logger = logging.getLogger(__name__)
 
 
@@ -113,8 +115,9 @@ def handle_exceptions(func):
                     "details": str(e)
                 }
             )
-        except HTTPException:
-            # Re-raise FastAPI HTTP exceptions
+        except (BaseDomainError, HTTPException):
+            # Re-raise FastAPI HTTP exceptions, and the domain-error family, which
+            # carries its own status and is rendered by the application's handler.
             raise
         except asyncio.TimeoutError:
             logger.error(f"Timeout in {func.__name__}")
@@ -177,7 +180,7 @@ def handle_exceptions(func):
                     "details": str(e)
                 }
             )
-        except HTTPException:
+        except (BaseDomainError, HTTPException):
             raise
         except Exception as e:
             error_id = id(e)

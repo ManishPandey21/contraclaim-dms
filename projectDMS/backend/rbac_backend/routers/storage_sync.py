@@ -25,6 +25,7 @@ from ..services.langchain_vector_service import LangChainVectorService
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
 from ..services.publication_policy import is_consumable
+from ..utils.error_handler import BaseDomainError
 
 try:
     from qdrant_client import QdrantClient
@@ -697,7 +698,7 @@ async def storage_sync_status(
     """
     try:
         return await _gather_storage_status(method)
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as exc:
         logger.exception("Failed to gather storage sync status")

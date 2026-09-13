@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .core.config import settings
 from .core.csrf import validate_unsafe_cookie_request
+from .core.errors import register_domain_error_handler
 from .core.public_body_limit import PublicBodyLimitMiddleware, public_body_caps
 from .routers import (
     ai_assistant,
@@ -119,6 +120,10 @@ app = FastAPI(
     openapi_url="/openapi.json" if api_docs_enabled else None,
 )
 _loop_handler_installed = False
+
+# F-A8W-B3. Routers re-raise the whole BaseDomainError family; a route without
+# `handle_exceptions` must still answer at the error's own status, not 500.
+register_domain_error_handler(app)
 
 # Distributed tracing (opt-in; no-op unless OTEL_ENABLED + libs installed).
 setup_tracing(app)

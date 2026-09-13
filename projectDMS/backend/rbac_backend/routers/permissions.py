@@ -16,6 +16,7 @@ from ..services.policy_service import PolicyService
 from ..services.step_up_service import require_step_up
 from ..models.permission import Permission, PermissionCreate, PermissionUpdate
 from ..models.role import Role, RoleCreate, RoleUpdate
+from ..utils.error_handler import BaseDomainError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -75,7 +76,7 @@ async def get_permissions(
             "limit": pagination["limit"]
         }
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get permissions: {str(e)}")
@@ -101,7 +102,7 @@ async def get_permission(
             )
         return permission
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to get permission {permission_id}: {str(e)}")
@@ -133,7 +134,7 @@ async def create_permission(
         )
         return permission
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to create permission: {str(e)}")
@@ -168,7 +169,7 @@ async def update_permission(
         )
         return permission
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to update permission {permission_id}: {str(e)}")
@@ -206,7 +207,7 @@ async def delete_permission(
         )
         return {"message": "Permission deleted successfully"}
 
-    except HTTPException:
+    except (BaseDomainError, HTTPException):
         raise
     except Exception as e:
         logger.error(f"Failed to delete permission {permission_id}: {str(e)}")
