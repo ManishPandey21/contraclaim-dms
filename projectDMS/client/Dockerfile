@@ -24,10 +24,19 @@ WORKDIR /app
 # Two things happen here beyond installing the healthcheck's wget, and both are
 # about what the shipped image carries rather than what it does.
 #
-# 1. The base image lags bookworm-security. libgnutls30 and libcap2 are the only
-#    packages with published fixes at build time; they are upgraded by name
-#    rather than with a blanket `apt-get upgrade`, so the image changes only
-#    where a fix is actually needed.
+# 1. The base image lags bookworm-security, so packages with a published fix are
+#    upgraded by name rather than with a blanket `apt-get upgrade`: the image
+#    changes only where a fix is actually needed.
+#
+#    The list is dated, not permanent. libgnutls30 and libcap2 were the whole of
+#    it when this stage was written; on 2026-09-13 the exact CI Trivy policy
+#    added libpcre2-8-0 (CVE-2026-86145, CVE-2026-89161, 10.42-1 ->
+#    10.42-1+deb12u1) on a commit that changed nothing here - the vulnerability
+#    database moved. The SAME advisory pair hit backend/Dockerfile's trixie base
+#    on the same day, which is the point: a hand-maintained list is the part of
+#    this that goes stale, and it will do so again on Debian's schedule rather
+#    than on this repository's. Recorded as release debt with the two durable
+#    options named (a base-image bump policy, or a blanket upgrade).
 #
 # 2. `node:*-slim` bundles the npm CLI, corepack and yarn. This stage runs
 #    `node scripts/serve-dist.mjs` and nothing else — no install, no script
@@ -38,7 +47,7 @@ WORKDIR /app
 #    package manager.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wget \
-    && apt-get install -y --only-upgrade libgnutls30 libcap2 \
+    && apt-get install -y --only-upgrade libgnutls30 libcap2 libpcre2-8-0 \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /usr/local/lib/node_modules/npm \
               /usr/local/lib/node_modules/corepack \
