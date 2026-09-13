@@ -43,8 +43,18 @@ Usage: MONGO_URI=... MONGO_DB=... mongo_restore.sh <archive.gz>
 Required:
   MONGO_URI (or DATABASE_URL)  connection string for the target deployment
   MONGO_DB (or MONGODB_DATABASE)
-                               database to restore; there is deliberately no
-                               default, because the old one was production
+                               database to restore INTO; there is deliberately
+                               no default, because the old one was production
+
+Cross-database restore:
+  RESTORE_SOURCE_DB            the database name the ARCHIVE carries, when it
+                               differs from the target. Defaults to MONGO_DB,
+                               which is every same-name restore and is the
+                               behaviour this script has always had. Setting it
+                               remaps the namespaces on the way in
+                               (--nsFrom/--nsTo); it does not relax a single
+                               production refusal, all of which are about the
+                               target.
 
 Execution context:
   RESTORE_EXEC_CONTEXT         host | compose | auto      (default: auto)
@@ -78,6 +88,7 @@ RESTORE_VERIFY=${RESTORE_VERIFY:-1}
 RESTORE_EXPECTED_DOCS=${RESTORE_EXPECTED_DOCS:-}
 RESTORE_ALLOW_EMPTY=${RESTORE_ALLOW_EMPTY:-}
 ALLOW_PRODUCTION_RESTORE=${ALLOW_PRODUCTION_RESTORE:-}
+RESTORE_SOURCE_DB=${RESTORE_SOURCE_DB:-}
 
 #: Names that mean production. `contraclaim` is the production database; `rs0` is
 #: the production replica set. A staging database name reached over the production
@@ -175,6 +186,41 @@ if [[ "${MONGO_DB}" == *[!A-Za-z0-9_-]* ]]; then
   echo "* and ? as wildcards: '*' would restore every namespace in the archive, including" >&2
   echo "the production database, past every check below. Use letters, digits, _ and - only." >&2
   exit 1
+fi
+
+# R-A8V / F-A8V-1. The archive's database and the target's database were one
+# variable, and `--nsInclude` filters source namespaces without ever remapping
+# them. So a PRODUCTION archive - `contraclaim.*`, because production_backup.sh
+# runs `mongodump --db="$MONGO_DB_NAME"` - had two spellings into a staging
+# deployment and both were dead ends: MONGO_DB=contraclaim_staging selected
+# nothing and failed as a wrong target, and MONGO_DB=contraclaim was refused as
+# the production database. The second is the dangerous one, because its printed
+# remedy is ALLOW_PRODUCTION_RESTORE=1 - the documented way through a staging
+# drill became switching off the guard that keeps the drill away from
+# production, inside a maintenance window.
+#
+# The source is now its own input. It names a namespace INSIDE A FILE and is
+# never connected to, so it carries no production refusal of its own; every
+# refusal stays on the target, which is the deployment being written to. It does
+# reach three namespace patterns, so it gets F-A8U-5's identifier rule.
+SOURCE_DB=${RESTORE_SOURCE_DB:-$MONGO_DB}
+if [[ "${SOURCE_DB}" == *[!A-Za-z0-9_-]* ]]; then
+  echo "REFUSED: RESTORE_SOURCE_DB='${SOURCE_DB}' is not a database name." >&2
+  echo "It is interpolated into --nsInclude, --nsFrom and --nsTo, where mongorestore" >&2
+  echo "treats * and ? as wildcards: '*' would read every namespace the archive carries." >&2
+  echo "Use letters, digits, _ and - only." >&2
+  exit 1
+fi
+
+#: Empty when the archive and the target share a name, which is every restore
+#: this script performed before R-A8V. The flags are then omitted entirely
+#: rather than passed as an identity mapping: an identity --nsFrom/--nsTo is a
+#: behaviour this script would be asserting on every same-name restore, and the
+#: point of the change is that those are untouched.
+NS_REMAP=""
+if [[ "${SOURCE_DB}" != "${MONGO_DB}" ]]; then
+  NS_REMAP="1"
+  echo "SOURCE_DATABASE=${SOURCE_DB} (archive) -> ${MONGO_DB} (target); namespaces are remapped"
 fi
 
 for name in $PRODUCTION_DATABASES; do
@@ -418,7 +464,14 @@ run_mongorestore() {
 }
 
 run_restore() {
-  run_mongorestore --nsInclude="${MONGO_DB}.*"
+  if [[ -n "$NS_REMAP" ]]; then
+    run_mongorestore \
+      --nsInclude="${SOURCE_DB}.*" \
+      --nsFrom="${SOURCE_DB}.*" \
+      --nsTo="${MONGO_DB}.*"
+  else
+    run_mongorestore --nsInclude="${MONGO_DB}.*"
+  fi
 }
 
 # The archive's own inventory, read BEFORE anything is written.
@@ -607,7 +660,10 @@ fi
 in_target=""
 out_of_target=""
 for ns in $expected_collections; do
-  if [[ "$ns" == "${MONGO_DB}."* ]]; then
+  # The archive prelude names namespaces as the archive spells them, so the
+  # in/out split is against the SOURCE database. With no remap SOURCE_DB is
+  # MONGO_DB and this is the comparison it always was.
+  if [[ "$ns" == "${SOURCE_DB}."* ]]; then
     in_target=$(append_unique "$in_target" "$ns")
   else
     out_of_target=$(append_unique "$out_of_target" "$ns")
@@ -615,11 +671,24 @@ for ns in $expected_collections; do
 done
 expected_collections=$in_target
 
+# Which namespace `mongorestore` names in its progress once --nsTo has been
+# applied - the source or the destination - is the tool's business, and a
+# guessed answer here would report every collection missing on one of the two.
+# Neither is assumed: a collection counts as applied if it appears in EITHER
+# spelling. That cannot mask a shortfall, because a collection the restore never
+# reached appears in neither, which the F-A8V-1 control pins. With no remap the
+# two spellings are the same string and this is the comparison it always was.
 missing_collections=""
 for ns in $expected_collections; do
+  remapped_ns="${MONGO_DB}.${ns#"${SOURCE_DB}."}"
   case " $restored_collections " in
     *" $ns "*) ;;
-    *) missing_collections="${missing_collections}${ns} " ;;
+    *)
+      case " $restored_collections " in
+        *" $remapped_ns "*) ;;
+        *) missing_collections="${missing_collections}${ns} " ;;
+      esac
+      ;;
   esac
 done
 missing_collections=${missing_collections% }
@@ -676,7 +745,7 @@ if [[ "$expected_docs" -eq 0 && "$restored_docs" -eq 0 ]]; then
     # this restore was aimed at. That is a wrong target, diagnosed rather than
     # merely refused - and it is why the inventory pass exists.
     status="FAILED"
-    reasons+=("the archive carries no collection in '${MONGO_DB}'. It carries: ${out_of_target}. This restore is aimed at the wrong database.")
+    reasons+=("the archive carries no collection in '${SOURCE_DB}'. It carries: ${out_of_target}. This restore is aimed at the wrong database. If the archive was taken from a differently named database, name it in RESTORE_SOURCE_DB rather than changing the target.")
   elif [[ "${RESTORE_ALLOW_EMPTY}" == "1" || "${RESTORE_ALLOW_EMPTY}" == "true" ]]; then
     # A genuinely empty archive. Declared, because from the document counts
     # alone it is indistinguishable from a wrong target.
@@ -704,6 +773,7 @@ if [[ "$status" == "FAILED" ]]; then match=NO; else match=YES; fi
 # layouts the execution-context tests run the script under, where nothing is on
 # PATH except the directories those tests created.
 echo "--- RESTORE VERIFICATION ---"
+echo "SOURCE_DATABASE=${SOURCE_DB}"
 echo "EXPECTED_DATABASE=${MONGO_DB}"
 echo "EXPECTED_COLLECTIONS=${expected_collections:-<none>}"
 echo "EXPECTED_COLLECTION_SOURCE=${expected_collection_source}"

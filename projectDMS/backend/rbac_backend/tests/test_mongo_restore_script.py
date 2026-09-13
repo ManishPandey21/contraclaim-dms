@@ -1274,3 +1274,186 @@ def test_f_a8u_6_the_effective_denylist_reaches_the_evidence(harness) -> None:
     assert "PRODUCTION_DATABASES=contraclaim" in result.stdout
     assert "PRODUCTION_REPLICA_SET=rs0" in result.stdout
     assert "PRODUCTION_HOSTS=mongo1 mongo2 mongo3" in result.stdout
+
+
+# --------------------------------------------------------------------------- #
+# R-A8V / F-A8V-1 - the archive's database and the target's database are two
+# different names, and until now the script had only one variable for both.
+# --------------------------------------------------------------------------- #
+#
+# Gate 6 bullet 3 restores a PRODUCTION archive into the STAGING deployment. The
+# archive carries `contraclaim.*` (production_backup.sh runs
+# `mongodump --db="$MONGO_DB_NAME"`, and production's MONGODB_DATABASE is
+# `contraclaim`); the staging application reads `contraclaim_staging`.
+# `--nsInclude` FILTERS source namespaces, it never remaps them, and there was
+# no `--nsFrom`/`--nsTo` anywhere in the repository. So the bullet had exactly
+# two spellings and both were dead ends, each reproduced below as its own
+# control:
+#
+#   MONGO_DB=contraclaim_staging -> --nsInclude="contraclaim_staging.*" matches
+#       nothing, 0 documents land, exit 5 "aimed at the wrong database";
+#   MONGO_DB=contraclaim         -> refused, exit 1, as the production database.
+#
+# The second is the dangerous one: its remedy reads `ALLOW_PRODUCTION_RESTORE=1`,
+# so the documented way out of a staging drill is to switch off the guard that
+# keeps the drill away from production - inside a maintenance window, under a
+# clock. The source database is now its own input.
+
+PRODUCTION_ARCHIVE_NS = "contraclaim.permissions contraclaim.users"
+#: What the tool reports once `--nsTo` has been applied. Both spellings are
+#: exercised below, because which one `mongorestore` prints is its business and
+#: this script must not depend on having guessed right.
+REMAPPED_NS = f"{STAGING_DB}.permissions {STAGING_DB}.users"
+
+
+def test_f_a8v_1_the_two_pre_fix_spellings_are_both_dead_ends(harness) -> None:
+    """The reproduction, kept as a permanent control.
+
+    Neither refusal is a defect on its own - each is correct in isolation. The
+    defect is that together they left no invocation at all that performs the
+    operation Gate 6 bullet 3 names.
+    """
+    aimed_at_the_staging_name = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+            "STUB_RESTORE_NS": "",
+            "STUB_RESTORE_APPLIED": "0",
+        }
+    )
+    assert aimed_at_the_staging_name.returncode == 5
+    assert "aimed at the wrong database" in aimed_at_the_staging_name.stderr
+
+    aimed_at_the_archive_name = harness(
+        db=PRODUCTION_DB,
+        env={"RESTORE_EXEC_CONTEXT": "host", "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS},
+    )
+    assert aimed_at_the_archive_name.returncode == 1
+    assert "is the production database" in aimed_at_the_archive_name.stderr
+
+
+def test_f_a8v_1_a_production_archive_restores_into_the_staging_database(harness) -> None:
+    """The operation the bullet names, with every production guard still armed."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "RESTORE_SOURCE_DB": PRODUCTION_DB,
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+            "STUB_RESTORE_NS": REMAPPED_NS,
+            "STUB_RESTORE_DOCS": "263",
+        }
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    evidence = _evidence(result.stdout)
+    assert evidence["STATUS"] == "OK"
+    assert evidence["SOURCE_DATABASE"] == PRODUCTION_DB
+    assert evidence["EXPECTED_DATABASE"] == STAGING_DB
+    assert evidence["MISSING_COLLECTIONS"] == "<none>"
+    assert evidence["EXCLUDED_BY_TARGET"] == "<none>"
+
+    restore_call = [line for line in result.stub_log.splitlines() if "--dryRun" not in line][-1]
+    assert f"--nsInclude={PRODUCTION_DB}.*" in restore_call
+    assert f"--nsFrom={PRODUCTION_DB}.*" in restore_call
+    assert f"--nsTo={STAGING_DB}.*" in restore_call
+
+
+def test_f_a8v_1_no_source_override_means_no_remap_at_all(harness) -> None:
+    """Behaviour preservation. Every existing caller passes one database name,
+    and for those the invocation must be what it was: an identity
+    `--nsFrom`/`--nsTo` is not the same thing as no flag, because it is then a
+    behaviour this script asserts on every restore it has ever performed."""
+    result = harness(env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    restore_call = [line for line in result.stub_log.splitlines() if "--dryRun" not in line][-1]
+    assert f"--nsInclude={STAGING_DB}.*" in restore_call
+    assert "--nsFrom" not in restore_call
+    assert "--nsTo" not in restore_call
+    assert _evidence(result.stdout)["SOURCE_DATABASE"] == STAGING_DB
+
+
+def test_f_a8v_1_the_target_keeps_every_production_refusal(harness) -> None:
+    """Remapping widens what may be READ, never what may be WRITTEN. The source
+    names a namespace inside a file and is never connected to; the target is the
+    deployment, and it keeps the database, replica-set and host refusals."""
+    into_the_production_database = harness(
+        db=PRODUCTION_DB,
+        env={"RESTORE_EXEC_CONTEXT": "host", "RESTORE_SOURCE_DB": PRODUCTION_DB},
+    )
+    assert into_the_production_database.returncode == 1
+    assert "is the production database" in into_the_production_database.stderr
+
+    over_the_production_replica_set = harness(
+        uri=PRODUCTION_URI,
+        env={"RESTORE_EXEC_CONTEXT": "host", "RESTORE_SOURCE_DB": PRODUCTION_DB},
+    )
+    assert over_the_production_replica_set.returncode == 1
+    assert "production replica set" in over_the_production_replica_set.stderr
+
+
+def test_f_a8v_1_a_glob_source_database_is_refused(harness) -> None:
+    """`RESTORE_SOURCE_DB` reaches `--nsInclude`, `--nsFrom` and `--nsTo`, so it
+    is the same injection surface F-A8U-5 closed on the target and it gets the
+    same rule. `*` here would read every namespace the archive carries."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "RESTORE_SOURCE_DB": "*",
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+        }
+    )
+
+    assert result.returncode == 1
+    assert "RESTORE_SOURCE_DB" in result.stderr
+    assert "--dryRun" not in result.stub_log, "refused before the archive was read"
+
+
+def test_f_a8v_1_a_source_the_archive_does_not_carry_is_still_diagnosed(harness) -> None:
+    """The wrong-target diagnosis has to follow the source, or naming a source
+    that is simply absent from the archive becomes a silent empty restore."""
+    result = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "RESTORE_SOURCE_DB": "someotherdb",
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+            "STUB_RESTORE_NS": "",
+            "STUB_RESTORE_APPLIED": "0",
+        }
+    )
+
+    assert result.returncode == 5
+    assert "aimed at the wrong database" in result.stderr
+    evidence = _evidence(result.stdout)
+    assert "contraclaim.permissions" in evidence["EXCLUDED_BY_TARGET"]
+
+
+def test_f_a8v_1_either_namespace_spelling_certifies(harness) -> None:
+    """`mongorestore` may report progress under the source name or under the
+    remapped one, and this script does not get to assume which. So neither is
+    assumed: a collection reported in EITHER spelling is applied, and one
+    reported in neither is still missing - which the second half proves, so the
+    tolerance cannot be hiding a real shortfall."""
+    reported_as_source = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "RESTORE_SOURCE_DB": PRODUCTION_DB,
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+            "STUB_RESTORE_NS": PRODUCTION_ARCHIVE_NS,
+        }
+    )
+    assert reported_as_source.returncode == 0, reported_as_source.stdout + reported_as_source.stderr
+    assert _evidence(reported_as_source.stdout)["STATUS"] == "OK"
+
+    one_collection_never_applied = harness(
+        env={
+            "RESTORE_EXEC_CONTEXT": "host",
+            "RESTORE_SOURCE_DB": PRODUCTION_DB,
+            "STUB_ARCHIVE_NS": PRODUCTION_ARCHIVE_NS,
+            "STUB_RESTORE_NS": f"{STAGING_DB}.permissions",
+        }
+    )
+    assert one_collection_never_applied.returncode == 5
+    evidence = _evidence(one_collection_never_applied.stdout)
+    assert evidence["STATUS"] == "FAILED"
+    assert "users" in evidence["MISSING_COLLECTIONS"]
