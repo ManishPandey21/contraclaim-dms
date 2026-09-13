@@ -46,7 +46,7 @@ x-mongo-ulimits: &mongo-ulimits
 
 services:
   mongo1:
-    image: mongo:8.0
+    image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
     restart: unless-stopped
     command: *mongo-command
     environment: *mongo-env
@@ -63,7 +63,7 @@ services:
         max-file: "5"
 
   mongo2:
-    image: mongo:8.0
+    image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
     restart: unless-stopped
     command: *mongo-command
     environment: *mongo-env
@@ -80,7 +80,7 @@ services:
         max-file: "5"
 
   mongo3:
-    image: mongo:8.0
+    image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
     restart: unless-stopped
     command: *mongo-command
     environment: *mongo-env
@@ -97,7 +97,7 @@ services:
         max-file: "5"
 
   mongo-init:
-    image: mongo:8.0
+    image: mongo:8.0@sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6
     restart: "no"
     # The init script reads MONGODB_REPLICA_SET and defaulted to rs0 because
     # nothing supplied it. It must agree with the name the members were started

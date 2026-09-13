@@ -354,7 +354,7 @@ services:
     logging: *default-logging
 
   qdrant:
-    image: qdrant/qdrant:v1.12.5
+    image: qdrant/qdrant:v1.12.5@sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae
     restart: unless-stopped
     environment:
       QDRANT__SERVICE__API_KEY: "${QDRANT_API_KEY:?QDRANT_API_KEY is required}"
@@ -375,7 +375,7 @@ services:
     logging: *default-logging
 
   falkordb:
-    image: falkordb/falkordb:v4.0.8
+    image: falkordb/falkordb:v4.0.8@sha256:af5f2aa035390f04fa6d1f0c6353669f5f75c101f6b4f385fcb672a288b4edb8
     restart: unless-stopped
     environment:
       FALKORDB_PASSWORD: "${FALKORDB_PASSWORD:?FALKORDB_PASSWORD is required}"
@@ -410,7 +410,7 @@ services:
     logging: *default-logging
 
   redis:
-    image: redis:7.4-alpine
+    image: redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     command:
       - sh
@@ -464,7 +464,7 @@ services:
   clamav:
     # Pinned like every other image: AV is fail-closed in production, so an
     # unexpected upstream release must not be able to break uploads on redeploy.
-    image: clamav/clamav:1.4
+    image: clamav/clamav:1.4@sha256:86c2a50372da8522186cc8f68e23ebebe9782c7eac21439a6fece9e1a867d038
     restart: unless-stopped
     deploy:
       resources:
@@ -481,7 +481,7 @@ services:
     logging: *default-logging
 
   gateway:
-    image: httpd:2.4
+    image: httpd:2.4@sha256:393435ee1a31437adeb1f03c134224c9ce5fa5f527e8c0cb9bea576b0d6fc742
     restart: unless-stopped
     depends_on:
       client:
