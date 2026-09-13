@@ -33,7 +33,7 @@ backup_volume() {
 }
 
 backup_volume "${PROJECT_NAME}_qdrant_data" qdrant_data --any-of "*/collections/*" --any-of "*raft_state*"
-backup_volume "${PROJECT_NAME}_qdrant_snapshots" qdrant_snapshots
+backup_volume "${PROJECT_NAME}_qdrant_snapshots" qdrant_snapshots --profile application-volume
 backup_volume "${PROJECT_NAME}_falkordb_data" falkordb_data --profile redis-persistence
 backup_volume "${PROJECT_NAME}_redis_data" redis_data --profile redis-persistence
 

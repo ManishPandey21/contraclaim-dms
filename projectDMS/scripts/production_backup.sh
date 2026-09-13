@@ -67,9 +67,14 @@ docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T redis \
 docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T falkordb \
   sh -c 'redis-cli -a "$FALKORDB_PASSWORD" BGSAVE' || true
 
-backup_volume "${project_name}_backend_uploads" "backend-uploads"
+# Uploads and Qdrant's snapshot scratch are legitimately empty on a fresh install.
+# With no contract, backup_volume.sh refused that archive and set -e aborted the
+# whole backup before any later volume (F-A8W-B1). `application-volume` accepts an
+# empty volume and still refuses an unreadable or root-escaping archive; the
+# stateful volumes below keep contracts that refuse emptiness.
+backup_volume "${project_name}_backend_uploads" "backend-uploads" --profile application-volume
 backup_volume "${project_name}_qdrant_data" "qdrant-data" --any-of "*/collections/*" --any-of "*raft_state*"
-backup_volume "${project_name}_qdrant_snapshots" "qdrant-snapshots"
+backup_volume "${project_name}_qdrant_snapshots" "qdrant-snapshots" --profile application-volume
 backup_volume "${project_name}_falkordb_data" "falkordb-data" --profile redis-persistence
 backup_volume "${project_name}_redis_data" "redis-data" --profile redis-persistence
 

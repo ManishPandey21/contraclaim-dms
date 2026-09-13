@@ -112,6 +112,12 @@ class ArchiveMember:
     name: str
     size: int
     is_file: bool
+    #: The target of a symbolic or hard link, empty for anything else.
+    link: str = ""
+    is_hardlink: bool = False
+    #: A character or block device, or a FIFO. Restored by a root `tar`, these
+    #: become device nodes inside an application volume.
+    is_special: bool = False
 
     @property
     def depth(self) -> int:
@@ -168,11 +174,29 @@ def _read_members(path: Path) -> tuple[list[ArchiveMember], dict[str, bytes]]:
             name = _normalise(info.name)
             if not name:
                 continue
-            members.append(ArchiveMember(name=name, size=info.size, is_file=info.isreg()))
+            link = info.linkname if (info.issym() or info.islnk()) else ""
+            members.append(
+                ArchiveMember(
+                    name=name,
+                    size=info.size,
+                    is_file=info.isreg(),
+                    link=link,
+                    is_hardlink=info.islnk(),
+                    is_special=info.ischr() or info.isblk() or info.isfifo(),
+                )
+            )
             if info.isreg() and info.size > 0 and name.endswith(".rdb"):
                 handle = tar.extractfile(info)
                 if handle is not None:
                     heads[name] = handle.read(RDB_HEAD_BYTES)
+        # `tarfile` stops at the tar end-of-archive marker and never reads the
+        # gzip trailer, so an archive cut in its last bytes listed cleanly and
+        # certified VALID while `gzip -t` and `tar -xzf` both refused it (R-A8X
+        # review). Reading the stream to its end makes GzipFile check the CRC
+        # and length, and a short or corrupt trailer raises here.
+        stream = tar.fileobj
+        while stream is not None and stream.read(1024 * 1024):
+            pass
     return members, heads
 
 
@@ -300,14 +324,118 @@ def _validate_redis_persistence(
     return verdict(INVALID_CONTENT, detail)
 
 
+def _escapes_restore_root(name: str) -> bool:
+    parts = name.replace("\\", "/").split("/")
+    return name.startswith(("/", "\\")) or ".." in parts
+
+
+def _raw_entry_count(path: Path) -> int:
+    """Entries as `tar` wrote them, the root entry included.
+
+    `_read_members` drops the `./` root entry GNU tar writes, so an archive of an
+    empty directory reads as zero members there. Only called when that list is
+    empty, when the archive is a few hundred bytes.
+    """
+    with tarfile.open(path, "r:gz") as tar:
+        return sum(1 for _ in tar)
+
+
+def _validate_application_volume(
+    path: Path, members: Sequence[ArchiveMember], heads: dict[str, bytes]
+) -> ArchiveVerdict:
+    """An application data volume for which emptiness is a legitimate state.
+
+    User uploads before the first upload, and Qdrant's snapshot scratch before
+    the first snapshot, are empty on every fresh install. F-A8W-B1: the bare
+    contract refused exactly that archive, and `production_backup.sh` aborted
+    under `set -e` before any later volume was written. This profile says what a
+    usable archive of such a volume is, without claiming it holds anything:
+
+    * it is a readable gzip tarball (decided before this function is called);
+    * `tar` recorded at least one entry - archiving a directory, even an empty
+      one, always records its root, so a stream with no entry at all was not
+      produced by archiving a volume;
+    * every entry, and every link target, restores inside the volume root;
+    * no device or FIFO entry, and no hard link to an entry not already carried.
+
+    Emptiness is judged from the entries and never from the byte count. This
+    profile is declared per label and must never be used for a volume whose
+    emptiness means lost state (FalkorDB, Redis, Qdrant data).
+    """
+
+    def verdict(status: str, detail: str) -> ArchiveVerdict:
+        return ArchiveVerdict(
+            status=status,
+            contract="application-volume",
+            detail=detail,
+            path=str(path),
+            member_count=len(members),
+            members=tuple(member.name for member in members[:50]),
+        )
+
+    escaping = sorted(
+        {
+            member.name if _escapes_restore_root(member.name) else f"{member.name} -> {member.link}"
+            for member in members
+            if _escapes_restore_root(member.name) or (member.link and _escapes_restore_root(member.link))
+        }
+    )
+    if escaping:
+        return verdict(
+            INVALID_ROOT,
+            f"entries would restore outside the volume root: {', '.join(escaping[:10])}",
+        )
+
+    special = sorted(member.name for member in members if member.is_special)
+    if special:
+        return verdict(
+            INVALID_CONTENT,
+            f"device or FIFO entries have no place in an application volume: {', '.join(special[:10])}",
+        )
+
+    seen: set[str] = set()
+    dangling: list[str] = []
+    for member in members:
+        if member.is_hardlink and _normalise(member.link) not in seen:
+            dangling.append(f"{member.name} -> {member.link}")
+        seen.add(member.name)
+    if dangling:
+        return verdict(
+            INVALID_CONTENT,
+            f"hard links to entries the archive does not carry before them: {', '.join(dangling[:10])}",
+        )
+
+    if not members and _raw_entry_count(path) == 0:
+        return verdict(
+            INVALID_CONTENT,
+            "the archive holds no tar entry at all, not even the volume root, so it was "
+            "not produced by archiving a volume",
+        )
+
+    files = sum(1 for member in members if member.is_file and member.size > 0)
+    if files == 0:
+        return verdict(VALID, "readable volume archive holding no file; an empty volume is valid for this label")
+    return verdict(VALID, f"readable volume archive holding {files} non-empty file(s)")
+
+
 #: Semantic contracts, by name. Adding one here is how a new volume declares
 #: what a usable archive of it looks like.
 PROFILES = {
     "redis-persistence": _validate_redis_persistence,
+    "application-volume": _validate_application_volume,
 }
 
 #: Which archive label carries which contract. `operations_health` reads this
 #: so the nightly signal and the backup script cannot drift apart.
+#:
+#: `application-volume` is deliberately NOT mapped here. It is declared where the
+#: archive is written (`production_backup.sh`, `backup.sh`), which is what
+#: F-A8W-B1 needed. Mapping it here would make `/health/operations` validate the
+#: uploads archive inline on every poll, and production's is ~355 MB, above
+#: `MAX_INLINE_VALIDATION_BYTES`: it would read UNEVALUATED, which is unhealthy,
+#: and the endpoint would answer 503 after deploy (R-A8X review). Health keeps
+#: reading those labels as UNVERIFIED. `test_backup_empty_application_volume.py`
+#: pins both halves, and that the profile is never used for a state label.
 PROFILE_BY_LABEL = {
     "falkordb-data": "redis-persistence",
     "falkordb-persistence": "redis-persistence",

@@ -127,6 +127,14 @@ shift 2
 archive_dir=$(cd "$(dirname "$archive")" && pwd)
 archive_name=$(basename "$archive")
 
+# `docker run -v NAME:/source` silently CREATES a named volume that does not
+# exist. Empty, it archives as a valid fresh install under application-volume,
+# so a misnamed or deleted volume would read as a healthy backup (R-A8X review).
+if ! docker volume inspect "$volume" >/dev/null 2>&1; then
+  echo "Backup failed: Docker volume $volume does not exist; refusing to archive a volume docker would create empty." >&2
+  exit 1
+fi
+
 echo "Backing up Docker volume $volume to $archive_dir/$archive_name"
 docker_run --rm \
   -v "${volume}:/source:ro" \

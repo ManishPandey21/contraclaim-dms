@@ -157,10 +157,19 @@ def test_falkordb_persists_inside_the_volume_that_gets_backed_up() -> None:
 #: volumes carry a semantic profile rather than a pattern list: a pattern list
 #: cannot tell an `appendonlydir/` holding an AOF from an empty directory with
 #: the same name, which is how the 89-byte FalkorDB archive verified clean.
+#: `qdrant_snapshots` is legitimately empty on a fresh install and declares the
+#: profile that says so; with no contract it aborted the whole backup (F-A8W-B1).
 REQUIRED_BACKUP_CONTRACTS = {
     "falkordb_data": "--profile redis-persistence",
     "redis_data": "--profile redis-persistence",
     "qdrant_data": "--any-of",
+    "qdrant_snapshots": "--profile application-volume",
+}
+
+#: Only `production_backup.sh` archives the uploads volume; the legacy script
+#: never did.
+PRODUCTION_ONLY_BACKUP_CONTRACTS = {
+    "backend_uploads": "--profile application-volume",
 }
 
 
@@ -179,7 +188,10 @@ def test_production_backup_requires_real_persistence_files_in_each_state_archive
         ]
         assert calls, f"{script.name} no longer backs up any volume"
 
-        for volume_suffix, contract in REQUIRED_BACKUP_CONTRACTS.items():
+        required = dict(REQUIRED_BACKUP_CONTRACTS)
+        if script == PRODUCTION_BACKUP:
+            required.update(PRODUCTION_ONLY_BACKUP_CONTRACTS)
+        for volume_suffix, contract in required.items():
             call = next(
                 (line for line in calls if line.split('"')[1].endswith(volume_suffix)),
                 None,
