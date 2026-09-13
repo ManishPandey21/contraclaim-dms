@@ -779,8 +779,109 @@ def test_the_scanned_images_are_the_images_that_get_built() -> None:
         match.group(1)
         for job in workflow["jobs"].values()
         for step in job["steps"]
-        for match in [re.search(r"docker build -t (\S+?):", str(step.get("run", "")))]
+        for match in [_DOCKER_BUILD_TAG.search(str(step.get("run", "")))]
         if match
     }
+    assert built, "no docker build step was found; this gate must not pass by measuring nothing"
     scanned = {str(step["with"]["image-ref"]).split(":")[0] for step in _trivy_steps()}
     assert scanned == built, f"built but not scanned: {built - scanned}; scanned but not built: {scanned - built}"
+
+
+# --------------------------------------------------------------------------- #
+# R-A8W owner decision - fresh-base verification is scheduled, pulls, deploys nothing
+# --------------------------------------------------------------------------- #
+#
+# `apt-get upgrade` (F-A8V-4) absorbs an advisory wave at the next build. It does
+# not make an already-built image stop ageing, and a CI run that only happens on
+# a push says nothing about a week in which nobody pushed. The owner decision in
+# docs/IMAGE_FRESHNESS_POLICY.md therefore asks for three properties of the
+# workflow, each pinned here:
+#
+#   1. it re-runs on a schedule, at least weekly, and can be started by hand;
+#   2. every image build pulls the current upstream base (`--pull`), so a cached
+#      base layer on a runner cannot stand in for a refreshed one;
+#   3. no run of it - scheduled or not - can push an image or deploy anything.
+
+_DOCKER_BUILD_TAG = re.compile(r"docker build\b[^\n]*?\s-t\s+(\S+?):")
+
+
+def _workflow() -> dict:
+    return yaml.safe_load((GIT_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+
+
+def _triggers(workflow: dict) -> dict:
+    # YAML 1.1 reads the bare key `on` as the boolean True.
+    triggers = workflow.get("on", workflow.get(True))
+    assert isinstance(triggers, dict), f"ci.yml triggers are not a mapping: {triggers!r}"
+    return triggers
+
+
+def _cron_is_at_least_weekly(expression: str) -> bool:
+    fields = expression.split()
+    if len(fields) != 5:
+        return False
+    minute, hour, day_of_month, month, _day_of_week = fields
+    # A fixed day-of-month or month would make it monthly or yearly at best.
+    return day_of_month == "*" and month == "*" and minute.isdigit() and hour.isdigit()
+
+
+def test_the_image_scan_reruns_on_a_weekly_schedule_and_on_demand() -> None:
+    triggers = _triggers(_workflow())
+    schedule = triggers.get("schedule") or []
+    crons = [str(entry.get("cron", "")) for entry in schedule if isinstance(entry, dict)]
+    assert crons, "ci.yml has no schedule, so an image is only re-scanned when someone happens to push"
+    assert any(_cron_is_at_least_weekly(cron) for cron in crons), f"no schedule runs at least weekly: {crons}"
+    assert "workflow_dispatch" in triggers, "the fresh-base run cannot be started by hand before a window"
+    # The existing triggers are not traded away for the new one.
+    assert "pull_request" in triggers and "push" in triggers
+
+
+def test_the_weekly_cron_check_would_notice_a_monthly_schedule() -> None:
+    assert _cron_is_at_least_weekly("23 2 * * 1")
+    assert not _cron_is_at_least_weekly("23 2 1 * *")
+    assert not _cron_is_at_least_weekly("23 2 * 6 1")
+    assert not _cron_is_at_least_weekly("not a cron")
+
+
+def _build_runs() -> list[str]:
+    runs = [
+        str(step.get("run", ""))
+        for job in _workflow()["jobs"].values()
+        for step in job["steps"]
+        if "docker build" in str(step.get("run", ""))
+    ]
+    assert runs, "no docker build step was found; this gate must not pass by measuring nothing"
+    return runs
+
+
+def test_every_image_build_pulls_the_current_base() -> None:
+    offenders = [run.strip() for run in _build_runs() if not re.search(r"\s--pull(\s|=true\b)", run)]
+    assert not offenders, (
+        "these image builds may reuse a cached base layer instead of the current "
+        "upstream base, so the scan certifies a base nobody refreshed:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_workflow_can_neither_push_an_image_nor_deploy() -> None:
+    workflow = _workflow()
+    permissions = workflow.get("permissions") or {}
+    assert permissions.get("contents") == "read", f"workflow contents permission is {permissions.get('contents')!r}"
+    assert "packages" not in permissions and "id-token" not in permissions, permissions
+
+    forbidden_run = re.compile(r"docker\s+push|docker\s+login|\bssh\s|\bscp\s|compose\b[^\n]*\bup\b|kubectl|helm\s")
+    forbidden_uses = ("docker/login-action", "docker/build-push-action", "appleboy/ssh-action", "aws-actions/")
+    offenders: list[str] = []
+    for job_name, job in workflow["jobs"].items():
+        if job.get("environment"):
+            offenders.append(f"{job_name}: targets environment {job['environment']!r}")
+        if (job.get("permissions") or {}).get("contents") == "write":
+            offenders.append(f"{job_name}: contents: write")
+        for step in job["steps"]:
+            # Fold shell line continuations first, as the shell does: otherwise
+            # `docker compose -f x \` + newline + `up -d` is one command that no
+            # single-line pattern sees.
+            if forbidden_run.search(str(step.get("run", "")).replace("\\\n", " ")):
+                offenders.append(f"{job_name}: run {str(step.get('run')).strip()[:80]!r}")
+            if any(name in str(step.get("uses", "")) for name in forbidden_uses):
+                offenders.append(f"{job_name}: uses {step.get('uses')}")
+    assert not offenders, "the CI workflow - which now also runs unattended every week - could publish or deploy:\n  " + "\n  ".join(offenders)

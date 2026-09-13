@@ -143,3 +143,230 @@ test.describe("Gate 3 bullet 2 - org-admin permission save/retrieve", () => {
     ).toContain(CLIENT_DMS_PERMISSION);
   });
 });
+
+/**
+ * R-A8W. The bullet above is "save/retrieve"; Gate 4 bullet 8 is "Org-Admin
+ * permissions are validated", and a permission that saves correctly but also
+ * reaches another tenant is not validated. So the same run measures the other
+ * half: an org admin is allowed inside its organisation and refused outside it.
+ *
+ * READ-ONLY against the foreign tenant. `E2E_FOREIGN_ORG_ID` and
+ * `E2E_FOREIGN_PROJECT_ID` name an organisation and a project the org admin does
+ * NOT belong to; nothing here writes to them, so the fixture rule that every
+ * write names `E2E_STAGING_ORG_ID` still holds.
+ *
+ * A refusal may be 403 or 404. A 401 is a FAILURE: the client turns 401 into a
+ * forced logout, so a scope refusal that arrives as 401 logs a legitimate user
+ * out of their own tenant. A 200 carrying a foreign row is a leak. A 200 with an
+ * empty list is only accepted where the endpoint is a collection read, because
+ * "the gate answers membership, the scope query answers row visibility".
+ */
+const FOREIGN = ["E2E_FOREIGN_ORG_ID", "E2E_FOREIGN_PROJECT_ID"] as const;
+const REFUSALS = [403, 404];
+
+function rowsOf(body: unknown, ...keys: string[]): any[] {
+  if (Array.isArray(body)) {
+    return body;
+  }
+  for (const key of keys) {
+    const value = (body as Record<string, unknown> | null)?.[key];
+    if (Array.isArray(value)) {
+      return value;
+    }
+  }
+  return [];
+}
+
+function organisationOf(row: any): string {
+  return String(row?.organization_id ?? row?.organizationId ?? "").trim();
+}
+
+function idOf(row: any): string {
+  return String(row?._id ?? row?.id ?? "").trim();
+}
+
+/** Every object anywhere in a JSON body that belongs to, or is, a foreign object. */
+function foreignObjectsIn(body: unknown, foreignOrg: string, foreignProject: string): unknown[] {
+  const found: unknown[] = [];
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node && typeof node === "object") {
+      const row = node as Record<string, unknown>;
+      const org = organisationOf(row);
+      const id = idOf(row);
+      const project = String(row.project_id ?? row.projectId ?? "").trim();
+      if (org === foreignOrg || project === foreignProject || id === foreignOrg || id === foreignProject) {
+        found.push(node);
+      }
+      Object.values(row).forEach(walk);
+    }
+  };
+  walk(body);
+  return found;
+}
+
+test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused outside it", () => {
+  test("the organisation list holds the org admin's own organisation and no other", async ({
+    request,
+  }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    await signIn(request, ADMIN[0], ADMIN[1]);
+
+    const response = await request.get("/api/organizations");
+    expect(response.status(), "an org admin could not list organisations at all").toBe(200);
+    const rows = rowsOf(await response.json(), "organizations", "items", "data");
+    const ids = rows.map(idOf);
+
+    expect(ids, "the org admin's own organisation is not visible to it").toContain(
+      env.E2E_STAGING_ORG_ID
+    );
+    expect(ids, "a foreign organisation is listed to an org admin").not.toContain(
+      env.E2E_FOREIGN_ORG_ID
+    );
+    expect(
+      ids.filter((id) => id !== env.E2E_STAGING_ORG_ID),
+      "the organisation list reaches beyond the org admin's tenant"
+    ).toEqual([]);
+  });
+
+  test("a foreign organisation addressed directly is refused", async ({ request }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    await signIn(request, ADMIN[0], ADMIN[1]);
+
+    const own = await request.get(`/api/organizations/${env.E2E_STAGING_ORG_ID}`);
+    expect(own.status(), "the org admin was refused its own organisation").toBe(200);
+
+    const foreign = await request.get(`/api/organizations/${env.E2E_FOREIGN_ORG_ID}`);
+    expect(
+      REFUSALS,
+      `a direct read of a foreign organisation returned ${foreign.status()}; 200 is a leak and 401 is a forced logout`
+    ).toContain(foreign.status());
+  });
+
+  test("every visible project belongs to the org admin's organisation", async ({ request }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    await signIn(request, ADMIN[0], ADMIN[1]);
+
+    const response = await request.get("/api/projects");
+    expect(response.status(), "an org admin could not list projects in its own tenant").toBe(200);
+    const rows = rowsOf(await response.json(), "projects", "items", "data");
+
+    // Non-empty, or "no foreign project" would be a pass that measured nothing.
+    expect(rows.length, "the org admin sees no project at all").toBeGreaterThan(0);
+    expect(
+      rows.filter((row) => organisationOf(row) !== env.E2E_STAGING_ORG_ID).map(idOf),
+      "projects outside the org admin's organisation are visible to it"
+    ).toEqual([]);
+  });
+
+  test("a foreign project, or a foreign-organisation filter, leaks nothing", async ({ request }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    await signIn(request, ADMIN[0], ADMIN[1]);
+
+    const direct = await request.get(`/api/projects/${env.E2E_FOREIGN_PROJECT_ID}`);
+    expect(
+      REFUSALS,
+      `a direct read of a foreign project returned ${direct.status()}; 200 is a leak and 401 is a forced logout`
+    ).toContain(direct.status());
+
+    // The selector: asking for another organisation's projects by parameter.
+    const filtered = await request.get("/api/projects", {
+      params: { organization_id: env.E2E_FOREIGN_ORG_ID },
+    });
+    expect(filtered.status(), "a scope refusal arrived as 401").not.toBe(401);
+    if (filtered.status() === 200) {
+      const leaked = foreignObjectsIn(
+        await filtered.json(),
+        env.E2E_FOREIGN_ORG_ID,
+        env.E2E_FOREIGN_PROJECT_ID
+      );
+      expect(leaked, "selecting a foreign organisation returned its projects").toEqual([]);
+    } else {
+      expect(REFUSALS).toContain(filtered.status());
+    }
+  });
+
+  test("roles and users of a foreign organisation are not visible", async ({ request }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    await signIn(request, ADMIN[0], ADMIN[1]);
+
+    const roles = await request.get("/api/roles");
+    expect(roles.status(), "an org admin could not list roles in its own tenant").toBe(200);
+    const foreignRoles = rowsOf(await roles.json(), "roles").filter((row) => {
+      const org = organisationOf(row);
+      return org !== "" && org !== env.E2E_STAGING_ORG_ID;
+    });
+    expect(foreignRoles.map(idOf), "roles scoped to another organisation are visible").toEqual([]);
+
+    const users = await request.get("/api/users", {
+      params: { organization_id: env.E2E_FOREIGN_ORG_ID },
+    });
+    expect(users.status(), "a scope refusal arrived as 401").not.toBe(401);
+    if (users.status() === 200) {
+      const leaked = rowsOf(await users.json(), "users", "items", "data").filter(
+        (row) => organisationOf(row) === env.E2E_FOREIGN_ORG_ID
+      );
+      expect(leaked.map(idOf), "an org admin can list another organisation's users").toEqual([]);
+    } else {
+      expect(REFUSALS).toContain(users.status());
+    }
+  });
+
+  test("navigating the admin pages surfaces no foreign data and no forced logout", async ({
+    page,
+  }) => {
+    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+
+    await page.goto("/login");
+    await page.getByLabel("Work email").fill(env.E2E_ORG_ADMIN_EMAIL);
+    await page.getByLabel("Password", { exact: true }).fill(env.E2E_ORG_ADMIN_PASSWORD);
+    await Promise.all([
+      page.waitForResponse(
+        (response) => response.url().includes("/api/login") && response.request().method() === "POST"
+      ),
+      page.getByRole("button", { name: "Sign in" }).click(),
+    ]);
+
+    const unauthorised: string[] = [];
+    const leaks: string[] = [];
+    let measured = 0;
+    page.on("response", async (response) => {
+      const url = response.url();
+      if (!url.includes("/api/")) {
+        return;
+      }
+      if (response.status() === 401) {
+        unauthorised.push(`${response.request().method()} ${new URL(url).pathname}`);
+      }
+      if (!(response.headers()["content-type"] ?? "").includes("application/json")) {
+        return;
+      }
+      try {
+        const body = await response.json();
+        measured += 1;
+        if (foreignObjectsIn(body, env.E2E_FOREIGN_ORG_ID, env.E2E_FOREIGN_PROJECT_ID).length > 0) {
+          leaks.push(new URL(url).pathname);
+        }
+      } catch {
+        // A body that is gone or not JSON carries no row to leak.
+      }
+    });
+
+    for (const path of ["/organizations", "/projects", "/users", "/permissions"]) {
+      await page.goto(path);
+      await page.waitForLoadState("networkidle");
+      expect(new URL(page.url()).pathname, `visiting ${path} forced the session back to login`).not.toBe(
+        "/login"
+      );
+    }
+
+    expect(measured, "no JSON API response was observed, so nothing was measured").toBeGreaterThan(0);
+    expect(unauthorised, "an admin page answered 401, which the client turns into a forced logout").toEqual(
+      []
+    );
+    expect(leaks, "an admin page received another organisation's objects").toEqual([]);
+  });
+});

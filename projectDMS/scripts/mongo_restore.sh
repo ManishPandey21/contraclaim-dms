@@ -255,7 +255,11 @@ percent_decode() {
 
 uri_replica_set=""
 if [[ -n "$uri_query" ]]; then
-  IFS='&' read -r -a _uri_opts <<< "$uri_query"
+  # R-A8W review HIGH-1. Split on `;` as well as `&`: the Go driver mongorestore
+  # is built on accepts both (connstring.go, `strings.FieldsFunc(uri, r == ';' ||
+  # r == '&')`), so `?authSource=admin;replicaSet=rs0` reached `rs0` while this
+  # loop saw a single option called `authsource`.
+  IFS='&;' read -r -a _uri_opts <<< "$uri_query"
   for _opt in "${_uri_opts[@]}"; do
     case "$_opt" in
       replicaset=*) uri_replica_set=$(percent_decode "${_opt#replicaset=}") ;;
@@ -296,17 +300,43 @@ uri_authority=${uri_authority%%/*}
 uri_authority=${uri_authority%%\?*}
 uri_authority=${uri_authority##*@}
 
+# R-A8W review HIGH-1. With no replica set named, the host list is the only
+# protection, and exact-name matching left four spellings of a production member
+# open: a trailing dot (`mongo1.`), a network-qualified name
+# (`contraclaim-mongo1-1.contraclaim_data-net`), a loopback or IP literal - the
+# host routes to every container IP even though production publishes no Mongo
+# port - and an SRV seedlist, whose hosts come from DNS where this script cannot
+# see them. Each is refused the same way a bare production name is, with the
+# same remedy: name the replica set, which the check above then decides.
+if [[ -z "$production_reason" && -z "$uri_replica_set" ]]; then
+  if [[ "$uri_lower" == mongodb+srv://* ]]; then
+    production_reason="the URI is an SRV seedlist and names no replica set, so its hosts are resolved from DNS where they cannot be told apart from a production member; add replicaSet=<set> to say which stack is meant"
+  fi
+fi
+
 if [[ -z "$production_reason" && -z "$uri_replica_set" ]]; then
   IFS=',' read -r -a _uri_hosts <<< "$uri_authority"
   for _uri_host in "${_uri_hosts[@]}"; do
-    _uri_host=${_uri_host%%:*}
-    _uri_host=${_uri_host#[}
-    _uri_host=${_uri_host%]}
+    if [[ "$_uri_host" == \[* ]]; then
+      # [v6addr]:port - the address itself contains colons.
+      _uri_host=${_uri_host#[}
+      _uri_host=${_uri_host%%]*}
+    else
+      _uri_host=${_uri_host%%:*}
+    fi
+    _uri_host=${_uri_host%.}
     [[ -z "$_uri_host" ]] && continue
+    _uri_label=${_uri_host%%.*}
+
+    if [[ "$_uri_host" == "localhost" || "$_uri_host" == *:* || "$_uri_host" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then
+      production_reason="the URI addresses ${_uri_host} and names no replica set; a loopback or IP address reaches whatever container answers there, including a production member, so it cannot be told apart from one; add replicaSet=<set> to say which stack is meant"
+      break
+    fi
+
     for host in $PRODUCTION_HOSTS; do
       host_lower=${host,,}
       [[ -z "$host_lower" ]] && continue
-      if [[ "$_uri_host" == "$host_lower" ]]; then
+      if [[ "$_uri_host" == "$host_lower" || "$_uri_label" == "$host_lower" ]]; then
         production_reason="the URI addresses ${host} and names no replica set, so it cannot be told apart from the production member of that name; add replicaSet=<set> to say which stack is meant"
         break 2
       fi

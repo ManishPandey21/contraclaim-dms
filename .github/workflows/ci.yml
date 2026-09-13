@@ -4,6 +4,18 @@ on:
   pull_request:
   push:
     branches: [main, master]
+  # R-A8W owner decision (docs/IMAGE_FRESHNESS_POLICY.md): a clean image scan is
+  # a statement about one day. R-A8V went red three times in one day on
+  # Dockerfiles that had not changed, because the advisory database moved. So
+  # the whole pipeline - every image rebuilt `--pull` from the current upstream
+  # base and scanned with the unchanged policy - re-runs weekly on its own.
+  # It builds and scans; it pushes nothing, deploys nothing and holds no
+  # credential that could. GitHub runs `schedule` against the default branch
+  # only, so this takes effect once the workflow is on `main`; until then
+  # `workflow_dispatch` is how the same run is started by hand.
+  schedule:
+    - cron: "23 2 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -200,7 +212,7 @@ jobs:
       # Python runtime is still built on every change so a 3.12 incompatibility
       # cannot stay hidden until an operator enables the profile.
       - name: Build the backend image
-        run: docker build -t projectdms-backend:${{ github.sha }} projectDMS/backend
+        run: docker build --pull -t projectdms-backend:${{ github.sha }} projectDMS/backend
       - name: Scan backend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -220,7 +232,7 @@ jobs:
       - name: Drop the backend image
         run: docker image rm projectdms-backend:${{ github.sha }}
       - name: Build the client image
-        run: docker build -t projectdms-client:${{ github.sha }} projectDMS/client
+        run: docker build --pull -t projectdms-client:${{ github.sha }} projectDMS/client
       - name: Client runtime image carries no package manager
         # The client image serves static files with `node scripts/serve-dist.mjs`.
         # node:*-slim bundles npm, corepack and yarn, and npm's vendored
@@ -274,7 +286,7 @@ jobs:
       - name: Drop the client image
         run: docker image rm projectdms-client:${{ github.sha }}
       - name: Build the LangGraph image
-        run: docker build -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
+        run: docker build --pull -t projectdms-langgraph:${{ github.sha }} projectDMS/services/langgraph
       - name: Scan LangGraph image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -294,7 +306,7 @@ jobs:
       - name: Drop the LangGraph image
         run: docker image rm projectdms-langgraph:${{ github.sha }}
       - name: Build the Graphiti image
-        run: docker build -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
+        run: docker build --pull -t projectdms-graphiti:${{ github.sha }} projectDMS/services/graphiti
       - name: Scan Graphiti image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -314,7 +326,7 @@ jobs:
       - name: Drop the Graphiti image
         run: docker image rm projectdms-graphiti:${{ github.sha }}
       - name: Build the Docling image
-        run: docker build -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
+        run: docker build --pull -t projectdms-docling:${{ github.sha }} projectDMS/services/docling
       - name: Scan Docling image
         uses: aquasecurity/trivy-action@v0.36.0
         with:

@@ -62,6 +62,10 @@ in writing before §3.
       until this run exists.
 - [ ] Trivy on the exact CI policy: **0/0, exit 0** for every image that will be
       deployed, with the negative control at exit 1.
+- [ ] Every image the window deploys rebuilt `docker build --pull` and
+      `scripts/check_image_scan_freshness.py` **exit 0** — reports ≤ 24 h old,
+      about the exact `ImageID`, 0 fixable CRITICAL/HIGH. Any fixable
+      CRITICAL/HIGH is **NO-GO**. Policy: `docs/IMAGE_FRESHNESS_POLICY.md`.
 - [ ] Backend image staleness re-derived **mechanically** against the release
       tree, and every affected image rebuilt and re-scanned before the outage.
 - [ ] `scripts/evidence_secret_scan.py` CLEAN on the evidence set, with a

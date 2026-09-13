@@ -1220,6 +1220,93 @@ def test_f_a8u_7_a_staging_replica_set_against_a_shared_host_is_still_allowed(
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# --------------------------------------------------------------------------- #
+# R-A8W independent review, HIGH-1 - two more ways to spell a production target
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param(
+            "mongodb://10.0.0.5:27017/?authSource=admin;replicaSet=rs0",
+            id="semicolon-separator",
+        ),
+        pytest.param(
+            "mongodb://10.0.0.5:27017/?authSource=admin;replicaset=%72s0",
+            id="semicolon-separator-encoded",
+        ),
+    ],
+)
+def test_r_a8w_a_semicolon_separated_production_replica_set_is_refused(
+    harness, uri: str
+) -> None:
+    """The option list was split on `&` only. The Go driver `mongorestore` is
+    built on splits it on `&` AND `;`
+    (`x/mongo/driver/connstring/connstring.go`: `strings.FieldsFunc(uri, r == ';'
+    || r == '&')`), so `?authSource=admin;replicaSet=rs0` connects to `rs0` while
+    the script parsed one option named `authsource` and saw no replica set."""
+    result = harness(uri=uri, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "rs0" in result.stderr
+    assert result.stub_log == ""
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("mongodb://localhost:27017/?directConnection=true", id="localhost"),
+        pytest.param("mongodb://127.0.0.1:27017", id="ipv4-loopback"),
+        pytest.param("mongodb://[::1]:27017/", id="ipv6-loopback"),
+        pytest.param(
+            "mongodb://172.18.0.5:27017/?directConnection=true", id="container-ip"
+        ),
+        pytest.param("mongodb://mongo1.:27017", id="trailing-dot"),
+        pytest.param(
+            "mongodb://contraclaim-mongo1-1.contraclaim_data-net:27017",
+            id="qualified-production-member",
+        ),
+        pytest.param("mongodb+srv://cluster.example.net/", id="srv-seedlist"),
+    ],
+)
+def test_r_a8w_a_host_that_cannot_be_told_from_production_needs_a_replica_set(
+    harness, uri: str
+) -> None:
+    """With no replica set named, the only protection is the host list, and it
+    compared exact names. A loopback address or a bridge IP reaches a production
+    member from the host (production publishes no Mongo port, but the host routes
+    to every container IP), a trailing dot or a network suffix is the same member,
+    and an SRV seedlist resolves its hosts from DNS where the script cannot see
+    them. Each is ambiguous in exactly the way the existing rule already refuses,
+    and the remedy is the one it already prints: name the replica set."""
+    result = harness(uri=uri, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode != 0
+    assert "names no replica set" in result.stderr
+    assert result.stub_log == ""
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        pytest.param("mongodb://localhost:27017/?replicaSet=rsstg", id="loopback-named-set"),
+        pytest.param(
+            "mongodb://10.0.0.5:27017/?authSource=admin;replicaSet=rsstg",
+            id="semicolon-named-staging-set",
+        ),
+        pytest.param(
+            "mongodb://primary.invalid:27017,secondary.invalid:27017/", id="unambiguous-names"
+        ),
+    ],
+)
+def test_r_a8w_the_printed_remedy_and_unambiguous_hosts_still_work(harness, uri: str) -> None:
+    """The false-positive boundary for both fixes above."""
+    result = harness(uri=uri, env={"RESTORE_EXEC_CONTEXT": "host"})
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_f_a8u_6_narrowing_the_denylist_is_refused_unless_declared(harness) -> None:
     """Every list was `${VAR:-default}`, so the caller could empty all three.
 

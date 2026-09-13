@@ -93,6 +93,7 @@ R-A8O's archive before it was relied on.
 | Swap | present (§7) |
 | Release source on the host | §8 |
 | Staging credentials | present (§9) |
+| **Image freshness** | every release image the window runs rebuilt `docker build --pull` and re-scanned with the exact CI Trivy policy, then `scripts/check_image_scan_freshness.py` **exit 0**: each report ≤ 24 h old, about the exact `ImageID`, 0 fixable CRITICAL/HIGH. **Any fixable CRITICAL/HIGH is NO-GO** — the remedy is a rebuild, never a waiver. Owner decision: `docs/IMAGE_FRESHNESS_POLICY.md` |
 | Backup cron disabled | `/etc/cron.d/contraclaim-backup` fires at 01:30 daily and shells into the stopped stack. Either schedule the window clear of 01:30–02:00 IST or comment the entry for its duration |
 | `certbot.timer` | a renewal attempt during the window fails while nginx is down. Stop the timer with nginx and start it again with nginx |
 | **Time budget** | **§1a. The only precondition that expires. It is checked last, immediately before the stop, and again at the stop** |
