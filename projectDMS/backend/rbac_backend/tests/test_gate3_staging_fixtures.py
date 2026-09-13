@@ -250,6 +250,65 @@ def test_no_fixture_spec_is_excluded_when_targeting_a_deployment(spec: Path) -> 
 
 
 # --------------------------------------------------------------------------- #
+# Bullet 2 measures the page the product renders, reached the way a user does
+# --------------------------------------------------------------------------- #
+
+ORG_ADMIN_SPEC = STAGING_E2E / "org-admin-permissions.spec.ts"
+
+
+def _bullet2_browser_test(text: str) -> str:
+    start = text.index('test("the Client DMS group is offered')
+    end = text.index("\n});", start)
+    return text[start:end]
+
+
+def test_bullet2_selects_the_permissions_tab_before_asserting_the_group() -> None:
+    """F-A8W-B4, measured in R-A8W Stage B run 2.
+
+    `PermissionsPage` opens on `<Tabs defaultValue="roles">` and renders the
+    permission groups only under the `permissions` tab. An assertion on
+    "Client DMS" before the tab is selected measures the default tab.
+    """
+    text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
+    page_source = (REPO_ROOT / "client" / "src" / "pages" / "PermissionsPage.tsx").read_text(encoding="utf-8")
+    assert '<Tabs defaultValue="roles"' in page_source and 'TabsContent value="permissions"' in page_source, (
+        "the page no longer hides the groups behind a tab; re-derive this guard from the page"
+    )
+
+    body = _bullet2_browser_test(text)
+    helper = text[text.index("async function openRoleInPermissionMatrix") :]
+    assert 'getByRole("tab", { name: "Permissions", exact: true }).click()' in helper
+    select_at = body.index("openRoleInPermissionMatrix(")
+    group_at = body.index('name: "Client DMS"')
+    assert select_at < group_at, "the spec asserts the Client DMS group before selecting the Permissions tab"
+
+
+def test_bullet2_accepts_the_terms_through_the_page_not_the_api() -> None:
+    fixtures = FIXTURES.read_text(encoding="utf-8")
+    body = _function_body(fixtures, "openProtectedPage")
+    assert "Accept and Continue" in body and ".check()" in body, (
+        "the terms are no longer accepted through the terms page"
+    )
+    assert "request.post" not in body and "security-terms/accept" in body, (
+        "acceptance must be a browser action observed on the wire, not a harness POST"
+    )
+    text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
+    assert "security-terms/accept" not in text, "the spec posts the acceptance itself"
+    assert text.count("openProtectedPage(") >= 3, "a browser test reaches a protected page without the terms step"
+
+
+def test_bullet2_saves_in_the_browser_and_reads_the_server_back() -> None:
+    body = _bullet2_browser_test(ORG_ADMIN_SPEC.read_text(encoding="utf-8"))
+    for affordance in ('"Save Changes"', '"Verify"', "getByRole(\"dialog\")", "toBeChecked()", "page.reload()"):
+        assert affordance in body, f"the browser leg no longer uses {affordance}"
+    assert "readRolePermissions(session, role)" in body, "the browser save is not read back from the server"
+    save_at = body.index('"Save Changes"')
+    assert "setRolePermissions(session, role, [CLIENT_DMS_PERMISSION])" not in body[save_at:], (
+        "the grant is written through the API after the browser step, so the browser proves nothing"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The refusal semantics the authorisation bullet turns on
 # --------------------------------------------------------------------------- #
 

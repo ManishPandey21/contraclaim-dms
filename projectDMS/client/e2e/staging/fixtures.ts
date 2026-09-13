@@ -36,7 +36,8 @@
  * with no staging window; this module and the specs that use it are the
  * executable artefacts bullets 2 and 3 have never had, and no bullet is ticked.
  */
-import type { APIRequestContext, PlaywrightWorkerArgs } from "@playwright/test";
+import { expect } from "@playwright/test";
+import type { APIRequestContext, Locator, Page, PlaywrightWorkerArgs } from "@playwright/test";
 
 import { BASE_URL, requireStagingEnvironment } from "./staging-target";
 
@@ -311,6 +312,71 @@ export async function signIn(
 }
 
 // --------------------------------------------------------------------------- #
+// A browser session, through the pages a user actually meets
+// --------------------------------------------------------------------------- #
+
+/** The mandatory terms screen `ProtectedRoute` sends an unaccepted user to. */
+const SECURITY_TERMS_HEADING = "Security, Privacy & Anti-Piracy Terms";
+const SECURITY_TERMS_CONSENT =
+  "I have read and agree to the active Security, Privacy & Anti-Piracy Terms.";
+
+/** Sign in through the login page, the way a person does. */
+export async function signInThroughBrowser(
+  page: Page,
+  emailVar: string,
+  passwordVar: string
+): Promise<void> {
+  assertTargetIsNotProduction();
+  const env = requireStagingEnvironment(emailVar, passwordVar);
+  await page.goto("/login");
+  await page.getByLabel("Work email").fill(env[emailVar]);
+  await page.getByLabel("Password", { exact: true }).fill(env[passwordVar]);
+  const [login] = await Promise.all([
+    page.waitForResponse(
+      (response) => response.url().includes("/api/login") && response.request().method() === "POST"
+    ),
+    page.getByRole("button", { name: "Sign in" }).click(),
+  ]);
+  // The status only. A body can carry the address that failed to sign in.
+  expect(login.ok(), `browser sign-in as ${emailVar} failed with ${login.status()}`).toBe(true);
+}
+
+/**
+ * Open a protected page, accepting the active Security Terms through the terms
+ * page first if the deployment requires it.
+ *
+ * R-A8W Stage B run 1 met that screen instead of Permissions Management: a
+ * freshly seeded org admin has not accepted the active terms, and the product
+ * refuses every protected page until they do. Run 2 got past it by calling
+ * `POST /api/security-terms/accept` from the harness, which proves the endpoint
+ * and not the page. Here the consent box is ticked and "Accept and Continue" is
+ * pressed, and the acceptance is waited for on the wire.
+ */
+export async function openProtectedPage(page: Page, path: string, ready: Locator): Promise<void> {
+  assertTargetIsNotProduction();
+  await page.goto(path);
+  const terms = page.getByRole("heading", { name: SECURITY_TERMS_HEADING });
+  await Promise.race([
+    ready.waitFor({ state: "visible", timeout: 30_000 }),
+    terms.waitFor({ state: "visible", timeout: 30_000 }),
+  ]);
+  if (await terms.isVisible()) {
+    await page.getByLabel(SECURITY_TERMS_CONSENT).check();
+    const [accepted] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/api/security-terms/accept") && response.request().method() === "POST"
+      ),
+      page.getByRole("button", { name: "Accept and Continue" }).click(),
+    ]);
+    expect(accepted.ok(), `accepting the security terms failed with ${accepted.status()}`).toBe(true);
+    await page.waitForURL((url) => url.pathname !== "/security-terms");
+    await page.goto(path);
+  }
+  await expect(ready).toBeVisible({ timeout: 30_000 });
+}
+
+// --------------------------------------------------------------------------- #
 // Roles - bullet 2
 // --------------------------------------------------------------------------- #
 
@@ -321,6 +387,18 @@ export interface FixtureRole {
 
 export function fixtureRoleName(label: string): string {
   return `${RUN_TAG}-${label}`;
+}
+
+/** The disposable role must be the organisation-scoped role the spec says it is. */
+function assertRoleIsFixtureScoped(role: any, name: string): void {
+  const organization = String(role?.organization_id ?? role?.organizationId ?? "");
+  const scope = String(role?.scope ?? "");
+  if (organization !== fixtureOrganizationId() || scope !== "organization") {
+    throw new Error(
+      `role ${name} is scope "${scope}" in organisation "${organization}", not an ` +
+        `organisation-scoped role in E2E_STAGING_ORG_ID; refusing to measure on it`
+    );
+  }
 }
 
 async function findRoleByName(session: FixtureSession, name: string): Promise<FixtureRole | null> {
@@ -334,6 +412,7 @@ async function findRoleByName(session: FixtureSession, name: string): Promise<Fi
   if (!match) {
     return null;
   }
+  assertRoleIsFixtureScoped(match, name);
   return { id: String(match._id ?? match.id), name: String(match.name) };
 }
 
@@ -372,6 +451,7 @@ export async function ensureDisposableRole(
     throw new Error(`POST /api/roles failed with ${response.status()}`);
   }
   const created = await response.json();
+  assertRoleIsFixtureScoped(created, name);
   return { id: String(created._id ?? created.id), name };
 }
 
