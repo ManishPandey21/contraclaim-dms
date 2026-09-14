@@ -1,6 +1,9 @@
 # Third-party production images — cutover security disposition
 
-**Status: OPEN — production cutover BLOCKED on this document.** Re-measured in
+**Status: OPEN — production cutover BLOCKED on this document.** R-A9A
+(2026-09-15): the ClamAV row is closed (production runs the validated 1.4.6 since
+R-A8Z); MongoDB, FalkorDB, Qdrant and httpd remain open and still block cutover.
+Re-measured in
 release programme R-A8X on 2026-09-13. No third-party image was **upgraded** in
 R-A8X, because no candidate's compatibility was proven (see "Why no image was
 upgraded"). Every one of them was, however, **digest-pinned to the bytes it already
@@ -42,7 +45,7 @@ current DB.
 | FalkorDB | `falkordb/falkordb:v4.0.8` (module 40008) | `af5f2aa03539…` / `13ee9b3bfcc1…` | 11 | 137 | 82 | `v4.20.4` (Debian 13) | `adbddd418916…` | 2 / 9 = **11** (alpine variant: 12) | **Possible**: 20 minor releases of the graph module | **Likely one-way**: persistence written by v4.20 may not load in v4.0.8, so rollback needs the pre-upgrade archive | CANDIDATE, NOT VALIDATED. Owner decision needed |
 | Qdrant | `qdrant/qdrant:v1.12.5` | `05fecce7dce4…` / `449e32141460…` | 6 | 78 | 56 | `v1.12.6` closes **nothing** (84). The only remediating line is `v1.19.1` | `12364fe851b9…` | 3 / 10 = **13** | **Yes**: seven minor versions; backend pins `qdrant-client==1.12.2` | **Yes**: storage upgrade chain 1.12→1.13→…→1.19, one minor at a time | OWNER DECISION: no safe patch exists |
 | Apache httpd (gateway) | `httpd:2.4` | `393435ee1a31…` / `00fe3afeb8c3…` | 3 | 48 | 52 | `httpd:2.4.68` (Debian 13) | `979c38c2228d…` | 3 / 13 = **16** (alpine: 0 / 22) | Not expected (same 2.4 line, same Debian major); **unproven** | None | CANDIDATE, NOT VALIDATED |
-| ClamAV | `clamav/clamav:1.4` (runs 1.4.5) | `86c2a50372da…` / `b70a05497f80…` | 0 | 3 | 0 | `clamav/clamav:1.4.6` | `71fbb76b397c…` (image `6dc7ff3fabde…`) | **0** (1.5.4 also 0); R-A8Y re-scan 2026-09-14: **0 CRITICAL/HIGH at all** | None found (R-A8Y drill: INSTREAM protocol, healthcheck, persistence, update, privilege) | None (new `clamav_db` volume is seeded from the image) | **ADOPTED ON THE RELEASE BRANCH (R-A8Y)**: validated in a disposable drill and pinned by digest; closes these 3 at cutover. Production still runs 1.4.5 |
+| ClamAV | `clamav/clamav:1.4` (runs 1.4.5) | `86c2a50372da…` / `b70a05497f80…` | 0 | 3 | 0 | `clamav/clamav:1.4.6` | `71fbb76b397c…` (image `6dc7ff3fabde…`) | **0** (1.5.4 also 0); R-A8Y re-scan 2026-09-14: **0 CRITICAL/HIGH at all** | None found (R-A8Y drill: INSTREAM protocol, healthcheck, persistence, update, privilege) | None (new `clamav_db` volume is seeded from the image) | **ADOPTED ON THE RELEASE BRANCH (R-A8Y); RUNNING IN PRODUCTION (R-A8Z)**: validated in a disposable drill and pinned by digest; certified scan 0 fixable CRITICAL/HIGH. Production's `clamav` service alone was recreated on 1.4.6 under a bounded owner authorization on 2026-09-14 (signature-freshness blocker F-A8X-2 CLOSED: loaded daily 28123, freshclam updating over `egress-net`). Held in production only by the untracked `docker-compose.clamav-r-a8z.yml` override until cutover. This row closes; the other images do not |
 | Redis | `redis:7.4-alpine` | `6ab0b6e73817…` / `487efc061638…` | 0 | 0 | 0 | current is clean (`7.4.11-alpine` also 0) | — | 0 | — | — | REMAINS. Digest-pin the running image when pins next change |
 | **Total** | | | **21** | **538** | | | | **137** if every candidate incl. Qdrant 1.19.1 is adopted | | | |
 

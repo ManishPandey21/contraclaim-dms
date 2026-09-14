@@ -1,5 +1,34 @@
 # ClamAV signature freshness — diagnosis, release fix, and gate
 
+> **TEMPORARY PRODUCTION OPERATIONAL WARNING (R-A8Z, re-verified read-only in R-A9A at 2026-09-14T17:56Z).**
+> **UNTIL FULL CUTOVER, EVERY PRODUCTION COMPOSE COMMAND THAT CAN RECREATE CLAMAV
+> MUST INCLUDE THE R-A8Z CLAMAV OVERRIDE.** Production's checkout is still the old
+> deployed source (`main` @ `b2d5025`); only the `clamav` service runs the release
+> definition, from the untracked file
+> `/opt/contraclaim-dms/projectDMS/docker-compose.clamav-r-a8z.yml`
+> (sha256 `8ab39508677f956d386c06d051247631554ee21f634ac97f51be8c4708b91e42`).
+> The required invocation, from `/opt/contraclaim-dms/projectDMS` (project name
+> `contraclaim` comes from `.env`):
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml <command>
+> ```
+>
+> Measured: the running container's compose config hash `6d2fd60e…` equals the
+> render WITH the override; the render without it hashes `d64c3d6b…` and defines
+> `clamav/clamav:1.4`, `service-net` only, no volume, 2 GiB. Any `up`, `up -d`
+> touching clamav, `--force-recreate` or `pull && up` with the two-file set
+> therefore recreates the stale 1.4.5 service that served a 70-day-old database.
+> Running state at the R-A9A read: container `1e0389a046f3`,
+> `clamav/clamav:1.4.6@sha256:71fbb76b…` (image `6dc7ff3fabde…`), healthy,
+> RestartCount 0, `contraclaim_egress-net` + `contraclaim_service-net`, volume
+> `contraclaim_clamav_db`, 3 GiB limit (949.5 MiB used), loaded
+> `ClamAV 1.4.6/28123/Mon Sep 14 06:24:19 2026` (11.5 h old), last freshclam run
+> 17:15:30Z up to date. Rollback script of record: `scripts/pc2_rollback.sh` in
+> `/var/backups/contraclaim-stg-evidence/R-A8Z-STAGEB-20260914T143311Z`. The
+> warning is retired only by the release cutover, which makes the tracked compose
+> carry this definition.
+
 **Release programme R-A8Y, 2026-09-14.** Production was read, never changed.
 The fix lives on `release/contraclaim-rc1` only and reaches production at cutover.
 
@@ -206,6 +235,20 @@ disabled-antivirus parser).
 | Gate 6, Gate 8 | kept | no migration, seed or restore path changed; `clamav_db` is deliberately outside the backup set |
 
 Readiness: 81 → **78** (raw 78.17): Gate 5 5/5 → 5/6, Gate 9 1/6 → 0/6.
+
+**Deployed-stack proof (R-A8Z, 2026-09-14).** Staging: the release compose's clamav
+on a fresh `contraclaim-stg` stack converged healthy, freshclam updated daily to 28123
+over `egress-net` with 0 failures, the race recurred and was healed by the healthcheck,
+the checker returned `CLAMAV_READINESS=OK scope=full` before and after a recreation
+that kept every CVD/CLD sha256-identical on `clamav_db`, and the canonical
+`post_deploy_verify.sh` carried the same verdict after deploy and after the restore
+drill (Gate 5 bullet 6). Production: under a bounded owner authorization only the
+`clamav` service was recreated, from the production compose files plus an override
+generated mechanically from this block (render-identical to staging), with no other
+container changed: daily 28051 (July) -> 28123, loaded age 8.87 h, clean accepted and
+EICAR rejected through the production backend, peak 1,675 MiB of 3 GiB. Until the
+cutover, production compose commands on clamav must include
+`docker-compose.clamav-r-a8z.yml`, or they recreate the old definition.
 
 **Cutover notes.** On adoption, compose recreates clamav with the new network and an
 empty `clamav_db` (seeded from the 1.4.6 image, database built 2026-09-06, older than

@@ -4,6 +4,19 @@ This guide explains how to update the ContraClaim Docker deployment on the Ubunt
 
 Use it as a deployment checklist. Do not overwrite production configuration, environment files, uploaded documents, database volumes, backup directories, or runtime data.
 
+> **TEMPORARY WARNING — PRODUCTION CLAMAV OVERRIDE (since R-A8Z, 2026-09-14).**
+> **UNTIL FULL CUTOVER, EVERY PRODUCTION COMPOSE COMMAND THAT CAN RECREATE CLAMAV
+> MUST INCLUDE THE R-A8Z CLAMAV OVERRIDE:**
+>
+> ```bash
+> docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml <command>
+> ```
+>
+> The override is an untracked file in `/opt/contraclaim-dms/projectDMS`. Without
+> it compose renders the old `clamav/clamav:1.4` service (no egress, no database
+> volume) and recreates it, reinstating stale virus signatures. Details and the
+> measured state: [CLAMAV_SIGNATURE_FRESHNESS.md](CLAMAV_SIGNATURE_FRESHNESS.md).
+
 ## 1. Connect to the Production Server
 
 Connect using the configured SSH alias:
