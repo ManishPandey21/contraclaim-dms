@@ -32,6 +32,11 @@ fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 # shellcheck source=scripts/lib/edge_target.sh
 . "$ROOT_DIR/scripts/lib/edge_target.sh"
 
+# Antivirus readiness beyond "clamd answers": loaded signature age, a clean
+# scan and an EICAR detection. See scripts/lib/clamav_readiness.sh.
+# shellcheck source=scripts/lib/clamav_readiness.sh
+. "$ROOT_DIR/scripts/lib/clamav_readiness.sh"
+
 
 resolve_python_bin() {
   if [[ -n "$PYTHON_BIN" ]]; then
@@ -217,6 +222,21 @@ if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=fa
   pass "Redis ping succeeded"
 else
   fail "Redis ping failed"
+fi
+
+# Gate 5 live antivirus. Production refuses to boot with antivirus disabled
+# unless an override is recorded, so a disabled scanner here is reported as a
+# failure of this verification, never skipped. The maximum age is policy
+# (CLAMAV_SIGNATURE_MAX_AGE_HOURS, default 48); a mirror outage that leaves the
+# loaded database inside it is a WARN at most and never touches /health/live.
+if [[ -n "$backend_container" ]]; then
+  if clamav_antivirus_disabled "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$backend_container" 2>/dev/null | grep -E '^ANTIVIRUS_ENABLED=' | tail -n 1 | cut -d= -f2- || true)"; then
+    fail "ANTIVIRUS_ENABLED is false on the running backend; uploads are not scanned and ClamAV readiness was not verified"
+  else
+    clamav_readiness_check "$(get_env CLAMAV_SIGNATURE_MAX_AGE_HOURS)" "$(get_env CLAMAV_SIGNATURE_WARN_HOURS)"
+  fi
+else
+  fail "No running backend container; ClamAV readiness (signature age, clean scan, EICAR) could not be verified"
 fi
 
 if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES logs --since=10m backend 2>/dev/null | grep -Ei "traceback|critical|unhandled|exception" >/tmp/backend_recent_errors.out; then

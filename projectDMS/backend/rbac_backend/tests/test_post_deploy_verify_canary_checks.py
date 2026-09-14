@@ -57,6 +57,9 @@ REQUIRED_CHECKS = {
     "archive rar policy": "RAR_UPLOAD_ENABLED",
     "archive mime policy": "ALLOWED_DOCUMENT_MIMES",
     "disjoint claim domains": "disjoint",
+    # R-A8Y: Gate 5 live antivirus - loaded signature age, clean scan, EICAR.
+    "clamav readiness": "clamav_readiness_check",
+    "clamav readiness library": "scripts/lib/clamav_readiness.sh",
 }
 
 
