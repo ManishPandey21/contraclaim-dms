@@ -1,7 +1,7 @@
 # Each mongod sizes its WiredTiger internal cache at half of visible RAM minus
 # 1 GB, and in this composition all three members see the WHOLE host. On the
 # production host, sized for it, that is survivable. On a 24-32 GB staging VM it
-# is three caches of ~7.5 GB each competing with ClamAV's 2 GB limit, FalkorDB's
+# is three caches of ~7.5 GB each competing with ClamAV's 3 GB limit, FalkorDB's
 # 2 GB maxmemory, Qdrant and three Python containers - the members thrash and
 # the failure looks like an application problem.
 #

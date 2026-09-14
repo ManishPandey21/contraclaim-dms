@@ -29,12 +29,19 @@ DIGEST = re.compile(r"@sha256:[0-9a-f]{64}$")
 FIRST_PARTY = re.compile(r"^(\$\{[A-Z_]+(:-[^}]*)?\}|contraclaim)")
 
 #: The exact bytes validated so far. Changing one is a release decision.
+#:
+#: ClamAV moved in R-A8Y to the 1.4.6 index digest R-A8X scanned (0 fixable
+#: CRITICAL/HIGH) and R-A8Y validated in a disposable drill. ClamAV rebuilds its
+#: tags to refresh the baked database: on 2026-09-14 `clamav/clamav:1.4.6` already
+#: resolved to `f156095071…`, not the scanned `71fbb76b…`. Pinning the tag
+#: would have adopted unscanned bytes; the digest is the only name for what
+#: was actually validated.
 EXPECTED = {
     "mongo:8.0": "ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6",
     "falkordb/falkordb:v4.0.8": "af5f2aa035390f04fa6d1f0c6353669f5f75c101f6b4f385fcb672a288b4edb8",
     "qdrant/qdrant:v1.12.5": "05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae",
     "httpd:2.4": "393435ee1a31437adeb1f03c134224c9ce5fa5f527e8c0cb9bea576b0d6fc742",
-    "clamav/clamav:1.4": "86c2a50372da8522186cc8f68e23ebebe9782c7eac21439a6fece9e1a867d038",
+    "clamav/clamav:1.4.6": "71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41",
     "redis:7.4-alpine": "6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99",
 }
 

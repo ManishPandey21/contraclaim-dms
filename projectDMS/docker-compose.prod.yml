@@ -464,20 +464,76 @@ services:
   clamav:
     # Pinned like every other image: AV is fail-closed in production, so an
     # unexpected upstream release must not be able to break uploads on redeploy.
-    image: clamav/clamav:1.4@sha256:86c2a50372da8522186cc8f68e23ebebe9782c7eac21439a6fece9e1a867d038
+    # R-A8Y: 1.4.6, the index digest R-A8X scanned (0 fixable CRITICAL/HIGH) and
+    # the R-A8Y disposable drill validated. The tag itself is rebuilt upstream
+    # (it already points elsewhere), so only the digest names these bytes.
+    image: clamav/clamav:1.4.6@sha256:71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41
     restart: unless-stopped
+    environment:
+      # Signature checks per day. The image default is 1, which lets one missed
+      # check leave the daily database ~48 h old - the freshness FAIL threshold
+      # (scripts/check_clamav_signature_freshness.py). 12 is freshclam's own
+      # documented default.
+      FRESHCLAM_CHECKS: "12"
     deploy:
       resources:
         limits:
-          memory: 2g
+          # A concurrent database reload holds the old and new engine at once:
+          # the R-A8Y drill peaked at 1952 MiB, 96 MiB under the former 2g. Now
+          # that updates really happen, that reload runs every day.
+          memory: 3g
     healthcheck:
-      test: ["CMD-SHELL", "clamdscan --ping=1 || exit 1"]
+      # Health is still "clamd answers PING". The rest heals a race measured in
+      # the R-A8Y drill: the image's /init starts freshclam and clamd together,
+      # freshclam can finish an update before clamd listens ("Clamd was NOT
+      # notified"), clamd keeps the database it began loading, and its SelfCheck
+      # then reports "Database status OK" - so it serves the old signatures until
+      # the NEXT published daily. When the daily version on disk (CVD/CLD header
+      # field 3) is newer than the one clamd reports loaded, ask for ONE RELOAD
+      # (marker file); scanning continues during a concurrent reload. Fail
+      # visible rather than heal silently: an unreadable VERSION is unhealthy,
+      # and so is a newer database still not loaded 10 minutes after the
+      # request - a reload that keeps failing is reported, never retried every
+      # 15 s. test_clamav_update_path.py pins this; the R-A8Y drill ran it.
+      test:
+        - CMD-SHELL
+        - >-
+          clamdscan --ping=1 >/dev/null || exit 1;
+          loaded=$$(printf 'zVERSION\0' | nc -w 5 127.0.0.1 3310 | tr -d '\0' | cut -d/ -f2);
+          case "$$loaded" in ''|*[!0-9]*) echo "clamd VERSION unreadable: $$loaded"; exit 1;; esac;
+          disk=0;
+          for f in /var/lib/clamav/daily.cvd /var/lib/clamav/daily.cld; do
+          [ -f "$$f" ] || continue;
+          v=$$(head -c 512 "$$f" | cut -d: -f3);
+          case "$$v" in ''|*[!0-9]*) continue;; esac;
+          [ "$$v" -gt "$$disk" ] && disk=$$v;
+          done;
+          m=/tmp/.clamd-reload-requested;
+          if [ "$$disk" -gt "$$loaded" ]; then
+          if [ ! -e "$$m" ]; then touch "$$m"; clamdscan --reload >/dev/null 2>&1;
+          elif [ -n "$$(find "$$m" -mmin +10)" ]; then echo "daily $$disk on disk but $$loaded loaded 10 min after RELOAD"; exit 1;
+          fi;
+          else rm -f "$$m";
+          fi;
+          exit 0
       interval: 15s
       timeout: 10s
       retries: 5
       start_period: 30s
+    # R-A8Y: on service-net alone (internal: true) freshclam had no route and no
+    # DNS, failed every daily check for 67 days, and clamd served the database
+    # baked into the image. egress-net gives it the update path; every peer on
+    # egress-net is already a peer on service-net, so no new service becomes
+    # reachable. Never data-net or edge-net. test_clamav_update_path.py pins this.
     networks:
       - service-net
+      - egress-net
+    # Signatures survive container recreation. A new, empty volume is seeded by
+    # Docker from the image's own /var/lib/clamav, so a fresh install starts
+    # with the baked database and freshclam brings it current. Regenerable
+    # cache: deliberately NOT part of the backup set.
+    volumes:
+      - clamav_db:/var/lib/clamav
     logging: *default-logging
 
   gateway:
@@ -520,6 +576,7 @@ volumes:
   qdrant_snapshots:
   falkordb_data:
   redis_data:
+  clamav_db:
 
 networks:
   data-net:

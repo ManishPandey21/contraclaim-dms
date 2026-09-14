@@ -54,7 +54,7 @@ services:
   #
   # 1 GB of internal cache per member, against a 24 GB host with 16 GB given to
   # the container runtime. Three members therefore hold 3 GB of cache and about
-  # 4.5 GB with process overhead, which leaves room for ClamAV's 2 GB limit,
+  # 4.5 GB with process overhead, which leaves room for ClamAV's 3 GB limit,
   # FalkorDB's 2 GB maxmemory, Qdrant, and the three Python containers inside
   # the R-A6 estimate of ~13 GB for the whole stack. Unbounded, each member
   # would size its cache at half of the VM minus 1 GB — roughly 7.5 GB each,

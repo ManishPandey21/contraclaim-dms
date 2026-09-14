@@ -199,7 +199,7 @@ def test_the_staging_override_bounds_each_member(staging: Dict[str, Any], member
     assert re.search(r":-\s*([0-9.]+)\s*}", cache), f"{member}'s cache bound has no concrete default: {cache!r}"
     assert float(re.search(r":-\s*([0-9.]+)\s*}", cache).group(1)) <= 2, (
         "three members at more than 2 GB of cache each would leave nothing for "
-        "ClamAV's 2 GB limit and FalkorDB's 2 GB maxmemory on a 16 GB budget"
+        "ClamAV's 3 GB limit and FalkorDB's 2 GB maxmemory on a 16 GB budget"
     )
     limits = service["deploy"]["resources"]["limits"]["memory"]
     assert limits, f"{member} declares no hard memory ceiling behind the cache bound"

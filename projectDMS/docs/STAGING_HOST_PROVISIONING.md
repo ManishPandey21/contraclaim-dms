@@ -17,8 +17,9 @@ have moved.
 ## 1. Why a separate host
 
 The development machine has 7.89 GB of RAM, of which the Docker Desktop VM gets
-3.77 GB. `docker-compose.prod.yml` declares a 2 GB memory limit for `clamav` and
-`--maxmemory 2gb` for `falkordb`: **4 GB of source-declared ceiling for two
+3.77 GB. `docker-compose.prod.yml` declares a 3 GB memory limit for `clamav`
+(2 GB until R-A8Y measured a 1,952 MiB concurrent-reload peak) and
+`--maxmemory 2gb` for `falkordb`: **5 GB of source-declared ceiling for two
 services**, before any of the three mongod, three Python, or four remaining
 containers. Free disk was 15.94 GB against roughly 17.7 GB of images, build
 cache, volumes and staging backups, and the backend and client images do not
@@ -122,7 +123,9 @@ variable, which is a decision rather than a side effect.
 
 Staging sets **1 GB per member** with a 2 GB hard container limit behind it:
 3 GB of cache, ≈4.5 GB with process overhead, inside a stack budgeted at ≈13 GB
-alongside ClamAV's 2 GB limit and FalkorDB's 2 GB maxmemory.
+alongside ClamAV's 3 GB limit and FalkorDB's 2 GB maxmemory. (ClamAV's steady
+state is ≈1 GB; the extra gigabyte is concurrent-reload headroom, used for about
+25 seconds per signature update, so the ≈13 GB steady-state figure holds.)
 
 ## 6. Credentials
 
