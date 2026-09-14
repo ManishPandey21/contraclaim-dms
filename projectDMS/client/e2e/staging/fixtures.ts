@@ -39,6 +39,7 @@
 import { expect } from "@playwright/test";
 import type { APIRequestContext, Locator, Page, PlaywrightWorkerArgs } from "@playwright/test";
 
+import { acceptSecurityTermsIfPresented } from "./security-terms";
 import { BASE_URL, requireStagingEnvironment } from "./staging-target";
 
 const CSRF_HEADER = "x-csrf-token";
@@ -315,11 +316,6 @@ export async function signIn(
 // A browser session, through the pages a user actually meets
 // --------------------------------------------------------------------------- #
 
-/** The mandatory terms screen `ProtectedRoute` sends an unaccepted user to. */
-const SECURITY_TERMS_HEADING = "Security, Privacy & Anti-Piracy Terms";
-const SECURITY_TERMS_CONSENT =
-  "I have read and agree to the active Security, Privacy & Anti-Piracy Terms.";
-
 /** Sign in through the login page, the way a person does. */
 export async function signInThroughBrowser(
   page: Page,
@@ -347,33 +343,15 @@ export async function signInThroughBrowser(
  *
  * R-A8W Stage B run 1 met that screen instead of Permissions Management: a
  * freshly seeded org admin has not accepted the active terms, and the product
- * refuses every protected page until they do. Run 2 got past it by calling
- * `POST /api/security-terms/accept` from the harness, which proves the endpoint
- * and not the page. Here the consent box is ticked and "Accept and Continue" is
- * pressed, and the acceptance is waited for on the wire.
+ * refuses every protected page until they do. The acceptance itself - consent
+ * box, "Accept and Continue", the POST observed on the wire - lives in
+ * `security-terms.ts`, so a mocked suite can exercise the same code against the
+ * page without a target (F-A8Z-B1 reached a deployment before anyone saw it).
  */
 export async function openProtectedPage(page: Page, path: string, ready: Locator): Promise<void> {
   assertTargetIsNotProduction();
   await page.goto(path);
-  const terms = page.getByRole("heading", { name: SECURITY_TERMS_HEADING });
-  await Promise.race([
-    ready.waitFor({ state: "visible", timeout: 30_000 }),
-    terms.waitFor({ state: "visible", timeout: 30_000 }),
-  ]);
-  if (await terms.isVisible()) {
-    await page.getByLabel(SECURITY_TERMS_CONSENT).check();
-    const [accepted] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.url().includes("/api/security-terms/accept") && response.request().method() === "POST"
-      ),
-      page.getByRole("button", { name: "Accept and Continue" }).click(),
-    ]);
-    expect(accepted.ok(), `accepting the security terms failed with ${accepted.status()}`).toBe(true);
-    await page.waitForURL((url) => url.pathname !== "/security-terms");
-    await page.goto(path);
-  }
-  await expect(ready).toBeVisible({ timeout: 30_000 });
+  await acceptSecurityTermsIfPresented(page, path, ready);
 }
 
 // --------------------------------------------------------------------------- #

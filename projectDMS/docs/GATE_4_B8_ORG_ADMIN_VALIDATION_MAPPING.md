@@ -8,6 +8,79 @@
 stays unticked until a real staging execution of the updated spec passes on a
 release that contains the fix.
 
+**R-A8Z Stage B (2026-09-14, run `R-A8Z-STAGEB-20260914T143311Z`, release `566a01a`): still NOT EARNED.**
+The updated spec ran against the deployed staging stack over TLS under
+`CONTRACLAIM_STAGING_E2E=1`: 2 passed, 1 failed, 8 skipped. The failure is
+**F-A8Z-B1, a spec/fixture defect**: `fixtures.ts::openProtectedPage` waits on
+`getByRole("heading", { name: "Security, Privacy & Anti-Piracy Terms" })`, and the
+deployed terms page renders that text twice (the `h1` page title and an `h2` inside
+the scrollable terms), so Playwright strict mode refuses the locator; file-level
+serial mode then skipped every Gate 4 test. A diagnostic re-run of the unchanged
+file selecting only this block passed 7 of 8 and failed row 9 on the same locator.
+Row by row (with independent HTTP probes and a database/audit read-back): rows 1-8,
+10, 11, 13 and 14 PASS - row 4 answered 403 with a `scope_denied` audit row, so
+F-A8W-B3 is closed on a deployed stack, and row 7's header + foreign-id probe that
+answered 500 in R-A8W answered 403; row 9 FAIL (not measured past F-A8Z-B1); row 12
+INCONCLUSIVE - the run-owned org1 account was refused its own control read and write
+even holding `projects:read` / `projects:update`, so the refusal measured was not the
+foreign-organisation check (proj1 stayed org1). This mapping named `dms.project.manage`
+for row 12, which `routers/projects.py` does not check (F-A8Z-B2). Observation
+F-A8Z-B3: `DELETE /api/roles/{id}` soft-deletes and `GET` still answers 200 for the
+deleted role. Re-earned by fixing the locator (and re-tracing row 12's control) and
+running the spec again on staging; an offline fix earns nothing.
+
+**R-A9A (2026-09-15, offline): spec repaired, bullet still NOT EARNED.** What
+changed, and what it does not buy:
+
+* **F-A8Z-B1 fixed in the harness.** The terms heading is located by the page's
+  semantic contract - the one level-1 heading with that exact name
+  (`client/e2e/staging/security-terms.ts::securityTermsHeading`) - not by element
+  order. The acceptance code moved to that module unchanged in behaviour (consent
+  box, "Accept and Continue", POST observed on the wire), so the mocked suite
+  `client/e2e/security-terms-acceptance.spec.ts` now runs the same code against the
+  page with an active version titled exactly like the page. Red first: the mocked
+  suite reproduced the R-A8Z strict-mode error verbatim; restoring the ambiguous
+  locator turns it red again. That suite is component evidence and is excluded
+  from deployed-stack runs.
+* **Serial mode is scoped to the Gate 3 bullet 2 block.** A bullet-2 failure can no
+  longer skip Gate 4 tests (guard: `test_serial_mode_cannot_skip_the_gate4_tests`).
+* **F-A8Z-B2 root cause: a harness seed defect, not an authorization defect.** The
+  R-A8Z seed wrote the probe role's NAME into `users.roles`; the role was inserted
+  with a generated ObjectId, and `PermissionService` resolves `users.roles` by
+  `_id`. The account therefore held no permission at all, which is why re-seeding
+  the role with `projects:read` / `projects:update` changed nothing. The default
+  roles work because their `_id` is the role key (`"orgadmin"`). Reproduced offline
+  in `test_gate4_row12_project_control.py::test_a_role_referenced_by_name_grants_nothing_which_was_F_A8Z_B2`.
+* **Row 12 is now automated with the org admin as its own control**: the default
+  `orgadmin` role receives the full `CLIENT_DMS_PERMISSIONS` merge
+  (`initial_data/default_roles.py`), which includes `dms.dashboard.view` and
+  `dms.project.manage`. The earlier statement that the default org-admin role
+  lacks `dms.project.manage` was wrong.
+* **Positive controls added to rows 6, 8 and 13** (own project by id, unfiltered
+  user list, own user and a run-owned own-organisation role by id), and a teardown
+  for the Gate 4 block, which now creates one run-owned role.
+* The spec lists **12 tests** (3 Gate 3 bullet 2 + 9 Gate 4 bullet 8).
+
+### Row 12, traced from source
+
+| Field | Value |
+|---|---|
+| ENDPOINT | `/api/projects/{project_id}` (`routers/projects.py::read_project`, `::update_project`) |
+| METHOD | `GET` (control read, read-back), `PUT` (control write, re-parent) |
+| REQUIRED PERMISSION | GET: dependency `require_permission("projects:read")` (satisfied by `dms.dashboard.view`), then `PolicyService.authorize("dms.dashboard.view", project scope)`. PUT: dependency `require_permission("projects:update")` (satisfied by `dms.project.manage`), then `PolicyService.authorize("dms.project.manage", project scope)`, then `check_resource_access` membership. Scope passes when the project is in the caller's projects, or the caller is `orgadmin`/`orguser` in the project's organisation. No step-up. |
+| CONTROL RESOURCE | `E2E_STAGING_PROJECT_ID` (proj1, organisation `E2E_STAGING_ORG_ID`), as the org admin |
+| CONTROL EXPECTED | `GET` 200 naming the own organisation; `PUT {name: <unchanged>, organization_id: <own>}` 200 |
+| FOREIGN RESOURCE | the same project with `organization_id: E2E_FOREIGN_ORG_ID` in the body (re-parent into org2) |
+| FOREIGN EXPECTED | exactly 403 `Moving a project to another organization requires a superadmin` (refused before the target organisation is looked up), read-back still names the own organisation and the unchanged name |
+
+Offline proof of the control shape through the real dependency chain (only the
+subscription entitlement and the audit writers stubbed):
+`test_gate4_row12_project_control.py` - control passes with `allow client_scope`
+decisions for both policy permissions, the re-parent is refused by its own check,
+a foreign project by id is refused `scope_denied`. Mutation: stripping every held
+permission that satisfies `projects:update` turns the control into a gate refusal
+(`Missing required permission: projects:update`) and the three control tests red.
+
 ## What "manually validated" is taken to mean
 
 Carried forward, not re-made: `READINESS_CONVERGENCE.md` §7 records that one
@@ -19,24 +92,86 @@ with an independent probe and a database/audit read-back**, which is what
 properties; the owner decision for R-A8W does: org-admin behaviour, project and
 organisation scope, foreign-tenant denial, and selector / direct-API behaviour.
 
-## Mapping
+A refusal row counts only when a **positive control** from the same account on
+the same route answered 200 in the same run. Without it a 403 may be the
+permission gate, which is exactly what R-A8Z row 12 measured.
 
-| # | Requirement (literal source) | Test assertion in the updated spec | Manual review needed? | Status |
-|---|---|---|---|---|
-| 1 | Org-admin can save and retrieve role permissions (bullet: "permissions ... validated"; Gate 3 b2 shared measurement) | `a Client DMS permission granted through the API is read back`; `the Client DMS group is offered, and a grant saved in the browser survives a reload` (browser save through Save Changes + step-up, server read-back equals `[dms.document.share]`, still ticked after reload) | Yes: confirm the role row's `organization_id` is the org admin's organisation, and an audit `role_updated` row exists for the run's role | R-A8W: API half PASS, browser half FAILED on F-A8W-B4 (spec). Spec corrected in R-A8X. **Not re-executed** |
-| 2 | A permission write needs step-up (org-admin behaviour) | `the permission write is refused without a step-up token` (403) | No | R-A8W PASS twice |
-| 3 | Organisation scope: the admin sees its own organisation and no other | `the organisation list holds the org admin's own organisation and no other`; own organisation by id 200 in `a foreign organisation addressed directly is refused` | Yes: read the policy audit rows for the run (all `allow` rows name the own organisation) | R-A8W PASS |
-| 4 | Foreign-tenant denial by direct id (organisation) | `a foreign organisation addressed directly is refused`: status in {403, 404}, never 200 (leak) or 401 (forced logout) | Yes: confirm no foreign row in the body and a `scope_denied` policy decision | R-A8W **FAIL (500)** = F-A8W-B3. Fixed in R-A8X (`test_organization_foreign_access_refusal.py`, class guard `test_domain_error_reraise_guard.py`). **Not re-executed** |
-| 5 | Project scope: visible projects are the admin's own, non-empty | `every visible project belongs to the org admin's organisation` | No | R-A8W PASS |
-| 6 | Foreign-tenant denial by direct id (project) | `a foreign project, or a foreign-organisation filter, leaks nothing` (direct read 403/404) | No | R-A8W PASS (403) |
-| 7 | Selector behaviour: asking for a foreign organisation's rows by parameter leaks nothing | same test, `?organization_id=<foreign>` → 200 with no foreign object, or 403/404, never 401 | Yes: repeat with the `X-Org-Id` header by hand. On this branch the token path ignores `X-Org-Id` (dev-header path only), so the query parameter is the selector the spec can assert | R-A8W PASS; the manual header probe answered 200/0 rows, and **500 when combined with a foreign id** - the same F-A8W-B3 path |
-| 8 | No foreign role or user visible | `roles and users of a foreign organisation are not visible` | No | R-A8W PASS |
-| 9 | The admin pages in the browser receive no foreign object and never force a logout | `navigating the admin pages surfaces no foreign data and no forced logout` (now after accepting the terms through the terms page, so the walk measures real pages) | No | R-A8W PASS |
-| 10 | A write naming a foreign organisation does not land in it — roles | **Not asserted by the spec** (read-only against the foreign tenant by rule) | **Yes, by hand**: POST a run-tagged role naming the foreign organisation; confirm 0 foreign roles changed and where the row landed | R-A8W manual probe: accepted, stored in the admin's own organisation (see below). Disposition A |
-| 11 | A write naming a foreign organisation does not land in it — users (found by the R-A8X review: an org admin could move any user in its tenant, itself included, into a foreign tenant through `PUT /api/users/{id}`) | `the org admin cannot move itself into a foreign organisation`: PUT own record with the foreign `organization_id` → 403/404, and `/api/users/me` still names the own organisation | Yes: confirm in the database that no user row changed organisation during the run | Fixed offline in R-A8X (`test_foreign_org_move_refusal.py`). **Not re-executed** |
-| 12 | A write naming a foreign organisation does not land in it — projects (same review: `PUT /api/projects/{id}` re-parented a project and leaked foreign-org existence) | Not asserted: the default org-admin role lacks `dms.project.manage`, so the spec would measure the permission gate, not this check | **Yes, by hand** with a role that holds `dms.project.manage`: PUT a staging project naming the foreign organisation → 403, project unchanged | Fixed offline in R-A8X (`test_foreign_org_move_refusal.py`). **Not re-executed** |
-| 13 | Foreign-tenant denial by direct id — users and roles | `a foreign user and a foreign role addressed directly are refused` (needs `E2E_FOREIGN_USER_ID`, `E2E_FOREIGN_ROLE_ID` seeded in the foreign tenant) | No | New in R-A8X. **Not executed** |
-| 14 | Foreign organisation update and delete by id | Not asserted in the browser run (a regression would write to the foreign tenant); covered offline by `test_organization_foreign_access_refusal.py` (PUT → 403) | **Yes, by hand**: PUT with an unchanged payload → 403; the foreign organisation's `updated_at` unchanged | Offline PASS in R-A8X |
+## Mapping (rebuilt in R-A9A from the corrected spec and current source)
+
+Fixture of record (R-A8Z seed, unchanged): org admin `orgadmin@example.com` (role
+`orgadmin`, organisation org1, projects [proj1]); org1 projects proj1, proj3;
+foreign org2 with proj2, an initializer user and a run-owned organisation role;
+active `dms_enterprise` subscriptions for org1 and org2; terms NOT pre-accepted.
+
+**Mandatory fixture preflight (R-A9A adversarial review), a database read-back
+before the spec runs, recorded with the run:** `E2E_FOREIGN_ORG_ID` exists and
+differs from `E2E_STAGING_ORG_ID`; `E2E_FOREIGN_PROJECT_ID`, `E2E_FOREIGN_USER_ID`
+and `E2E_FOREIGN_ROLE_ID` exist, are active, and name `E2E_FOREIGN_ORG_ID` as
+their organisation; `E2E_STAGING_PROJECT_ID` names `E2E_STAGING_ORG_ID` with a
+string `organization_id` (row 12's control writes it back as a string); the staging
+`orgadmin` role document holds `dms.dashboard.view`, `dms.project.manage` and
+`organizations:update`. Why: `GET /api/organizations/{id}` runs the access check
+before the lookup, so a wrong foreign organisation id is refused 403 exactly like a
+real one, and rows 3, 7 and 8 filter "foreign" by that id. The spec asserts the
+foreign ids differ from the fixture ids, and requires **exactly 403** on every
+direct-id refusal - users, roles and projects answer 404 for an id that does not
+exist, so 403 there also proves the object exists - but only the database can
+prove which organisation a foreign object belongs to.
+
+| Row | Literal requirement | Automated assertion (spec test) | Manual validation | Fixture | Expected | Status before staging |
+|---|---|---|---|---|---|---|
+| 1 | Org-admin saves and retrieves role permissions, incl. Client DMS (shared with Gate 3 b2) | `a Client DMS permission granted through the API is read back`; `the Client DMS group is offered, and a grant saved in the browser survives a reload` (terms accepted through the page, Permissions tab, Save Changes + step-up, server read-back `[dms.document.share]`, ticked after reload) | DB: the run role's `organization_id` is org1; audit `role.updated` by the org admin | run-owned org1 role `g3-<run>-permissions` | 200; read-back equals the grant; ticked after reload | R-A8Z: API half PASS, browser half not reached (F-A8Z-B1). Locator fixed offline. **OPEN** |
+| 2 | A permission write needs step-up | `the permission write is refused without a step-up token` (control: the step-up write in row 1 answers 200) | none | same role | 403 without step-up | R-A8Z PASS. **OPEN** (needs the run of record) |
+| 3 | The admin sees its own organisation and no other | `the organisation list holds the org admin's own organisation and no other` | audit: every `policy.authorize allow` for the admin names org1 | org1, org2 | 200, ids = [org1] | R-A8Z diagnostic + manual PASS. **OPEN** |
+| 4 | Foreign organisation by id is refused | `a foreign organisation addressed directly is refused` (control: own organisation by id 200) | body names no foreign field; `scope_denied` audit row for org2 | org2 (preflight: exists) | exactly 403 (R-A9A; the access check precedes the lookup, so this alone does not prove existence) | R-A8Z PASS (F-A8W-B3 closed on a deployed stack). **OPEN** |
+| 5 | Visible projects are the admin's own, non-empty | `every visible project belongs to the org admin's organisation` | none | proj1, proj3 | 200, non-empty, all org1 | R-A8Z diagnostic PASS. **OPEN** |
+| 6 | Foreign project by id is refused | `a foreign project, or a foreign-organisation filter, leaks nothing` (**control added R-A9A**: own project by id 200) | none | proj1 (control), proj2 | control 200; foreign exactly 403 (404 = missing fixture) | R-A8Z diagnostic PASS without an in-test control. **OPEN** |
+| 7 | Selector: a foreign organisation's rows by parameter leak nothing | same test, `?organization_id=<foreign>` (control: row 5's unfiltered list) | by hand: `X-Org-Id: org2` header on a list, and with `GET /api/organizations/org2` | org2 | 200 with no foreign object, or 403/404; never 401/500 | R-A8Z diagnostic + manual PASS. **OPEN** |
+| 8 | No foreign role or user is visible | `roles and users of a foreign organisation are not visible` (control: role list 200; **added R-A9A**: unfiltered user list 200) | none | seeded org2 role; `users?organization_id=org2` | no foreign rows; filter 200-empty or 403/404 | R-A8Z diagnostic PASS. **OPEN** |
+| 9 | Admin pages in the browser receive no foreign object and never force a logout | `navigating the admin pages surfaces no foreign data and no forced logout` (controls, tightened after the R-A9A review: each page stays on itself, shows its own `h1` and no "Access unavailable" card, and makes its own API call AFTER navigation - the navbar's organisation/project calls no longer count - and every response body is parsed before the leak assertion) | none | org admin, terms accepted through the page | no 401, no foreign object | R-A8Z FAIL (not measured, F-A8Z-B1). Fixed offline. **OPEN** |
+| 10 | A role write naming a foreign organisation does not land in it | not asserted (the spec is read-only against the foreign tenant) | by hand: POST a run-tagged role naming org2 (control: same POST naming org1 200) → stored in org1; org2 roles changed 0 | org admin | 200, stored in org1 (Disposition A below) | R-A8Z manual PASS. **OPEN** |
+| 11 | A user write naming a foreign organisation does not move the user | `the org admin cannot move itself into a foreign organisation` (control: `GET /api/users/me` 200 naming org1) | DB: the users organisation map hash unchanged | org admin's own user | exactly 403; `me` still org1 | R-A8Z diagnostic + manual PASS. **OPEN** |
+| 12 | A project write naming a foreign organisation does not re-parent it | **new in R-A9A**: `the org admin can update its own project, and cannot move it into a foreign organisation` (control GET 200 and unchanged PUT 200, then re-parent exactly 403, then read-back) | preflight: the staging `orgadmin` role document holds `dms.dashboard.view` and `dms.project.manage`; DB: proj1 `organization_id` and `name` before = after; audit: `policy.authorize allow` for `dms.project.manage` on proj1 before the refusal | E2E_STAGING_PROJECT_ID (proj1), org2 | control 200/200; re-parent 403; proj1 still org1 | R-A8Z INCONCLUSIVE (F-A8Z-B2, harness seed defect). Control proven offline. **OPEN** |
+| 13 | Foreign user and foreign role by id are refused | `a foreign user and a foreign role addressed directly are refused` (**controls added R-A9A**: own user by id 200, run-owned org1 role by id 200) | none | E2E_FOREIGN_USER_ID, E2E_FOREIGN_ROLE_ID; run-owned `g3-<run>-g4-own-role-control` | controls 200; foreign exactly 403 (404 = missing fixture) | R-A8Z diagnostic + manual PASS without in-test controls. **OPEN** |
+| 14 | Foreign organisation update by id is refused | not asserted (a regression would write to the foreign tenant) | by hand: **control** `PUT /api/organizations/org1` with its unchanged name → 200 (the org admin holds `organizations:update`, and `check_organization_access` allows `orgadmin` on its own organisation); then `PUT /api/organizations/org2` unchanged → 403; org2 `updated_at` unchanged | org1, org2 | control 200; foreign 403 | R-A8Z manual 403 **without the own-organisation control** - re-measure with it. **OPEN** |
+
+The bullet is ticked only when every row is PASS with evidence from one staging
+run of record. A green Playwright run alone is not enough.
+
+## Role soft delete (F-A8Z-B3) — disposition
+
+Read from source (`services/role_service.py`, `routers/roles.py`):
+`delete_role` is a documented soft delete (`is_active=False`, `deleted_at`,
+`deleted_by`, document kept); `get_roles_paginated` filters `is_active != False`,
+so the role leaves every listing; `get_role_by_id` does not filter, and
+`GET /api/roles/{id}` stays behind `roles:read` and `can_view_role` (tenant scope);
+the router emits `role.deleted` with the before-image.
+
+**Disposition A - intentional soft delete; direct historical lookup allowed** inside
+the caller's scope. Not changed for Gate 4, whose literal requirement does not
+touch deletion. Pinned by `test_role_soft_delete_contract.py`.
+
+## Defects found while tracing (production authorization, NOT fixed in R-A9A)
+
+* **F-A9A-1 - a soft-deleted role still grants its permissions.** Nothing on the
+  permission path reads `is_active`: `PermissionService.user_has_permission` and
+  `get_user_permissions` resolve `users.roles` by `_id` unfiltered, and
+  `delete_role` neither detaches the role from users nor invalidates the
+  `user_perms:{id}` cache. Reproduced offline (strict xfail in
+  `test_role_soft_delete_contract.py`). Intra-tenant; no cross-tenant exposure.
+* **F-A9A-2 - a shared legacy alias makes unrelated permissions equivalent.**
+  Twenty canonical permissions alias to `projects:update`; the resolver expands
+  aliases in both directions, so a role holding only `dms.task.manage` (or
+  `dms.claim.manage`, `dms.keydate.manage`, ...) satisfies `projects:update` and
+  `dms.project.manage`, and passes both gates of `PUT /api/projects/{id}` in its
+  own tenant. Found because the row 12 mutation control did not go red when only
+  `dms.project.manage` was removed. Reproduced offline (strict xfails in
+  `test_legacy_alias_fanout_defect.py`). Tenant scope still applies.
+
+Neither changes a row verdict above: the org admin legitimately holds the project
+permissions, and both are intra-tenant. Both are release risks for Gate 9
+("High severity risks fixed or explicitly accepted") and need an owner decision
+and a production authorization fix phase with the full backend suite.
 
 ## Foreign-write semantics (F-A8W-B5)
 
@@ -68,6 +203,10 @@ and is not made in R-A8X.
 
 ## What re-earns the bullet
 
-One staging execution of the updated spec on a release containing the R-A8X fix,
-9/9, with rows 1, 3, 4, 7 and 10 reviewed by hand against the database and the
-policy audit log, and the result recorded here requirement by requirement.
+One staging execution of the corrected spec on a release containing the R-A9A
+harness fix, **12/12** (a deployed-stack run is forced to one worker and no
+retries by `playwright.config.ts`, because the Gate 3 and Gate 4 blocks both clean
+up by run tag and a retried pass is not evidence), the fixture preflight above
+recorded, and all 14 rows above reviewed by hand against the database and
+the policy audit log, each refusal row with its positive control, recorded here
+requirement by requirement.

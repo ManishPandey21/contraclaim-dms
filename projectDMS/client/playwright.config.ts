@@ -22,7 +22,11 @@ const stagingBaseUrl = process.env.E2E_BASE_URL?.trim();
 const targetsDeployedStack = Boolean(stagingBaseUrl);
 
 /** Suites whose network is mocked. They prove component behaviour, never a deployment. */
-const MOCKED_SUITES = ["**/contract-workflows.spec.ts", "**/contract-master.spec.ts"];
+const MOCKED_SUITES = [
+  "**/contract-workflows.spec.ts",
+  "**/contract-master.spec.ts",
+  "**/security-terms-acceptance.spec.ts",
+];
 
 export default defineConfig({
   testDir: "./e2e",
@@ -32,7 +36,13 @@ export default defineConfig({
   },
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  // A deployed-stack run is certification evidence. One worker: the staging specs
+  // clean up by run tag from more than one describe block, and parallel workers
+  // would delete each other's run-owned objects mid-test (R-A9A review). No
+  // retries: a pass on the second attempt is not evidence, and a retried serial
+  // group re-creates a role whose soft-deleted name still answers 409.
+  workers: targetsDeployedStack ? 1 : undefined,
+  retries: targetsDeployedStack ? 0 : process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["html", { open: "never" }], ["list"]] : "list",
   testIgnore: targetsDeployedStack ? MOCKED_SUITES : [],
   use: {

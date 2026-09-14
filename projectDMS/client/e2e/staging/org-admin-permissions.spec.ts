@@ -51,17 +51,24 @@ import { requireStagingEnvironment, stagingTeardownHasWork } from "./staging-tar
 
 /** One Client DMS permission, chosen because it is in the group the bullet names. */
 const CLIENT_DMS_PERMISSION = "dms.document.share";
-
-// The three bullet-2 tests share one run-owned role, and each worker runs its
-// own afterAll cleanup. In parallel they reset, grant and delete that role under
-// each other (`playwright.config.ts` sets fullyParallel). Serial, they cannot.
-test.describe.configure({ mode: "serial" });
 const SECOND_PERMISSION = "dms.document.view";
 
 const ADMIN = ["E2E_ORG_ADMIN_EMAIL", "E2E_ORG_ADMIN_PASSWORD"] as const;
 const SCOPE = ["E2E_STAGING_ORG_ID"] as const;
 
 test.describe("Gate 3 bullet 2 - org-admin permission save/retrieve", () => {
+  // The three bullet-2 tests share one run-owned role, and each worker runs its
+  // own afterAll cleanup. In parallel they reset, grant and delete that role under
+  // each other (`playwright.config.ts` sets fullyParallel). Serial, they cannot.
+  //
+  // Scoped to THIS block (R-A9A, F-A8Z-B1). R-A8Z configured serial mode for the
+  // whole file, so one failed bullet-2 browser test skipped all eight Gate 4
+  // tests - measured as "8 skipped", i.e. never executed. The Gate 4 tests must
+  // run whatever happens here. Both blocks clean up by run tag, so a deployed-stack
+  // run uses one worker (`playwright.config.ts`), or one block's teardown could
+  // remove the other's run-owned role mid-test.
+  test.describe.configure({ mode: "serial" });
+
   test.afterAll(async ({ playwright }) => {
     // Nothing ran, so there is nothing run-owned to remove. Without this the
     // hook builds a fixture context with no target and throws, turning a
@@ -230,6 +237,29 @@ const FOREIGN = ["E2E_FOREIGN_ORG_ID", "E2E_FOREIGN_PROJECT_ID"] as const;
 const FOREIGN_OBJECTS = ["E2E_FOREIGN_USER_ID", "E2E_FOREIGN_ROLE_ID"] as const;
 const REFUSALS = [403, 404];
 
+/**
+ * The staging environment, plus the one property every Gate 4 refusal rests on:
+ * the "foreign" fixtures are not the fixture tenant itself. With
+ * `E2E_FOREIGN_ORG_ID` equal to `E2E_STAGING_ORG_ID`, the list rows pass because
+ * the own id is filtered out as "foreign" and the refusal rows measure the
+ * admin's own tenant.
+ */
+function requireForeignTenant(...names: string[]): Record<string, string> {
+  const env = requireStagingEnvironment(...names);
+  if (env.E2E_FOREIGN_ORG_ID !== undefined) {
+    expect(
+      env.E2E_FOREIGN_ORG_ID,
+      "E2E_FOREIGN_ORG_ID names the fixture organisation itself, so no foreign tenant is measured"
+    ).not.toBe(env.E2E_STAGING_ORG_ID);
+  }
+  if (env.E2E_FOREIGN_PROJECT_ID !== undefined && env.E2E_STAGING_PROJECT_ID !== undefined) {
+    expect(env.E2E_FOREIGN_PROJECT_ID, "E2E_FOREIGN_PROJECT_ID names the fixture project itself").not.toBe(
+      env.E2E_STAGING_PROJECT_ID
+    );
+  }
+  return env;
+}
+
 function rowsOf(body: unknown, ...keys: string[]): any[] {
   if (Array.isArray(body)) {
     return body;
@@ -286,10 +316,26 @@ function foreignObjectsIn(body: unknown, foreignOrg: string, foreignProject: str
 }
 
 test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused outside it", () => {
+  test.afterAll(async ({ playwright }) => {
+    // Row 13's own-role control creates one run-owned role in the fixture
+    // organisation. The same run tag and teardown as bullet 2; safe to call twice.
+    if (!stagingTeardownHasWork()) {
+      return;
+    }
+    const context = await newFixtureContext(playwright);
+    try {
+      const session = await signIn(context, ADMIN[0], ADMIN[1]);
+      const report = await cleanupRunOwned(session);
+      expect(report.failed, `teardown left state behind: ${JSON.stringify(report.failed)}`).toEqual([]);
+    } finally {
+      await context.dispose();
+    }
+  });
+
   test("the organisation list holds the org admin's own organisation and no other", async ({
     request,
   }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
     await signIn(request, ADMIN[0], ADMIN[1]);
 
     const response = await request.get("/api/organizations");
@@ -310,21 +356,24 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
   });
 
   test("a foreign organisation addressed directly is refused", async ({ request }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
     await signIn(request, ADMIN[0], ADMIN[1]);
 
     const own = await request.get(`/api/organizations/${env.E2E_STAGING_ORG_ID}`);
     expect(own.status(), "the org admin was refused its own organisation").toBe(200);
 
     const foreign = await request.get(`/api/organizations/${env.E2E_FOREIGN_ORG_ID}`);
+    // Exactly 403 for every direct-id refusal (R-A9A review): an id that does not
+    // exist answers 404, so accepting 404 would pass on a wrong or stale fixture
+    // id while measuring nothing. 403 proves the object exists AND was refused.
     expect(
-      REFUSALS,
-      `a direct read of a foreign organisation returned ${foreign.status()}; 200 is a leak and 401 is a forced logout`
-    ).toContain(foreign.status());
+      foreign.status(),
+      `a direct read of a foreign organisation returned ${foreign.status()}; 200 is a leak, 401 a forced logout, 404 a missing fixture`
+    ).toBe(403);
   });
 
   test("every visible project belongs to the org admin's organisation", async ({ request }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
     await signIn(request, ADMIN[0], ADMIN[1]);
 
     const response = await request.get("/api/projects");
@@ -340,14 +389,19 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
   });
 
   test("a foreign project, or a foreign-organisation filter, leaks nothing", async ({ request }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN, "E2E_STAGING_PROJECT_ID");
     await signIn(request, ADMIN[0], ADMIN[1]);
+
+    // CONTROL: the same read of the org admin's own project succeeds, so the
+    // refusal below is the foreign-project check and not a missing permission.
+    const own = await request.get(`/api/projects/${env.E2E_STAGING_PROJECT_ID}`);
+    expect(own.status(), "CONTROL: the org admin was refused its own project by id").toBe(200);
 
     const direct = await request.get(`/api/projects/${env.E2E_FOREIGN_PROJECT_ID}`);
     expect(
-      REFUSALS,
-      `a direct read of a foreign project returned ${direct.status()}; 200 is a leak and 401 is a forced logout`
-    ).toContain(direct.status());
+      direct.status(),
+      `a direct read of a foreign project returned ${direct.status()}; 200 is a leak, 401 a forced logout, 404 a missing fixture`
+    ).toBe(403);
 
     // The selector: asking for another organisation's projects by parameter.
     const filtered = await request.get("/api/projects", {
@@ -367,7 +421,7 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
   });
 
   test("roles and users of a foreign organisation are not visible", async ({ request }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
     await signIn(request, ADMIN[0], ADMIN[1]);
 
     const roles = await request.get("/api/roles");
@@ -377,6 +431,11 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
       return org !== "" && org !== env.E2E_STAGING_ORG_ID;
     });
     expect(foreignRoles.map(idOf), "roles scoped to another organisation are visible").toEqual([]);
+
+    // CONTROL: the unfiltered user list answers, so a refusal of the foreign
+    // filter below is the selector check and not a missing users:read.
+    const ownUsers = await request.get("/api/users");
+    expect(ownUsers.status(), "CONTROL: the org admin could not list users in its own tenant").toBe(200);
 
     const users = await request.get("/api/users", {
       params: { organization_id: env.E2E_FOREIGN_ORG_ID },
@@ -393,15 +452,29 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
   });
 
   test("a foreign user and a foreign role addressed directly are refused", async ({ request }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN, ...FOREIGN_OBJECTS);
-    await signIn(request, ADMIN[0], ADMIN[1]);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN, ...FOREIGN_OBJECTS);
+    const session = await signIn(request, ADMIN[0], ADMIN[1]);
+
+    // CONTROLS: the same two routes answer 200 for an object in the org admin's
+    // own organisation - its own user record, and a run-owned organisation role
+    // (removed by this block's teardown) - so the refusals below are the tenant
+    // check and not a missing users:read / roles:read or a role-visibility rule.
+    const me = await (await session.request.get("/api/users/me")).json();
+    const ownUser = await session.request.get(`/api/users/${String(me._id ?? me.id)}`);
+    expect(ownUser.status(), "CONTROL: the org admin was refused its own user record by id").toBe(200);
+    const ownRole = await ensureDisposableRole(session, "g4-own-role-control");
+    const ownRoleRead = await session.request.get(`/api/roles/${ownRole.id}`);
+    expect(ownRoleRead.status(), "CONTROL: the org admin was refused its own organisation's role by id").toBe(200);
 
     for (const path of [`/api/users/${env.E2E_FOREIGN_USER_ID}`, `/api/roles/${env.E2E_FOREIGN_ROLE_ID}`]) {
       const response = await request.get(path);
+      // Exactly 403: both routes answer 404 for an id that does not exist
+      // (`routers/users.py` and `routers/roles.py` look the object up before the
+      // tenant check), so 404 would pass on a wrong fixture id.
       expect(
-        REFUSALS,
-        `GET ${path} for a foreign object returned ${response.status()}; 200 is a leak, 401 a forced logout, 500 a masked refusal`
-      ).toContain(response.status());
+        response.status(),
+        `GET ${path} for a foreign object returned ${response.status()}; 200 is a leak, 401 a forced logout, 404 a missing fixture, 500 a masked refusal`
+      ).toBe(403);
     }
   });
 
@@ -410,7 +483,7 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
     // organization_id was accepted and moved the admin into the foreign tenant.
     // The only write here targets the admin's own record; if the refusal is
     // missing, the read-back fails the test and names the moved account.
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
     const session = await signIn(request, ADMIN[0], ADMIN[1]);
 
     const before = await session.request.get("/api/users/me");
@@ -423,9 +496,7 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
       headers: session.headers(),
       data: { organization_id: env.E2E_FOREIGN_ORG_ID },
     });
-    expect(REFUSALS, `moving the org admin into a foreign organisation returned ${moved.status()}`).toContain(
-      moved.status()
-    );
+    expect(moved.status(), `moving the org admin into a foreign organisation returned ${moved.status()}`).toBe(403);
 
     const after = await (await session.request.get("/api/users/me")).json();
     expect(
@@ -434,10 +505,70 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
     ).toBe(env.E2E_STAGING_ORG_ID);
   });
 
+  test("the org admin can update its own project, and cannot move it into a foreign organisation", async ({
+    request,
+  }) => {
+    // Gate 4 b8 row 12 (R-A9A, F-A8Z-B2). R-A8Z measured this by hand with a
+    // probe account whose `users.roles` held a role NAME; permission lookup
+    // resolves role ids, so that account held no permission and was refused its
+    // own project - the re-parent refusal it recorded measured the gate, not the
+    // foreign-organisation check. The org admin's default role carries
+    // `dms.dashboard.view` and `dms.project.manage`, the names
+    // `routers/projects.py` checks, so the same account is the control.
+    //
+    // OWN-ORG CONTROL must pass first: read and an unchanged update of the org
+    // admin's own project. Only then is a 403 on the re-parent the property.
+    // The only writes target the fixture project, with its own name and
+    // organisation; if the refusal were missing, the read-back names the move.
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN, "E2E_STAGING_PROJECT_ID");
+    const session = await signIn(request, ADMIN[0], ADMIN[1]);
+    const path = `/api/projects/${env.E2E_STAGING_PROJECT_ID}`;
+
+    const before = await session.request.get(path);
+    expect(
+      before.status(),
+      "CONTROL: the org admin was refused a read of its own project, so a refusal below would measure the permission gate"
+    ).toBe(200);
+    const project = await before.json();
+    expect(organisationOf(project), "the fixture project is not in the fixture organisation").toBe(
+      env.E2E_STAGING_ORG_ID
+    );
+
+    const control = await session.request.put(path, {
+      headers: session.headers(),
+      data: { name: project.name, organization_id: env.E2E_STAGING_ORG_ID },
+    });
+    expect(
+      control.status(),
+      "CONTROL: an unchanged update of the org admin's own project was refused, so the re-parent refusal would measure nothing"
+    ).toBe(200);
+
+    const moved = await session.request.put(path, {
+      headers: session.headers(),
+      data: { name: project.name, organization_id: env.E2E_FOREIGN_ORG_ID },
+    });
+    // Exactly 403: the router refuses a re-parent before it looks the target
+    // organisation up, so a 400/404 here is the existence oracle R-A8X closed.
+    expect(moved.status(), `moving the fixture project into a foreign organisation returned ${moved.status()}`).toBe(
+      403
+    );
+    // Pins the refusal to the re-parent branch, the only body-dependent 403 on this route.
+    expect(await moved.text()).toContain("Moving a project to another organization requires a superadmin");
+
+    const after = await session.request.get(path);
+    expect(after.status()).toBe(200);
+    const stored = await after.json();
+    expect(
+      organisationOf(stored),
+      `project ${env.E2E_STAGING_PROJECT_ID} now belongs to another organisation`
+    ).toBe(env.E2E_STAGING_ORG_ID);
+    expect(stored.name, "the control update changed the fixture project's name").toBe(project.name);
+  });
+
   test("navigating the admin pages surfaces no foreign data and no forced logout", async ({
     page,
   }) => {
-    const env = requireStagingEnvironment(...ADMIN, ...SCOPE, ...FOREIGN);
+    const env = requireForeignTenant(...ADMIN, ...SCOPE, ...FOREIGN);
 
     await signInThroughBrowser(page, ADMIN[0], ADMIN[1]);
     // Accept the mandatory terms before measuring, or every page below is the
@@ -446,9 +577,13 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
 
     const unauthorised: string[] = [];
     const leaks: string[] = [];
-    const observed = new Set<string>();
+    // Per page, not per test (R-A9A review): the navbar's TenantContext lists
+    // organisations and projects on every mount, so one shared set let
+    // /organizations and /projects "make their call" on the navbar's alone.
+    let observed = new Set<string>();
+    const parsing: Promise<void>[] = [];
     let measured = 0;
-    page.on("response", async (response) => {
+    page.on("response", (response) => {
       const url = response.url();
       if (!url.includes("/api/")) {
         return;
@@ -460,35 +595,47 @@ test.describe("Gate 4 bullet 8 - org-admin is allowed in its tenant and refused 
       if (!(response.headers()["content-type"] ?? "").includes("application/json")) {
         return;
       }
-      try {
-        const body = await response.json();
-        measured += 1;
-        if (foreignObjectsIn(body, env.E2E_FOREIGN_ORG_ID, env.E2E_FOREIGN_PROJECT_ID).length > 0) {
-          leaks.push(new URL(url).pathname);
-        }
-      } catch {
-        // A body that is gone or not JSON carries no row to leak.
-      }
+      // Collected and awaited below, so a leak in the last page's body cannot
+      // arrive after the assertion that says there was none.
+      parsing.push(
+        (async () => {
+          try {
+            const body = await response.json();
+            measured += 1;
+            if (foreignObjectsIn(body, env.E2E_FOREIGN_ORG_ID, env.E2E_FOREIGN_PROJECT_ID).length > 0) {
+              leaks.push(new URL(url).pathname);
+            }
+          } catch {
+            // A body that is gone or not JSON carries no row to leak.
+          }
+        })()
+      );
     });
 
-    // Each page must stay on itself and make its own API call, or "no foreign
-    // object" is true of a page that redirected away and loaded nothing.
-    const pages: Array<[string, string]> = [
-      ["/organizations", "/api/organizations"],
-      ["/projects", "/api/projects"],
-      ["/users", "/api/users"],
-      ["/permissions", "/api/roles"],
+    // Each page must stay on itself, render ITS page (its own h1, not the
+    // "Access unavailable" card `ProtectedRoute` shows at the same URL), and make
+    // its own API call after navigating - or "no foreign object" is true of a page
+    // that loaded nothing.
+    const pages: Array<[string, string, RegExp]> = [
+      ["/organizations", "/api/organizations", /^Organizations$/],
+      ["/projects", "/api/projects", /^Projects( - .+)?$/],
+      ["/users", "/api/users", /^Users Management$/],
+      ["/permissions", "/api/roles", /^Permissions Management$/],
     ];
-    for (const [path, api] of pages) {
+    for (const [path, api, title] of pages) {
+      observed = new Set<string>();
       await page.goto(path);
       await page.waitForLoadState("networkidle");
       expect(new URL(page.url()).pathname, `visiting ${path} did not stay on ${path}`).toBe(path);
+      await expect(page.getByRole("heading", { level: 1, name: title }), `${path} did not render its page`).toBeVisible();
+      await expect(page.getByText("Access unavailable"), `${path} rendered the access-denied card`).toHaveCount(0);
       expect(
         [...observed].some((seen) => seen.startsWith(api)),
-        `${path} made no ${api} call, so its data was never measured`
+        `${path} made no ${api} call after navigating, so its data was never measured`
       ).toBe(true);
     }
 
+    await Promise.allSettled(parsing);
     expect(measured, "no JSON API response was observed, so nothing was measured").toBeGreaterThan(0);
     expect(unauthorised, "an admin page answered 401, which the client turns into a forced logout").toEqual(
       []

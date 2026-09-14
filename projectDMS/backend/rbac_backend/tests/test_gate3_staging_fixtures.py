@@ -283,18 +283,164 @@ def test_bullet2_selects_the_permissions_tab_before_asserting_the_group() -> Non
     assert select_at < group_at, "the spec asserts the Client DMS group before selecting the Permissions tab"
 
 
+SECURITY_TERMS = STAGING_E2E / "security-terms.ts"
+TERMS_MOCKED_SPEC = REPO_ROOT / "client" / "e2e" / "security-terms-acceptance.spec.ts"
+
+
 def test_bullet2_accepts_the_terms_through_the_page_not_the_api() -> None:
     fixtures = FIXTURES.read_text(encoding="utf-8")
     body = _function_body(fixtures, "openProtectedPage")
-    assert "Accept and Continue" in body and ".check()" in body, (
+    assert "assertTargetIsNotProduction" in body, "the protected page opens without the target check"
+    assert "acceptSecurityTermsIfPresented(page, path, ready)" in body, (
+        "openProtectedPage no longer goes through the shared terms acceptance"
+    )
+    helper = _function_body(SECURITY_TERMS.read_text(encoding="utf-8"), "acceptSecurityTermsIfPresented")
+    assert "Accept and Continue" in helper and ".check()" in helper, (
         "the terms are no longer accepted through the terms page"
     )
-    assert "request.post" not in body and "security-terms/accept" in body, (
+    assert "request.post" not in helper and "security-terms/accept" in helper, (
         "acceptance must be a browser action observed on the wire, not a harness POST"
     )
     text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
     assert "security-terms/accept" not in text, "the spec posts the acceptance itself"
     assert text.count("openProtectedPage(") >= 3, "a browser test reaches a protected page without the terms step"
+
+
+def test_the_terms_heading_locator_is_unambiguous_by_semantics_not_order() -> None:
+    """F-A8Z-B1, measured on the R-A8Z staging deployment.
+
+    The terms page renders its title as the `h1` AND the active version's title as
+    an `h2` inside the scrollable terms; the deployment titles that version with
+    the same text. A heading locator by name alone matched both and strict mode
+    refused it. The fix is the page's semantic contract (one level-1 title), not
+    element order.
+    """
+    page = (REPO_ROOT / "client" / "src" / "pages" / "SecurityTermsPage.tsx").read_text(encoding="utf-8")
+    assert re.search(r"<h1[^>]*>\s*Security, Privacy &amp; Anti-Piracy Terms\s*</h1>", page), (
+        "the terms page title is no longer the h1; re-derive the locator from the page"
+    )
+    assert "<h2" in page and "{active.title}</h2>" in page, (
+        "the active version's title is no longer an h2 in the terms region; re-derive this guard"
+    )
+
+    helper = _function_body(SECURITY_TERMS.read_text(encoding="utf-8"), "securityTermsHeading")
+    assert re.search(r'getByRole\("heading",\s*\{\s*level:\s*1,', helper), (
+        "the terms heading locator is not pinned to the level-1 page title"
+    )
+    for order_dependent in (".first()", ".nth(", ".last()"):
+        assert order_dependent not in helper, f"the terms heading locator depends on element order ({order_dependent})"
+    assert "getByRole(\"heading\"" not in FIXTURES.read_text(encoding="utf-8").split("export async function openProtectedPage")[1].split("\nexport ")[0], (
+        "openProtectedPage builds its own heading locator again instead of using the shared one"
+    )
+
+
+def test_the_terms_locator_has_a_mocked_page_test_excluded_from_deployments() -> None:
+    """The locator reached a deployment unexercised once; the mocked suite runs it in CI."""
+    spec = TERMS_MOCKED_SPEC.read_text(encoding="utf-8")
+    assert 'from "./staging/security-terms"' in spec, "the mocked suite does not exercise the staging helper"
+    assert "acceptSecurityTermsIfPresented(" in spec and "securityTermsHeading(page)" in spec
+    assert "toHaveCount(2)" in spec, "the duplicate-heading premise is no longer asserted"
+    config = (REPO_ROOT / "client" / "playwright.config.ts").read_text(encoding="utf-8")
+    assert '"**/security-terms-acceptance.spec.ts"' in config, (
+        "the mocked terms suite is not excluded from deployed-stack runs, where it would "
+        "assert its own fixtures while reporting a staging URL"
+    )
+
+
+def test_serial_mode_cannot_skip_the_gate4_tests() -> None:
+    """R-A8Z: file-level serial mode turned one bullet-2 failure into 8 skipped Gate 4 tests."""
+    text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
+    gate3_start = text.index('test.describe("Gate 3 bullet 2')
+    gate4_start = text.index('test.describe("Gate 4 bullet 8')
+    configures = [m.start() for m in re.finditer(r"test\.describe\.configure\(", text)]
+    assert configures, "the shared-role bullet-2 tests are no longer serial"
+    for position in configures:
+        assert gate3_start < position < gate4_start, (
+            "describe.configure is applied outside the Gate 3 bullet 2 block, so a bullet-2 "
+            "failure can skip Gate 4 tests"
+        )
+
+
+def test_a_deployed_stack_run_is_one_worker_with_no_retries() -> None:
+    """R-A9A review: both describe blocks clean up by run tag, and Playwright splits a
+    parallel describe with an afterAll across workers - one block's teardown could
+    delete the other's run-owned role mid-test. A retried pass is not evidence."""
+    config = (REPO_ROOT / "client" / "playwright.config.ts").read_text(encoding="utf-8")
+    assert re.search(r"workers:\s*targetsDeployedStack\s*\?\s*1\s*:", config), (
+        "a deployed-stack run is not forced to one worker"
+    )
+    assert re.search(r"retries:\s*targetsDeployedStack\s*\?\s*0\s*:", config), (
+        "a deployed-stack run may retry, so a second-attempt pass could be filed as evidence"
+    )
+
+
+def _gate4_test(text: str, title_start: str) -> str:
+    start = text.index(f'test("{title_start}')
+    return text[start : text.index("\n  });", start)]
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "a foreign organisation addressed directly is refused",
+        "a foreign user and a foreign role addressed directly are refused",
+        "the org admin cannot move itself into a foreign organisation",
+    ],
+)
+def test_direct_id_refusals_require_exactly_403(title: str) -> None:
+    """R-A9A review: users, roles and projects answer 404 for an id that does not exist,
+    so accepting 404 passes on a wrong or stale fixture id while measuring nothing."""
+    body = _gate4_test(ORG_ADMIN_SPEC.read_text(encoding="utf-8"), title)
+    assert "REFUSALS" not in body, f"{title!r} still accepts 404 as a refusal"
+    assert ".toBe(403)" in body, f"{title!r} does not require exactly 403"
+
+
+def test_the_foreign_project_by_id_requires_exactly_403() -> None:
+    body = _gate4_test(ORG_ADMIN_SPEC.read_text(encoding="utf-8"), "a foreign project, or a foreign-organisation filter")
+    direct = body[body.index("const direct") : body.index("const filtered")]
+    assert "REFUSALS" not in direct and ".toBe(403)" in direct
+
+
+def test_the_foreign_fixtures_cannot_be_the_fixture_tenant() -> None:
+    text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
+    helper = text[text.index("function requireForeignTenant") :]
+    helper = helper[: helper.index("\n}\n")]
+    assert "not.toBe(env.E2E_STAGING_ORG_ID)" in helper
+    gate4 = text[text.index('test.describe("Gate 4 bullet 8') :]
+    assert "requireStagingEnvironment(" not in gate4, "a Gate 4 test skips the foreign-tenant check"
+
+
+def test_the_admin_page_walk_measures_each_page_on_its_own() -> None:
+    """R-A9A review: the navbar lists organisations and projects on every mount, and
+    ProtectedRoute renders the access-denied card at the same URL."""
+    body = _gate4_test(ORG_ADMIN_SPEC.read_text(encoding="utf-8"), "navigating the admin pages")
+    loop = body[body.index("for (const [path, api, title] of pages)") :]
+    assert loop.index("observed = new Set<string>()") < loop.index("page.goto(path)"), (
+        "API calls are not reset per page, so the navbar's calls satisfy every page"
+    )
+    assert 'getByRole("heading", { level: 1, name: title })' in loop
+    assert '"Access unavailable"' in loop
+    assert body.index("await Promise.allSettled(parsing)") < body.index('expect(leaks'), (
+        "response bodies may still be parsing when the leak assertion runs"
+    )
+
+
+def test_gate4_row12_measures_the_refusal_behind_a_passing_control() -> None:
+    """F-A8Z-B2: a re-parent 403 means nothing if the same account is refused its own project."""
+    text = ORG_ADMIN_SPEC.read_text(encoding="utf-8")
+    start = text.index('test("the org admin can update its own project')
+    body = text[start : text.index("\n  });", start)]
+    read_control = body.index("CONTROL: the org admin was refused a read")
+    write_control = body.index("CONTROL: an unchanged update")
+    move = body.index("organization_id: env.E2E_FOREIGN_ORG_ID")
+    read_back = body.index("now belongs to another organisation")
+    assert read_control < write_control < move < read_back, (
+        "row 12 must read and update its own project successfully BEFORE the foreign re-parent, "
+        "and read the project back after it"
+    )
+    assert ".toBe(200)" in body[write_control - 200 : move] and ").toBe(\n      403\n    )" in body, (
+        "row 12's control must require 200 and its re-parent exactly 403"
+    )
 
 
 def test_bullet2_saves_in_the_browser_and_reads_the_server_back() -> None:
