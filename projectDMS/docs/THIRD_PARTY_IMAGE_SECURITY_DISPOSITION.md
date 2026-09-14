@@ -42,7 +42,7 @@ current DB.
 | FalkorDB | `falkordb/falkordb:v4.0.8` (module 40008) | `af5f2aa03539…` / `13ee9b3bfcc1…` | 11 | 137 | 82 | `v4.20.4` (Debian 13) | `adbddd418916…` | 2 / 9 = **11** (alpine variant: 12) | **Possible**: 20 minor releases of the graph module | **Likely one-way**: persistence written by v4.20 may not load in v4.0.8, so rollback needs the pre-upgrade archive | CANDIDATE, NOT VALIDATED. Owner decision needed |
 | Qdrant | `qdrant/qdrant:v1.12.5` | `05fecce7dce4…` / `449e32141460…` | 6 | 78 | 56 | `v1.12.6` closes **nothing** (84). The only remediating line is `v1.19.1` | `12364fe851b9…` | 3 / 10 = **13** | **Yes**: seven minor versions; backend pins `qdrant-client==1.12.2` | **Yes**: storage upgrade chain 1.12→1.13→…→1.19, one minor at a time | OWNER DECISION: no safe patch exists |
 | Apache httpd (gateway) | `httpd:2.4` | `393435ee1a31…` / `00fe3afeb8c3…` | 3 | 48 | 52 | `httpd:2.4.68` (Debian 13) | `979c38c2228d…` | 3 / 13 = **16** (alpine: 0 / 22) | Not expected (same 2.4 line, same Debian major); **unproven** | None | CANDIDATE, NOT VALIDATED |
-| ClamAV | `clamav/clamav:1.4` (runs 1.4.5) | `86c2a50372da…` / `b70a05497f80…` | 0 | 3 | 0 | `clamav/clamav:1.4.6` | `71fbb76b397c…` | **0** (1.5.4 also 0) | Not expected (patch) ; **unproven** | None | CANDIDATE, NOT VALIDATED. Lowest-risk remediation |
+| ClamAV | `clamav/clamav:1.4` (runs 1.4.5) | `86c2a50372da…` / `b70a05497f80…` | 0 | 3 | 0 | `clamav/clamav:1.4.6` | `71fbb76b397c…` (image `6dc7ff3fabde…`) | **0** (1.5.4 also 0); R-A8Y re-scan 2026-09-14: **0 CRITICAL/HIGH at all** | None found (R-A8Y drill: INSTREAM protocol, healthcheck, persistence, update, privilege) | None (new `clamav_db` volume is seeded from the image) | **ADOPTED ON THE RELEASE BRANCH (R-A8Y)**: validated in a disposable drill and pinned by digest; closes these 3 at cutover. Production still runs 1.4.5 |
 | Redis | `redis:7.4-alpine` | `6ab0b6e73817…` / `487efc061638…` | 0 | 0 | 0 | current is clean (`7.4.11-alpine` also 0) | — | 0 | — | — | REMAINS. Digest-pin the running image when pins next change |
 | **Total** | | | **21** | **538** | | | | **137** if every candidate incl. Qdrant 1.19.1 is adopted | | | |
 
@@ -94,6 +94,26 @@ Not covered by the compose pins (recorded, not changed in R-A8X):
   mounted in `scripts/backup_volume.sh` and `scripts/production_restore_volumes.sh`;
 * the host nginx TLS terminator is a distribution package, outside this matrix.
 
+## R-A8Y: ClamAV 1.4.6 adopted
+
+Driven by F-A8X-2: production's clamd was serving a 70-day-old signature database
+(`docs/CLAMAV_SIGNATURE_FRESHNESS.md`). The service definition changed in the same
+programme (egress-net, `clamav_db` volume, `FRESHCLAM_CHECKS=12`, a healthcheck
+that reloads a stale load, memory 2g -> 3g), so the image was validated together
+with it, never on its own.
+
+* **Pinned bytes:** `clamav/clamav:1.4.6@sha256:71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41`,
+  the index digest R-A8X scanned. **The tag has moved since:** on 2026-09-14
+  `clamav/clamav:1.4.6` (and `1.4`) resolved to `f156095071…`, because ClamAV
+  rebuilds its tags to refresh the baked database. A tag pin would have adopted
+  bytes nobody scanned.
+* **Re-scan:** Trivy 0.74.0 with its database refreshed at scan time
+  (2026-09-14T03:31Z): 0 CRITICAL, 0 HIGH, fixable or not.
+* **Drill:** local disposable Docker, the release compose's own `clamav` service
+  (details and results in `docs/CLAMAV_SIGNATURE_FRESHNESS.md` §5).
+* **Not changed:** every other third-party image. The disposition above for
+  MongoDB, FalkorDB, Qdrant and httpd stands; cutover stays BLOCKED on them.
+
 ## Why no image was upgraded in R-A8X
 
 The owner's rule is "if safe upgrades are proven, update the pins". A disposable
@@ -119,7 +139,9 @@ be exactly the implicit acceptance the policy forbids.
 1. **Run the compatibility drill** (authorise it on the production host under the
    standing disposable-drill authorisation, or supply a separate drill host). It
    is ready to run and takes roughly 20–30 minutes.
-2. **ClamAV 1.4.6 and httpd 2.4.68**: adopt once the drill passes. Low risk.
+2. **httpd 2.4.68**: adopt once the drill passes. Low risk. (**ClamAV 1.4.6 is
+   done** - adopted on the release branch in R-A8Y after its own disposable drill;
+   see "R-A8Y: ClamAV 1.4.6 adopted" below.)
 3. **MongoDB 8.0.30**: adopt once the drill passes, and decide the residual 97
    (Go tooling and mongosh, not the server): accept narrowly with a revisit date,
    or wait for an upstream tools rebuild.
@@ -146,7 +168,7 @@ Adopting a candidate later stales, at minimum:
 | FalkorDB v4.20.x | Gate 2 graph round trip, Gate 8 FalkorDB backup/recovery, Gate 9 b3 and b4 |
 | Qdrant v1.19.x (+ client) | Gate 2 vector round trip, Gate 8 Qdrant backup, Gate 9 b3 and b4, the full backend suite and image scan (client dependency) |
 | httpd 2.4.68 | Gate 7 edge/deployment evidence and every smoke, which runs through the gateway |
-| ClamAV 1.4.6 | Gate 5's live clean/infected scan (P0-005) and every smoke |
+| ClamAV 1.4.6 (**adopted in R-A8Y**) | Gate 5's live clean/infected scan (P0-005; now Gate 5 bullet 6, never earned) and every smoke - R-A8Y withdrew Gate 9 bullet 4 accordingly |
 
 Separately, the R-A8X source changes to `production_backup.sh` / `backup_volume.sh`
 touch the backup path that Gate 8 measured; the next window's canonical backup on a
