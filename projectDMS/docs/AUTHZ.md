@@ -79,7 +79,7 @@ System roles are referenced by their key (`users.roles: ["superadmin"]`) and
 name-based decisions (superadmin bypass, scope, role manageability) read
 `CurrentUser.roles`, so the principal itself drops references to inactive roles:
 `get_current_user` and `resolve_stored_principal` both build it through
-`_without_revoked_roles`. A reference with no role document is kept, as before.
+`_without_revoked_roles`. A bare key with no role document is kept, as before.
 
 `delete_role` sets every holder's `user_jwt_min_iat` and then drops their cached
 grant, like every other role mutation. A cached grant stores `computed_at`, stamped
@@ -92,6 +92,45 @@ setup would reactivate a deleted system role.
 
 Build cache keys with `permission_cache_key(user_id)` only. The key moved off
 `user_perms:{id}` in R-A9B so entries computed before the fix are never read.
+
+## Role references: one resolver for tier, permissions and the audit
+
+A `users.roles` entry is resolved by `core/role_reference.py::resolve_role_reference`
+and nothing else. The principal (`_without_revoked_roles`, which decides the tier the
+account carries) and `PermissionService._load_role` (which decides whose permissions
+apply) both call it, so an account can never again have a role's tier without its
+permissions, or the reverse. `scripts/system_role_audit.py` embeds a byte-identical copy
+(pinned by `test_role_reference_single_definition.py`) and fails when the running image's
+copy classifies any reference differently.
+
+- A reference equal to a role document's `_id` resolves to that document.
+- Otherwise the key the principal carries for it (`normalize_role_key`: `ROLE_ALIASES`,
+  else the lowercased reference) is tried ONE hop: a legacy spelling such as
+  `organization-admin` resolves to the `orgadmin` document and receives exactly its
+  permissions, and `DocController` resolves to `doccontroller`. It resolves only if no
+  other role document carries the reference as its exact name; otherwise it is ambiguous
+  and grants nothing.
+- A reference contributes to the name-based grants (`users:create`, `users:read`,
+  superadmin `*`) exactly the key the principal carries. `permission_service`'s wider
+  `_normalize_role_name` table applies to role document display names only.
+- Role mutations reach every holder the resolver would give the role to: cache
+  invalidation and holder counts match legacy spellings as well as the id. No role may
+  be created or renamed so its name spells another role - a legacy spelling of a canonical
+  key, or an existing role's key (400, every actor; re-sending an unchanged name is not a
+  rename), because such a lookalike would make every holder of that spelling, in every
+  organisation, ambiguous. Non-superadmins also may not use a `superadmin`/`superuser`
+  key as a name.
+- An alias of a system role (`super-admin`) never loads the system document. The
+  principal still carries `superadmin` by name (ADR 0001); assignment stores the canonical
+  id, and the audit fails the stored alias.
+- A deactivated target, reached directly or through an alias, revokes the reference: no
+  permission, no role name, no tier.
+- Anything else grants nothing. There is no second hop, no lookup by name, and no link to
+  permission aliases, which resolve separately (next section).
+
+New writes never store a legacy spelling: `routers/users.py::_resolve_assigned_roles`
+stores the resolved document's `_id`. The audit WARNs for a stored legacy spelling only
+when authorization really resolves it to an active non-system canonical document.
 
 ## Legacy permission aliases translate a name; they never create authority
 
