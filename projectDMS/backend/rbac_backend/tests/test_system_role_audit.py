@@ -326,3 +326,19 @@ def test_the_readiness_gate_fails_without_an_approved_count_and_on_any_audit_fai
         "a non-zero audit exit (1 = failure, 2 = could not read) must fail the gate"
     )
     assert "warn " not in gate_block, "the gate must not downgrade an audit failure to a warning"
+
+
+def test_super_admin_holders_are_counted_as_the_runtime_keeps_them() -> None:
+    """A reference whose `superadmin` key the principal drops (its document is deactivated) holds nothing.
+
+    Counting keys instead would report the approved 2 while no account can act as Super Admin.
+    """
+    roles = _roles()
+    roles[0]["is_active"] = False
+    report = _evaluate(roles=roles, users=_users() + [(["super-admin"], False)], expected=2)
+    assert _failed(report, "Super Admin holders = 0 (0 enabled, 0 disabled), approved = 2"), report.lines()
+
+    active = _evaluate(users=_users() + [(["super-admin"], False)], expected=3)
+    assert any("Super Admin holders = 3 (3 enabled, 0 disabled)" in line for line in active.passes), (
+        "positive control: with the document active, the alias still counts (ADR 0001)"
+    )
