@@ -196,6 +196,26 @@ else
   fail "Operations runbook or release gate is missing"
 fi
 
+# System roles (docs/adr/0001, owner decisions Q9/Q14/Q15, 2026-09-15). Super Admin
+# authority attaches to the role name, so who holds it is the control. The audit
+# reads the live role store through the running backend container (the host has
+# none of the app's dependencies) and is fed on stdin, so it also runs against the
+# currently deployed image, which does not ship it. It fails the deploy on a Super
+# User holder, a missing or deactivated superadmin document, a Super Admin holder
+# count other than the approved EXPECTED_SUPERADMIN_HOLDERS, or a role reference
+# that is unresolvable, ambiguous or resolves to an unexpected role. Exit 2 means
+# it could not read the store, which is a failure too.
+expected_superadmin_holders=$(get_env EXPECTED_SUPERADMIN_HOLDERS)
+if [[ ! "$expected_superadmin_holders" =~ ^[0-9]+$ ]]; then
+  fail "EXPECTED_SUPERADMIN_HOLDERS must be set to the approved Super Admin holder count"
+elif docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T backend \
+    python - --expected-superadmin-holders "$expected_superadmin_holders" \
+    <"$ROOT_DIR/scripts/system_role_audit.py"; then
+  pass "System-role audit passed (approved Super Admin holders: $expected_superadmin_holders)"
+else
+  fail "System-role audit failed or could not read the role store; see its FAIL lines above"
+fi
+
 if [[ -f "$ROOT_DIR/backend/rbac_backend/scripts/migrate_database.py" ]]; then
   pass "Versioned database migration runner exists"
 else
