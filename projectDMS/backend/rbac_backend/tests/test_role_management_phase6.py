@@ -223,3 +223,81 @@ async def test_phase6_delete_unauthorized_role_surfaces_forbidden():
     assert exc.value.status_code == 403
 
     assert await service.delete_role("custom-project-role", _project_admin()) is True
+
+
+# --------------------------------------------------------------------------- #
+# A role name must not be another role's legacy spelling (R-A9B v2 review F5/F4)
+# --------------------------------------------------------------------------- #
+
+
+def _super_admin():
+    return SimpleNamespace(id="super-admin-user", roles=["superadmin"], organization_id=None, organizations=[], projects=[])
+
+
+@pytest.mark.parametrize(
+    "name,org_admin_status",
+    [
+        ("project-user", 400),  # resolves one hop to projectuser; a lookalike would leave every holder with nothing
+        ("Organization User", 400),
+        ("org-admin", 403),  # already a reserved key for non-superadmins
+        ("Super Admin", 403),  # a system key: never for non-superadmins
+    ],
+)
+async def test_no_actor_may_create_a_role_named_with_another_roles_legacy_spelling(name, org_admin_status):
+    for actor, expected in ((_org_admin(), org_admin_status), (_super_admin(), 400)):
+        db = _DB()
+        before = len(db.roles.docs)
+        with pytest.raises(RoleServiceError) as exc:
+            await _RoleService(db).create_role(RoleCreate(name=name, permissions=["dms.document.view"]), actor)
+        assert exc.value.status_code == expected, (actor.roles, name, exc.value)
+        assert len(db.roles.docs) == before, "a refused role was written"
+
+
+@pytest.mark.parametrize("name", ["SuperAdmin", "super_user"])
+async def test_a_non_superadmin_cannot_create_a_role_named_as_a_system_key(name):
+    """Not table spellings, but a role named so reads as Super Admin to the display-name grants."""
+    with pytest.raises(RoleServiceError) as exc:
+        await _RoleService(_DB()).create_role(RoleCreate(name=name, permissions=["dms.document.view"]), _org_admin())
+    assert exc.value.status_code == 403
+
+
+async def test_no_actor_may_rename_a_role_to_another_roles_legacy_spelling():
+    for actor in (_org_admin(), _super_admin()):
+        db = _DB()
+        with pytest.raises(RoleServiceError) as exc:
+            await _RoleService(db).update_role("custom-org-role", RoleUpdate(name="project-user"), actor)
+        assert exc.value.status_code == 400
+        assert db.roles.docs[0]["name"] == "Custom Org Role"
+
+
+async def test_a_role_name_that_spells_an_existing_roles_key_is_refused():
+    """`Custom-Project-Role` is the key of the existing `custom-project-role` role."""
+    db = _DB()
+    with pytest.raises(RoleServiceError) as exc:
+        await _RoleService(db).create_role(
+            RoleCreate(name="Custom-Project-Role", permissions=["dms.document.view"]), _org_admin()
+        )
+    assert exc.value.status_code == 400
+
+
+async def test_re_sending_an_unchanged_name_is_not_a_rename():
+    """A role that already carries a lookalike name stays editable."""
+    db = _DB()
+    db.roles.docs[0]["name"] = "project-user"
+    await _RoleService(db).update_role(
+        "custom-org-role", RoleUpdate(name="project-user", description="edited"), _super_admin()
+    )
+    assert db.roles.docs[0]["description"] == "edited"
+
+
+async def test_an_ordinary_role_name_is_still_accepted():
+    created = await _RoleService(_DB()).create_role(
+        RoleCreate(name="Site Reviewer", permissions=["dms.document.view"]), _org_admin()
+    )
+    assert created.name == "Site Reviewer"
+
+
+async def test_the_canonical_role_may_keep_a_name_that_spells_its_own_key():
+    db = _DB()
+    await _RoleService(db).update_role("orgadmin", RoleUpdate(name="Organization-Admin"), _super_admin())
+    assert next(doc for doc in db.roles.docs if doc["_id"] == "orgadmin")["name"] == "Organization-Admin"

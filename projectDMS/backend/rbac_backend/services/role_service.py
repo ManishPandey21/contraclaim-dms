@@ -13,6 +13,7 @@ from ..models.permission import Permission, PermissionCategory, PermissionLevel
 from ..utils.error_handler import RoleError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .permission_service import permission_cache_key
+from ..core.role_reference import legacy_alias_target, normalize_role_key
 
 logger = logging.getLogger(__name__)
 
@@ -359,6 +360,49 @@ class RoleService:
             self.db = await get_database()
         return self.db
 
+    @staticmethod
+    def _reference_names_role(reference: Any, role_id: str) -> bool:
+        """Whether a stored reference can resolve to this role: its id, or a legacy spelling of it."""
+        text = str(reference).strip()
+        return text == role_id or normalize_role_key(text) == role_id
+
+    async def _holders_of_role(self, db: Any, role_id: Any, query: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Every user whose `users.roles` can resolve to this role, legacy spellings included.
+
+        A legacy spelling (`organization-admin`) receives the `orgadmin` document's
+        permissions (`core.role_reference`), so a mutation of `orgadmin` must reach those
+        holders too. Spellings vary in case and punctuation, so they are matched here
+        rather than in the query.
+        """
+        role_key = str(role_id)
+        cursor = db.users.find(dict(query or {}), {"_id": 1, "roles": 1})
+        return [
+            user
+            for user in await cursor.to_list(length=None)
+            if any(self._reference_names_role(reference, role_key) for reference in user.get("roles") or [])
+        ]
+
+    async def _refuse_lookalike_name(self, db: Any, name: Optional[str], role_id: Any) -> None:
+        """No role may be named so that it spells another role.
+
+        A stored reference resolves one hop to the role its key names only while no other
+        document carries that reference as its exact name (`core.role_reference`). A role
+        named `project-user`, or `Custom-Project-Role` beside a `custom-project-role` role,
+        would leave every holder of that spelling, in every organisation, with nothing. So
+        a name may be neither a legacy spelling of a canonical key nor the key of an
+        existing role - unless that role is this one.
+        """
+        if not name:
+            return
+        own = str(role_id) if role_id is not None else None
+        target = legacy_alias_target(name)
+        if target is None:
+            key = normalize_role_key(name)
+            if key and key != own and await db.roles.find_one({"_id": key}) is not None:
+                target = key
+        if target is not None and target != own:
+            raise RoleServiceError(f"Role name '{name}' is reserved: it spells the '{target}' role", 400)
+
     async def _invalidate_role_caches(self, role_id: str) -> None:
         """Invalidate permission caches and JWTs for all users with this role."""
         try:
@@ -370,17 +414,8 @@ class RoleService:
 
             db = await self._get_db()
 
-            # Find all users with this role ID (handle both string and ObjectId references)
-            try:
-                role_oid = ObjectId(role_id)
-            except:
-                role_oid = role_id
-
-            cursor = db.users.find(
-                {"roles": {"$in": [role_id, role_oid, str(role_id)]}},
-                {"_id": 1}
-            )
-            users = await cursor.to_list(length=None)
+            # Holders by id AND by legacy spelling: both receive this role's permissions.
+            users = await self._holders_of_role(db, role_id)
 
             now_ts = int(datetime.utcnow().timestamp())
             for user in users:
@@ -413,8 +448,9 @@ class RoleService:
             project_ids = [str(p) for p in (getattr(created_by, "projects", []) or []) if p]
 
             role_name_key = self._normalize_role_key(role_data.name)
-            if role_name_key in RESERVED_ROLE_KEYS and not is_superadmin:
+            if role_name_key in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES and not is_superadmin:
                 raise RoleServiceError("Not authorized to create reserved roles", 403)
+            await self._refuse_lookalike_name(db, role_data.name, None)
 
             if not is_superadmin and role_data.is_system:
                 raise RoleServiceError("Not authorized to create system roles", 403)
@@ -631,7 +667,7 @@ class RoleService:
 
             self._ensure_role_manageable(updated_by, existing)
             if not self._is_superadmin_actor(updated_by):
-                if update_data.name is not None and self._normalize_role_key(update_data.name) in RESERVED_ROLE_KEYS:
+                if update_data.name is not None and self._normalize_role_key(update_data.name) in RESERVED_ROLE_KEYS | SYSTEM_ROLE_NAMES:
                     raise RoleServiceError("Not authorized to rename roles to reserved names", 403)
                 if update_data.is_system is not None and self._field_changed(existing, "is_system", bool(update_data.is_system)):
                     raise RoleServiceError("Not authorized to change system role status", 403)
@@ -643,6 +679,8 @@ class RoleService:
                     raise RoleServiceError("Not authorized to move roles across organizations", 403)
                 if update_data.project_id is not None and self._field_changed(existing, "project_id", update_data.project_id):
                     raise RoleServiceError("Not authorized to move roles across projects", 403)
+            if update_data.name is not None and update_data.name != existing.get("name"):
+                await self._refuse_lookalike_name(db, update_data.name, existing.get("_id"))
 
             # Build update document
             update_doc = {
@@ -737,12 +775,7 @@ class RoleService:
             db = await self._get_db()
 
             # Count users with this role
-            count = await db.users.count_documents({
-                "roles": role_id,
-                "is_active": True
-            })
-
-            return count
+            return len(await self._holders_of_role(db, role_id, {"is_active": True}))
 
         except Exception as e:
             logger.error(f"Failed to count users with role {role_id}: {str(e)}")

@@ -3,8 +3,10 @@
 Owner decisions (2026-09-15): Super User is dormant (Q1), Super Admin is name-based
 (Q2/ADR 0001), 2 holders is the approved production count and any other count is a
 stop (Q14), and the audit is a hard gate in `pre_deploy_readiness.sh` (Q15). Owner
-safeguard: an alias may only WARN when it resolves to the intended canonical
-document; an ambiguous, unexpected or unresolved reference FAILS.
+contract (D2): a reference is classified by the resolver authorization uses
+(`core/role_reference.py`). Only a legacy spelling that really resolves one hop to an
+active, non-system canonical document may WARN; an unresolved, ambiguous, deactivated
+or system-alias reference FAILS, and so does any disagreement with the running image.
 
 The baseline below is the production shape measured read-only that day: a
 `superadmin` document with no lifecycle/scope metadata, 9 users, and three legacy
@@ -24,7 +26,7 @@ from typing import Any, Dict, List
 import pytest
 from bson import ObjectId
 
-from rbac_backend.core.security import _normalize_roles_list
+from rbac_backend.core import role_reference
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "system_role_audit.py"
@@ -65,12 +67,12 @@ def _users() -> List[tuple]:
     ]
 
 
-def _evaluate(roles=None, users=None, expected=2):
+def _evaluate(roles=None, users=None, expected=2, runtime_resolve=None):
     return audit.evaluate(
         _roles() if roles is None else roles,
         _users() if users is None else users,
         expected,
-        _normalize_roles_list,
+        runtime_resolve,
     )
 
 
@@ -90,6 +92,7 @@ def test_the_measured_production_shape_passes_with_alias_warnings() -> None:
     assert report.exit_code == audit.EXIT_OK
     assert any("Super Admin holders = 2 (2 enabled, 0 disabled)" in line for line in report.passes)
     warning = " ".join(report.warnings)
+    assert "authorization resolves to their active canonical role (tier and permissions)" in warning
     assert "organization-admin -> orgadmin x2" in warning
     assert "project-admin -> projectadmin x1" in warning
 
@@ -136,29 +139,88 @@ def test_an_unresolved_reference_fails() -> None:
     assert _failed(_evaluate(users=_users() + [(["xyzadmin"], False)]), "no role document: xyzadmin x1")
 
 
+def test_a_legacy_spelling_whose_canonical_document_is_gone_fails() -> None:
+    roles = [doc for doc in _roles() if doc["_id"] != "orgadmin"]
+    report = _evaluate(roles=roles, users=[u for u in _users() if u[0] != ["orgadmin"]])
+    assert _failed(report, "no role document: organization-admin x2")
+    assert not any("organization-admin" in line for line in report.warnings)
+
+
 def test_a_reference_matching_two_documents_fails() -> None:
     roles = _roles() + [{"_id": ObjectId(), "name": "organization-admin", "scope": "organization", "is_active": True}]
-    assert _failed(_evaluate(roles=roles), "matching more than one role document")
+    report = _evaluate(roles=roles)
+    assert _failed(report, "matching more than one role document: organization-admin -> orgadmin")
+    assert not any("organization-admin" in line for line in report.warnings)
 
 
-def test_a_reference_the_principal_would_read_as_a_different_key_fails() -> None:
-    """Stored by exact name, the principal carries 'site reviewer', not the document id."""
-    assert _failed(_evaluate(users=_users() + [(["Site Reviewer"], False)]), "the principal would carry 'site reviewer'")
+def test_a_reference_stored_by_display_name_resolves_to_nothing() -> None:
+    """Authorization never looks a stored reference up by name, so neither does the audit."""
+    assert _failed(_evaluate(users=_users() + [(["Site Reviewer"], False)]), "no role document: Site Reviewer x1")
 
 
-def test_a_reference_to_a_deactivated_role_only_warns() -> None:
+def test_a_reference_to_a_deactivated_role_fails() -> None:
     roles = _roles()
     retired = ObjectId()
     roles.append({"_id": retired, "name": "Retired", "scope": "organization", "is_active": False})
     report = _evaluate(roles=roles, users=_users() + [([str(retired)], False)])
-    assert report.failures == [], report.lines()
-    assert any("deactivated roles" in line for line in report.warnings)
+    assert _failed(report, f"deactivated roles (they grant nothing): {retired} -> {retired} x1")
+
+
+def test_a_legacy_spelling_of_a_deactivated_role_fails_instead_of_warning() -> None:
+    roles = _roles()
+    roles[1]["is_active"] = False
+    report = _evaluate(roles=roles)
+    assert _failed(report, "organization-admin -> orgadmin x2")
+    assert not any("organization-admin" in line for line in report.warnings)
 
 
 def test_canonical_ids_and_custom_role_ids_pass_without_warnings() -> None:
     users = [(["superadmin"], False), (["superadmin"], False), (["orguser", str(REVIEWER_ID)], False)]
     report = _evaluate(users=users)
     assert report.failures == [] and report.warnings == [], report.lines()
+
+
+# --------------------------------------------------------------------------- #
+# The audit and the running image cannot disagree
+# --------------------------------------------------------------------------- #
+
+
+def test_without_the_module_in_the_image_the_audit_says_whose_resolver_it_used() -> None:
+    report = _evaluate()
+    assert any("no core.role_reference and may not resolve legacy spellings" in line for line in report.notes)
+    assert report.lines()[0].startswith("NOTE:")
+    warning = " ".join(report.warnings)
+    assert "that the candidate's authorization resolves" in warning, (
+        "inside an image that predates the resolver the audit must not claim the running authorization resolves them"
+    )
+
+
+def test_the_running_image_resolving_identically_passes() -> None:
+    report = _evaluate(runtime_resolve=role_reference.resolve_role_reference)
+    assert report.failures == [], report.lines()
+    assert any("resolves every reference exactly as this audit does" in line for line in report.passes)
+
+
+def test_a_running_image_that_resolves_a_reference_differently_fails() -> None:
+    def _exact_id_only(reference, documents):
+        """The pre-fix runtime: a legacy spelling loads nothing."""
+        resolution = role_reference.resolve_role_reference(reference, documents)
+        if resolution.status == role_reference.LEGACY_ALIAS:
+            return role_reference.RoleResolution(resolution.reference, resolution.key, role_reference.UNRESOLVED)
+        return resolution
+
+    report = _evaluate(runtime_resolve=_exact_id_only)
+    assert _failed(report, "resolve references differently: organization-admin: audit legacy_alias, runtime unresolved x2")
+
+
+def test_main_resolves_with_the_image_module_when_it_exists(monkeypatch, capsys) -> None:
+    async def _collected():
+        return _roles(), _users()
+
+    monkeypatch.setattr(audit, "_collect_from_application", _collected)
+    assert audit.main(["--expected-superadmin-holders", "2"]) == audit.EXIT_OK
+    output = capsys.readouterr().out
+    assert "PASS: the running image resolves every reference exactly as this audit does" in output
 
 
 # --------------------------------------------------------------------------- #
@@ -203,11 +265,19 @@ def test_the_output_never_carries_user_identity() -> None:
     assert planted_email in str(db.users.docs), "positive control: the identity is present in the store"
 
     roles, collected = asyncio.run(audit.collect(db))
-    output = "\n".join(audit.evaluate(roles, collected, 2, _normalize_roles_list).lines())
+    output = "\n".join(audit.evaluate(roles, collected, 2).lines())
 
     assert "Super Admin holders = 2" in output, "positive control: the planted holders were counted"
     assert planted_email not in output and str(planted_id) not in output and "planted" not in output
     assert db.users.projections == [{"roles": 1, "disabled": 1, "_id": 0}]
+
+
+def test_the_audit_reads_every_field_the_resolver_decides_on() -> None:
+    db = type("DB", (), {"roles": _Collection(_roles()), "users": _Collection([])})()
+    asyncio.run(audit.collect(db))
+    projection = db.roles.projections[0]
+    for decided_on in ("name", "is_active", "scope"):
+        assert projection.get(decided_on) == 1, f"the resolver reads `{decided_on}` but the audit does not collect it"
 
 
 def test_an_unreadable_role_store_is_a_failure_that_does_not_leak_the_error(monkeypatch, capsys) -> None:

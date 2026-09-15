@@ -10,10 +10,10 @@ from .database import get_db  # Corrected import
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, Field
 import uuid
-import re
 from bson import ObjectId
 from pydantic import ConfigDict
-from ..services.permission_service import PermissionService
+from ..services.permission_service import PermissionService, fetch_role_documents
+from .role_reference import ROLE_ALIASES as _ROLE_REFERENCE_ALIASES, normalize_role_key, resolve_role_reference
 from ..utils.audit_logger import get_audit_logger
 
 
@@ -61,41 +61,14 @@ async def _handle_session_store_unavailable(exc: Exception) -> None:
         exc,
     )
 
-# Compatibility role aliases to normalize various role naming schemes
-ROLE_ALIASES = {
-    "organization-user": "orguser",
-    "org-user": "orguser",
-    "organization user": "orguser",
-    "organizationuser": "orguser",
-    "orguser": "orguser",
-    "organization-admin": "orgadmin",
-    "org-admin": "orgadmin",
-    "organization admin": "orgadmin",
-    "organizationadmin": "orgadmin",
-    "orgadmin": "orgadmin",
-    "project-user": "projectuser",
-    "project user": "projectuser",
-    "projectuser": "projectuser",
-    "proj-user": "projectuser",
-    "proj user": "projectuser",
-    "projuser": "projectuser",
-    "project-admin": "projectadmin",
-    "project admin": "projectadmin",
-    "projectadmin": "projectadmin",
-    "proj-admin": "projectadmin",
-    "proj admin": "projectadmin",
-    "projadmin": "projectadmin",
-    "super-admin": "superadmin",
-    "super admin": "superadmin",
-    "superadministrator": "superadmin",
-}
+# The principal's role-alias table lives with the reference resolver, so the key the
+# principal carries and the document the permission resolver loads cannot drift apart.
+ROLE_ALIASES = _ROLE_REFERENCE_ALIASES
 
 def _normalize_roles_list(roles):
     out = []
     for r in (roles or []):
-        s = str(r).strip().lower()
-        s = ROLE_ALIASES.get(s, ROLE_ALIASES.get(re.sub(r"[^a-z0-9]", "", s), s))
-        out.append(s)
+        out.append(normalize_role_key(r))
     # de-duplicate while preserving order
     result = []
     seen = set()
@@ -130,32 +103,28 @@ class StoredPrincipalUnavailableError(Exception):
 
 
 async def _without_revoked_roles(db, user: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop `users.roles` references to soft-deleted roles before the principal is built.
+    """Drop `users.roles` references that must not reach the principal.
 
     `CurrentUser.roles` is what every name-based decision reads - superadmin
     bypass, scope, role manageability. System roles are stored under their key
     (`"superadmin"`, `"orgadmin"`), so without this a soft-deleted system role kept
     granting by name even after `PermissionService` stopped counting its
-    permissions (R-A9B). A reference with no role document is kept, as before; a
-    document with `is_active=False` is revoked. One query per principal.
+    permissions (R-A9B).
+
+    Each reference is judged by `core.role_reference`, the same resolver that decides
+    which document `PermissionService` loads, so tier and permissions agree: a
+    deactivated role - reached directly or through a legacy spelling - is dropped,
+    and so is a legacy spelling that resolves to no role or to more than one. A bare
+    key with no document is kept, as before. One query per principal.
     """
     references = list(user.get("roles") or [])
     if not references:
         return user
-    candidates: List[Any] = []
-    for reference in references:
-        candidates.append(reference)
-        try:
-            candidates.append(ObjectId(reference))
-        except Exception:
-            pass
-    revoked_docs = await db.roles.find(
-        {"_id": {"$in": candidates}, "is_active": False}, {"_id": 1}
-    ).to_list(length=None)
-    revoked = {str(doc.get("_id")) for doc in revoked_docs}
-    if not revoked:
+    documents = await fetch_role_documents(db, references)
+    kept = [reference for reference in references if resolve_role_reference(reference, documents).keeps_role_key]
+    if len(kept) == len(references):
         return user
-    return {**user, "roles": [reference for reference in references if str(reference) not in revoked]}
+    return {**user, "roles": kept}
 
 
 def _principal_from_user_document(user: Dict[str, Any], email: Optional[str] = None) -> CurrentUser:

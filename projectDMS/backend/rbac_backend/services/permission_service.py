@@ -12,6 +12,13 @@ from pymongo.errors import DuplicateKeyError
 from ..core.config import settings
 from ..core.database import get_database
 from ..core.permissions import equivalent_permissions
+from ..core.role_reference import (
+    RoleResolution,
+    normalize_role_key,
+    reference_text,
+    resolve_role_reference,
+    role_is_active as role_is_active,  # re-exported: the soft-delete contract reads it from here
+)
 from ..models.permission import (
     Permission,
     PermissionCreate,
@@ -65,16 +72,24 @@ ROLE_ALIASES = {
 }
 
 def _normalize_role_name(value: Any) -> str:
+    """Normalise a role DOCUMENT's display name for the name-based grants.
+
+    Never apply it to a `users.roles` reference: a reference contributes exactly the key
+    `core.role_reference` gives the principal (`RoleResolution.key`), so a spelling only
+    this wider table knows cannot grant by name what the principal does not carry.
+    """
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
     return ROLE_ALIASES.get(raw, raw)
 
 
-#: Moved off `user_perms:{id}` in R-A9B. Entries under the old key were computed
-#: while soft-deleted roles and transitive aliases still granted; under a new key
-#: no process reads them, and they expire unread on their own TTL.
-PERMISSION_CACHE_KEY_PREFIX = "user_perms:v2:"
+#: Moved off `user_perms:{id}` in R-A9B, and off `v2` when legacy role spellings
+#: started resolving one hop. Entries under an old key were computed while
+#: soft-deleted roles and transitive aliases still granted (v1), or with a legacy
+#: spelling's role names but not its document (v2); under a new key no process
+#: reads them, and they expire unread on their own TTL.
+PERMISSION_CACHE_KEY_PREFIX = "user_perms:v3:"
 
 
 def permission_cache_key(user_id: Any) -> str:
@@ -82,15 +97,60 @@ def permission_cache_key(user_id: Any) -> str:
     return f"{PERMISSION_CACHE_KEY_PREFIX}{user_id}"
 
 
-def role_is_active(role: Dict[str, Any]) -> bool:
-    """Whether a role document may contribute authority.
+def _id_candidates(text: str) -> List[Any]:
+    candidates: List[Any] = []
+    try:
+        candidates.append(ObjectId(text))
+    except Exception:
+        pass
+    candidates.append(text)
+    return candidates
 
-    `RoleService.delete_role` soft-deletes by writing `is_active=False` and keeps
-    the document for history and direct lookup. A document without the flag
-    predates soft delete and is active - the same reading the role listing uses
-    (`{"$ne": False}`).
+
+async def load_role_resolution(db: Any, reference: Any) -> RoleResolution:
+    """Fetch what `resolve_role_reference` needs for ONE reference, then resolve it.
+
+    The direct document first; only when there is none, the canonical document the
+    key names and any other document carrying the reference as its exact name (the
+    ambiguity check). Store errors propagate: a lookup that cannot run is not "no role".
     """
-    return role.get("is_active") is not False
+    text = reference_text(reference)
+    if not text:
+        return resolve_role_reference(text, [])
+    for candidate in _id_candidates(text):
+        direct = await db.roles.find_one({"_id": candidate})
+        if direct is not None:
+            return resolve_role_reference(text, [direct])
+    key = normalize_role_key(text)
+    if key == text:
+        return resolve_role_reference(text, [])
+    target = await db.roles.find_one({"_id": key})
+    if target is None:
+        return resolve_role_reference(text, [])
+    documents = [target]
+    lookalike = await db.roles.find_one({"name": text, "_id": {"$ne": target.get("_id")}})
+    if lookalike is not None:
+        documents.append(lookalike)
+    return resolve_role_reference(text, documents)
+
+
+async def fetch_role_documents(db: Any, references: List[Any]) -> List[Dict[str, Any]]:
+    """Every role document `resolve_role_reference` may need for these references, in one query."""
+    ids: List[Any] = []
+    names: List[str] = []
+    for reference in references or []:
+        text = reference_text(reference)
+        if not text:
+            continue
+        names.append(text)
+        for candidate in dict.fromkeys([text, normalize_role_key(text)]):
+            ids.extend(_id_candidates(candidate))
+    if not names:
+        return []
+    return await db.roles.find(
+        {"$or": [{"_id": {"$in": ids}}, {"name": {"$in": names}}]},
+        {"_id": 1, "name": 1, "is_active": 1, "scope": 1},
+    ).to_list(length=None)
 
 class PermissionServiceError(Exception):
     """Custom exception for permission service errors."""
@@ -177,24 +237,16 @@ class PermissionService:
             return True
         return int(computed_at) > int(min_iat)
 
-    async def _load_role(self, db: Any, role_ref: Any) -> Tuple[Optional[Dict[str, Any]], bool]:
-        """Resolve one `users.roles` entry to `(document or None, revoked)`.
+    async def _load_role(self, db: Any, role_ref: Any) -> RoleResolution:
+        """Resolve one `users.roles` entry through `core.role_reference`.
 
-        Every resolver goes through here so a soft-deleted role contributes
-        nothing - no permission, no wildcard, no role name - wherever authority is
-        computed (F-A9A-1). A reference that resolves to no document is not
-        revoked; callers keep their existing handling of bare role keys.
+        Every resolver goes through here, so wherever authority is computed a
+        reference contributes role names only when `keeps_role_key` (a soft-deleted
+        role contributes nothing - F-A9A-1) and permissions only from
+        `document`, which is set only when the reference resolves to one active
+        document: its own `_id`, or a legacy spelling one hop to its canonical role.
         """
-        try:
-            query_id = ObjectId(role_ref)
-        except Exception:
-            query_id = role_ref
-        role = await db.roles.find_one({"_id": query_id})
-        if role is None:
-            return None, False
-        if not role_is_active(role):
-            return None, True
-        return role, False
+        return await load_role_resolution(db, role_ref)
 
     async def get_permission_by_id(self, permission_id: str) -> Optional[Permission]:
         """Get permission by ID."""
@@ -553,7 +605,7 @@ class PermissionService:
             perm_ids: List[ObjectId] = []
 
             for rid in role_ids:
-                role, _revoked = await self._load_role(db, rid)
+                role = (await self._load_role(db, rid)).document
                 if not role:
                     continue
                 rperms = role.get("permissions", []) or []
@@ -616,15 +668,13 @@ class PermissionService:
             role_names: set[str] = set()
 
             for rid in user_doc.get("roles", []) or []:
-                role, revoked = await self._load_role(db, rid)
-                if revoked:
+                resolution = await self._load_role(db, rid)
+                if not resolution.keeps_role_key:
                     continue
-                rid_str = str(rid).strip()
-                if rid_str:
-                    role_names.add(rid_str.lower())
-                    normalized_rid = _normalize_role_name(rid_str)
-                    if normalized_rid:
-                        role_names.add(normalized_rid)
+                role = resolution.document
+                # The reference contributes exactly the key the principal carries.
+                if resolution.key:
+                    role_names.add(resolution.key)
                     if "superadmin" in role_names:
                         return ["*"]
 
@@ -835,15 +885,13 @@ class PermissionService:
                 perm_names = set()
                 role_names = set()
                 for rid in role_ids:
-                    role, revoked = await self._load_role(db, rid)
-                    if revoked:
+                    resolution = await self._load_role(db, rid)
+                    if not resolution.keeps_role_key:
                         continue
-                    rid_str = str(rid).lower()
-                    if rid_str:
-                        role_names.add(rid_str)
-                        normalized_rid = _normalize_role_name(rid_str)
-                        if normalized_rid:
-                            role_names.add(normalized_rid)
+                    role = resolution.document
+                    # The reference contributes exactly the key the principal carries.
+                    if resolution.key:
+                        role_names.add(resolution.key)
                     if not role:
                         continue
                     role_name = str(role.get("name", "")).lower()
@@ -966,9 +1014,10 @@ class PermissionService:
             role_ids = user_doc.get("roles", []) or []
             is_super_admin = False
             for rid in role_ids:
-                role, revoked = await self._load_role(db, rid)
-                if revoked:
+                resolution = await self._load_role(db, rid)
+                if not resolution.keeps_role_key:
                     continue
+                role = resolution.document
                 role_id_str = str(rid).lower()
                 if role_id_str == "superadmin" or role_id_str == "super admin":
                     is_super_admin = True
