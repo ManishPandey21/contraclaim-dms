@@ -254,6 +254,8 @@ class UserController:
 
             # Validate and sanitize input
             validated_data = await self._validate_user_input(user_data)
+            # Every later check, and the stored record, sees canonical role ids only.
+            validated_data.roles = await self._resolve_assigned_roles(validated_data.roles)
 
             # Check for existing user
             existing_user = await self.user_service.check_user_exists(
@@ -440,6 +442,8 @@ class UserController:
             validated_update = await self._validate_user_update(update_data, existing_user)
 
             if validated_update.roles is not None:
+                # Resolve before judging: an alias must be judged as the role it becomes.
+                validated_update.roles = await self._resolve_assigned_roles(validated_update.roles)
                 await self._enforce_role_assignment_scope(
                     current_user,
                     validated_update.roles,
@@ -614,9 +618,11 @@ class UserController:
                     status.HTTP_400_BAD_REQUEST,
                 )
 
+            # Case is kept: role names are matched exactly, and ids/keys are normalised
+            # by `_resolve_assigned_roles`. Lowercasing here broke name matches.
             validated_roles: List[str] = []
             for role in (user_data.roles or []):
-                normalized_role = sanitize_text(str(role).lower())
+                normalized_role = sanitize_text(str(role))
                 if normalized_role:
                     validated_roles.append(normalized_role)
             if not validated_roles:
@@ -707,10 +713,12 @@ class UserController:
             validated_fields['password'] = update_data.password
 
         if update_data.roles is not None:
+            # Case is kept; `_resolve_assigned_roles` resolves names exactly and keys normalised.
             validated_roles = []
             for role in update_data.roles:
-                normalized_role = sanitize_text(str(role).lower())
-                validated_roles.append(normalized_role)
+                normalized_role = sanitize_text(str(role))
+                if normalized_role:
+                    validated_roles.append(normalized_role)
             validated_fields['roles'] = validated_roles
 
         if update_data.disabled is not None:
@@ -832,33 +840,63 @@ class UserController:
             user_data.projects or [],
         )
 
+    async def _resolve_assigned_roles(self, requested_roles: List[str]) -> List[str]:
+        """Resolve every requested role to exactly one active role document.
+
+        Returns the documents' ids, deduplicated in request order. That id is what is
+        stored, so the principal later reads the same key the checks below judged.
+
+        A string is looked up three ways: as a role id, as the key the principal's
+        normaliser gives it (`core.security._normalize_roles_list`, so `super-admin`
+        is judged as the `superadmin` role it will become), and as an exact role name.
+        No match, more than one distinct match, or a deactivated role is refused
+        with 400 before anything is written. There is no scope guess for a string
+        without a document: that guess is how an alias reached Super Admin (ADR 0001).
+        """
+        from ..core.security import _normalize_roles_list
+
+        resolved: List[str] = []
+        for requested in requested_roles or []:
+            text = str(requested or "").strip()
+            if not text:
+                continue
+            normalized = (_normalize_roles_list([text]) or [""])[0]
+
+            matches: Dict[str, Any] = {}
+            for key in dict.fromkeys([text, normalized]):
+                if key:
+                    role = await self.role_service.get_role_by_id(key)
+                    if role:
+                        matches[str(role.id)] = role
+            role = await self.role_service.get_role_by_name(text)
+            if role:
+                matches[str(role.id)] = role
+
+            if not matches:
+                raise UserError(f"Unknown role: {text}", status.HTTP_400_BAD_REQUEST)
+            if len(matches) > 1:
+                raise UserError(f"Role '{text}' matches more than one role", status.HTTP_400_BAD_REQUEST)
+            ((role_id, role),) = matches.items()
+            if not role.is_active:
+                raise UserError(f"Role '{text}' is not active", status.HTTP_400_BAD_REQUEST)
+            if role_id not in resolved:
+                resolved.append(role_id)
+        return resolved
+
     async def _resolve_role_scope(self, role_id: str) -> dict:
         role = await self.role_service.get_role_by_id(role_id)
         if not role:
             role = await self.role_service.get_role_by_name(role_id)
-        if role:
-            return {
-                "id": role.id,
-                "name": role.name,
-                "scope": role.scope,
-                "organization_id": role.organization_id,
-                "project_id": role.project_id,
-            }
-        key = str(role_id or "").lower()
-        if key in {"superadmin", "superuser"}:
-            scope = "system"
-        elif "project" in key:
-            scope = "project"
-        elif "org" in key:
-            scope = "organization"
-        else:
-            scope = "organization"
+        if not role:
+            # Roles reach here already resolved by `_resolve_assigned_roles`; a miss means
+            # the role vanished in between. Refuse rather than guess a scope.
+            raise UserError(f"Unknown role: {role_id}", status.HTTP_400_BAD_REQUEST)
         return {
-            "id": role_id,
-            "name": role_id,
-            "scope": scope,
-            "organization_id": None,
-            "project_id": None,
+            "id": role.id,
+            "name": role.name,
+            "scope": role.scope,
+            "organization_id": role.organization_id,
+            "project_id": role.project_id,
         }
 
     async def _enforce_role_assignment_scope(
