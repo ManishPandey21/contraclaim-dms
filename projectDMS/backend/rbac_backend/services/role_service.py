@@ -12,6 +12,7 @@ from ..models.role import Role, RoleCreate, RoleUpdate
 from ..models.permission import Permission, PermissionCategory, PermissionLevel
 from ..utils.error_handler import RoleError, ValidationError
 from ..utils.audit_logger import AuditLogger
+from .permission_service import permission_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -384,8 +385,11 @@ class RoleService:
             now_ts = int(datetime.utcnow().timestamp())
             for user in users:
                 uid_str = str(user["_id"])
-                await redis.delete(f"user_perms:{uid_str}")
+                # The marker first: it also makes any cache entry written by an
+                # in-flight check stale (`_cache_entry_is_current`), even if the
+                # delete below fails.
                 await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
+                await redis.delete(permission_cache_key(uid_str))
         except Exception as e:
             logger.error(f"Failed to invalidate cache for role {role_id}: {e}")
 
@@ -714,6 +718,11 @@ class RoleService:
                 }
             )
 
+            # An inactive role grants nothing (`role_is_active`), but a holder's
+            # cached grant was computed while it was active. Drop it now rather
+            # than at the cache TTL, and make holders re-authenticate, as every
+            # other role mutation does.
+            await self._invalidate_role_caches(role_id)
             return result.modified_count > 0
 
         except RoleServiceError:

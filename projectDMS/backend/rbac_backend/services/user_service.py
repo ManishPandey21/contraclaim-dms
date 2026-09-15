@@ -396,14 +396,15 @@ class UserService:
                 # If roles were modified, invalidate permission cache and force JWT refresh
                 if "roles" in update_dict:
                     try:
+                        from .permission_service import permission_cache_key
                         from .runtime_state import get_runtime_state
                         runtime = get_runtime_state()
                         redis = await runtime.get_redis()
                         if redis:
                             uid_str = str(user_oid)
                             now_ts = int(datetime.utcnow().timestamp())
-                            await redis.delete(f"user_perms:{uid_str}")
                             await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
+                            await redis.delete(permission_cache_key(uid_str))
                     except Exception as e:
                         logger.warning(f"Failed to invalidate cache for updated user {user_id}: {e}")
 

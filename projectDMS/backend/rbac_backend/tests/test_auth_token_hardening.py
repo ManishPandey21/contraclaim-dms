@@ -38,9 +38,21 @@ class _FakeUsers:
         return self._doc
 
 
+class _NoRevokedRoles:
+    """`get_current_user` asks for soft-deleted role references (R-A9B); none here."""
+
+    def find(self, *_args, **_kwargs):
+        class _Cursor:
+            async def to_list(self, length=None):
+                return []
+
+        return _Cursor()
+
+
 class _FakeDB:
     def __init__(self, user_doc):
         self.users = _FakeUsers(user_doc)
+        self.roles = _NoRevokedRoles()
 
 
 class _FakeRequest:

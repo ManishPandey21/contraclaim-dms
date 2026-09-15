@@ -129,6 +129,35 @@ class StoredPrincipalUnavailableError(Exception):
     """
 
 
+async def _without_revoked_roles(db, user: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop `users.roles` references to soft-deleted roles before the principal is built.
+
+    `CurrentUser.roles` is what every name-based decision reads - superadmin
+    bypass, scope, role manageability. System roles are stored under their key
+    (`"superadmin"`, `"orgadmin"`), so without this a soft-deleted system role kept
+    granting by name even after `PermissionService` stopped counting its
+    permissions (R-A9B). A reference with no role document is kept, as before; a
+    document with `is_active=False` is revoked. One query per principal.
+    """
+    references = list(user.get("roles") or [])
+    if not references:
+        return user
+    candidates: List[Any] = []
+    for reference in references:
+        candidates.append(reference)
+        try:
+            candidates.append(ObjectId(reference))
+        except Exception:
+            pass
+    revoked_docs = await db.roles.find(
+        {"_id": {"$in": candidates}, "is_active": False}, {"_id": 1}
+    ).to_list(length=None)
+    revoked = {str(doc.get("_id")) for doc in revoked_docs}
+    if not revoked:
+        return user
+    return {**user, "roles": [reference for reference in references if str(reference) not in revoked]}
+
+
 def _principal_from_user_document(user: Dict[str, Any], email: Optional[str] = None) -> CurrentUser:
     """Build the canonical principal from an entitlement-store row.
 
@@ -232,7 +261,7 @@ async def resolve_stored_principal(db, actor_reference: Any) -> CurrentUser:
             f"stored actor reference {reference!r} resolves to a disabled account"
         )
     try:
-        return _principal_from_user_document(user)
+        return _principal_from_user_document(await _without_revoked_roles(db, user))
     except Exception as exc:  # noqa: BLE001 - an unbuildable principal is a refusal
         raise StoredPrincipalUnavailableError(
             f"stored actor reference {reference!r} is not a usable principal: {exc}"
@@ -314,6 +343,16 @@ async def get_current_user(request: Request, db = Depends(get_db)):
                             # timeout mid-call, stale client): apply the policy.
                             await _handle_session_store_unavailable(exc)
 
+                    try:
+                        user = await _without_revoked_roles(db, user)
+                    except Exception as exc:
+                        # Not a credential problem: a 401 here would force a logout
+                        # for a role-store blip. Surface it as the outage it is.
+                        logger.error("Role store unavailable while building the principal: %s", exc)
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Authorization service temporarily unavailable",
+                        ) from exc
                     return _principal_from_user_document(user, email)
         except JWTError:
             # Try the next credential source before falling through to dev mode.

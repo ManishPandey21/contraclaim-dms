@@ -70,6 +70,28 @@ def _normalize_role_name(value: Any) -> str:
         return ""
     return ROLE_ALIASES.get(raw, raw)
 
+
+#: Moved off `user_perms:{id}` in R-A9B. Entries under the old key were computed
+#: while soft-deleted roles and transitive aliases still granted; under a new key
+#: no process reads them, and they expire unread on their own TTL.
+PERMISSION_CACHE_KEY_PREFIX = "user_perms:v2:"
+
+
+def permission_cache_key(user_id: Any) -> str:
+    """The one spelling of a user's cached-permission key; invalidation must use it too."""
+    return f"{PERMISSION_CACHE_KEY_PREFIX}{user_id}"
+
+
+def role_is_active(role: Dict[str, Any]) -> bool:
+    """Whether a role document may contribute authority.
+
+    `RoleService.delete_role` soft-deletes by writing `is_active=False` and keeps
+    the document for history and direct lookup. A document without the flag
+    predates soft delete and is active - the same reading the role listing uses
+    (`{"$ne": False}`).
+    """
+    return role.get("is_active") is not False
+
 class PermissionServiceError(Exception):
     """Custom exception for permission service errors."""
     def __init__(self, message: str, status_code: int = 400):
@@ -148,6 +170,44 @@ class PermissionService:
         if self.db is None:
             self.db = await get_database()
         return self.db
+
+    @staticmethod
+    async def _cache_entry_is_current(redis: Any, user_id: Any, entry: Dict[str, Any]) -> bool:
+        """Whether a cached grant post-dates the user's last authority change.
+
+        Role mutations set `user_jwt_min_iat:{id}` (whole seconds) and delete the
+        cache key, but a check that read the roles just before the mutation can
+        write its entry just after the delete. Such an entry is stamped before the
+        mutation, so it is refused here instead of being served for the whole TTL.
+        The comparison is on whole seconds and refuses ties: an entry computed in
+        the same second as the invalidation is recomputed, never trusted.
+        """
+        computed_at = entry.get("computed_at")
+        if not isinstance(computed_at, (int, float)):
+            return False
+        min_iat = await redis.get(f"user_jwt_min_iat:{user_id}")
+        if min_iat is None:
+            return True
+        return int(computed_at) > int(min_iat)
+
+    async def _load_role(self, db: Any, role_ref: Any) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Resolve one `users.roles` entry to `(document or None, revoked)`.
+
+        Every resolver goes through here so a soft-deleted role contributes
+        nothing - no permission, no wildcard, no role name - wherever authority is
+        computed (F-A9A-1). A reference that resolves to no document is not
+        revoked; callers keep their existing handling of bare role keys.
+        """
+        try:
+            query_id = ObjectId(role_ref)
+        except Exception:
+            query_id = role_ref
+        role = await db.roles.find_one({"_id": query_id})
+        if role is None:
+            return None, False
+        if not role_is_active(role):
+            return None, True
+        return role, False
 
     async def get_permission_by_id(self, permission_id: str) -> Optional[Permission]:
         """Get permission by ID."""
@@ -506,11 +566,7 @@ class PermissionService:
             perm_ids: List[ObjectId] = []
 
             for rid in role_ids:
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                role, _revoked = await self._load_role(db, rid)
                 if not role:
                     continue
                 rperms = role.get("permissions", []) or []
@@ -573,6 +629,9 @@ class PermissionService:
             role_names: set[str] = set()
 
             for rid in user_doc.get("roles", []) or []:
+                role, revoked = await self._load_role(db, rid)
+                if revoked:
+                    continue
                 rid_str = str(rid).strip()
                 if rid_str:
                     role_names.add(rid_str.lower())
@@ -582,12 +641,6 @@ class PermissionService:
                     if "superadmin" in role_names:
                         return ["*"]
 
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-
-                role = await db.roles.find_one({"_id": role_qid})
                 if not role:
                     continue
 
@@ -741,15 +794,17 @@ class PermissionService:
 
         granted = False
         redis = None
-        cache_key = f"user_perms:{user_id}"
+        cache_key = permission_cache_key(user_id)
 
         try:
             runtime = get_runtime_state()
             redis = await runtime.get_redis()
             if redis is not None:
                 cached_data = await redis.get(cache_key)
-                if cached_data:
-                    cache_parsed = json.loads(cached_data)
+                cache_parsed = json.loads(cached_data) if cached_data else None
+                if cache_parsed is not None and not await self._cache_entry_is_current(redis, user_id, cache_parsed):
+                    cache_parsed = None
+                if cache_parsed is not None:
                     raw_permissions = cache_parsed.get("raw_permissions", [])
                     role_names = set(cache_parsed.get("role_names", []))
                     perm_names = set(cache_parsed.get("perm_names", []))
@@ -783,6 +838,9 @@ class PermissionService:
             logger.warning(f"Failed to read permission cache for {user_id}: {e}")
 
         try:
+            # Stamped BEFORE the read: an entry computed from roles read before an
+            # invalidation must be recognisably older than that invalidation.
+            computed_at = datetime.utcnow().timestamp()
             db = await self._get_db()
             try:
                 user_query_id = ObjectId(user_id)
@@ -798,17 +856,15 @@ class PermissionService:
                 perm_names = set()
                 role_names = set()
                 for rid in role_ids:
+                    role, revoked = await self._load_role(db, rid)
+                    if revoked:
+                        continue
                     rid_str = str(rid).lower()
                     if rid_str:
                         role_names.add(rid_str)
                         normalized_rid = _normalize_role_name(rid_str)
                         if normalized_rid:
                             role_names.add(normalized_rid)
-                    try:
-                        role_qid = ObjectId(rid)
-                    except Exception:
-                        role_qid = rid
-                    role = await db.roles.find_one({"_id": role_qid})
                     if not role:
                         continue
                     role_name = str(role.get("name", "")).lower()
@@ -844,7 +900,8 @@ class PermissionService:
                         await redis.set(cache_key, json.dumps({
                             "raw_permissions": raw_permissions,
                             "role_names": list(role_names),
-                            "perm_names": list(perm_names)
+                            "perm_names": list(perm_names),
+                            "computed_at": computed_at,
                         }), ex=3600)
                     except Exception as e:
                         logger.warning(f"Failed to write permission cache for {user_id}: {e}")
@@ -930,16 +987,14 @@ class PermissionService:
             role_ids = user_doc.get("roles", []) or []
             is_super_admin = False
             for rid in role_ids:
+                role, revoked = await self._load_role(db, rid)
+                if revoked:
+                    continue
                 role_id_str = str(rid).lower()
                 if role_id_str == "superadmin" or role_id_str == "super admin":
                     is_super_admin = True
                     break
-                # Also check by querying the role
-                try:
-                    role_qid = ObjectId(rid)
-                except Exception:
-                    role_qid = rid
-                role = await db.roles.find_one({"_id": role_qid})
+                # Also check by the role's name
                 if role:
                     role_name = str(role.get("name", "")).lower()
                     if role_name == "super admin" or role_name == "superadmin":
