@@ -379,25 +379,64 @@ LEGACY_PERMISSION_ALIASES: Dict[str, List[str]] = {
     "subscription.offboarding_export": [],
 }
 
+#: Older spellings of names that are still checked today (`orgs:view` is
+#: `organizations:read`). Each label names exactly one target, so a label is a
+#: spelling of that name, never a permission of its own.
+LEGACY_LABEL_ALIASES: Dict[str, List[str]] = {
+    "organizations:read": ["orgs:view"],
+    "organizations:create": ["orgs:create"],
+    "organizations:update": ["orgs:edit"],
+    "organizations:delete": ["orgs:delete"],
+    "projects:read": ["projects:view"],
+    "projects:update": ["projects:edit"],
+}
+
+#: One owner per alias, for `permission_domain` only. A shared alias keeps its
+#: LAST declaration here, so this map must never decide whether a permission is
+#: held - that is `equivalent_permissions`.
 ALIAS_TO_CANONICAL: Dict[str, str] = {
     alias: canonical
     for canonical, aliases in LEGACY_PERMISSION_ALIASES.items()
     for alias in aliases
 }
 
+_LABEL_TARGET: Dict[str, str] = {
+    label: name for name, labels in LEGACY_LABEL_ALIASES.items() for label in labels
+}
+_DECLARED_BY: Dict[str, frozenset] = {
+    alias: frozenset(
+        canonical for canonical, aliases in LEGACY_PERMISSION_ALIASES.items() if alias in aliases
+    )
+    for alias in ALIAS_TO_CANONICAL
+}
+
 
 def equivalent_permissions(permission: str) -> set[str]:
-    """Return canonical and legacy spellings that should satisfy the same check."""
+    """Every held name that satisfies a check for `permission`.
+
+    A held name satisfies the check when it is the same name (a label spelling
+    counts), or when one of the two declares the other in
+    `LEGACY_PERMISSION_ALIASES`: a canonical holder passes the legacy route gate
+    its alias names, and a stored legacy name passes each canonical check that
+    declares it.
+
+    That is one hop and deliberately not transitive. Canonical permissions that
+    share a legacy alias (twenty share `projects:update`) are not equivalent to
+    each other, and legacy names that share a canonical are not either; treating
+    them so let `dms.task.manage` satisfy `dms.project.manage` (F-A9A-2). The
+    relation is symmetric, so this is also every name a holder of `permission`
+    can be advertised to hold. Nothing else may expand the alias tables.
+    """
     key = (permission or "").strip()
     if not key:
         return set()
 
-    canonical = ALIAS_TO_CANONICAL.get(key, key)
-    equivalents = {key, canonical}
-    equivalents.update(LEGACY_PERMISSION_ALIASES.get(canonical, []))
-
-    if key in LEGACY_PERMISSION_ALIASES:
-        equivalents.update(LEGACY_PERMISSION_ALIASES[key])
+    name = _LABEL_TARGET.get(key, key)
+    related = {name, *LEGACY_PERMISSION_ALIASES.get(name, []), *_DECLARED_BY.get(name, ())}
+    equivalents = {key}
+    for related_name in related:
+        equivalents.add(related_name)
+        equivalents.update(LEGACY_LABEL_ALIASES.get(related_name, []))
     return equivalents
 
 

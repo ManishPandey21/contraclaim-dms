@@ -4,7 +4,7 @@ from typing import Any, Optional
 
 from fastapi import HTTPException, status
 
-from ..core.permissions import Permissions, equivalent_permissions, permission_domain
+from ..core.permissions import Permissions, permission_domain
 from ..services.audit_event_service import AuditEventService
 from ..services.entitlement_service import EntitlementService
 from ..services.permission_service import PermissionService
@@ -43,7 +43,11 @@ class PolicyService:
     async def has_permission(self, current_user: Any, permission: str) -> bool:
         if self.scope_service.is_superadmin(current_user):
             return True
-        candidates = set(equivalent_permissions(permission))
+        # `user_has_permission` applies the alias contract itself. Expanding the
+        # name here first made resolution two hops deep - through a shared legacy
+        # alias, `billing.plan.manage` reached `dms.admin` (see
+        # `equivalent_permissions`).
+        candidates = {permission}
         if permission.startswith("drafting."):
             candidates.add(Permissions.DRAFTING_ADMIN)
         if permission.startswith("dms."):

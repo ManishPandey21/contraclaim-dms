@@ -11,7 +11,7 @@ from pymongo.errors import DuplicateKeyError
 
 from ..core.config import settings
 from ..core.database import get_database
-from ..core.permissions import LEGACY_PERMISSION_ALIASES, equivalent_permissions
+from ..core.permissions import equivalent_permissions
 from ..models.permission import (
     Permission,
     PermissionCreate,
@@ -148,22 +148,9 @@ class PermissionService:
     def __init__(self):
         self.db = None
         self.audit_logger = AuditLogger()
-        # Non-document aliases retained for older project/org labels. Document
-        # access is intentionally canonical-only and enforced by PolicyService.
-        self._permission_aliases = {
-            **LEGACY_PERMISSION_ALIASES,
-            # Organizations
-            "organizations:read": ["orgs:view"],
-            "organizations:create": ["orgs:create"],
-            "organizations:update": ["orgs:edit"],
-            "organizations:delete": ["orgs:delete"],
-            # Projects
-            "projects:read": ["projects:view"],
-            "projects:update": ["projects:edit"],
-        }
-        for canonical, aliases in LEGACY_PERMISSION_ALIASES.items():
-            for alias in aliases:
-                self._permission_aliases.setdefault(alias, []).append(canonical)
+        # Legacy names resolve through `equivalent_permissions` only (one hop,
+        # never through a shared alias). Document access is canonical-only and
+        # enforced by PolicyService.
 
     async def _get_db(self):
         """Get database connection."""
@@ -663,14 +650,11 @@ class PermissionService:
             if role_names & {"orgadmin", "orguser", "projectadmin", "projectuser"}:
                 raw_permissions.add("users:read")
 
+            # The alias relation is symmetric, so this advertises exactly what
+            # `user_has_permission` grants for each held name.
             expanded_permissions: set[str] = set(raw_permissions)
-            for permission in list(raw_permissions):
+            for permission in raw_permissions:
                 expanded_permissions.update(equivalent_permissions(permission) or {permission})
-                expanded_permissions.update(self._permission_aliases.get(permission, []))
-                for canonical, alias_list in self._permission_aliases.items():
-                    if permission in alias_list:
-                        expanded_permissions.add(canonical)
-                        expanded_permissions.update(alias_list)
 
             return sorted(expanded_permissions)
         except Exception as e:
@@ -782,15 +766,10 @@ class PermissionService:
         if not permission_key:
             return False
 
-        # Build a set of equivalent permission keys (requested key + aliases + canonical names)
+        # Held names that satisfy this check: the name, its label spellings, and
+        # names it declares or that declare it - one hop, never through a shared
+        # legacy alias (F-A9A-2).
         lookup_keys = equivalent_permissions(permission_key) or {permission_key}
-        aliases = self._permission_aliases.get(permission_key, [])
-        lookup_keys.update(aliases)
-        # If caller passes an alias, also add its canonical target for matching
-        for canonical, alias_list in self._permission_aliases.items():
-            if permission_key in alias_list:
-                lookup_keys.add(canonical)
-                lookup_keys.update(alias_list)
 
         granted = False
         redis = None

@@ -280,9 +280,10 @@ def test_a_foreign_project_addressed_directly_is_refused_on_scope(monkeypatch, d
 def _held_names_satisfying(monkeypatch, permission: str, held: List[str]) -> List[str]:
     """Every held permission that ON ITS OWN satisfies `permission` in the live resolver.
 
-    Measured, not derived from the alias table: the resolver expands a shared
-    legacy alias in both directions (F-A9A-2), so the set is far wider than
-    `equivalent_permissions(permission)`.
+    Measured, not derived from the alias table. `projects:update` is the legacy
+    gate declared by every canonical that aliases it, so the set is wide even
+    after R-A9B made resolution non-transitive; only the canonical
+    `authorize("dms.project.manage")` behind it is precise.
     """
     satisfying = []
     for name in held:
@@ -336,3 +337,40 @@ def test_a_role_referenced_by_name_grants_nothing_which_was_F_A8Z_B2(
     # The same role referenced by its id resolves, so the permissions were never the defect.
     db.users.docs[0]["roles"] = [str(role["_id"])]
     assert asyncio.run(PermissionService().user_has_permission(ADMIN_ID, "projects:update", log=False))
+
+
+# --------------------------------------------------------------------------- #
+# F-A9A-2 through the real route: a sibling permission cannot update a project
+# --------------------------------------------------------------------------- #
+
+
+def _project_holder_db(permissions: List[str]) -> _DB:
+    role = {"_id": "probe-role", "scope": "organization", "organization_id": OWN_ORG, "permissions": permissions}
+    return _DB(user=_user_doc(["probe-role"]), roles=[role])
+
+
+@pytest.mark.parametrize("sibling", ["dms.task.manage", "dms.claim.manage", "dms.keydate.manage"])
+def test_a_sibling_of_the_project_update_alias_cannot_update_a_project(monkeypatch, decisions, sibling: str) -> None:
+    """R-A9A saw such a role pass both gates of PUT /api/projects/{id} in its own tenant."""
+    db = _project_holder_db([sibling, "dms.dashboard.view"])
+    _wire(monkeypatch, db)
+    actor = _actor(["probe-role"])
+
+    refused = _refusal(_put(db, actor, OWN_PROJECT, OWN_ORG))
+
+    assert refused.status_code == 403
+    assert ("dms.project.manage", "deny", "missing_permission") in [
+        (d["metadata"]["permission"], d["result"], d["reason"]) for d in decisions
+    ]
+    assert db.projects.writes == []
+
+
+def test_a_role_storing_the_legacy_project_update_permission_still_updates_a_project(monkeypatch, decisions) -> None:
+    """Legacy compatibility: the stored legacy name keeps the capability it used to gate."""
+    db = _project_holder_db(["projects:update", "dms.dashboard.view"])
+    _wire(monkeypatch, db)
+
+    saved = asyncio.run(_put(db, _actor(["probe-role"]), OWN_PROJECT, OWN_ORG))
+
+    assert saved.organization_id == OWN_ORG
+    assert len(db.projects.writes) == 1
