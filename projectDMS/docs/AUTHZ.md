@@ -64,6 +64,57 @@ cursor = db.documents.find(query)
 _: bool = Depends(require_permission("dms.report.view"))
 ```
 
+## Role lifecycle: a deleted role grants nothing
+
+`RoleService.delete_role` is a soft delete (`is_active=False`, `deleted_at`,
+`deleted_by`). The document stays: it is hidden from listings and still readable by
+id (behind `roles:read` + `can_view_role`) for history and audit.
+
+Readable is not effective. `PermissionService` resolves every `users.roles` entry
+through `_load_role`, and a role whose `is_active` is `False` contributes **no
+permission, no wildcard and no role name** to `user_has_permission`,
+`get_user_permissions`, `get_effective_permission_names` or `check_resource_access`
+(`role_is_active`; a document without the flag predates soft delete and is active).
+System roles are referenced by their key (`users.roles: ["superadmin"]`) and
+name-based decisions (superadmin bypass, scope, role manageability) read
+`CurrentUser.roles`, so the principal itself drops references to inactive roles:
+`get_current_user` and `resolve_stored_principal` both build it through
+`_without_revoked_roles`. A reference with no role document is kept, as before.
+
+`delete_role` sets every holder's `user_jwt_min_iat` and then drops their cached
+grant, like every other role mutation. A cached grant stores `computed_at`, stamped
+before its roles were read. A hit is served only if it is strictly newer, in whole
+seconds, than `user_jwt_min_iat`. That way a check that read the roles just before
+a deletion cannot write back a grant that outlives it. There is no second lifecycle
+flag and no reactivation API. `DataInitializer.initialize_roles` (reached
+only through `SetupService`) rewrites `is_active` from `DEFAULT_ROLES`, so re-running
+setup would reactivate a deleted system role.
+
+Build cache keys with `permission_cache_key(user_id)` only. The key moved off
+`user_perms:{id}` in R-A9B so entries computed before the fix are never read.
+
+## Legacy permission aliases translate a name; they never create authority
+
+`LEGACY_PERMISSION_ALIASES` declares, per canonical permission, the legacy names
+that used to gate the same capability; `LEGACY_LABEL_ALIASES` holds one-to-one older
+spellings (`orgs:view` = `organizations:read`). `equivalent_permissions` is the
+only function that reads them:
+
+- A **canonical holder passes a legacy route gate** its alias names
+  (`dms.task.manage` passes `require_permission("projects:update")`).
+- A **stored legacy name passes each canonical check that declares it**
+  (`projects:update` in a role passes `dms.project.manage`).
+- **Nothing is transitive.** Canonicals sharing a legacy alias are not equivalent
+  (`dms.task.manage` does **not** pass `dms.project.manage`), and legacy names
+  sharing a canonical are not either (`projects:create` does not pass
+  `projects:delete`).
+
+So a legacy route dependency is coarse by design; the canonical
+`PolicyService.authorize(...)` behind it is the precise gate. Do not pre-expand a
+name before calling `user_has_permission` - that re-creates the second hop
+(R-A9B: it let `billing.plan.manage` reach `dms.admin`).
+`test_permission_alias_contract.py` holds the matrix over every shared alias.
+
 ## Removed / forbidden
 
 These were removed in the Week-1 consolidation and are blocked by a pre-commit hook

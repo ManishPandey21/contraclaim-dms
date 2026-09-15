@@ -61,6 +61,18 @@ changed, and what it does not buy:
   for the Gate 4 block, which now creates one run-owned role.
 * The spec lists **12 tests** (3 Gate 3 bullet 2 + 9 Gate 4 bullet 8).
 
+**R-A9B (2026-09-15, offline): authorization semantics changed, bullet still NOT
+EARNED.** F-A9A-1 and F-A9A-2 are fixed in `PermissionService`,
+`core/permissions.py::equivalent_permissions` and `PolicyService.has_permission`
+(see the closure section below), and the same fan-out was found to make the default
+org admin a billing/subscription administrator (F-A9B-1, fixed). The default
+`orgadmin` role holds every permission rows 1-14 exercise **directly**
+(`CLIENT_DMS_PERMISSIONS` merge plus its stored `organizations:*`, `roles:*`,
+`users:*`), so no row's expected result changes. What does change is the code
+under measurement, so **the staging run of record must execute against the final
+R-A9B HEAD**; a run against an earlier release measures authorization that no
+longer ships.
+
 ### Row 12, traced from source
 
 | Field | Value |
@@ -151,27 +163,64 @@ the router emits `role.deleted` with the before-image.
 the caller's scope. Not changed for Gate 4, whose literal requirement does not
 touch deletion. Pinned by `test_role_soft_delete_contract.py`.
 
-## Defects found while tracing (production authorization, NOT fixed in R-A9A)
+## Authorization defects found while tracing - found R-A9A, closed offline in R-A9B
 
-* **F-A9A-1 - a soft-deleted role still grants its permissions.** Nothing on the
-  permission path reads `is_active`: `PermissionService.user_has_permission` and
-  `get_user_permissions` resolve `users.roles` by `_id` unfiltered, and
-  `delete_role` neither detaches the role from users nor invalidates the
-  `user_perms:{id}` cache. Reproduced offline (strict xfail in
-  `test_role_soft_delete_contract.py`). Intra-tenant; no cross-tenant exposure.
-* **F-A9A-2 - a shared legacy alias makes unrelated permissions equivalent.**
-  Twenty canonical permissions alias to `projects:update`; the resolver expands
-  aliases in both directions, so a role holding only `dms.task.manage` (or
-  `dms.claim.manage`, `dms.keydate.manage`, ...) satisfies `projects:update` and
-  `dms.project.manage`, and passes both gates of `PUT /api/projects/{id}` in its
-  own tenant. Found because the row 12 mutation control did not go red when only
-  `dms.project.manage` was removed. Reproduced offline (strict xfails in
-  `test_legacy_alias_fanout_defect.py`). Tenant scope still applies.
+* **F-A9A-1 - a soft-deleted role still granted its permissions.** Nothing on the
+  permission path read `is_active`, and `delete_role` neither detached users nor
+  invalidated their cache. **Fixed:** every resolver loads roles through
+  `PermissionService._load_role`; an inactive role contributes no permission,
+  wildcard or role name. `delete_role` drops holders' cached grants and sets
+  `user_jwt_min_iat`. The cache key moved to `permission_cache_key` (`user_perms:v2:`)
+  so pre-fix entries are never read.
 
-Neither changes a row verdict above: the org admin legitimately holds the project
-permissions, and both are intra-tenant. Both are release risks for Gate 9
-("High severity risks fixed or explicitly accepted") and need an owner decision
-and a production authorization fix phase with the full backend suite.
+  The R-A9B adversarial review found two gaps in the first cut, both now fixed:
+  * **System roles granted by name.** A soft-deleted system role stored under its
+    key (`superadmin`, `orgadmin`) still granted by name, because `CurrentUser.roles`
+    is built from `users.roles` strings. The principal now drops inactive
+    references.
+  * **Cache race.** A check in flight could write a pre-deletion grant back after
+    the invalidation. Cached grants now carry `computed_at` and are refused unless
+    newer than `user_jwt_min_iat`.
+
+  The disposition-A historical read is unchanged. Pinned by
+  `test_role_soft_delete_contract.py`.
+* **F-A9A-2 - a shared legacy alias made unrelated permissions equivalent.**
+  **Fixed as a class:** `equivalent_permissions` is the only alias expansion. It is
+  one hop in either direction between a canonical and a legacy name it declares,
+  and never transitive. `PermissionService`'s reverse table and
+  `PolicyService.has_permission`'s second expansion are gone. `dms.task.manage` no
+  longer satisfies `dms.project.manage`, and it still passes the legacy
+  `projects:update` dependency. A role storing `projects:update` keeps what that
+  name gated. Pinned by `test_permission_alias_contract.py` (matrix over every
+  shared alias) and the route-level tests in `test_gate4_row12_project_control.py`.
+* **F-A9B-1 - the default org admin was a billing and subscription administrator
+  (same mechanism).** `dms.admin` shares `system:admin` with `billing.plan.manage` and
+  `subscription.*`. Through the real `PolicyService.authorize` chain on the R-A9A
+  tree, the default `orgadmin` was allowed:
+  * `billing.plan.manage` with no tenant scope (`POST/PUT /api/plans`, the
+    platform-wide catalogue, behind step-up);
+  * `subscription.entitlement.manage` in its own organisation;
+  * `subscription.upgrade` in its own organisation.
+
+  Conversely, a role holding only `billing.plan.manage` satisfied `dms.admin`, and
+  through it every `dms.*` check. Foreign-organisation scope still refused. The
+  same code runs in production today. **Fixed** by the F-A9A-2 change.
+* **F-A9B-2 - observation, NOT changed.** Eight canonicals declare `system:admin` as
+  their legacy name, so every holder of one passes `require_permission("system:admin")`.
+  That covers `dms.admin` (default `orgadmin`, `contractmgr_org`, `projectadmin`),
+  `billing.plan.manage` (`contraclaim_billing_admin`), `subscription.entitlement.manage`
+  and `subscription.upgrade/downgrade/cancel/trial.manage/addon.manage`.
+  That dependency is the only gate on `/api/admin/legal-words`, and legal words are
+  global (no organisation field). Conversely, a role that stores the legacy
+  `system:admin` passes `billing.plan.manage` and `subscription.entitlement.manage`,
+  and the billing branch allows those with no tenant scope. That matches the declared
+  meaning of `system:admin`: it is non-delegable, and the one production role storing
+  it also holds both directly. Each of these is one declared hop, and each was true
+  before R-A9B. Whether these holders should administer platform-wide legal words is
+  an owner decision.
+
+No row verdict above changes: the org admin holds the row permissions directly. The
+staging run must still execute on the R-A9B HEAD.
 
 ## Foreign-write semantics (F-A8W-B5)
 
