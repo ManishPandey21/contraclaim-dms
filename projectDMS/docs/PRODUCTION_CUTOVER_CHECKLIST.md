@@ -186,14 +186,26 @@ in writing before §3.
       diff certified in final staging; `unapproved_additions_total` must be **0** and
       `warnings` empty (a deactivated or organisation-bound `orgadmin`/`projectadmin`
       document is a STOP). After `--apply`, `align_role_contract --apply` must report
-      `second_apply_is_noop: true`. It never removes a permission: the production
-      documents keep `billing.plan.manage`, `billing.plan.view`, `roles:assign` and
-      `drafting.*` they store outside the release contract (F-A9D-1, owner decision).
-- [ ] The alignment writes role documents directly and does **not** invalidate the
-      permission cache. It only ADDS permissions, so a cached decision can be briefly
-      more restrictive, never more permissive; the staleness window is one cache TTL
-      (60 min). Run it while the application tier is still stopped, as this checklist
-      orders it, and the window is empty.
+      `second_apply_is_noop: true`.
+- [ ] **F-A9D-1 (owner decision, R-A9E): the operation also REMOVES exactly
+      `billing.plan.manage` from `orgadmin` and `projectadmin`**, because it gates the
+      platform-wide plan catalogue with no tenant scope and is outside the release role
+      contract. Check the report's three classes: `proposed_additions` (canonical),
+      `proposed_removals` (must be exactly `["billing.plan.manage"]` for each of the two
+      roles, and `unapproved_removals_total` must be **0**), and
+      `retained_outside_contract` — every other production-only permission
+      (`billing.plan.view`, `roles:assign`, `drafting.*`) is **preserved and reported**.
+      The decision is deliberately NOT generalised to other production-only permissions
+      or to other roles: `contractmgr_org`, `settings_manager`, `limited_user`,
+      `projectuser` and `orguser` are never touched.
+- [ ] The alignment writes role documents directly. An ADDITION can only make a cached
+      decision briefly more restrictive, but the F-A9D-1 REMOVAL is a revocation, so the
+      operation carries the D4-B contract for it: it reads the role's holders (by id and
+      by legacy spelling), announces the authority change before the write and
+      invalidates after it, and **refuses to change the role at all** if the holders
+      cannot be read or the announcement cannot be made (reported as a warning, exit 2).
+      Run it while the application tier is still stopped, as this checklist orders it,
+      and there is nothing cached to revoke in the first place.
 - [ ] System-role audit (`EXPECTED_SUPERADMIN_HOLDERS=2`) passes again after the
       migrations and the startup seeder.
 - [ ] There is **no migration rollback**. `runner.py` never calls a downgrade.
@@ -298,5 +310,5 @@ roll-forward for migrations because there is no downgrade.
 | Legacy `organization-admin`/`project-admin` references resolve one hop to `orgadmin`/`projectadmin` | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role references" |
 | No re-grant of alias-fan-out permissions to `projectuser`; `orgadmin`/`projectadmin` aligned to the release contract by the explicit `align_role_contract` operation (§14) | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role documents are aligned" |
 | F-A9B-2 legal-words admin requires system authority | **CLOSED IN CODE (R-A9D)** | `docs/AUTHZ.md` "System administration is nobody's alias" |
-| F-A9D-1 production `orgadmin`/`projectadmin` documents store `billing.plan.manage` (platform plan catalogue) outside the release contract; the alignment keeps it | **OPEN - owner decision** | R-A9D receipt |
-| Third-party image fixable CRITICAL/HIGH (MongoDB, FalkorDB, Qdrant, httpd) | **OPEN - owner exception required** | R-A9D receipt exception table; `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` |
+| F-A9D-1 production `orgadmin`/`projectadmin` documents store `billing.plan.manage` (platform plan catalogue) outside the release contract | **DECIDED (R-A9E): REMOVE it from those two roles only; every other production-only permission is preserved and reported** | §14; `docs/AUTHZ.md` "Role documents are aligned" |
+| Third-party image fixable CRITICAL/HIGH (MongoDB, FalkorDB, Qdrant, httpd) | **EXCEPTED (R-A9E) until 2026-10-15**; remediation window 2026-10-06 → 2026-10-15, httpd first. Not permanent acceptance | `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` "R-A9E cutover exception" |

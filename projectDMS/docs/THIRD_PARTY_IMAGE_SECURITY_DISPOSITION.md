@@ -1,8 +1,13 @@
 # Third-party production images — cutover security disposition
 
-**Status: OPEN — production cutover BLOCKED on this document.** R-A9A
+**Status: EXCEPTED UNTIL 2026-10-15 — see "R-A9E cutover exception" at the end of this
+document.** R-A9E (owner decision, 2026-09-16): MongoDB, FalkorDB, Qdrant and httpd are
+carried under a dated, bounded exception for the initial production cutover, so they no
+longer block it *until that exception expires on 2026-10-15*; remediation runs in the
+window 2026-10-06 → 2026-10-15, httpd first. This is not permanent acceptance — on expiry
+the cutover blocker below is live again for any image still on these digests. R-A9A
 (2026-09-15): the ClamAV row is closed (production runs the validated 1.4.6 since
-R-A8Z); MongoDB, FalkorDB, Qdrant and httpd remain open and still block cutover.
+R-A8Z), and Redis is clean; neither needs an exception.
 Re-measured in
 release programme R-A8X on 2026-09-13. No third-party image was **upgraded** in
 R-A8X, because no candidate's compatibility was proven (see "Why no image was
@@ -115,7 +120,8 @@ with it, never on its own.
 * **Drill:** local disposable Docker, the release compose's own `clamav` service
   (details and results in `docs/CLAMAV_SIGNATURE_FRESHNESS.md` §5).
 * **Not changed:** every other third-party image. The disposition above for
-  MongoDB, FalkorDB, Qdrant and httpd stands; cutover stays BLOCKED on them.
+  MongoDB, FalkorDB, Qdrant and httpd stands; they blocked cutover until R-A9E, which
+  carries them under the dated exception at the end of this document (expiry 2026-10-15).
 
 ## Why no image was upgraded in R-A8X
 
@@ -187,3 +193,109 @@ archives are therefore the rollback path, not a formality.
 without the browser UI, which would remove the bundled `next`/`sharp` findings. The
 FalkorDB jump is about ten minor releases (the line uses even-numbered minors), not
 twenty.
+
+## R-A9E cutover exception — dated, bounded, not permanent acceptance
+
+**Owner decision, 2026-09-16 (phase R-A9E).** MongoDB, FalkorDB, Qdrant and httpd are
+**not** upgraded for the initial production cutover: upgrading any of them immediately
+before the window would stale a large part of the release evidence listed under
+"Evidence made stale by this document" — Gate 6 b2/b3, Gate 8, Gate 9 b3/b4, Gate 2 and
+Gate 7 — with no time to re-earn it. The four images below are therefore carried under a
+**dated exception that expires**, not accepted permanently.
+
+Every image is pinned by index digest in `docker-compose.prod.yml` /
+`docker-compose.mongo-replicaset.yml`, pinned again by
+`backend/rbac_backend/tests/test_third_party_image_pins.py`, and was re-measured on
+**2026-09-16T05:12Z** with Trivy 0.74.0 against the image id the RUNNING production
+container uses (`.claude/context/contract-master` R-A9D evidence,
+`60-third-party-image-scan.txt`). "Fixable" counts findings that carry a `FixedVersion`,
+read from the JSON, not from the exit code. No tag moved and nothing was pulled.
+
+### E1 — MongoDB
+
+* **IMAGE** `mongo:8.0` (production containers `contraclaim-mongo{1,2,3}`, image id `7281281f68a3`)
+* **DIGEST** `sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6`
+* **FIXABLE CRITICAL/HIGH** 1 critical / 272 high = **273** (0 unfixed C/H)
+* **EXPOSURE** None in `mongod` itself: the findings are `gosu`, the eight Go-built
+  database tools and `js-yaml` in mongosh. Reachable only by an operator running those
+  tools on the host; the data tier has no public route.
+* **MITIGATION** Internal docker network only, SCRAM-authenticated replica set, digest
+  pin, tools run only from operator-initiated backup/restore.
+* **WHY UPGRADE DEFERRED** The 8.0.30 candidate has never been validated — the
+  compatibility drill is written but unrun — and adopting it stales Gate 6 b2/b3,
+  Gate 8 and Gate 9 b3/b4 days before cutover.
+* **OWNER ACCEPTANCE** Accepted for the initial production cutover only — owner
+  decision R-A9E, 2026-09-16.
+* **EXPIRY** 2026-10-15
+* **REMEDIATION WINDOW** 2026-10-06 → 2026-10-15
+
+### E2 — FalkorDB
+
+* **IMAGE** `falkordb/falkordb:v4.0.8` (container `contraclaim-falkordb-1`, image id `13ee9b3bfcc1`)
+* **DIGEST** `sha256:af5f2aa035390f04fa6d1f0c6353669f5f75c101f6b4f385fcb672a288b4edb8`
+* **FIXABLE CRITICAL/HIGH** 11 critical / 137 high = **148** (82 unfixed C/H)
+* **EXPOSURE** Debian packages plus the bundled browser UI's `next` / `sharp`. The
+  engine is reachable only on the internal data network and is password-protected; the
+  browser UI is not published.
+* **MITIGATION** Internal network only, `requirepass`, digest pin; credential rotation
+  is already scheduled inside the `/FalkorDB` → `/data` cutover.
+* **WHY UPGRADE DEFERRED** v4.20.x is roughly ten module releases with a likely one-way
+  persistence format, and it would ride the same window as the persistence cutover.
+  It stales Gate 2, Gate 8 and Gate 9 b3/b4.
+* **OWNER ACCEPTANCE** Accepted for the initial production cutover only — owner
+  decision R-A9E, 2026-09-16.
+* **EXPIRY** 2026-10-15
+* **REMEDIATION WINDOW** 2026-10-06 → 2026-10-15
+
+### E3 — Qdrant
+
+* **IMAGE** `qdrant/qdrant:v1.12.5` (container `contraclaim-qdrant-1`, image id `449e32141460`)
+* **DIGEST** `sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae`
+* **FIXABLE CRITICAL/HIGH** 6 critical / 78 high = **84** (56 unfixed C/H)
+* **EXPOSURE** Debian `perl-base`, `libpcre2`, `libsqlite3`, `gzip` and one Node
+  `js-yaml`. The service is internal-only with no public route.
+* **MITIGATION** Internal network only, digest pin, storage archived by the nightly
+  backup so the pre-upgrade state is recoverable.
+* **WHY UPGRADE DEFERRED** No patch remediates: the first remediating line is v1.19.1,
+  which means a 1.12 → 1.19 storage-migration chain plus a `qdrant-client` upgrade
+  (backend dependency, full suite, image rebuild). The storage migration is
+  irreversible, so it cannot ride a cutover window.
+* **OWNER ACCEPTANCE** Accepted for the initial production cutover only — owner
+  decision R-A9E, 2026-09-16.
+* **EXPIRY** 2026-10-15
+* **REMEDIATION WINDOW** 2026-10-06 → 2026-10-15
+
+### E4 — Apache httpd (gateway) — highest priority of the four
+
+* **IMAGE** `httpd:2.4` (container `contraclaim-gateway-1`, image id `00fe3afeb8c3`)
+* **DIGEST** `sha256:393435ee1a31437adeb1f03c134224c9ce5fa5f527e8c0cb9bea576b0d6fc742`
+* **FIXABLE CRITICAL/HIGH** 3 critical / 48 high = **51** (52 unfixed C/H)
+* **EXPOSURE** All Debian packages (`perl-base`, `libpcre2`, `libsqlite3`, `gzip`,
+  `libssh2`, `openssl`). **This is the only image on the public path**, which is why it
+  is remediated first.
+* **MITIGATION** The host nginx terminates TLS in front of it, no CGI or perl is in the
+  served path, and the image is digest-pinned.
+* **WHY UPGRADE DEFERRED** The 2.4.68 candidate is unvalidated, and the gateway is the
+  public edge: an upgrade stales Gate 7 and every smoke that runs through it.
+* **OWNER ACCEPTANCE** Accepted for the initial production cutover only — owner
+  decision R-A9E, 2026-09-16.
+* **EXPIRY** 2026-10-15
+* **REMEDIATION WINDOW** 2026-10-06 → 2026-10-15
+
+### No exception required
+
+| Image | Digest | Fixable C/H | Why no exception |
+|---|---|---:|---|
+| ClamAV | `clamav/clamav:1.4.6@sha256:71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41` | **0** | Remediated in R-A8Y/R-A8Z after its own disposable drill. Held in production by the untracked `docker-compose.clamav-r-a8z.yml` override, which must be present in EVERY production compose command until it is folded into the tracked compose at cutover. |
+| Redis | `redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99` | **0** | Clean. Keep the current digest. |
+
+### What this exception does not do
+
+It does **not** accept these findings permanently, and it does not survive its expiry.
+On **2026-10-15** the exception lapses: from that date the cutover blocker recorded under
+"Owner decisions needed before cutover" is live again for any image still on the digest
+above. Inside the remediation window (2026-10-06 → 2026-10-15) the prepared compatibility
+drill runs for all four candidates on disposable infrastructure, and adoption order is
+**httpd first** (public path, lowest risk), then MongoDB, then a decision on FalkorDB and
+Qdrant — which also unblocks the derived-patched-image option that would close the
+Debian/Alpine class for all four at once.

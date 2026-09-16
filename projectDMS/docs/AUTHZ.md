@@ -137,18 +137,38 @@ refuses provisioning unless the setting is a canonical key (no alias, case or sp
 variant), not `superadmin`/`superuser`, and names exactly one active, non-system-scoped
 role document; the production config gate refuses the unsafe spellings before startup.
 
-## Role documents are aligned to the release contract by an explicit operation (R-A9D)
+## Role documents are aligned to the release contract by an explicit operation (R-A9D/R-A9E)
 
-`services/role_contract_alignment.py` adds to the `orgadmin` and `projectadmin`
-documents the permissions this release's `DEFAULT_ROLES` gives them, and nothing else: no
-removal, no user read or write, no other role, no creation, no reactivation, nothing for
-an organisation-bound document. It is a cutover step, **not** a catalogued migration: it
-must not run unreviewed on `migrate_database --apply`, and a catalogue entry would expire
-the proven fresh-install and upgrade-path evidence. Run
-`python -m rbac_backend.scripts.align_role_contract` (inspect) and then `--apply`, which
-prints the before / expected / additions / after report and proves a second apply is a
-no-op. It does not invalidate caches: it only adds authority, so a cached decision can be
-briefly more restrictive, never more permissive.
+`services/role_contract_alignment.py` brings the `orgadmin` and `projectadmin` documents
+to this release's `DEFAULT_ROLES` contract, and touches nothing else: no user write, no
+other role, no creation, no reactivation, nothing for an organisation-bound document. It
+is a cutover step, **not** a catalogued migration: it must not run unreviewed on
+`migrate_database --apply`, and a catalogue entry would expire the proven fresh-install
+and upgrade-path evidence. Run `python -m rbac_backend.scripts.align_role_contract`
+(inspect) and then `--apply`, which prints the report and proves a second apply is a
+no-op.
+
+Every permission it looks at falls into exactly one of three classes, and the report
+names all three:
+
+- **canonical additions** — in the release definition of the role and not held;
+- **owner-approved removals** — `OWNER_APPROVED_REMOVALS`, which is
+  `billing.plan.manage` for `orgadmin` and `projectadmin` and nothing else (owner
+  decision F-A9D-1, R-A9E: it gates the platform-wide plan catalogue, and
+  `PolicyService`'s billing branch allows it with no tenant scope). A listed permission
+  that the role's own release definition contains is refused, not removed;
+- **everything else the document holds outside the contract** — `billing.plan.view`,
+  `roles:assign`, `drafting.*` and the rest are **preserved and reported**. The decision
+  is deliberately not generalised into "remove every production-only permission", and no
+  role outside `ALIGNED_ROLE_IDS` is touched at all.
+
+An addition can only make a cached decision briefly more restrictive. A removal is a
+**revocation**, so it carries the D4-B contract: the operation reads the role's holders
+(by id and by legacy spelling, both of which receive this document's permissions),
+announces the authority change before the write and invalidates it afterwards. If the
+holders cannot be read, or the announcement cannot be made, the role is **not changed at
+all** — the alignment fails closed rather than leaving a revoked grant readable for a
+cache TTL.
 
 ## Role references: one resolver for tier, permissions and the audit
 
