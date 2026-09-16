@@ -419,12 +419,31 @@ class RoleService:
             raise RoleServiceError("Authorization cache unavailable; the role was not changed", 503) from e
         return user_ids
 
-    async def _complete_role_authority_change(self, user_ids: List[str], applied: bool) -> None:
-        """After the write: invalidate holders (sessions and cached grants), or withdraw the announcement."""
-        if applied:
-            await complete_authority_change(user_ids)
-        else:
+    async def _complete_role_authority_change(self, db: Any, role_id: Any, user_ids: List[str], applied: bool) -> None:
+        """After the write: invalidate every holder, or withdraw the announcement.
+
+        The holders are read AGAIN here, and the two lists are invalidated together. A user
+        assigned this role between the announcement and the write carries neither a pending
+        marker nor a re-authentication marker from this change - their own assignment could
+        not know about a role change that had not landed yet - so the second read is the only
+        thing that reaches a grant they cached from the role as it still was.
+
+        If that read fails, nothing is cleared: the announced holders keep their pending
+        markers (their cached grants stay bypassed until the markers expire) and the failure
+        is logged, rather than clearing a marker for an invalidation that did not happen.
+        """
+        if not applied:
             await cancel_authority_change(user_ids)
+            return
+        try:
+            holders = [str(user["_id"]) for user in await self._holders_of_role(db, role_id)]
+        except Exception as e:
+            logger.error(
+                f"Role {role_id} changed, but its holders could not be re-read; their cached authority "
+                f"stays bypassed until the pending markers expire: {e}"
+            )
+            return
+        await complete_authority_change(list(dict.fromkeys([*user_ids, *holders])))
 
     async def create_role(
         self,
@@ -711,7 +730,7 @@ class RoleService:
                 {"_id": query_id},
                 {"$set": update_doc}
             )
-            await self._complete_role_authority_change(holders, result.matched_count > 0)
+            await self._complete_role_authority_change(db, role_id, holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
@@ -759,7 +778,7 @@ class RoleService:
             # cached grant was computed while it was active. Drop it now rather
             # than at the cache TTL, and make holders re-authenticate, as every
             # other role mutation does.
-            await self._complete_role_authority_change(holders, result.matched_count > 0)
+            await self._complete_role_authority_change(db, role_id, holders, result.matched_count > 0)
             return result.modified_count > 0
 
         except RoleServiceError:
@@ -882,7 +901,7 @@ class RoleService:
                     }
                 }
             )
-            await self._complete_role_authority_change(holders, result.matched_count > 0)
+            await self._complete_role_authority_change(db, role_id, holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
@@ -931,7 +950,7 @@ class RoleService:
                     }
                 }
             )
-            await self._complete_role_authority_change(holders, result.matched_count > 0)
+            await self._complete_role_authority_change(db, role_id, holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
@@ -979,7 +998,7 @@ class RoleService:
                     }
                 }
             )
-            await self._complete_role_authority_change(holders, result.matched_count > 0)
+            await self._complete_role_authority_change(db, role_id, holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)

@@ -189,6 +189,11 @@ in writing before §3.
       `second_apply_is_noop: true`. It never removes a permission: the production
       documents keep `billing.plan.manage`, `billing.plan.view`, `roles:assign` and
       `drafting.*` they store outside the release contract (F-A9D-1, owner decision).
+- [ ] The alignment writes role documents directly and does **not** invalidate the
+      permission cache. It only ADDS permissions, so a cached decision can be briefly
+      more restrictive, never more permissive; the staleness window is one cache TTL
+      (60 min). Run it while the application tier is still stopped, as this checklist
+      orders it, and the window is empty.
 - [ ] System-role audit (`EXPECTED_SUPERADMIN_HOLDERS=2`) passes again after the
       migrations and the startup seeder.
 - [ ] There is **no migration rollback**. `runner.py` never calls a downgrade.

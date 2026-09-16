@@ -127,7 +127,7 @@ class _RoleService(RoleService):
     async def _begin_role_authority_change(self, db, role_id) -> list:
         return []
 
-    async def _complete_role_authority_change(self, user_ids, applied: bool) -> None:
+    async def _complete_role_authority_change(self, db, role_id, user_ids, applied: bool) -> None:
         return None
 
 
