@@ -8,6 +8,12 @@ from bson.errors import InvalidId
 from bcrypt import gensalt, hashpw, checkpw
 
 from ..models.user import User
+from .permission_service import (
+    AuthorityChangeUnavailableError,
+    begin_authority_change,
+    cancel_authority_change,
+    complete_authority_change,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +385,12 @@ class UserService:
                 logger.warning(f"No fields to update for user: {user_id}")
                 return await self.get_user(user_id)
 
+            # A role change is announced to the permission cache BEFORE the write, and
+            # refused (503) if it cannot be: a revoked grant must never stay cached (D4-B).
+            role_change = "roles" in update_dict
+            if role_change:
+                await begin_authority_change([user_oid])
+
             result = await self.db.users.update_one(
                 {"_id": user_oid},
                 {"$set": update_dict}
@@ -386,27 +398,20 @@ class UserService:
 
             if result.matched_count == 0:
                 logger.info(f"User not found for update: {user_id}")
+                if role_change:
+                    await cancel_authority_change([user_oid])
                 return None
 
             if result.modified_count == 0:
                 logger.info(f"User not modified (no changes): {user_id}")
+                if role_change:
+                    await cancel_authority_change([user_oid])
             else:
                 logger.info(f"Updated user: {user_id}")
 
-                # If roles were modified, invalidate permission cache and force JWT refresh
-                if "roles" in update_dict:
-                    try:
-                        from .permission_service import permission_cache_key
-                        from .runtime_state import get_runtime_state
-                        runtime = get_runtime_state()
-                        redis = await runtime.get_redis()
-                        if redis:
-                            uid_str = str(user_oid)
-                            now_ts = int(datetime.utcnow().timestamp())
-                            await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
-                            await redis.delete(permission_cache_key(uid_str))
-                    except Exception as e:
-                        logger.warning(f"Failed to invalidate cache for updated user {user_id}: {e}")
+                # Roles changed: invalidate the cached grant and force a JWT refresh.
+                if role_change:
+                    await complete_authority_change([user_oid])
 
             # Return the updated user (lightweight object to avoid strict Pydantic validation)
             return await self.get_user_by_id(user_id)
@@ -415,7 +420,7 @@ class UserService:
             raise
         except (ValueError, UserAlreadyExistsError):
             raise
-        except UserServiceError:
+        except (UserServiceError, AuthorityChangeUnavailableError):
             raise
         except Exception as e:
             logger.error(f"Failed to update user {user_id}: {e}")

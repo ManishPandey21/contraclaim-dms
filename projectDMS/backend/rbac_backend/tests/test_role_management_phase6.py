@@ -124,7 +124,10 @@ class _RoleService(RoleService):
     async def _get_db(self):
         return self._db
 
-    async def _invalidate_role_caches(self, role_id: str) -> None:
+    async def _begin_role_authority_change(self, db, role_id) -> list:
+        return []
+
+    async def _complete_role_authority_change(self, user_ids, applied: bool) -> None:
         return None
 
 

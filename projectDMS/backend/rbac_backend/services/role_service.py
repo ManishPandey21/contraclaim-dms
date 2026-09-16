@@ -12,7 +12,7 @@ from ..models.role import Role, RoleCreate, RoleUpdate
 from ..models.permission import Permission, PermissionCategory, PermissionLevel
 from ..utils.error_handler import RoleError, ValidationError
 from ..utils.audit_logger import AuditLogger
-from .permission_service import permission_cache_key
+from .permission_service import begin_authority_change, cancel_authority_change, complete_authority_change
 from ..core.role_reference import legacy_alias_target, normalize_role_key
 
 logger = logging.getLogger(__name__)
@@ -403,30 +403,28 @@ class RoleService:
         if target is not None and target != own:
             raise RoleServiceError(f"Role name '{name}' is reserved: it spells the '{target}' role", 400)
 
-    async def _invalidate_role_caches(self, role_id: str) -> None:
-        """Invalidate permission caches and JWTs for all users with this role."""
+    async def _begin_role_authority_change(self, db: Any, role_id: Any) -> List[str]:
+        """Announce a change to this role's authority to every holder, BEFORE the write (D4-B).
+
+        Holders by id AND by legacy spelling: both receive this role's permissions. If
+        they cannot be read, or the announcement cannot be made, the role is not changed:
+        a 503 instead of a change whose revoked grants stay cached for the TTL.
+        """
         try:
-            from .runtime_state import get_runtime_state
-            runtime = get_runtime_state()
-            redis = await runtime.get_redis()
-            if not redis:
-                return
-
-            db = await self._get_db()
-
-            # Holders by id AND by legacy spelling: both receive this role's permissions.
-            users = await self._holders_of_role(db, role_id)
-
-            now_ts = int(datetime.utcnow().timestamp())
-            for user in users:
-                uid_str = str(user["_id"])
-                # The marker first: it also makes any cache entry written by an
-                # in-flight check stale (`_cache_entry_is_current`), even if the
-                # delete below fails.
-                await redis.set(f"user_jwt_min_iat:{uid_str}", now_ts)
-                await redis.delete(permission_cache_key(uid_str))
+            holders = await self._holders_of_role(db, role_id)
+            user_ids = [str(user["_id"]) for user in holders]
+            await begin_authority_change(user_ids)
         except Exception as e:
-            logger.error(f"Failed to invalidate cache for role {role_id}: {e}")
+            logger.error(f"Role {role_id} not changed: its holders' cached authority cannot be invalidated: {e}")
+            raise RoleServiceError("Authorization cache unavailable; the role was not changed", 503) from e
+        return user_ids
+
+    async def _complete_role_authority_change(self, user_ids: List[str], applied: bool) -> None:
+        """After the write: invalidate holders (sessions and cached grants), or withdraw the announcement."""
+        if applied:
+            await complete_authority_change(user_ids)
+        else:
+            await cancel_authority_change(user_ids)
 
     async def create_role(
         self,
@@ -708,18 +706,18 @@ class RoleService:
                 update_doc["project_id"] = update_data.project_id
 
             # Update role
+            holders = await self._begin_role_authority_change(db, role_id)
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {"$set": update_doc}
             )
+            await self._complete_role_authority_change(holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
 
             # Return updated role
-            updated_role = await self.get_role_by_id(role_id)
-            await self._invalidate_role_caches(role_id)
-            return updated_role
+            return await self.get_role_by_id(role_id)
 
         except RoleServiceError:
             raise
@@ -745,6 +743,7 @@ class RoleService:
             self._ensure_role_manageable(deleted_by, existing)
 
             # Soft delete (mark as inactive)
+            holders = await self._begin_role_authority_change(db, role_id)
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {
@@ -760,7 +759,7 @@ class RoleService:
             # cached grant was computed while it was active. Drop it now rather
             # than at the cache TTL, and make holders re-authenticate, as every
             # other role mutation does.
-            await self._invalidate_role_caches(role_id)
+            await self._complete_role_authority_change(holders, result.matched_count > 0)
             return result.modified_count > 0
 
         except RoleServiceError:
@@ -872,6 +871,7 @@ class RoleService:
             permission_ids = self._ensure_permissions_assignable(updated_by, permission_ids)
 
             # Update role permissions
+            holders = await self._begin_role_authority_change(db, role_id)
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {
@@ -882,12 +882,12 @@ class RoleService:
                     }
                 }
             )
+            await self._complete_role_authority_change(holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
 
             # Return updated role
-            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
 
         except RoleServiceError:
@@ -920,6 +920,7 @@ class RoleService:
             permission_id = self._ensure_permissions_assignable(updated_by, [permission_id])[0]
 
             # Add permission to role (if not already present)
+            holders = await self._begin_role_authority_change(db, role_id)
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {
@@ -930,12 +931,12 @@ class RoleService:
                     }
                 }
             )
+            await self._complete_role_authority_change(holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
 
             # Return updated role
-            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
 
         except RoleServiceError:
@@ -967,6 +968,7 @@ class RoleService:
             self._ensure_role_manageable(updated_by, existing)
 
             # Remove permission from role
+            holders = await self._begin_role_authority_change(db, role_id)
             result = await db.roles.update_one(
                 {"_id": query_id},
                 {
@@ -977,12 +979,12 @@ class RoleService:
                     }
                 }
             )
+            await self._complete_role_authority_change(holders, result.matched_count > 0)
 
             if result.matched_count == 0:
                 raise RoleServiceError("Role not found", 404)
 
             # Return updated role
-            await self._invalidate_role_caches(role_id)
             return await self.get_role_by_id(role_id)
 
         except RoleServiceError:

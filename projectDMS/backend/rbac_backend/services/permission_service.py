@@ -28,7 +28,7 @@ from ..models.permission import (
     PermissionLevel,
     DEFAULT_PERMISSIONS,
 )
-from ..utils.error_handler import ValidationError
+from ..utils.error_handler import BaseDomainError, ValidationError
 from ..utils.audit_logger import AuditLogger
 from .runtime_state import get_runtime_state
 
@@ -95,6 +95,112 @@ PERMISSION_CACHE_KEY_PREFIX = "user_perms:v3:"
 def permission_cache_key(user_id: Any) -> str:
     """The one spelling of a user's cached-permission key; invalidation must use it too."""
     return f"{PERMISSION_CACHE_KEY_PREFIX}{user_id}"
+
+
+#: How long a computed grant may be served from `permission_cache_key`.
+PERMISSION_CACHE_TTL_SECONDS = 3600
+#: A pending authority change must outlive every cache entry that could predate it,
+#: so a change whose invalidation failed costs cache bypass, never stale authority.
+AUTHORITY_CHANGE_PENDING_TTL_SECONDS = PERMISSION_CACHE_TTL_SECONDS + 300
+AUTHORITY_CHANGE_PENDING_PREFIX = "authz_change_pending:"
+
+
+def authority_change_pending_key(user_id: Any) -> str:
+    return f"{AUTHORITY_CHANGE_PENDING_PREFIX}{user_id}"
+
+
+class AuthorityChangeUnavailableError(BaseDomainError):
+    """An authority change could not be announced to the permission cache, so it was not made."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, 503)
+
+
+def _distinct_user_ids(user_ids: Any) -> List[str]:
+    return list(dict.fromkeys(str(user_id) for user_id in user_ids or [] if str(user_id)))
+
+
+async def begin_authority_change(user_ids: Any) -> None:
+    """Announce an authority change for these users BEFORE it is written (D4-B).
+
+    From here until `complete_authority_change`, no cached grant is served or
+    written for them. Raises `AuthorityChangeUnavailableError` when the
+    announcement cannot be made - the caller must then not make the change,
+    because nothing could stop an entry computed from the old authority being
+    served for the whole cache TTL. A deployment without a runtime Redis has no
+    permission cache, so there is nothing to announce.
+    """
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return
+    runtime = get_runtime_state()
+    try:
+        redis = await runtime.get_redis()
+        if redis is None:
+            if getattr(runtime, "redis_url", None):
+                raise ConnectionError("runtime Redis is configured but unreachable")
+            return
+        for user_id in ids:
+            await redis.set(authority_change_pending_key(user_id), "1", ex=AUTHORITY_CHANGE_PENDING_TTL_SECONDS)
+    except Exception as exc:
+        logger.error("Authority change refused: the permission cache could not be told about it: %s", exc)
+        raise AuthorityChangeUnavailableError(
+            "Authorization cache unavailable; the authority change was not made"
+        ) from exc
+
+
+async def complete_authority_change(user_ids: Any) -> bool:
+    """Invalidate after the write: re-authentication marker, cached grant, then the pending marker.
+
+    The pending marker is removed last, and only once the rest succeeded. On any
+    failure it stays until it expires, which outlasts every entry that could
+    predate the change, so the failure is logged, never silently trusted.
+    """
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return True
+    runtime = get_runtime_state()
+    try:
+        redis = await runtime.get_redis()
+    except Exception as exc:
+        logger.error("Authority change applied; invalidation deferred to the pending marker: %s", exc)
+        return False
+    if redis is None:
+        if getattr(runtime, "redis_url", None):
+            logger.error("Authority change applied; Redis unreachable, invalidation deferred to the pending marker")
+            return False
+        return True
+    now_ts = int(datetime.utcnow().timestamp())
+    complete = True
+    for user_id in ids:
+        try:
+            await redis.set(f"user_jwt_min_iat:{user_id}", now_ts)
+            await redis.delete(permission_cache_key(user_id))
+            await redis.delete(authority_change_pending_key(user_id))
+        except Exception as exc:
+            complete = False
+            logger.error(
+                "Authority change for user %s applied but invalidation failed; its cached grants stay bypassed "
+                "until the pending marker expires: %s",
+                user_id,
+                exc,
+            )
+    return complete
+
+
+async def cancel_authority_change(user_ids: Any) -> None:
+    """The announced change was not made. Best effort: a marker left behind only bypasses the cache."""
+    ids = _distinct_user_ids(user_ids)
+    if not ids:
+        return
+    try:
+        redis = await get_runtime_state().get_redis()
+        if redis is None:
+            return
+        for user_id in ids:
+            await redis.delete(authority_change_pending_key(user_id))
+    except Exception as exc:
+        logger.warning("Could not clear a pending authority change marker: %s", exc)
 
 
 def _id_candidates(text: str) -> List[Any]:
@@ -231,6 +337,8 @@ class PermissionService:
         """
         computed_at = entry.get("computed_at")
         if not isinstance(computed_at, (int, float)):
+            return False
+        if await redis.get(authority_change_pending_key(user_id)) is not None:
             return False
         min_iat = await redis.get(f"user_jwt_min_iat:{user_id}")
         if min_iat is None:
@@ -924,12 +1032,15 @@ class PermissionService:
 
                 if redis is not None:
                     try:
-                        await redis.set(cache_key, json.dumps({
-                            "raw_permissions": raw_permissions,
-                            "role_names": list(role_names),
-                            "perm_names": list(perm_names),
-                            "computed_at": computed_at,
-                        }), ex=3600)
+                        # Never cache a decision computed while an authority change
+                        # is pending: it may have read the authority being replaced.
+                        if await redis.get(authority_change_pending_key(user_id)) is None:
+                            await redis.set(cache_key, json.dumps({
+                                "raw_permissions": raw_permissions,
+                                "role_names": list(role_names),
+                                "perm_names": list(perm_names),
+                                "computed_at": computed_at,
+                            }), ex=PERMISSION_CACHE_TTL_SECONDS)
                     except Exception as e:
                         logger.warning(f"Failed to write permission cache for {user_id}: {e}")
         except Exception as exc:
