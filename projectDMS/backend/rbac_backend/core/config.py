@@ -825,6 +825,19 @@ class Settings(BaseSettings):
                     production_errors.append(
                         "OIDC is enabled but missing: " + ", ".join(missing_oidc)
                     )
+                # Provisioned SSO users are stored with this role, and Super Admin
+                # authority is name-based (ADR 0001). Provisioning re-checks the role
+                # document; this refuses the unsafe spellings before startup.
+                from .role_reference import SYSTEM_ROLE_KEYS, normalize_role_key
+
+                default_role = str(getattr(self, "OIDC_DEFAULT_ROLE", "") or "")
+                if default_role and (
+                    normalize_role_key(default_role) != default_role
+                    or normalize_role_key(default_role) in SYSTEM_ROLE_KEYS
+                ):
+                    production_errors.append(
+                        "OIDC_DEFAULT_ROLE must be a canonical, non-system role key"
+                    )
             # Payments: with PAYMENT_PROVIDER=razorpay, an empty webhook secret is
             # the worst kind of misconfiguration — checkout works and customers
             # PAY, but every webhook fails signature verification (deny-by-
