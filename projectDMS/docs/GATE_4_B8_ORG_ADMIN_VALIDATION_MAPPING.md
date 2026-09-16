@@ -205,7 +205,11 @@ touch deletion. Pinned by `test_role_soft_delete_contract.py`.
   Conversely, a role holding only `billing.plan.manage` satisfied `dms.admin`, and
   through it every `dms.*` check. Foreign-organisation scope still refused. The
   same code runs in production today. **Fixed** by the F-A9A-2 change.
-* **F-A9B-2 - observation, NOT changed.** Eight canonicals declare `system:admin` as
+* **F-A9B-2 - CLOSED in R-A9D** (owner decision: global legal-words administration
+  requires system authority). `system:admin` is no longer any canonical's legacy name,
+  backend and client, in either direction; pinned by
+  `test_system_admin_authority_contract.py`. No Gate 4 b8 row gates on `system:admin`.
+  The observation as recorded in R-A9B follows. Eight canonicals declare `system:admin` as
   their legacy name, so every holder of one passes `require_permission("system:admin")`.
   That covers `dms.admin` (default `orgadmin`, `contractmgr_org`, `projectadmin`),
   `billing.plan.manage` (`contraclaim_billing_admin`), `subscription.entitlement.manage`

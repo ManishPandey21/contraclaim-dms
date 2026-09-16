@@ -93,6 +93,63 @@ setup would reactivate a deleted system role.
 Build cache keys with `permission_cache_key(user_id)` only. The key moved off
 `user_perms:{id}` in R-A9B so entries computed before the fix are never read.
 
+## Authority changes are announced before they are written (R-A9D, D4-B)
+
+`user_has_permission` serves a cached grant for up to `PERMISSION_CACHE_TTL_SECONDS`
+(one hour). Every mutation that changes someone's authority - `RoleService`
+`update_role`, `delete_role`, `update_role_permissions`, `add_permission_to_role`,
+`remove_permission_from_role`, and a `roles` change in `UserService.update_user` - uses
+the three functions in `services/permission_service.py`:
+
+1. **`begin_authority_change(user_ids)` before the write.** It sets
+   `authz_change_pending:{id}` for every affected user (role holders, legacy spellings
+   included). While that marker exists no cached grant is served and no new one is
+   written. If the holders cannot be read, the store is configured but unreachable, or a
+   marker cannot be written, it raises `AuthorityChangeUnavailableError` and **the
+   mutation is not made**: the role routes answer 503 through `RoleServiceError`, the user
+   route through the domain-error handler.
+2. **The write.**
+3. **`complete_authority_change(user_ids)` after it**: `user_jwt_min_iat`, then the cached
+   grant, then the marker, in that order. If any step fails the marker stays. It lives
+   `AUTHORITY_CHANGE_PENDING_TTL_SECONDS`, longer than any entry that could predate the
+   change, so a failed invalidation costs cache bypass, never stale authority. A write
+   that matched nothing calls `cancel_authority_change` instead.
+
+A deployment with no runtime Redis has no permission cache, so there is nothing to
+announce and the mutation proceeds. `test_authority_cache_invalidation_fail_closed.py`
+pins every branch; do not add a role or user mutation that bypasses these three calls.
+
+## System administration is nobody's alias (R-A9D, F-A9B-2)
+
+`system:admin` ("Full system administration", non-delegable) gates the platform-wide
+`/api/admin/legal-words`. It is declared as no canonical permission's legacy name, in the
+backend `LEGACY_PERMISSION_ALIASES` and the client `PERMISSION_ALIASES` alike. Holding
+`dms.admin`, `billing.plan.manage` or any `subscription.*` administration does not satisfy
+it, and holding it does not satisfy them. It is reached only by holding it (only a Super
+Admin can grant it), a `*` wildcard, or the Super Admin principal.
+`test_system_admin_authority_contract.py` pins this at the resolver and at the route.
+
+## SSO default role (R-A9D)
+
+`OIDC_DEFAULT_ROLE` becomes the stored role of every newly provisioned SSO user, and Super
+Admin authority is name-based (ADR 0001). `oidc_service.resolve_default_role` therefore
+refuses provisioning unless the setting is a canonical key (no alias, case or spacing
+variant), not `superadmin`/`superuser`, and names exactly one active, non-system-scoped
+role document; the production config gate refuses the unsafe spellings before startup.
+
+## Role documents are aligned to the release contract by an explicit operation (R-A9D)
+
+`services/role_contract_alignment.py` adds to the `orgadmin` and `projectadmin`
+documents the permissions this release's `DEFAULT_ROLES` gives them, and nothing else: no
+removal, no user read or write, no other role, no creation, no reactivation, nothing for
+an organisation-bound document. It is a cutover step, **not** a catalogued migration: it
+must not run unreviewed on `migrate_database --apply`, and a catalogue entry would expire
+the proven fresh-install and upgrade-path evidence. Run
+`python -m rbac_backend.scripts.align_role_contract` (inspect) and then `--apply`, which
+prints the before / expected / additions / after report and proves a second apply is a
+no-op. It does not invalidate caches: it only adds authority, so a cached decision can be
+briefly more restrictive, never more permissive.
+
 ## Role references: one resolver for tier, permissions and the audit
 
 A `users.roles` entry is resolved by `core/role_reference.py::resolve_role_reference`

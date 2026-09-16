@@ -178,6 +178,19 @@ in writing before §3.
 - [ ] `20260906_0001 permission_name_unique` applied. It is applied to **staging
       only** today. It makes `permissions.name` unique, and the seeder races
       itself without it.
+- [ ] Role-contract alignment (R-A9D, owner decision 2) - an explicit operation,
+      **not** in the migration catalogue, so `migrate_database` never runs it. After
+      the migrations, inside the backend container, run
+      `python -m rbac_backend.scripts.align_role_contract` and compare its
+      `proposed_additions` for `orgadmin` and `projectadmin` with the owner-reviewed
+      diff certified in final staging; `unapproved_additions_total` must be **0** and
+      `warnings` empty (a deactivated or organisation-bound `orgadmin`/`projectadmin`
+      document is a STOP). After `--apply`, `align_role_contract --apply` must report
+      `second_apply_is_noop: true`. It never removes a permission: the production
+      documents keep `billing.plan.manage`, `billing.plan.view`, `roles:assign` and
+      `drafting.*` they store outside the release contract (F-A9D-1, owner decision).
+- [ ] System-role audit (`EXPECTED_SUPERADMIN_HOLDERS=2`) passes again after the
+      migrations and the startup seeder.
 - [ ] There is **no migration rollback**. `runner.py` never calls a downgrade.
       Recovery is roll-forward: fix the cause and re-run `--apply`.
 
@@ -277,3 +290,8 @@ roll-forward for migrations because there is no downgrade.
 | Gate 3 bullet 8 (empty/loading/error states) | **OPEN** | `docs/GATE_3_EXECUTION_PLAN.md` |
 | Falkor rollback variant (A out-of-band vs B image-based) | **OPEN** | `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §3 |
 | Staging SMTP sink for the Gate 3 share leg | **OPEN** | `docs/GATE_3_EVIDENCE_MATRIX.md` row 3 |
+| Legacy `organization-admin`/`project-admin` references resolve one hop to `orgadmin`/`projectadmin` | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role references" |
+| No re-grant of alias-fan-out permissions to `projectuser`; `orgadmin`/`projectadmin` aligned to the release contract by the explicit `align_role_contract` operation (§14) | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role documents are aligned" |
+| F-A9B-2 legal-words admin requires system authority | **CLOSED IN CODE (R-A9D)** | `docs/AUTHZ.md` "System administration is nobody's alias" |
+| F-A9D-1 production `orgadmin`/`projectadmin` documents store `billing.plan.manage` (platform plan catalogue) outside the release contract; the alignment keeps it | **OPEN - owner decision** | R-A9D receipt |
+| Third-party image fixable CRITICAL/HIGH (MongoDB, FalkorDB, Qdrant, httpd) | **OPEN - owner exception required** | R-A9D receipt exception table; `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` |
