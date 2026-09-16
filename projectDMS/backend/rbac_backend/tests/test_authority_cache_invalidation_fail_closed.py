@@ -271,6 +271,27 @@ def test_a_failed_invalidation_after_the_write_never_serves_the_revoked_grant(mo
 
 
 @pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
+def test_the_marker_is_removed_only_after_the_invalidation_it_covers_succeeded(monkeypatch, mutation) -> None:
+    """Order matters, not just presence. The re-authentication marker is written first and
+    the pending marker removed last; removing it first would clear the only thing standing
+    between a half-finished invalidation and a stale grant."""
+    h = _Harness(monkeypatch)
+    _cached_grant(h)
+    # Only the re-authentication marker fails. The cache delete would succeed, so an
+    # implementation that clears the pending marker before this step leaves nothing behind.
+    h.redis.fail = {"set:user_jwt_min_iat"}
+
+    _attempt(h, mutation)
+
+    assert _applied(h, mutation), "precondition: the change reached the database"
+    h.redis.fail = set()
+    assert any("pending" in key for key in h.redis.store), (
+        f"{mutation.__name__}: the pending marker was cleared although the invalidation it covers failed"
+    )
+    assert not h.has(), f"{mutation.__name__}: revoked authority was served after a partial invalidation"
+
+
+@pytest.mark.parametrize("mutation", MUTATIONS, ids=lambda m: m.__name__)
 def test_a_store_that_cannot_be_reached_refuses_the_change(monkeypatch, mutation) -> None:
     """Redis is configured but unreachable: nothing can be invalidated, so nothing is changed."""
     h = _Harness(monkeypatch)
