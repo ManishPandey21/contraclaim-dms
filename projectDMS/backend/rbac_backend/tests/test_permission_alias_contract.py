@@ -180,15 +180,18 @@ def test_legacy_siblings_do_not_satisfy_each_other(hold) -> None:
 def test_billing_and_subscription_admins_do_not_become_dms_admins(hold) -> None:
     for held in ("billing.plan.manage", "subscription.entitlement.manage", "subscription.upgrade"):
         holder = hold(held)
-        assert holder.satisfies("system:admin"), f"{held} lost the legacy gate it declares"
-        for checked in ("dms.admin", "dms.project.manage", "dms.document.delete"):
+        for checked in ("dms.admin", "dms.project.manage", "dms.document.delete", "system:admin"):
             assert not holder.policy_satisfies(checked), f"{held} satisfied {checked}"
+        assert not holder.satisfies("system:admin"), f"{held} reached system administration (F-A9B-2)"
 
 
-def test_a_stored_legacy_system_admin_still_administers_dms(hold) -> None:
+def test_a_stored_system_admin_is_not_an_alias_of_dms_administration(hold) -> None:
+    """R-A9D (F-A9B-2): `system:admin` is no canonical's legacy name, in either direction.
+    Pinned in full by `test_system_admin_authority_contract.py`."""
     holder = hold("system:admin")
-    assert holder.satisfies("dms.admin")
-    assert holder.policy_satisfies("dms.document.delete")
+    assert holder.satisfies("system:admin")
+    assert not holder.satisfies("dms.admin")
+    assert not holder.policy_satisfies("dms.document.delete")
 
 
 # --------------------------------------------------------------------------- #
@@ -203,7 +206,6 @@ def test_the_ambiguous_groups_are_the_ones_this_contract_was_written_against() -
         "projects:read",
         "reports:view",
         "organizations:read",
-        "system:admin",
     }
     assert set(MULTI_ALIAS_CANONICALS) == {"dms.user.manage", "dms.project.manage"}
 
@@ -345,11 +347,10 @@ def test_the_billing_admin_control_still_manages_plans(monkeypatch, hold) -> Non
     assert decision == "allow", decision
 
 
-def test_a_held_dms_admin_still_passes_the_legacy_system_admin_route_gate(hold) -> None:
-    """Kept one hop, declared by the table: `/api/admin/legal-words` depends on
-    `require_permission("system:admin")`. Recorded as R-A9B observation F-A9B-2 for
-    an owner decision; R-A9B does not change it."""
-    assert hold("dms.admin").satisfies("system:admin")
+def test_a_held_dms_admin_does_not_pass_the_system_admin_route_gate(hold) -> None:
+    """F-A9B-2, closed in R-A9D: `/api/admin/legal-words` depends on
+    `require_permission("system:admin")`, and organisation administration does not reach it."""
+    assert not hold("dms.admin").satisfies("system:admin")
 
 
 # --------------------------------------------------------------------------- #
