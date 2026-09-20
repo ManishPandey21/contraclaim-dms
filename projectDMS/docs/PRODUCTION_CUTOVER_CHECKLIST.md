@@ -20,10 +20,12 @@ ordering from here, and re-derive every number.
 |---|---|---|
 | P1 | Owner authorisation for a production cutover | **NOT GIVEN** |
 | P2 | Maintenance window booked, with a reserve | **NOT BOOKED** — book 5–6 h, see §2 |
-| P3 | Release branch reaches a deployable branch | **OPEN** — local only, not pushed to either remote |
-| P4 | Readiness ≥ 85 for Gate 9 | **OPEN** — re-derive with `scripts/production_readiness_score.py`; a figure quoted here goes stale the moment a bullet is ticked, and this row carried the pre-R-A8S 68 for a phase after it stopped being true |
+| P3 | Release branch reaches a deployable branch | **CLOSED 2026-09-20 (R-A9F)** — `release/contraclaim-rc1` fast-forwarded to the certified candidate `fe728b2` and pushed to both trusted remotes; PR #20 open, draft, unmerged |
+| P4 | Readiness ≥ 85 for Gate 9 | **SCORE MET, GATE NOT CLOSED (2026-09-20, R-A9F)** — the scorer reads 85/100 (raw 85.33, verdict "Ready") on this HEAD with Gate 9 b5 itself unticked, which is the non-circularity condition. Gate 9 is still 2/6: b1, b2, b5 and b6 are open. Re-derive with `scripts/production_readiness_score.py`; a figure quoted here goes stale the moment a bullet is ticked |
 | P5 | FalkorDB `/data` cutover sequenced with the deploy | **PLANNED, NOT EXECUTED** — `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` |
 | P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — confirmed at §8; the standing decisions are listed at the end of this file |
+| P7 | Every open launch-gate bullet formally disposed | **OPEN** — the matrix is written and the owner approvals are enumerated in `docs/R_A9F_OPEN_GATE_MATRIX.md`; **seven owner acts** remain, and until they are recorded production promotion is not authorised whatever the score reads |
+| P8 | ClamAV temporary override retired | **PLANNED for §13a** — production depends on the untracked `docker-compose.clamav-r-a8z.yml` today; it is retired **after** the release stack is running and verified, never before |
 
 P4 is a Gate 9 condition, not a cutover condition. A deploy can technically
 proceed below 85; **Gate 9 cannot close**, and the release is then deployed
@@ -50,10 +52,25 @@ in writing before §3.
 
 - [ ] `EXPECTED_EXECUTION_BUDGET` is **120 minutes**, derived from R-A8M's
       59 m 23 s × 2, rounded up. **Do not plan with 59.**
-- [ ] `LATEST_SAFE_STOP = WINDOW_END − 210 min`, so a 4-hour window permits a stop
-      no later than `WINDOW_START + 30 min` and leaves nothing for pre-outage
-      revalidation. **Book 5–6 hours.**
+- [ ] `LATEST_SAFE_STOP = WINDOW_END − 210 min` (120 execution + 90 recovery reserve),
+      so a 4-hour window permits a stop no later than `WINDOW_START + 30 min` and leaves
+      nothing for pre-outage revalidation.
+- [ ] **R-A9F recommendation to the owner for the R-A9G window: 8 hours**, with a
+      **minimum 120-minute execution budget** and a **minimum 90-minute recovery reserve**.
+      An 8-hour window puts `LATEST_SAFE_STOP` at `WINDOW_START + 270 min`, which is the
+      first budget that leaves real slack for pre-outage revalidation. The earlier "book
+      5–6 hours" was sized for a deploy plus migrations; R-A9G additionally carries the
+      explicit role alignment, the FalkorDB `/FalkorDB` → `/data` Variant-A cutover with an
+      out-of-band engine, a `FALKORDB_PASSWORD` rotation, the ClamAV override retirement,
+      backup verification, restore verification and observation.
+- [ ] The time gate is **mechanical**, not a judgement:
+      `scripts/check_maintenance_time_budget.py --recovery-reserve-minutes 90
+      --execution-budget-minutes 120`. R-A8P stopped production 7 minutes inside the
+      reserve; the gate exists so that cannot happen again. Run it **before the stop** and
+      **again immediately before the stop command**.
 - [ ] Clients informed; hard recovery start agreed and recorded.
+- [ ] **Do not schedule this automatically.** The window is granted by the owner, in
+      writing, together with the Gate 9 approvals in `docs/R_A9F_OPEN_GATE_MATRIX.md`.
 
 ## 3. Final CI and security
 
@@ -79,7 +96,12 @@ in writing before §3.
       not a gate failure.
 - [ ] Migration dry run **inside the backend container**:
       `migrate_database --list`, then `--fail-on-warning`.
-- [ ] `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml config`
+- [ ] `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml config`
+      **The ClamAV override belongs in every production compose command** until §13a retires
+      it. The running `clamav` container's own
+      `com.docker.compose.project.config_files` label carries three files; a two-file render
+      is a different service. `config` and `ps` succeed either way, so the error only
+      appears at `up`.
       renders exit 0 with no unresolved variable. **Do not add the base
       `docker-compose.yml`** — `config` and `ps` still succeed with the wrong file
       set, and only `up` fails, on a missing `client/.env.development`.
@@ -87,6 +109,24 @@ in writing before §3.
       (tree-wide `sha256sum` compare) before trusting any code read of production.
 
 ## 5. Fresh backups
+
+**The pre-deploy backup contract.** The deploy does not start until *all* of these hold,
+and each is a measured artefact rather than a green log line:
+
+| Artefact | Required state |
+|---|---|
+| Mongo logical backup | written, `sha256sum -c` verified against its own manifest |
+| FalkorDB rescue archive | **fresh in this window**, semantically `VALID` under the `redis-persistence` profile, entries at the archive **root** |
+| Qdrant volume archive | `VALID` under its declared contract |
+| Redis volume archive | `VALID` under its declared contract |
+| Uploads / `application-volume` | `VALID` — an **empty** uploads volume must not abort the run (F-A8W-B1, fixed in R-A8X) |
+| Checksums and manifests | every archive's checksum recorded and verified; the manifest matches the archive it names |
+| Off-site leg | exit 0 |
+
+**"Valid" has exactly one definition here.** Freshness, a glob that matches, and a
+plausible archive size have each certified an unrestorable archive in this programme.
+`scripts/validate_backup_archive.py` — which reads the archive's structure against a named
+profile — is the only definition. Do not substitute a file listing for it.
 
 - [ ] `bash scripts/production_backup.sh` — **expect it to stop at
       `falkordb-data`** while persistence is still at `/FalkorDB`. That is
@@ -168,8 +208,64 @@ in writing before §3.
       placeholder secrets, dev CORS, insecure cookies, fail-open RBAC, and missing
       metrics token / Redis / backup config, and it is deliberate.
 
+## 13a. ClamAV temporary-override retirement
+
+Production depends on the **untracked** `docker-compose.clamav-r-a8z.yml`, applied in R-A8Z
+because the deployed production source predates the ClamAV fix. The release source already
+carries that configuration in the tracked compose: **ClamAV 1.4.6, `egress-net` so FreshClam
+can reach the update path, the persistent `clamav_db` volume, 3 GiB, and the signature
+freshness healthcheck**. Retiring the override is therefore a *deletion of a duplicate*, not
+a configuration change — but only once that has been proved.
+
+**Static equivalence is already proven, offline, in R-A9F (2026-09-20).** The override's
+`clamav` service block and the release `docker-compose.prod.yml` `clamav` service block were
+compared line by line. They differ in **exactly one line**: the release block ends with
+`logging: *default-logging` and the override does not. That is the difference the override's
+own header declares and explains - a YAML anchor cannot cross files, and the base compose
+already sets logging - so the two **render** the same service. Image digest, `FRESHCLAM_CHECKS`,
+the 3 GiB memory limit, the full freshness healthcheck, `service-net` + `egress-net`, and the
+`clamav_db` volume are byte-identical, and the release compose declares `clamav_db` at the top
+level. Override sha256 `8ab39508677f956d386c06d051247631554ee21f634ac97f51be8c4708b91e42`.
+Evidence: `15-clamav-override-equivalence.txt` in the R-A9F evidence set.
+
+That is a *source* comparison. The render comparison below still runs in the window, because
+a render also resolves environment and the base file, and only the render is what `up` uses.
+
+- [ ] **Before the deploy, prove equivalence by rendering, not by reading.** With the release
+      checkout in place, compare the two renders of the `clamav` service:
+      `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml config`
+      against
+      `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml config`.
+      The `clamav` service must be **identical** in image digest, networks, volumes, memory
+      limit, healthcheck and environment. Any difference is a STOP: it means the release
+      compose is not in fact equivalent and the override is still load-bearing.
+- [ ] **Redact before the render reaches evidence.** `docker compose config` resolves
+      environment values, so the output carries live secrets. Redact by **value**, never by
+      key name, before the file is written into the evidence directory.
+- [ ] **Keep the override in every compose command through the deploy.** Do not remove the
+      file, and do not drop it from the command, until this section's final step.
+- [ ] **Retire only after the release stack is running and verified** — that is, after §16
+      startup, §19 gate-style health and §21 `post_deploy_verify.sh` are green, including
+      `CLAMAV_READINESS=OK` and the live antivirus check (clean accepted, EICAR rejected,
+      loaded signature age within the maximum).
+- [ ] **Retire in one step, then re-verify.** Drop `-f docker-compose.clamav-r-a8z.yml` from
+      the command and run `up -d --no-deps clamav`. Then confirm: the container's
+      `com.docker.compose.project.config_files` label now names **two** files; the image is
+      still `clamav/clamav:1.4.6@sha256:71fbb76b…`; the **`clamav_db` volume is the same
+      volume**, not a new one (a fresh volume means the signature database was discarded and
+      clamd will serve nothing until FreshClam completes); `clamd` reports loaded signatures
+      and their age; and `post_deploy_verify.sh` passes the antivirus check again.
+- [ ] **Do not delete the override file before that verification.** Move it aside only after
+      the two-file render is running and verified; if anything fails, re-adding it is the
+      rollback.
+- [ ] Tags get rebuilt — the ClamAV pin is a **digest**, and the freshness rule in
+      `docs/CLAMAV_SIGNATURE_FRESHNESS.md` still applies after retirement.
+
 ## 14. Production migrations
 
+- [ ] The exact expected ledger state, catalogue, orphan rows and pending set are frozen in
+      `docs/R_A9F_PRODUCTION_MANIFEST.md`, "Production migration manifest". Compare against
+      it; do not discover it during the window.
 - [ ] `migrate_database --list` inside the backend container.
 - [ ] `--apply --fail-on-warning`. **Exit 2 is expected on the first apply** and
       is computed after the migrations ran: read the JSON, confirm the only
@@ -183,7 +279,7 @@ in writing before §3.
       the migrations, inside the backend container, run
       `python -m rbac_backend.scripts.align_role_contract` and compare its
       `proposed_additions` for `orgadmin` and `projectadmin` with the owner-reviewed
-      diff certified in final staging; `unapproved_additions_total` must be **0** and
+      diff frozen in `docs/R_A9F_ROLE_ALIGNMENT_CUTOVER_DIFF.md`; `unapproved_additions_total` must be **0** and
       `warnings` empty (a deactivated or organisation-bound `orgadmin`/`projectadmin`
       document is a STOP). After `--apply`, `align_role_contract --apply` must report
       `second_apply_is_noop: true`.
@@ -250,6 +346,18 @@ in writing before §3.
 
 ## 20. Backup verification, after the cutover
 
+**The post-deploy backup contract.** A deployment is **not complete** because health
+endpoints answer 200. It is complete when the deployed release can produce a backup that a
+restore can consume. All four must hold:
+
+1. the canonical production backup runs **from the release's own script, with no manual
+   step** — an operator replaying a failed script by hand is diagnostic evidence, not
+   certification (the R-A8X rule, from F-A8W-B1);
+2. **every** artefact is produced — nothing skipped, nothing empty-and-counted;
+3. **semantic validation passes** for each artefact under its declared profile;
+4. `backup_status.py` reports healthy — `falkordb-data` **`VALID`**, not `UNVERIFIED`,
+   not `UNEVALUATED`.
+
 - [ ] `bash scripts/production_backup.sh` → exit 0, and `falkordb-data` no longer
       stops the run.
 - [ ] `python scripts/backup_status.py` → `falkordb-data` **`VALID`** — not
@@ -262,9 +370,16 @@ in writing before §3.
 - [ ] 0 failures. In production mode the **edge check is now mandatory**
       (`docs/OPERATIONS.md` §6.1): `PUBLIC_BASE_URL` must be set, TLS, and a
       public DNS name, and an unset value is a failure rather than a skip.
-- [ ] Note the historical trap: production has no `document-worker`, so the
+- [ ] Note the historical trap: production has no `document-worker` **today**, so the
       release copy of this script may need the server's own copy. Resolve which
       copy is authoritative **before** the window, not during it.
+- [ ] **This cutover changes that fact.** The release production compose declares
+      `document-worker` and `document-worker-canary` with **no profile**, so both start as
+      new production services (`docs/R_A9F_PRODUCTION_MANIFEST.md` section 4). After
+      startup they must exist, and the section 16 assertion — exactly **one** scheduler
+      owner across every running service, and the web tier not acting as an extraction
+      worker — must be re-checked with them running, not with the pre-cutover service set.
+      `graphiti` stays behind the `graph-experimental` profile and does **not** start.
 
 ## 22. Rollback criteria
 
@@ -303,10 +418,10 @@ roll-forward for migrations because there is no downgrade.
 | RPO 24 h / RTO 8 h, quarterly staging drill | **MADE 2026-09-08**, RECORDED not DEMONSTRATED | `docs/OPERATIONS.md` §5 |
 | Shared production S3 bucket for documents and backups | **ACCEPTED as post-release debt** | `docs/S3_STORAGE_POSTURE_DEBT.md`, `docs/RPO_RTO_OWNER_DECISION.md` header |
 | Gate 2 FalkorDB vector criterion withdrawn | **APPROVED for this release** | `docs/PRODUCTION_READINESS_RELEASE_GATE.md` |
-| Gate 3 bullet 7 (arbitration) | **OPEN** | `docs/GATE_3_EXECUTION_PLAN.md` |
-| Gate 3 bullet 8 (empty/loading/error states) | **OPEN** | `docs/GATE_3_EXECUTION_PLAN.md` |
-| Falkor rollback variant (A out-of-band vs B image-based) | **OPEN** | `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §3 |
-| Staging SMTP sink for the Gate 3 share leg | **OPEN** | `docs/GATE_3_EVIDENCE_MATRIX.md` row 3 |
+| Gate 3 bullet 7 (arbitration) | **OPEN — proposed as owner-accepted debt (R-A9F); explicitly NOT superseded** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
+| Gate 3 bullet 8 (empty/loading/error states) | **OPEN — error-state half already SUPERSEDED and guarded (decision 8-C); remainder proposed as owner-accepted debt (R-A9F)** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
+| Falkor rollback variant (A out-of-band vs B image-based) | **DECIDED 2026-09-20 (R-A9F): VARIANT A.** Variant B withdrawn for this cutover | `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §3, "OWNER DECISION, 2026-09-20" |
+| Staging SMTP sink for the Gate 3 share leg | **DISPOSED (R-A9F): NOT REQUIRED for the initial cutover.** It is a staging configuration and a sub-dependency of Gate 3 b3, not an independent gate item; it changes nothing in production. Carried with b3 | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EVIDENCE_MATRIX.md` row 3 |
 | Legacy `organization-admin`/`project-admin` references resolve one hop to `orgadmin`/`projectadmin` | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role references" |
 | No re-grant of alias-fan-out permissions to `projectuser`; `orgadmin`/`projectadmin` aligned to the release contract by the explicit `align_role_contract` operation (§14) | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role documents are aligned" |
 | F-A9B-2 legal-words admin requires system authority | **CLOSED IN CODE (R-A9D)** | `docs/AUTHZ.md` "System administration is nobody's alias" |

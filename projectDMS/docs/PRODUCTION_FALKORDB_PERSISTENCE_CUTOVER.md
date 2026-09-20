@@ -125,6 +125,36 @@ it must not be chosen by default.
 **Recommendation: Variant A**, with the commit snapshot and the validated rescue
 archive kept as independent nets regardless of variant.
 
+### OWNER DECISION, 2026-09-20 (release programme R-A9F): **VARIANT A**
+
+The owner has chosen **Variant A**. Variant B is **withdrawn** for this cutover and must
+not be substituted for convenience during the window. The decision is recorded in
+`PRODUCTION_CUTOVER_CHECKLIST.md`'s standing-decisions table, which previously carried this
+row as OPEN, and in `docs/R_A9F_OPEN_GATE_MATRIX.md`.
+
+What that binds the R-A9G window to:
+
+* The original production FalkorDB container object (`contraclaim-falkordb-1`, id
+  `de249ee3df2009c0ac12655cad95a9edc6d995d152d4632131d5fe74e5a712fc` as of 2026-09-20,
+  `dir=/FalkorDB`) is **preserved, stopped, not removed**, for the whole acceptance period.
+  Rollback is `docker stop` the new engine and `docker start` the original - never a restore.
+* The release engine is created out of band with `docker run`, under its own name and with a
+  `falkordb` network alias, so **no compose command may address the `falkordb` service**
+  until the owner records acceptance and it is adopted back into compose (section 5.4).
+* `FALKORDB_PASSWORD` is rotated **only after** graph parity is proven (section 4.19), never
+  before.
+* The rescue archive and the commit snapshot are kept as independent nets regardless.
+
+R-A9E already exercised the first three steps of the sequence against live production,
+read-only, on 2026-09-20: a hot rescue archive was taken from `/FalkorDB`
+(`falkordb-persistence-20260920T110319Z-RA9E-hot.tar.gz`, sha256 `ebecc4cea8a273a5...`),
+semantically validated under the `redis-persistence` contract, and restored into a
+**disposable** run-owned volume and engine that came up with `dir=/data` and reproduced the
+production graph exactly - **156 nodes, 220 edges, 7 labels**, matching the live inventory -
+after which the original container was re-checked and found to be the same object, running,
+0 restarts. That proves the procedure; it does **not** substitute for step 4.2, which must
+take a **fresh** archive inside the window.
+
 ---
 
 ## 4. Cutover sequence — Variant A
@@ -132,7 +162,14 @@ archive kept as independent nets regardless of variant.
 Every step is quoted with its own verification. A step that cannot be verified is
 a step that has not been done.
 
-`COMPOSE="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml"`
+`COMPOSE="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml"`
+
+> **The ClamAV override is part of that variable until it is retired.** Production's running
+> `clamav` container carries a three-file `com.docker.compose.project.config_files` label, so a
+> compose command built from only the first two files renders a *different* ClamAV service and
+> will recreate it on `up`. `config` and `ps` still succeed with the wrong file set, so the
+> mistake only surfaces at `up`. The override is retired in one deliberate step **after** the
+> release stack is running and verified - see `PRODUCTION_CUTOVER_CHECKLIST.md` section 13a.
 throughout — **not** the base `docker-compose.yml`, which makes `up` fail on a
 missing `client/.env.development`.
 
