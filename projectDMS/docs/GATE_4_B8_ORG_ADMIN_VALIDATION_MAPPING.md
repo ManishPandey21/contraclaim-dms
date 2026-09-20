@@ -2,7 +2,9 @@
 
 **Bullet:** "Production Org-Admin permissions are manually validated in staging/prod."
 
-**Status: NOT EARNED — UNTICKED.** R-A8W Stage B measured it against staging on
+**Status: EARNED — TICKED in R-A9E Stage B (2026-09-20) on candidate
+`fe728b205ed5dfb20d88040bc44214ca71d11c43`; see "R-A9E Stage B — run of record" below.**
+History: R-A8W Stage B measured it against staging on
 2026-09-13 and it failed on F-A8W-B3 (a foreign organisation read by id answered
 500). R-A8X fixed that defect offline; an offline fix earns nothing, so the bullet
 stays unticked until a real staging execution of the updated spec passes on a
@@ -72,6 +74,56 @@ org admin a billing/subscription administrator (F-A9B-1, fixed). The default
 under measurement, so **the staging run of record must execute against the final
 R-A9B HEAD**; a run against an earlier release measures authorization that no
 longer ships.
+
+### R-A9E Stage B — run of record (2026-09-20)
+
+Run `R-A9E-20260916T081258Z/candidate-fe728b2`, candidate
+`fe728b205ed5dfb20d88040bc44214ca71d11c43` (tree `b936ba25`) on
+`fix/role-assignment-resolution` — the commit `release/contraclaim-rc1` was
+fast-forwarded to in R-A9F. Segment B reset the staging database and ran the fresh
+initializer, so **no production-copy fixture from Segment A was reused**. The stack was
+reached over a run-owned TLS edge (`ra9e-stg-tls`) in front of the deployed staging
+gateway. Evidence files are named by their number in that directory.
+
+* **Spec (`32`): 12/12 passed**, 1 worker, 0 retries, 0 unexpected skips, 0 failures,
+  27.6 s, `CONTRACLAIM_STAGING_E2E=1`, spec sha256 in the runner `26458689ca4451f9`.
+* **Independent manual probes (`35`), outside the spec**, each refusal preceded by its
+  own positive control from the same account in the same run, with the exact expected
+  and actual status recorded. Identity control M1 (`GET /api/users/me` = org1) ran first.
+
+| Row | Positive control (same account, same run) | Measured | Verdict |
+|---|---|---|---|
+| 1 | POST run-owned org1 role with step-up 200, stored org1 | step-up PUT 200; read-back exactly `[dms.document.share, dms.document.view]` | PASS |
+| 2 | the row-1 step-up PUT 200 | PUT without step-up 403; read-back unchanged | PASS |
+| 3 | — | `GET /api/organizations` 200, ids exactly `[org1]` | PASS |
+| 4 | `GET /api/organizations/org1` 200 | org2 403, `leak=false` (existence proven by the DB preflight) | PASS |
+| 5 | — | `GET /api/projects` 200, n=2, every row org1 | PASS |
+| 6 | `GET /api/projects/proj1` 200 | proj2 403 (existence proven by the DB preflight) | PASS |
+| 7 | the unfiltered list of row 5 | `?organization_id=org2` 200 with 0 foreign rows; `X-Org-Id: org2` 200 with 0; header + `GET /api/organizations/org2` 403, `leak=false`. Never 401, never 5xx | PASS |
+| 8 | `GET /api/roles` 200; `GET /api/users` unfiltered 200 | 0 org2 roles and the seeded foreign role not listed; `users?organization_id=org2` 403 with 0 foreign rows | PASS |
+| 9 | each admin page's own `h1` and own API call after navigation | deployed spec test `navigating the admin pages surfaces no foreign data and no forced logout` passed (7.5 s) — the only row carried by the spec rather than a probe | PASS |
+| 10 | POST role naming org1 200, stored org1 | POST role naming org2 200, stored **org1**, not org2 (Disposition A) | PASS |
+| 11 | `GET /api/users/me` 200 org1 | PUT own `organization_id=org2` 403; `me` still org1 | PASS |
+| 12 | GET proj1 200 org1 (12a); unchanged PUT 200 (12b) | re-parent proj1 into org2 403 with the superadmin text (12c); read-back proj1 still org1, same name (12d) | PASS |
+| 13 | own user by id 200; own-org role by id 200 | foreign user by id 403; foreign role by id 403 (the router looks up before the tenant check, so 403 also proves existence) | PASS |
+| 14 | `PUT /api/organizations/org1` unchanged name 200 (14a) | `PUT /api/organizations/org2` unchanged name 403, `leak=false` (14b, counted only after 14a) | PASS |
+
+`ROW_VERDICTS` recorded `true` for every row and for M0/M1/S1/S2; `PROBES_ALL_PASS=true`,
+`probes_exit=0`. **All 14 rows PASS from one staging run of record. The bullet is ticked.**
+
+Sanity properties on the same deployed stack (no gate point of their own):
+
+* **S1, soft-deleted role: PASS.** With the role active the account read proj1 (200);
+  the org admin soft-deleted the run-owned role with step-up (200); the pre-delete
+  session answered **401** (min-iat revocation); a fresh login authenticated (200) and
+  proj1 answered **403**. F-A9A-1 stays closed on a deployed stack.
+* **S2, alias fan-out: PASS — and now measured, not inconclusive.** R-A9C's S2 was
+  invalid because the probe body omitted `organization_id` and both legs answered 422
+  before authorization ran (F-A9C-B2). This run sent a schema-valid body and asserted
+  `not 422` explicitly: the task-only account's unchanged PUT of proj1 answered **403**,
+  while the `dms.project.manage` holder's identical PUT answered **200**, and proj1's
+  name and organisation were unchanged afterwards. F-A9A-2 is therefore measured on a
+  deployment as well as offline.
 
 ### Row 12, traced from source
 
