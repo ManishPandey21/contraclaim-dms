@@ -409,18 +409,114 @@ def test_gate9_bullet_1_is_not_ticked_while_a_blocker_is_open(gate_text: str) ->
     )
 
 
+#: A register carrying every status the real one has ever used, so the classifier
+#: can be exercised independently of what the real register happens to say today.
+SYNTHETIC_REGISTER = """## Current Critical Blocker Register
+
+| ID | Status | Blocker | Evidence | Required resolution |
+| --- | --- | --- | --- | --- |
+| P0-001 | Resolved | something | e | r |
+| P0-002 | Open | something else | e | r |
+| P0-003 | Partially mitigated | a third thing | e | r |
+| P0-004 | Accepted debt - Owner approved for initial cutover | a fourth thing | e | r |
+| P0-005 | Resolved (code); staging proof captured | a fifth thing | e | r |
+"""
+
+#: The same register with every row disposed. A legitimate end state, not an error.
+SYNTHETIC_REGISTER_FULLY_DISPOSED = SYNTHETIC_REGISTER.replace(
+    "| P0-002 | Open |",
+    "| P0-002 | Accepted debt - Owner approved for initial cutover |",
+)
+
+#: A row whose status cell was emptied. The one way to defeat the Open rule by
+#: editing the register rather than by resolving anything.
+SYNTHETIC_REGISTER_BLANK_STATUS = SYNTHETIC_REGISTER.replace(
+    "| P0-002 | Open |", "| P0-002 |  |"
+)
+
+
+def blank_status_rows(text: str) -> List[str]:
+    """Blocker rows whose status cell is empty or a placeholder dash."""
+    found = []
+    for line in text.splitlines():
+        match = BLOCKER_ROW.match(line.strip())
+        if match and match.group(2).strip() in {"", "-", "--", "—"}:
+            found.append(match.group(1))
+    return found
+
+
 def test_the_open_blocker_rule_reads_the_real_register(gate_text: str) -> None:
-    """Anti-vacuity: the register exists, is parsed, and has rows.
+    """Anti-vacuity: the register exists, is parsed, and is classified correctly.
 
     A guard pointed at a table it cannot parse is a guard that always passes.
+
+    **Re-anchored 2026-09-20 (R-A9G-0) under narrowly scoped owner
+    authorisation, exactly as the previous version of this docstring
+    instructed.** It proved non-vacuity by asserting that the real register
+    still listed *something* as Open - true for as long as P0-002 and P0-008
+    were. The release owner then disposed P0-002 as dated accepted debt
+    (follow-up 2026-10-15) and P0-008 closed on the Gate 9 bullet 6 sign-off, so
+    the real register legitimately holds **zero** Open rows and that assertion
+    would fire for the one reason it was never meant to: success. Keeping it
+    would make this guard contradict the gate state it exists to validate.
+
+    Nothing is weakened. What moved is only *where* parser non-vacuity is
+    proven: onto synthetic registers the classifier has to get right, which no
+    operational state can invalidate. The real register is still parsed, still
+    required to have rows, and now additionally required to carry a status in
+    every row - so emptying a status cell to dodge the Open rule fails here
+    instead of passing silently. The production rule itself is untouched and
+    lives next door in
+    `test_gate9_bullet_1_is_not_ticked_while_a_blocker_is_open`: Gate 9 bullet 1
+    must not be ticked while any real row parses as Open.
     """
     rows = [
-        match.group(1)
+        (match.group(1), match.group(2).strip())
         for match in (BLOCKER_ROW.match(line.strip()) for line in gate_text.splitlines())
         if match
     ]
     assert len(rows) >= 5, f"the blocker register parsed to {len(rows)} rows"
-    assert open_blockers(gate_text), (
-        "no blocker parses as Open. If they are genuinely all closed, re-anchor "
-        "this control; today P0-002 and P0-008 are open"
+
+    blank = blank_status_rows(gate_text)
+    assert not blank, (
+        "these real blocker rows carry no status, so the Open rule cannot "
+        "classify them and Gate 9 bullet 1 would pass by default. A row is "
+        f"disposed by recording a disposition, never by emptying the cell: {blank}"
+    )
+
+    # --- the classifier, exercised against known input ---------------------- #
+    classified = open_blockers(SYNTHETIC_REGISTER)
+    assert classified == ["P0-002"], (
+        "the Open-row classifier no longer reads a register it is handed: it "
+        f"returned {classified} for a table with exactly one Open row. Gate 9 "
+        "bullet 1's guard is only ever as good as this"
+    )
+    # Each disposition, named, so a regression says which one broke.
+    assert "P0-001" not in classified, "a Resolved row is being read as Open"
+    assert "P0-003" not in classified, "a Partially mitigated row is being read as Open"
+    assert "P0-004" not in classified, (
+        "an accepted-debt disposition is being read as Open; formally disposing "
+        "a row and leaving it open are different things, and the guard has to "
+        "tell them apart"
+    )
+    assert "P0-005" not in classified, (
+        "a qualified Resolved status is being read as Open; the rule matches the "
+        "whole status cell, not a substring of it"
+    )
+
+    # --- zero Open rows is a legitimate state, not a parse failure ----------- #
+    assert open_blockers(SYNTHETIC_REGISTER_FULLY_DISPOSED) == [], (
+        "a fully disposed register must classify as zero Open rows. If this "
+        "returns anything, the release can never legitimately close Gate 9 "
+        "bullet 1 and the guard has become unsatisfiable"
+    )
+
+    # --- and the blank-status detector is not vacuous either ----------------- #
+    assert blank_status_rows(SYNTHETIC_REGISTER_BLANK_STATUS) == ["P0-002"], (
+        "the blank-status detector no longer sees an emptied status cell, so "
+        "the check against the real register above proves nothing"
+    )
+    assert blank_status_rows(SYNTHETIC_REGISTER) == [], (
+        "the blank-status detector fires on a register where every row has a "
+        "status; it would fail the real document for no reason"
     )

@@ -1,7 +1,7 @@
 # Third-party production images — cutover security disposition
 
-**Status: EXCEPTED UNTIL 2026-10-15 — see "R-A9E cutover exception" at the end of this
-document.** R-A9E (owner decision, 2026-09-16): MongoDB, FalkorDB, Qdrant and httpd are
+**Status: EXCEPTED UNTIL 2026-10-15, AND ACCEPTED BY THE RELEASE OWNER ON 2026-09-20 — see
+"R-A9E cutover exception" and "R-A9G-0 owner acceptance" at the end of this document.** R-A9E (owner decision, 2026-09-16): MongoDB, FalkorDB, Qdrant and httpd are
 carried under a dated, bounded exception for the initial production cutover, so they no
 longer block it *until that exception expires on 2026-10-15*; remediation runs in the
 window 2026-10-06 → 2026-10-15, httpd first. This is not permanent acceptance — on expiry
@@ -313,3 +313,33 @@ drill runs for all four candidates on disposable infrastructure, and adoption or
 **httpd first** (public path, lowest risk), then MongoDB, then a decision on FalkorDB and
 Qdrant — which also unblocks the derived-patched-image option that would close the
 Debian/Alpine class for all four at once.
+
+## R-A9G-0 owner acceptance — 2026-09-20
+
+**The release owner accepted the dated exception above, for THIS INITIAL CUTOVER ONLY.**
+Verbatim record: `docs/R_A9G_OWNER_DECISION_RECORD.md` section 8. This section adds the
+owner's acceptance and nothing else — **no image was upgraded, no digest moved, and no
+finding count was re-measured in R-A9G-0.**
+
+| Image | Digest (index), as pinned in the production compose files | Fixable C/H | Expiry | Remediation window | Post-cutover owner |
+|---|---|---:|---|---|---|
+| MongoDB `mongo:8.0` | `sha256:ffa440e8d62533e24a67696ae1bbb46e610ebb3167d65abd122b496ae06d28e6` | **273** | 2026-10-15 | 2026-10-06 → 2026-10-15 | Release Owner |
+| FalkorDB `falkordb/falkordb:v4.0.8` | `sha256:af5f2aa035390f04fa6d1f0c6353669f5f75c101f6b4f385fcb672a288b4edb8` | **148** | 2026-10-15 | 2026-10-06 → 2026-10-15 | Release Owner |
+| Qdrant `qdrant/qdrant:v1.12.5` | `sha256:05fecce7dce45d1254e0468bc037e8210e187fd56fa847688b012293d5f08aae` | **84** | 2026-10-15 | 2026-10-06 → 2026-10-15 | Release Owner |
+| Apache httpd `httpd:2.4` | `sha256:393435ee1a31437adeb1f03c134224c9ce5fa5f527e8c0cb9bea576b0d6fc742` | **51** | 2026-10-15 | 2026-10-06 → 2026-10-15, **first** | Release Owner |
+
+Total **556** fixable CRITICAL/HIGH, as re-measured on 2026-09-16T05:12Z against the image
+id each running production container uses. Use the exact digests above and in
+`docs/R_A9F_PRODUCTION_MANIFEST.md`; never a floating tag.
+
+**Mandatory review trigger, 2026-10-06.** Re-scan the exact deployed digests on the first
+day of the remediation window. **A materially increased finding count, a newly exploitable
+CRITICAL, or a new public-path risk may accelerate remediation ahead of the stated window**
+rather than waiting for 2026-10-15.
+
+**Not automatically renewable. Silence does not extend it.** On 2026-10-15 the exception
+lapses and the cutover blocker is live again for any image still on these digests, unless a
+new dated owner decision is written into this document.
+
+**ClamAV 1.4.6 requires no exception. Redis requires no exception.** Confirmed by the owner
+on 2026-09-20; both scan 0 fixable CRITICAL/HIGH.

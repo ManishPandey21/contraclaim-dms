@@ -1,26 +1,32 @@
 # R-A9G production cutover plan — scope, window, ordering
 
-**Status: PLAN ONLY. NOT AUTHORISED. NOT SCHEDULED. NOT EXECUTED.**
+**Status: PLAN ONLY. NOT SCHEDULED. NOT EXECUTED.**
 Written 2026-09-20 in release programme R-A9F, which made no production change of any kind.
+
+**Updated 2026-09-20 (R-A9G-0): six of the seven preconditions below are now recorded.** The
+release owner disposed every open gate item and signed Gate 9 bullet 6
+(`docs/R_A9G_OWNER_DECISION_RECORD.md`). **The seventh — the maintenance window — is an owner
+grant and has not been given, so this plan is still not authorised to run and production
+deployment remains NONE.**
 
 This file is the *shape* of the window: what is in scope, how long it needs, and in what order
 the existing documents are executed. It does not restate their steps. Where it and another
 document disagree, **`PRODUCTION_CUTOVER_CHECKLIST.md` is the canonical ordering** and this file
 is wrong.
 
-## Preconditions — none of which R-A9F can satisfy
+## Preconditions — none of which R-A9F could satisfy
 
 R-A9G may not start until every row is recorded in writing.
 
-| # | Precondition | Where |
-|---|---|---|
-| 1 | The owner accepts high-risk items A1–A9 | `docs/R_A9F_OPEN_GATE_MATRIX.md`, "Consolidated high-risk acceptance list" |
-| 2 | Gate 9 b2 ticked (high-severity risks fixed or explicitly accepted) | release gate |
-| 3 | Gate 9 b1 decided — close P0-002/P0-008 or convert the register rows to accepted debt | release gate + Critical Blocker Register |
-| 4 | Gate 9 b5 ticked by the owner (legitimately tickable now; R-A9F left it) | release gate |
-| 5 | Gate 9 b6 — the release owner signs off | release gate |
-| 6 | The 3 production roles / 4 users carried from R-A9B reviewed | R-A9B receipt §16 |
-| 7 | The maintenance window granted, with the hard recovery start agreed and recorded | this file |
+| # | Precondition | State | Where |
+|---|---|---|---|
+| 1 | The owner accepts high-risk items A1–A9 | **RECORDED 2026-09-20** — individual disposition: A1–A8 accepted as bounded residual risk for this release only, each with a 2026-10-15 follow-up; A9 **discharged**, not accepted | `docs/R_A9G_OWNER_DECISION_RECORD.md` §2; `docs/R_A9F_OPEN_GATE_MATRIX.md` |
+| 2 | Gate 9 b2 ticked (high-severity risks fixed or explicitly accepted) | **RECORDED 2026-09-20** | release gate |
+| 3 | Gate 9 b1 decided — close P0-002/P0-008 or convert the register rows to accepted debt | **RECORDED 2026-09-20** — converted: P0-002 is `Accepted debt - Owner approved for initial cutover` (follow-up 2026-10-15), P0-008 closed on the b6 signature. **Formal disposition, not technical closure** | release gate + Critical Blocker Register |
+| 4 | Gate 9 b5 ticked by the owner | **RECORDED 2026-09-20** — the threshold was met at 85 / raw 85.33 **before** the tick, which is the non-circularity condition | release gate |
+| 5 | Gate 9 b6 — the release owner signs off | **RECORDED 2026-09-20** — signer **Release Owner** | release gate |
+| 6 | The 3 production roles / 4 users carried from R-A9B reviewed | **RECORDED 2026-09-20** — reviewed; **NO RE-GRANT**; the removal is intended; precondition discharged | R-A9B receipt §16; `docs/R_A9G_OWNER_DECISION_RECORD.md` §7 |
+| 7 | The maintenance window granted, with the hard recovery start agreed and recorded | **OUTSTANDING — the only one.** No start time is invented anywhere in this repository | this file |
 
 ## Window
 
@@ -33,7 +39,8 @@ R-A9G may not start until every row is recorded in writing.
 | Gate | `scripts/check_maintenance_time_budget.py --recovery-reserve-minutes 90 --execution-budget-minutes 120`, run **before** the stop and **again immediately before** the stop command |
 | Expected outage | materially longer than R-A9E's 29 m 54 s or R-A9C's 8 m 28 s: those windows only stopped and restarted production, while this one deploys, migrates, aligns roles, moves Falkor persistence and rotates a credential |
 
-**Do not schedule this automatically.** The window is an owner grant.
+**Do not schedule this automatically.** The window is an owner grant, and as of 2026-09-20 it
+is the single remaining precondition. Everything else in the table above is recorded.
 
 Why 8 hours rather than the 5–6 the checklist carried: that figure was sized for a deploy plus
 migrations. R-A9G additionally carries the explicit role alignment, the FalkorDB Variant-A

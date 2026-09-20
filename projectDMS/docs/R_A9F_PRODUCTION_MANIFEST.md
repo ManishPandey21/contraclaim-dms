@@ -29,12 +29,90 @@ either.
 ## 2. First-party images — certified in R-A9E, not to be rebuilt
 
 R-A9E built these from the certified checkout at `fe728b2` (`docker build --pull --no-cache`)
-and scanned them under the exact CI policy. **The release-only commits after the
-fast-forward change no build input**, so these bytes remain the certified bytes for this
-release: the Docker build contexts are `./backend`, `./client` and `./services/graphiti`,
-and every subsequent commit touches `docs/` only. If a release tag is required, **retag these
-exact image ids — do not rebuild.** A rebuild picks up newer base layers, and that would
-require a fresh scan and, for anything it changes, fresh staging evidence.
+and scanned them under the exact CI policy. These bytes remain the certified bytes for this
+release. If a release tag is required, **retag these exact image ids — do not rebuild.** A
+rebuild picks up newer base layers, and that would require a fresh scan and, for anything it
+changes, fresh staging evidence.
+
+### Provenance model — precise, after the R-A9G-0 owner decision (2026-09-20)
+
+The earlier absolute form of this paragraph said the release-only commits change **no** build
+input. That is no longer exactly true, and the precise statement replaces it:
+
+> **The final release runtime production source and deployment configuration are byte-identical
+> to the certified R-A9E candidate, except for one non-runtime Gate 9 test file located inside
+> the Docker build context.**
+
+| Field | Value |
+|---|---|
+| CERTIFIED CANDIDATE | `fe728b205ed5dfb20d88040bc44214ca71d11c43` |
+| CERTIFIED BACKEND IMAGE | `sha256:52fd95afb62f36b77521b0926ec4cafd13235b029fcbc2351f06d942db9a23fb` |
+| CERTIFIED CLIENT IMAGE | `sha256:c7ccd59ec4d4f5a369d55d095773a90533a2079d786da0f1f2d0dff98d4e00f8` |
+| FINAL RELEASE HEAD | the R-A9G-0 owner-decision commit on `release/contraclaim-rc1` |
+| Runtime production-code differences | **0** |
+| Runtime configuration differences | **0** |
+| Dependency differences | **0** |
+| Migration differences | **0** |
+| Dockerfile differences | **0** |
+| Compose differences | **0** |
+| **Docker build-context differences** | **1** |
+| Exact build-context-only differing file | `backend/rbac_backend/tests/test_gate9_scoreability.py` |
+| Classification | non-runtime Gate 9 security / release guard test |
+| Runtime-imported differences | **0** |
+| `./client` context | **0** differing files |
+| `./services/graphiti` context | **0** differing files |
+
+Measured with `git diff --name-only fe728b2 -- <context>` against the release working tree.
+
+**The build-context count is deliberately reported as 1, not 0.** The differing file is a test,
+it is imported by nothing at runtime, and it changes no product behaviour - but it lives inside
+the `./backend` Docker build context, and `backend/Dockerfile` copies that context with
+`COPY . .`. Recording it as "0 build-input differences" would be the comfortable number rather
+than the true one, and it is exactly the claim this exception exists to qualify. The honest pair
+of statements is: **runtime-imported differences 0, Docker build-context differences 1.**
+
+**Why that file changed at all.** The owner disposed P0-002 as dated accepted debt and closed
+P0-008 on the Gate 9 bullet 6 sign-off, which legitimately left the Critical Blocker Register
+with zero `Open` rows. The guard's anti-vacuity control asserted that the *real* register still
+carried an `Open` row, so it began failing for the one reason it was never meant to — success.
+Its own docstring instructed the re-anchor, and the owner authorised it narrowly.
+
+**Runtime-import proof, recorded rather than assumed.** No file in the repository references
+`test_gate9_scoreability` outside that file itself; no runtime module imports the
+`rbac_backend.tests` package, which is not even a package (there is no `__init__.py`); no
+`pytest11` entry point or `pytest_plugins` declaration exists outside the tests; the only
+dynamic imports in runtime source are scoped to `ai_workflows.langgraph.*` and to hardcoded
+service lists in `manual/validation/`. Importing all four runtime entrypoints —
+`rbac_backend.main`, `rbac_backend.worker`, `rbac_backend.scripts.migrate_database` and
+`rbac_backend.scripts.align_role_contract` — loads **zero** `rbac_backend.tests` modules and
+does not load `test_gate9_scoreability`.
+
+### DEPLOYABLE ARTIFACT RULE — binding
+
+| Field | Value |
+|---|---|
+| **DEPLOYABLE BACKEND ARTIFACT** | the **R-A9E certified image digest** `sha256:52fd95afb62f36b77521b0926ec4cafd13235b029fcbc2351f06d942db9a23fb` |
+| **DEPLOYABLE CLIENT ARTIFACT** | the R-A9E certified image digest `sha256:c7ccd59ec4d4f5a369d55d095773a90533a2079d786da0f1f2d0dff98d4e00f8` |
+| **FINAL RELEASE SOURCE HEAD** | contains one later non-runtime, test-only divergence |
+| **Provenance relationship** | **runtime-equivalent, but not whole-build-context byte-identical** |
+
+**R-A9G MUST deploy the exact backend image already certified in R-A9E.** Do **not** substitute
+a backend image rebuilt from the documentation/test-only release HEAD, and do **not** move this
+manifest's deployable digest to a new CI-built image.
+
+**Final-CI Docker output is verification only.** The CI pipeline still runs its Docker
+build-and-scan job on the final HEAD. If that build produces a *different* backend image digest
+because the changed test file is copied into the image, that image is **CI VERIFICATION OUTPUT
+ONLY**. It must still satisfy the normal vulnerability policy, but its existence does not
+replace the R-A9E certified deployment artefact, and the two are recorded separately and never
+conflated.
+
+**Gate 3 b2 and Gate 4 b8 are not invalidated**, for reasons recorded in
+`docs/PRODUCTION_READINESS_RELEASE_GATE.md`: both were measured against the exact R-A9E
+certified runtime image, R-A9G deploys that exact image, no runtime source used by it changed,
+and the sole later divergence is an unimported guard. **The exception does not broaden** to any
+future change in runtime source, dependencies, Dockerfile, compose, migrations, runtime
+configuration, entrypoints, worker code or client runtime code.
 
 | Service(s) | Staging tag built in R-A9E | Image id (sha256) | Trivy (CI policy) |
 |---|---|---|---|
@@ -128,17 +206,29 @@ should be cleared before the window: `ra9bs-e2e` (a leftover R-A9B staging Playw
 
 ### Procedure and disposition documents
 
-| Document | sha256 |
-|---|---|
-| `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` | `a5b50a1d8acb09c0d044f7e8c86a01ba24b501803e1e19e9d95fb1f9dfd85656` |
-| `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` | `4b697fa53508285334c10e06270df3676221e940d3337e3222100dce86892634` |
-| `docs/PRODUCTION_CUTOVER_CHECKLIST.md` | `9cd82014147d8e3cf9405fc4ddcc9972d1681d0eb0a581bd8a984216190e0238` |
-| `docs/PRODUCTION_READINESS_RELEASE_GATE.md` | `a38f9dee7bbd4ee36b48e6b52015e9b5741098f6404760124a7760604fb8614a` |
-| `docs/R_A9F_ROLE_ALIGNMENT_CUTOVER_DIFF.md` | `522bf14816f3829d5dfbae209a9f1d2a729af5c859d74242420e28751b97be3f` |
-| `docs/R_A9F_OPEN_GATE_MATRIX.md` | `b905529fbc1a02236d23a27dd7812141244ec24c292d5c809cd1fed4fa00ffff` |
-| `docs/GATE_4_B8_ORG_ADMIN_VALIDATION_MAPPING.md` | `1d7ff5c5f57414a0592c2941396ce2d0131f2342b35625058b4ba14d1864c2d9` |
-| `docs/GATE_3_EVIDENCE_MATRIX.md` | `9f31e9e2755dde1b43c36213d0285bd417e4d1e8ecb0486862c725fcc5c5f82c` |
-| `docs/CLAMAV_SIGNATURE_FRESHNESS.md` | `eae83f988f5c4085eb52eb8eae1d51bc7d9f7e60b0a1549b3c258ad946202f30` |
+**Re-hashed 2026-09-20 in release programme R-A9G-0.** Five of these documents changed when
+the owner's decisions were recorded, and one was added. **Nothing about the release build
+changed**: every path below is under `projectDMS/docs/`, which is in none of the three Docker
+build contexts, so the image provenance and the Gate 3 b2 / Gate 4 b8 ticks are untouched. The
+R-A9F values are kept beside the current ones so the change is visible rather than silent.
+
+| Document | sha256 (current, R-A9G-0) | sha256 at R-A9F | Changed? |
+|---|---|---|---|
+| `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` | `18ae2fad5c0def3b7f5ce76115e53e714c4632ff0221657649fd3d4a31b682ca` | `a5b50a1d8acb09c0d044f7e8c86a01ba24b501803e1e19e9d95fb1f9dfd85656` | yes - owner acceptance recorded |
+| `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` | `d47facbf9e5d18bba70a677d57ce252432de733e521f2b4e1e5f500454408372` | `4b697fa53508285334c10e06270df3676221e940d3337e3222100dce86892634` | yes - Variant A re-confirmed |
+| `docs/PRODUCTION_CUTOVER_CHECKLIST.md` | `4f6b7642f189e652f1cdc779c95228b0dcc54f687112bf97d85be2ae91c186bf` | `9cd82014147d8e3cf9405fc4ddcc9972d1681d0eb0a581bd8a984216190e0238` | yes - preconditions and standing decisions |
+| `docs/PRODUCTION_READINESS_RELEASE_GATE.md` | `9cdfd140fa2487539a3118679527de7a5c0882a85c6c173f6d67e82fb3889555` | `a38f9dee7bbd4ee36b48e6b52015e9b5741098f6404760124a7760604fb8614a` | yes - Gate 9 1/2/5/6 ticked, register disposed |
+| `docs/R_A9F_OPEN_GATE_MATRIX.md` | `79ef030ce7b255b9715add09966b8ba33ac2bb44a63de640c50f273678800fe4` | `b905529fbc1a02236d23a27dd7812141244ec24c292d5c809cd1fed4fa00ffff` | yes - owner answers per row |
+| `docs/R_A9G_OWNER_DECISION_RECORD.md` | `03ee5da6eeaeca65d34c239c4923ff67a0ca41b9b99487cb9132d25be3f4f61c` | - | **new in R-A9G-0** |
+| `docs/R_A9G_CUTOVER_PLAN.md` | `da07a8c489e2102a361d6ccf7dd594f84ad1a8e114deb1baa0f75e6bf05b049c` | not previously hashed here | yes - preconditions 1-6 recorded |
+| `docs/R_A9F_ROLE_ALIGNMENT_CUTOVER_DIFF.md` | `522bf14816f3829d5dfbae209a9f1d2a729af5c859d74242420e28751b97be3f` | same | **no - frozen** |
+| `docs/GATE_4_B8_ORG_ADMIN_VALIDATION_MAPPING.md` | `1d7ff5c5f57414a0592c2941396ce2d0131f2342b35625058b4ba14d1864c2d9` | same | **no** |
+| `docs/GATE_3_EVIDENCE_MATRIX.md` | `9f31e9e2755dde1b43c36213d0285bd417e4d1e8ecb0486862c725fcc5c5f82c` | same | **no** |
+| `docs/CLAMAV_SIGNATURE_FRESHNESS.md` | `eae83f988f5c4085eb52eb8eae1d51bc7d9f7e60b0a1549b3c258ad946202f30` | same | **no** |
+
+The frozen role-alignment diff is deliberately in the unchanged set: the owner's decision
+confirmed it rather than altering it, so the production run stays a comparison against
+bytes that have not moved since R-A9F.
 
 > These hashes are taken at the moment this manifest is generated. The manifest is committed
 > in the same commit as the documents it hashes, so they are the committed bytes — except for

@@ -1,8 +1,8 @@
 # Production Readiness Release Gate
 
-Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 85/100 (raw 85.33, meeting the 85 target), re-derived from `scripts/production_readiness_score.py` on 2026-09-20 in release programme R-A9F after the R-A9E Stage B staging execution on candidate `fe728b205ed5dfb20d88040bc44214ca71d11c43` earned Gate 3 bullet 2 and Gate 4 bullet 8, and before that on 2026-09-14 in release programme R-A8Z (82, raw 82.50) after its Stage B staging execution earned Gate 5 bullet 6 (live antivirus effective on a deployed stack) and re-earned Gate 9 bullets 3 and 4, and left Gate 3 bullet 2 and Gate 4 bullet 8 open on a measured spec defect (F-A8Z-B1), and before that on 2026-09-14 in release programme R-A8Y (78, raw 78.17), which added Gate 5 bullet 6 unticked (live antivirus effectiveness - production's clamd was serving a 70-day-old signature database behind every green check) and withdrew Gate 9 bullet 4 as stale, and before that on 2026-09-13 in release programme R-A8X (81, raw 81.17), which withdrew Gate 9 bullet 3 because its smoke passed only after an operator replayed a failed `production_backup.sh` by hand (F-A8W-B1), and before that after the R-A8W Stage B staging execution earned Gate 6 bullet 3 and Gate 9 bullet 4 and left Gate 3 bullet 2 and Gate 4 bullet 8 open on measured failures, and before that on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
+Status: Phase 8 final production-readiness audit recorded; current launch-readiness score is 91/100 (raw 90.67, exceeding the 85 target), re-derived from `scripts/production_readiness_score.py` on 2026-09-20 in release programme R-A9G-0 after the release owner ticked Gate 9 bullets 1, 2, 5 and 6 in a single owner-decision act (`docs/R_A9G_OWNER_DECISION_RECORD.md`) - four checkboxes and no new measurement, so the figure the sealed R-A9E staging evidence measured remains 85 (raw 85.33) and is the number to compare that evidence against. Before that it read 85/100 (raw 85.33) on 2026-09-20 in release programme R-A9F after the R-A9E Stage B staging execution on candidate `fe728b205ed5dfb20d88040bc44214ca71d11c43` earned Gate 3 bullet 2 and Gate 4 bullet 8, and before that on 2026-09-14 in release programme R-A8Z (82, raw 82.50) after its Stage B staging execution earned Gate 5 bullet 6 (live antivirus effective on a deployed stack) and re-earned Gate 9 bullets 3 and 4, and left Gate 3 bullet 2 and Gate 4 bullet 8 open on a measured spec defect (F-A8Z-B1), and before that on 2026-09-14 in release programme R-A8Y (78, raw 78.17), which added Gate 5 bullet 6 unticked (live antivirus effectiveness - production's clamd was serving a 70-day-old signature database behind every green check) and withdrew Gate 9 bullet 4 as stale, and before that on 2026-09-13 in release programme R-A8X (81, raw 81.17), which withdrew Gate 9 bullet 3 because its smoke passed only after an operator replayed a failed `production_backup.sh` by hand (F-A8W-B1), and before that after the R-A8W Stage B staging execution earned Gate 6 bullet 3 and Gate 9 bullet 4 and left Gate 3 bullet 2 and Gate 4 bullet 8 open on measured failures, and before that on 2026-09-09 after release programme R-A8S closed Gate 5 bullets 3 and 5 and attached the fresh-install evidence to Gate 6 bullet 2, and after R-A8R re-measured `npm run lint` as passing and after the R-A8Q Stage B staging execution certified Gate 3 bullet 1 against a deployed stack over TLS and re-confirmed Gate 2, Gate 7 and Gate 8 on current images, and after the R-A8M staging execution certified Gate 2 (6/6), Gate 7 (7/7) and Gate 8 (7/8) and the release owner's 2026-09-08 RPO/RTO decision closed Gate 8's eighth bullet as RECORDED (not demonstrated), after verifying FalkorDB backup and recovery with a destructive disposable drill (release programme R-A4), and after closing the upload-antivirus gate (P0-005) in code and adding Org-Admin permission HTTP-boundary regression coverage (P0-006). Live-integration, E2E, backup/restore, and sign-off blockers remain; the Python dependency scan is green as of release programme R-A5 with one recorded no-fix exception.
 
-Current verdict: **Ready**, which is the scorer's own term for the current checkbox state and not a promotion decision. Production promotion remains blocked: the score now meets its target, but Gate 9 has two of six bullets earned (R-A8Z re-earned the smoke after deploy and the smoke after the restore drill) and its four remaining bullets - critical blockers closed, high-severity risks disposed, the readiness-score assertion, and the release owner's sign-off - are open. The open-bullet disposition matrix for the initial cutover is `docs/R_A9F_OPEN_GATE_MATRIX.md`. ClamAV signature freshness (F-A8X-2) is root-caused, fixed on the release branch (`docs/CLAMAV_SIGNATURE_FRESHNESS.md`), proven on the R-A8Z staging deployment, and applied to production's `clamav` service alone under a bounded owner authorization in R-A8Z (no other production service changed). Third-party production images carry 556 fixable CRITICAL/HIGH findings (re-measured 2026-09-16T05:12Z by running image id: MongoDB 273, FalkorDB 148, Qdrant 84, httpd 51; ClamAV and Redis 0). They no longer block cutover on their own, because R-A9E carries them under a **dated exception that expires on 2026-10-15** with a 2026-10-06 → 2026-10-15 remediation window (`docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md`, "R-A9E cutover exception"). That is a bounded deferral, not acceptance: on expiry the blocker is live again for any image still on those digests.
+Current verdict: **Ready**, which is the scorer's own term for the current checkbox state and not a promotion decision. Gate 9 is now **6/6**: the release owner ticked bullets 1, 2 and 5 and signed bullet 6 on 2026-09-20 (`docs/R_A9G_OWNER_DECISION_RECORD.md`), after R-A8Z had earned bullets 3 and 4 against staging. **The gate conditions for production promotion are therefore satisfied, and one authorisation is not: the R-A9G maintenance window is an owner grant and has not been given.** Read the Gate 9 bullets for what those ticks rest on - bullet 1 was reached by formally disposing P0-002 as dated accepted debt with a 2026-10-15 follow-up, not by capturing the live-integration proof, and Gate 3 remains 2/9 with six browser-E2E bullets carried as owner-accepted debt under the same deadline. The open-bullet disposition matrix for the initial cutover is `docs/R_A9F_OPEN_GATE_MATRIX.md`; the owner's verbatim decisions are `docs/R_A9G_OWNER_DECISION_RECORD.md`. ClamAV signature freshness (F-A8X-2) is root-caused, fixed on the release branch (`docs/CLAMAV_SIGNATURE_FRESHNESS.md`), proven on the R-A8Z staging deployment, and applied to production's `clamav` service alone under a bounded owner authorization in R-A8Z (no other production service changed). Third-party production images carry 556 fixable CRITICAL/HIGH findings (re-measured 2026-09-16T05:12Z by running image id: MongoDB 273, FalkorDB 148, Qdrant 84, httpd 51; ClamAV and Redis 0). They no longer block cutover on their own, because R-A9E carries them under a **dated exception that expires on 2026-10-15** with a 2026-10-06 → 2026-10-15 remediation window (`docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md`, "R-A9E cutover exception"). That is a bounded deferral, not acceptance: on expiry the blocker is live again for any image still on those digests.
 
 **What the ticks above are evidence for, and what they are not (R-A9F, 2026-09-20).** The runtime
 code certified by the R-A9E Stage B staging execution is commit
@@ -26,6 +26,54 @@ change no runtime source, no Dockerfile, no compose file, no migration, no seed 
 is what keeps the R-A9E images and their scans valid for this HEAD. No staging run has been executed
 against a release HEAD later than `fe728b2`, and none is claimed. If a future release commit touches
 any build input, the R-A9E image provenance and these two ticks are stale and must be re-earned.
+
+**One narrow, owner-accepted exception, R-A9G-0, 2026-09-20.** The R-A9G-0 owner-decision commit
+also changes **one** file inside a Docker build context:
+`backend/rbac_backend/tests/test_gate9_scoreability.py`, the anti-vacuity guard for Gate 9
+bullet 1, re-anchored because the owner's disposition of P0-002 and closure of P0-008
+legitimately left the blocker register with zero `Open` rows. Measured against the certified
+candidate `fe728b2`, and stated as the exact field set rather than a rounded summary:
+
+| Field | Value |
+|---|---|
+| Runtime production-code differences | **0** |
+| Runtime configuration differences | **0** |
+| Dependency differences | **0** |
+| Migration differences | **0** |
+| Dockerfile differences | **0** |
+| Compose differences | **0** |
+| **Docker build-context differences** | **1** |
+| Exact build-context-only differing file | `backend/rbac_backend/tests/test_gate9_scoreability.py` |
+| Classification | non-runtime Gate 9 security / release guard test |
+| Runtime-imported differences | **0** |
+| `./client` context | **0** differing files |
+| `./services/graphiti` context | **0** differing files |
+
+**The build-context count is 1, not 0, and is reported that way deliberately.** The file is a
+test that nothing imports at runtime, but it sits inside the `./backend` build context and
+`backend/Dockerfile` copies that context with `COPY . .`. Calling it "0 build-input differences"
+would be the comfortable number rather than the true one, and it is precisely the claim this
+exception exists to qualify.
+
+So the accurate statement is no longer "the final release build inputs are byte-identical to the
+certified candidate". It is: **the final release runtime production source and deployment
+configuration are byte-identical to the certified R-A9E candidate, except for one non-runtime
+Gate 9 guard test that happens to sit inside the Docker build context.** Proven, not assumed:
+no file in the repository references that module outside itself; nothing imports the
+`rbac_backend.tests` package from runtime (it is not even a package - it has no `__init__.py`);
+no pytest plugin is registered outside the tests; and importing all four runtime entrypoints
+(`rbac_backend.main`, `rbac_backend.worker`, `rbac_backend.scripts.migrate_database`,
+`rbac_backend.scripts.align_role_contract`) loads **zero** `rbac_backend.tests` modules.
+
+**Gate 3 bullet 2 and Gate 4 bullet 8 are NOT invalidated by this**, and the reason is recorded
+rather than asserted: both were measured against the exact R-A9E certified runtime image; R-A9G
+deploys **that exact image** (`docs/R_A9F_PRODUCTION_MANIFEST.md` pins it and forbids
+substituting a rebuild); no runtime production source used by that image has changed; and the
+sole later divergence is an unimported release guard. The measured deployed behaviour is
+therefore the behaviour being promoted. **This exception does not broaden.** Any future change
+to runtime source, dependencies, the Dockerfile, compose, a migration, runtime configuration, an
+entrypoint, worker code or client runtime code stales the relevant image and staging provenance
+normally.
 
 This document is the tracked release-control checklist for moving Contraclaim DMS from the current hardening branch to a production candidate. Until every launch gate below is satisfied, feature work should be frozen except for production-readiness fixes, test fixes, security fixes, operational hardening, and documentation needed to prove readiness.
 
@@ -516,12 +564,12 @@ time. No production S3 architecture change is authorised in this phase.
 
 ### Gate 9: Final Production Readiness Review
 
-- [ ] Critical blockers closed.
-- [ ] High severity risks fixed or explicitly accepted.
+- [x] Critical blockers closed. evidence: owner decision 2026-09-20 recorded verbatim in `docs/R_A9G_OWNER_DECISION_RECORD.md`. No row of the Current Critical Blocker Register below parses as Open. **P0-002 is FORMALLY DISPOSED as dated accepted debt - owner-approved for this initial cutover with a 2026-10-15 follow-up - and is NOT technically closed:** the combined live AI/vector/graph integration proof has still never been captured, and nothing in this tick asserts otherwise. P0-008 closes on the release owner's sign-off in bullet 6, the fifth and last of its five named required resolutions; the other four - staging deploy, smoke after deploy, smoke after restore drill, and the readiness re-derivation - were measured in R-A8Z and re-derived in R-A9F. P0-003 and P0-007 remain Partially mitigated and were never Open under this rule.
+- [x] High severity risks fixed or explicitly accepted. evidence: owner decision 2026-09-20, `docs/R_A9G_OWNER_DECISION_RECORD.md`. The consolidated high-risk list A1-A9 in `docs/R_A9F_OPEN_GATE_MATRIX.md` is fully disposed. A1-A8 are explicitly ACCEPTED as bounded residual risk for this initial cutover only, not permanent waivers: A1 (deployed-browser E2E gaps, b7 prioritised), A2 (degraded/empty/loading states, structural guards and the generated route denominator remain mandatory), A3 (P0-002), A4 (P0-007), A6 (shared S3 bucket, post-release remediation must establish an independent backup failure domain) and A7 (RPO/RTO recorded not demonstrated, quarterly staging restore drills remain mandatory) each carry a **2026-10-15 follow-up deadline**; A5 is the dated third-party image exception (expiry 2026-10-15, remediation 2026-10-06 to 2026-10-15, httpd first, post-cutover owner Release Owner, `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md`); A8 is accepted only while `ARBITRATION_ENGINE_ROLLOUT_MODE=off` and `ARBITRATION_ENGINE_PRODUCTION_ACCEPTED=false`, and authorises no promotion to primary. **A9 is DISCHARGED, not accepted as debt:** the owner reviewed the 3 production roles / 4 users carried from R-A9B receipt section 16 and decided NO RE-GRANT, because that authority existed only through the permission-alias fan-out defect. Supporting dispositions: `docs/S3_STORAGE_POSTURE_DEBT.md`, `docs/OPERATIONS.md` section 5, and the register below.
 - [x] Staging smoke test passes after deploy. evidence: scripts/post_deploy_verify.sh (R-A8Z Stage B, 2026-09-14, run `R-A8Z-STAGEB-20260914T143311Z`, release `566a01a`, fresh `contraclaim-stg` deploy, 19/19 migrations then 0 on re-apply: the release's own `scripts/production_backup.sh` exit 0 on the fresh install with no manual step - every archive VALID under its declared contract, the empty uploads and snapshots volumes under `application-volume`, `backup_status.py` ok (`20`) - then ONE canonical `scripts/post_deploy_verify.sh` run: exit 0, 24 PASS, 1 WARN (`ALLOWED_DOCUMENT_MIMES not visible on the worker container`), 0 FAIL, including the Gate 5 live antivirus check (`21`). F-A8W-B1 is closed on a deployed stack and the R-A8X no-manual-reconstruction rule is met.) **R-A8X disposition (history): NOT EARNED (withdrawn, provenance kept).** R-A8W Stage B ticked it on 2026-09-13 (run `R-A8W-STAGEB-20260913T154822Z`, release `37e79ba`, backend `d9eedb2cbee3`, client `865fd898f818`, fresh `contraclaim-stg` deploy, 19/19 migrations) on a third run of `scripts/post_deploy_verify.sh`: exit 0, 23 PASS, 0 FAIL, 1 WARN. The sequence, all kept in that evidence directory: run 1 failed one check, `/health/operations` 503, because a fresh stack had never been backed up; the release's own `scripts/production_backup.sh` was then run and **aborted** under `set -e` on the empty fresh-install uploads volume (**F-A8W-B1**), so run 2 failed the same check; an operator then replayed that script's remaining per-volume steps by hand into the same stamp (`20d-F-A8W-B1-staging-backup-completion.txt`), and run 3 passed. The release owner's R-A8X rule: a canonical smoke must pass against the deployed release without manually reconstructing a failed release script; a pass that needed one is diagnostic evidence, not certification. The bullet's own words - the smoke passes *after deploy* - describe the deployed release doing it, and here the deployed release could not produce the backup the smoke checks. F-A8W-B1 is fixed offline in R-A8X (`application-volume` backup profile, `test_backup_empty_application_volume.py`); the bullet is re-earned only by a clean canonical run in the next staging window
 - [x] Staging smoke test passes after restore drill. evidence: scripts/post_deploy_verify.sh (R-A8Z Stage B, same run and release: this window's quiesced production archive `contraclaim-20260914-202039-RA8Z-quiesced` - sha256 equal to its manifest, `gzip -t` clean - restored with every guard armed into an emptied `contraclaim_staging` on `rsstg` with the writers stopped: 48,032 documents, 0 failed, 162 collections, read-back parity; with the application still stopped 3 migrations applied, re-apply 0, `uq_permissions_name` unique and a duplicate insert refused 11000, permissions 263 -> 265 after start (`24-29`); then the canonical smoke on the 1.4.6 ClamAV service: exit 0, 23 PASS, 2 WARN, 0 FAIL, `CLAMAV_READINESS=OK scope=full` (`31`). WARN 1 `Recent backend logs contain errors` - one `Traceback` line captured, its context not retained before teardown (`31b`); WARN 2 `ALLOWED_DOCUMENT_MIMES`.) **R-A8Y disposition (history): STALE (withdrawn, provenance kept).** R-A8W Stage B ticked it on 2026-09-13 with `scripts/post_deploy_verify.sh` (same run and release as bullet 3, executed after the Gate 6 bullet 3 production-copy restore and migration: exit 0, 22 PASS, 0 FAIL, 2 WARN - a benign trapped bcrypt-version traceback and `ALLOWED_DOCUMENT_MIMES` - permission catalogue 265, superadmin holding all 198 release permissions, `/health/operations` 200 `ok`; `30-gate9b4-smoke-after-restore.txt`). It is stale because R-A8Y changes the ClamAV service the smoke ran against - image (1.4.5 → 1.4.6), network, volume, healthcheck and memory limit - and `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` had pre-registered adopting ClamAV 1.4.6 as staling "every smoke" before this programme began. Supporting, not sufficient on its own: the canonical smoke now also carries the Gate 5 live antivirus check (loaded signature age within 48 h, clean accepted, EICAR rejected); that run's output has no antivirus line at all, and its ClamAV ran the same `service-net`-only definition R-A8Y proved cannot update. Re-earned by a canonical run after the next staging restore drill
-- [ ] Readiness score target is 85 or higher.
-- [ ] Release owner signs off.
+- [x] Readiness score target is 85 or higher. evidence: `scripts/production_readiness_score.py` on this release HEAD, measured **before this bullet was ticked**: raw 85.33, displayed 85/100 against a target of 85, verdict Ready. The criterion was therefore already satisfied with bullet 5 unticked, which is exactly the non-circularity condition `backend/rbac_backend/tests/test_gate9_scoreability.py` enforces. Ticked by owner decision 2026-09-20. **Any increase in the figure after this tick is checkbox arithmetic recording an already-satisfied condition. It is not a new staging measurement: no staging run was executed, re-scoped or rewritten to produce it, and the sealed R-A9E staging evidence is unchanged.**
+- [x] Release owner signs off. evidence: GATE 9 BULLET 6 - RELEASE OWNER SIGN-OFF, signer **Release Owner**, dated **2026-09-20**, recorded verbatim in `docs/R_A9G_OWNER_DECISION_RECORD.md`. Release `release/contraclaim-rc1`; frozen release HEAD before this owner-decision documentation update `79180d55d8d0635780405d662871bec1a69641bc`, tree `3487cde0aacb669924e6528bb4c3d63f7336edca`; runtime code certified at candidate `fe728b205ed5dfb20d88040bc44214ca71d11c43`; final R-A9F CI run `35518788548`, 5/5 green on that HEAD. The owner accepts A1-A8 as the bounded residual-risk profile of this initial release, records A9 discharged with no re-grant, accepts the dated third-party image exception expiring 2026-10-15 and takes responsibility as its post-cutover owner, and approves FalkorDB Variant A, G32 excluded from this cutover, the frozen role-alignment operation, the production migration sequence, the ClamAV overlay retirement procedure, and the backup and rollback contracts. **This sign-off is what closes P0-008.**
 
 **Gate 9 scoreability - what the preamble's blocking sentence does and does not
 say.** "Production promotion is blocked until all gates are checked", under
@@ -554,10 +602,45 @@ required resolution names the readiness rerun and the owner sign-off, so bullet
 1 must not be ticked while any row in the Current Critical Blocker Register is
 still Open. That is enforced rather than described.
 
+**Owner decision, 2026-09-20 - how bullets 1, 2, 5 and 6 came to be ticked, and
+what that does and does not mean.** All four were ticked in one owner act, whose
+verbatim record is `docs/R_A9G_OWNER_DECISION_RECORD.md`. Read in the order the
+constraints require:
+
+1. **Bullet 2** was ticked first. Its own words are "fixed **or explicitly
+   accepted**", and every high-severity item had a written disposition with an
+   owner and, where applicable, a date and an expiry. The owner accepted A1-A8
+   and discharged A9. Nothing was fixed to earn it; the acceptance is the
+   evidence, and it is bounded to this initial cutover.
+2. **Bullet 1** required no Critical Blocker Register row to parse as Open. That
+   was reached by **formal disposition, not by closure**: P0-002 moved from Open
+   to dated accepted debt carrying A3, and P0-008 closed on the bullet-6
+   signature. The register rows below say so in their own cells, so a reader who
+   never sees this note cannot mistake disposal for repair.
+3. **Bullet 5** was tickable because the figure computed **with bullet 5
+   unticked** already met the target - raw 85.33, displayed 85/100 - which is the
+   non-circularity rule above. The tick records that measurement; it does not
+   create one.
+4. **Bullet 6** is the promotion decision itself and was signed by the release
+   owner. It cannot be self-signed and was not.
+
+**What ticking these four did to the figure.** Gate 9 moved from 2/6 to 6/6, so
+the weighted total moved by +5.33 on four checkboxes and **no new measurement**.
+The sealed R-A9E staging evidence measured the 85.33 that bullet 5 asserts, and
+that evidence is unchanged, unedited and unrewritten. Any later reader comparing
+this document's figure with the R-A9E evidence should expect them to differ by
+exactly those four ticks, and by nothing else. If a future phase needs the
+measured-at-R-A9E figure, it is 85 / raw 85.33.
+
 Current score evidence:
 
-- Current production launch-readiness score is **85/100** (raw 85.33; re-derived by
-  `scripts/production_readiness_score.py`, release programme R-A9F, 2026-09-20, after
+- Current production launch-readiness score is **91/100** (raw 90.67; re-derived by
+  `scripts/production_readiness_score.py`, release programme R-A9G-0, 2026-09-20, after
+  the release owner ticked Gate 9 bullets 1, 2, 5 and 6 in one decision act. That move is
+  **four checkboxes and no new measurement**: the +5.33 is Gate 9 going 2/6 to 6/6.
+  R-A9F had recorded 85 (raw 85.33) on 2026-09-20 with Gate 9 at 2/6, and that is the
+  figure the sealed R-A9E staging evidence measured; compare that evidence against 85,
+  never against 91. R-A9F reached it after
   the R-A9E Stage B staging execution on candidate `fe728b2` earned Gate 3 bullet 2 and
   Gate 4 bullet 8. R-A8Z had recorded 82 (raw 82.50) on 2026-09-14, after
   its Stage B staging execution earned Gate 5 bullet 6 and Gate 9 bullets 3 and 4,
@@ -583,18 +666,20 @@ Current score evidence:
 | ID | Status | Blocker | Evidence | Required resolution |
 | --- | --- | --- | --- | --- |
 | P0-001 | Resolved | Backend suite is red | Original full backend run observed 6 failures in `test_llamaindex_service.py`; Phase 1 local rerun now reports 462 passed, 7 skipped | Confirmed in GitHub Actions - run 34376328409, `backend-checks` green on `60f196c` (R-A8T, 2026-09-09) |
-| P0-002 | Open | Live AI/vector/graph integrations are skipped by default | `RUN_EXTERNAL_INTEGRATION_TESTS=1` required for live tests | Add a staging live-integration release gate and capture results |
+| P0-002 | Accepted debt - Owner approved for initial cutover | Live AI/vector/graph integrations are skipped by default | `RUN_EXTERNAL_INTEGRATION_TESTS=1` required for live tests. **The underlying technical evidence is unchanged: the combined live staging proof with OCR, ClamAV, OpenAI, Qdrant, FalkorDB and Redis all enabled has never been captured.** This row is FORMALLY DISPOSED, not resolved | Unchanged: add a staging live-integration release gate and capture results. **Owner decision 2026-09-20 (`docs/R_A9G_OWNER_DECISION_RECORD.md`, item A3): accepted as dated debt for this initial cutover only, follow-up deadline 2026-10-15.** On that date the acceptance lapses and this row is a live blocker again unless a new dated owner decision is recorded |
 | P0-003 | Partially mitigated | Browser E2E incomplete | Phase 5 adds Playwright coverage for contract upload/search/Q&A/appraisal, but auth/session, document workflows, timeline, chronology, arbitration, and broad empty/error/mobile coverage remain uncovered | Expand E2E harness to all launch-critical workflows |
 | P0-004 | Resolved locally | Migration discipline incomplete | Phase 3 adds `rbac_backend.migrations`, `schema_migrations` ledger, RBAC seed digesting, and `python -m rbac_backend.scripts.migrate_database` dry-run/apply support | Run against staging/fresh MongoDB and confirm in CI/release evidence |
 | P0-005 | Resolved (code); staging proof captured and production clamav hardened (R-A8Z) | Upload antivirus can be disabled - and, found in R-A8Y, can be enabled while ineffective | Production startup now refuses to boot unless antivirus is enabled and fail-closed (`ANTIVIRUS_REQUIRED_IN_PRODUCTION` default true); `.env.example` sets `ANTIVIRUS_ENABLED=true`; upload routes reject not-clean files. Tests: `test_config_validation.py` (3 new), `test_antivirus_service.py`. R-A8Y: production clamd served a 70-day-old signature database behind every green check (no egress on the internal `service-net`, no persistent database volume); release fix and freshness gate in `docs/CLAMAV_SIGNATURE_FRESHNESS.md` | Deployed-stack `post_deploy_verify.sh` run showing clamd reachable, loaded signatures within the maximum age, clean accepted, EICAR rejected (Gate 5 bullet 6) - staging first, then production at cutover |
 | P0-006 | Mitigated (regression coverage added) | Production Org-Admin permission flow not yet validated | Service round trip covered by `test_role_permission_catalog_drift.py`; HTTP-boundary retrieve now covered by `test_org_admin_permissions_api.py`, reproducing the catalog-missing Client DMS permission failure through `GET /api/roles/{id}/permissions` | Manual save/retrieve validation in staging/prod remains for the Gate 4 box. R-A9A (offline, earns nothing): the staging spec's terms locator (F-A8Z-B1) and row 12's control (F-A8Z-B2, a harness seed defect) are repaired, 12 tests, 14-row mapping rebuilt with positive controls (`docs/GATE_4_B8_ORG_ADMIN_VALIDATION_MAPPING.md`); two intra-tenant authorization defects recorded unfixed for an owner decision - F-A9A-1 (a soft-deleted role still grants its permissions) and F-A9A-2 (a shared legacy alias lets e.g. `dms.task.manage` satisfy `dms.project.manage`). R-A9B (offline, earns nothing): both fixed in the permission resolver - an inactive role contributes nothing and its holders' cached grants are dropped; alias resolution is one hop and never passes through a shared alias. F-A9B-1 is fixed by the same change: the default org admin passed `billing.plan.manage` with no scope and `subscription.entitlement.manage` via `dms.admin` -> `system:admin`. F-A9B-2 (`dms.admin` holders pass the global legal-words `system:admin` gate) is recorded for an owner decision. The Gate 3 b2 / Gate 4 b8 staging run must execute on the R-A9B HEAD. **R-A9E Stage B (2026-09-20, candidate `fe728b2`): executed on that candidate - the org-admin spec 12/12 on the first attempt with one worker and no retries, and all 14 Gate 4 b8 mapping rows PASS with same-run positive controls and database/audit read-back. Gate 3 bullet 2 and Gate 4 bullet 8 are ticked on that evidence. On the deployed stack a soft-deleted role stopped granting (F-A9A-1 closed there) and `dms.task.manage` alone no longer satisfied a project update while `dms.project.manage` did, both with schema-valid bodies that reached authorization - so F-A9A-2 is now measured on a deployment as well as offline. F-A9B-2 was closed in code in R-A9D (`system:admin` is nobody's alias). F-A9D-1, the production-only `billing.plan.manage` grants, is closed by the owner-approved removal in the cutover role alignment, which has not yet run against production.** |
 | P0-007 | Partially mitigated | Python dependency scan is red | `requests` bumped to 2.32.4 (CVE-2024-47081). Remaining ~60 advisories require a coordinated FastAPI/Starlette + LangChain/LangGraph/Pydantic-AI upgrade and a full backend regression run; `ecdsa` Minerva (CVE-2024-23342) is upstream won't-fix and unused in our HS256 path | Execute the framework/AI-stack upgrade, rerun `pip-audit` to green (or document accepted won't-fix), rerun backend tests and Docker build |
-| P0-008 | Open | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | Gate 9 is 2/6: R-A8Z Stage B re-earned the smoke after deploy (the release's own backup script and the canonical smoke, no manual step, F-A8W-B1 closed on a deployed stack) and the smoke after the restore drill (with the live antivirus check); the readiness score now reads 85/100 against its 85 target, so Gate 9 bullet 5 is satisfiable in substance but is deliberately left unticked until the owner ticks it with bullet 6 (see `docs/R_A9F_OPEN_GATE_MATRIX.md`); the owner sign-off and the bullet 1/2 dispositions are outstanding | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off |
+| P0-008 | Resolved | Final staging deploy, smoke, backup/restore, and release sign-off evidence are missing | **Closed 2026-09-20 by the release owner's Gate 9 bullet 6 sign-off, the fifth and last of the five required resolutions in the right-hand column.** Gate 9 is now 6/6. Historical state, kept: Gate 9 was 2/6: R-A8Z Stage B re-earned the smoke after deploy (the release's own backup script and the canonical smoke, no manual step, F-A8W-B1 closed on a deployed stack) and the smoke after the restore drill (with the live antivirus check); the readiness score now reads 85/100 against its 85 target, so Gate 9 bullet 5 is satisfiable in substance but is deliberately left unticked until the owner ticks it with bullet 6 (see `docs/R_A9F_OPEN_GATE_MATRIX.md`); the owner sign-off and the bullet 1/2 dispositions were outstanding. All five are now recorded: the staging deploy, the smoke after deploy and the smoke after the restore drill were measured in R-A8Z Stage B; the readiness re-derivation ran in R-A9F; and the release owner signed off on 2026-09-20 | Complete staging deploy, smoke after deploy, smoke after restore, readiness-score rerun, and release owner sign-off - **all five recorded** |
 
 ## Current Readiness Score
 
-The current production launch-readiness score is **85/100** against a target of
-**85/100**. The score is generated from checked launch-gate evidence, not from
+The current production launch-readiness score is **91/100** against a target of
+**85/100**. It was **85/100** (raw 85.33) when the R-A9E staging evidence measured it;
+the difference is the four Gate 9 checkboxes the owner ticked on 2026-09-20 and nothing
+else. The score is generated from checked launch-gate evidence, not from
 implementation intent or local-only assumptions.
 
 Run:
@@ -615,7 +700,7 @@ is one point lower because a point that had never been earned was being counted,
 not because anything regressed.
 
 Current gate score summary, re-derived mechanically from
-`scripts/production_readiness_score.py` on 2026-09-20 (R-A9F, after the R-A9E Stage B staging execution on candidate `fe728b2` earned Gate 3 bullet 2 and Gate 4 bullet 8; before that R-A8Z on 2026-09-14, after its Stage B earned Gate 5 bullet 6 and Gate 9 bullets 3 and 4). This table is a rendering
+`scripts/production_readiness_score.py` on 2026-09-20 (R-A9G-0, after the release owner ticked Gate 9 bullets 1, 2, 5 and 6; before that R-A9F, after the R-A9E Stage B staging execution on candidate `fe728b2` earned Gate 3 bullet 2 and Gate 4 bullet 8, which is the run that measured Gate 9 at 2/6 and the total at 85; before that R-A8Z on 2026-09-14, after its Stage B earned Gate 5 bullet 6 and Gate 9 bullets 3 and 4). This table is a rendering
 of the checkboxes above and nothing else; when the two disagree, the checkboxes
 and their evidence lines are the record. (The previous copy of this table
 predated the R-A8M staging execution and still showed Gate 2 at 0/6, Gate 7 at
@@ -632,9 +717,9 @@ stale rendering, not withdrawn evidence.)
 | Gate 6: Database, Migrations, And Seeds | 10.00 / 10 | 6 / 6 |
 | Gate 7: Deployment And Environment | 10.00 / 10 | 7 / 7 |
 | Gate 8: Backup, Restore, And Rollback | 10.00 / 10 | 8 / 8 |
-| Gate 9: Final Production Readiness Review | 2.67 / 8 | 2 / 6 |
+| Gate 9: Final Production Readiness Review | 8.00 / 8 | 6 / 6 |
 
-Total: **85 / 100** against a target of 85.
+Total: **91 / 100** against a target of 85.
 
 ## Pending Blockers By Phase
 
@@ -648,7 +733,7 @@ Total: **85 / 100** against a target of 85.
 | Phase 5 | Browser E2E for auth/session/CSRF, Org-Admin permissions, document workflows, timeline, chronology, arbitration, and broad route states; live staging browser run. |
 | Phase 6 | Live LLM-backed arbitration drafting proof; arbitration browser E2E for create/import/generate/regenerate/export/approval. |
 | Phase 7 | Bash syntax validation; staging backup execution, offsite S3 sync, `/health/operations` scrape, restore drill, RPO/RTO, and rollback proof. |
-| Phase 8 | Critical blockers still open; readiness score below target; release owner sign-off missing. |
+| Phase 8 | R-A9G maintenance window grant, which is an owner act and is not yet given. |
 
 ## Evidence Capture Template
 
@@ -984,6 +1069,6 @@ If host `mongosh` is installed but cannot resolve Docker service names from `DAT
 - [x] Critical blocker register includes final staging deploy/smoke/restore/sign-off gap as `P0-008`.
 - [x] Score script compile validation passed: `python -m py_compile scripts/production_readiness_score.py`.
 - [x] Score script execution passed: `python scripts/production_readiness_score.py`.
-- [ ] Critical blockers remain open.
-- [ ] Readiness score remains below the 85/100 target.
-- [ ] Release owner sign-off is not recorded.
+- [x] Critical blockers **as at Phase 8** remained open. (Superseded 2026-09-20: no register row parses as Open - P0-002 formally disposed as dated accepted debt to 2026-10-15, P0-008 closed by the owner sign-off. Read the register and the Gate 9 bullets above, not this line.)
+- [x] Readiness score **as at Phase 8** was below the 85/100 target. (Superseded - the scorer now computes 91/100 against that target. Read the readiness section above, not this line.)
+- [x] Release owner sign-off **as at Phase 8** was not recorded. (Superseded - signed by Release Owner on 2026-09-20; see Gate 9 bullet 6 and `docs/R_A9G_OWNER_DECISION_RECORD.md`.)

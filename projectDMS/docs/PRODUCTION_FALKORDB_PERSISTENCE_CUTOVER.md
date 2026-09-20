@@ -127,6 +127,10 @@ archive kept as independent nets regardless of variant.
 
 ### OWNER DECISION, 2026-09-20 (release programme R-A9F): **VARIANT A**
 
+**RE-CONFIRMED by the owner on 2026-09-20 in release programme R-A9G-0**
+(`docs/R_A9G_OWNER_DECISION_RECORD.md` section 9), which restated the seventeen required
+steps and recorded that **no Variant-A-specific owner choice remains open before R-A9G**.
+
 The owner has chosen **Variant A**. Variant B is **withdrawn** for this cutover and must
 not be substituted for convenience during the window. The decision is recorded in
 `PRODUCTION_CUTOVER_CHECKLIST.md`'s standing-decisions table, which previously carried this

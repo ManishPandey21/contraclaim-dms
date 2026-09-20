@@ -18,19 +18,27 @@ ordering from here, and re-derive every number.
 
 | # | Precondition | State on 2026-09-08 |
 |---|---|---|
-| P1 | Owner authorisation for a production cutover | **NOT GIVEN** |
-| P2 | Maintenance window booked, with a reserve | **NOT BOOKED** — book 5–6 h, see §2 |
+| P1 | Owner authorisation for a production cutover | **GATE AUTHORISATION GIVEN 2026-09-20; WINDOW GRANT NOT GIVEN.** The release owner signed Gate 9 bullet 6 and disposed every open gate item (`docs/R_A9G_OWNER_DECISION_RECORD.md`). What is still missing is P2: the maintenance window is a separate owner grant, and nothing may run without it |
+| P2 | Maintenance window booked, with a reserve | **NOT BOOKED — this is the one outstanding owner act.** Book **8 h** (not the older 5–6 h figure, which was sized for a deploy plus migrations and predates the role alignment, the Falkor Variant-A move, the password rotation and the ClamAV retirement): minimum **120-minute** execution budget, minimum **90-minute** protected recovery reserve, `LATEST_SAFE_STOP = WINDOW_START + 270 min`. See §2 and `docs/R_A9G_CUTOVER_PLAN.md` |
 | P3 | Release branch reaches a deployable branch | **CLOSED 2026-09-20 (R-A9F)** — `release/contraclaim-rc1` fast-forwarded to the certified candidate `fe728b2` and pushed to both trusted remotes; PR #20 open, draft, unmerged |
-| P4 | Readiness ≥ 85 for Gate 9 | **SCORE MET, GATE NOT CLOSED (2026-09-20, R-A9F)** — the scorer reads 85/100 (raw 85.33, verdict "Ready") on this HEAD with Gate 9 b5 itself unticked, which is the non-circularity condition. Gate 9 is still 2/6: b1, b2, b5 and b6 are open. Re-derive with `scripts/production_readiness_score.py`; a figure quoted here goes stale the moment a bullet is ticked |
+| P4 | Readiness ≥ 85 for Gate 9 | **CLOSED 2026-09-20 (R-A9G-0)** — Gate 9 is **6/6** and the scorer reads **91/100 (raw 90.67, verdict "Ready")**. The threshold was met **before** b5 was ticked (85 / raw 85.33), which is the non-circularity condition; the move to 91 is four checkboxes and **no new measurement**. Re-derive with `scripts/production_readiness_score.py` rather than trusting this figure |
 | P5 | FalkorDB `/data` cutover sequenced with the deploy | **PLANNED, NOT EXECUTED** — `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` |
 | P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — confirmed at §8; the standing decisions are listed at the end of this file |
-| P7 | Every open launch-gate bullet formally disposed | **OPEN** — the matrix is written and the owner approvals are enumerated in `docs/R_A9F_OPEN_GATE_MATRIX.md`; **seven owner acts** remain, and until they are recorded production promotion is not authorised whatever the score reads |
+| P7 | Every open launch-gate bullet formally disposed | **CLOSED 2026-09-20 (R-A9G-0)** — all eleven open bullets are disposed in `docs/R_A9F_OPEN_GATE_MATRIX.md`: Gate 9 b1, b2, b5 and b6 are checked, and Gate 3 b3–b9 are **dated owner-accepted debt with a 2026-10-15 follow-up**. Six of the seven owner acts are recorded (`docs/R_A9G_OWNER_DECISION_RECORD.md`); only the window grant (P2) remains |
 | P8 | ClamAV temporary override retired | **PLANNED for §13a** — production depends on the untracked `docker-compose.clamav-r-a8z.yml` today; it is retired **after** the release stack is running and verified, never before |
 
 P4 is a Gate 9 condition, not a cutover condition. A deploy can technically
 proceed below 85; **Gate 9 cannot close**, and the release is then deployed
 without a completed final review. That is an owner decision, and it must be made
-in writing before §3.
+in writing before §3. It was made on 2026-09-20 and P4 is closed.
+
+**What the owner's 2026-09-20 decisions did and did not authorise.** They closed
+every *gate* precondition: the high-risk list is disposed, the blocker register
+has no row parsing as Open, Gate 9 is signed, and the production role impact is
+discharged with **no re-grant**. They did **not** authorise execution. P2 is the
+binding constraint now, and it is a grant only the owner can make. Read
+`docs/R_A9G_OWNER_DECISION_RECORD.md` before §1, because several steps below
+exist only because of a decision recorded there.
 
 ---
 
@@ -413,17 +421,26 @@ roll-forward for migrations because there is no downgrade.
 
 ## Standing owner decisions this checklist assumes
 
+**All seven R-A9G owner acts except the window grant were recorded on 2026-09-20. The
+verbatim record is `docs/R_A9G_OWNER_DECISION_RECORD.md`; the rows below are renderings of
+it.**
+
 | Decision | State | Where |
 |---|---|---|
 | RPO 24 h / RTO 8 h, quarterly staging drill | **MADE 2026-09-08**, RECORDED not DEMONSTRATED | `docs/OPERATIONS.md` §5 |
 | Shared production S3 bucket for documents and backups | **ACCEPTED as post-release debt** | `docs/S3_STORAGE_POSTURE_DEBT.md`, `docs/RPO_RTO_OWNER_DECISION.md` header |
 | Gate 2 FalkorDB vector criterion withdrawn | **APPROVED for this release** | `docs/PRODUCTION_READINESS_RELEASE_GATE.md` |
-| Gate 3 bullet 7 (arbitration) | **OPEN — proposed as owner-accepted debt (R-A9F); explicitly NOT superseded** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
-| Gate 3 bullet 8 (empty/loading/error states) | **OPEN — error-state half already SUPERSEDED and guarded (decision 8-C); remainder proposed as owner-accepted debt (R-A9F)** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
-| Falkor rollback variant (A out-of-band vs B image-based) | **DECIDED 2026-09-20 (R-A9F): VARIANT A.** Variant B withdrawn for this cutover | `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §3, "OWNER DECISION, 2026-09-20" |
+| Gate 3 bullet 7 (arbitration) | **ACCEPTED DEBT (owner, 2026-09-20), follow-up 2026-10-15, and prioritised for first post-release closure; explicitly NOT superseded** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
+| Gate 3 bullet 8 (empty/loading/error states) | **error-state half SUPERSEDED and guarded (decision 8-C); remainder ACCEPTED DEBT (owner, 2026-09-20), follow-up 2026-10-15, with the structural guards and the generated route denominator still mandatory** | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EXECUTION_PLAN.md` |
+| Falkor rollback variant (A out-of-band vs B image-based) | **DECIDED 2026-09-20 (R-A9F): VARIANT A**, **re-confirmed by the owner 2026-09-20 (R-A9G-0)**. Variant B withdrawn for this cutover and not to be substituted for convenience during the window | `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` §3, "OWNER DECISION, 2026-09-20" |
 | Staging SMTP sink for the Gate 3 share leg | **DISPOSED (R-A9F): NOT REQUIRED for the initial cutover.** It is a staging configuration and a sub-dependency of Gate 3 b3, not an independent gate item; it changes nothing in production. Carried with b3 | `docs/R_A9F_OPEN_GATE_MATRIX.md`; `docs/GATE_3_EVIDENCE_MATRIX.md` row 3 |
 | Legacy `organization-admin`/`project-admin` references resolve one hop to `orgadmin`/`projectadmin` | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role references" |
 | No re-grant of alias-fan-out permissions to `projectuser`; `orgadmin`/`projectadmin` aligned to the release contract by the explicit `align_role_contract` operation (§14) | **APPROVED (R-A9D)** | `docs/AUTHZ.md` "Role documents are aligned" |
 | F-A9B-2 legal-words admin requires system authority | **CLOSED IN CODE (R-A9D)** | `docs/AUTHZ.md` "System administration is nobody's alias" |
-| F-A9D-1 production `orgadmin`/`projectadmin` documents store `billing.plan.manage` (platform plan catalogue) outside the release contract | **DECIDED (R-A9E): REMOVE it from those two roles only; every other production-only permission is preserved and reported** | §14; `docs/AUTHZ.md` "Role documents are aligned" |
-| Third-party image fixable CRITICAL/HIGH (MongoDB, FalkorDB, Qdrant, httpd) | **EXCEPTED (R-A9E) until 2026-10-15**; remediation window 2026-10-06 → 2026-10-15, httpd first. Not permanent acceptance | `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` "R-A9E cutover exception" |
+| F-A9D-1 production `orgadmin`/`projectadmin` documents store `billing.plan.manage` (platform plan catalogue) outside the release contract | **DECIDED (R-A9E): REMOVE it from those two roles only; every other production-only permission is preserved and reported.** Re-confirmed by the owner 2026-09-20 | §14; `docs/AUTHZ.md` "Role documents are aligned" |
+| The 3 production roles / 4 users whose fan-out-only authority R-A9B removed (`custom#2`, `custom#3`, `custom#11`) | **REVIEWED AND DISCHARGED (owner, 2026-09-20): NO RE-GRANT.** That authority came only from the permission-alias fan-out defect, is not in the canonical release role contract, and its removal is **intended**. **No manual pre-cutover re-grant is required.** If an operational need appears after cutover, grant the specific permission explicitly through normal role administration — never by restoring fan-out | `docs/R_A9G_OWNER_DECISION_RECORD.md` §7; R-A9B receipt §16 |
+| High-risk acceptance list A1–A9 | **A1–A8 ACCEPTED as bounded residual risk for this initial release only, each with a 2026-10-15 follow-up (A8 has none: it is bounded by the engine staying non-primary). A9 DISCHARGED. Not permanent waivers** | `docs/R_A9G_OWNER_DECISION_RECORD.md` §2; `docs/R_A9F_OPEN_GATE_MATRIX.md` |
+| P0-002 (combined live AI/vector/graph integration proof) | **FORMALLY DISPOSED (owner, 2026-09-20) as `Accepted debt - Owner approved for initial cutover`, follow-up 2026-10-15. NOT technically closed** — the proof has still never been captured | `docs/PRODUCTION_READINESS_RELEASE_GATE.md` register; `docs/R_A9G_OWNER_DECISION_RECORD.md` §4 |
+| Gate 9 closure and release sign-off | **SIGNED 2026-09-20 by Release Owner.** Bullets 1, 2, 5 and 6 ticked; Gate 9 6/6; scorer 91/100 raw 90.67. The +5.33 is four checkboxes, not a new measurement — the sealed R-A9E staging evidence still measures 85 / raw 85.33 | `docs/R_A9G_OWNER_DECISION_RECORD.md` §3–§6 |
+| G32 production state migration | **OUT OF SCOPE for this cutover, re-confirmed by the owner 2026-09-20.** NOT RUN, NOT CERTIFIED; separate owner authorisation and its own four approvals | §15; `docs/R_A9G_CUTOVER_PLAN.md` |
+| Third-party image fixable CRITICAL/HIGH (MongoDB, FalkorDB, Qdrant, httpd) | **EXCEPTED (R-A9E) until 2026-10-15 and ACCEPTED by the owner on 2026-09-20**; remediation window 2026-10-06 → 2026-10-15, httpd first; mandatory 2026-10-06 review trigger; post-cutover owner **Release Owner**. Not permanent acceptance and not renewed by silence | `docs/THIRD_PARTY_IMAGE_SECURITY_DISPOSITION.md` "R-A9E cutover exception" |
