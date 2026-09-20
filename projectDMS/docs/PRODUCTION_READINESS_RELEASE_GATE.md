@@ -10,8 +10,17 @@ code certified by the R-A9E Stage B staging execution is commit
 `fix/role-assignment-resolution`. R-A9F integrated that commit into `release/contraclaim-rc1` by
 **fast-forward** - `93bbc308` was already an ancestor - so at the moment of integration the release
 tree *was* the certified tree, object for object, and every production-code and build-input category
-matched with an identical git blob rollup
-(`.claude/context/contract-master/R-A9F-RELEASE-INTEGRATION-FREEZE-RECEIPT.md`, step 2 table).
+matched with an identical git blob rollup. The full table is in the phase receipt
+(`.claude/context/contract-master/R-A9F-RELEASE-INTEGRATION-FREEZE-RECEIPT.md`, step 5), which is
+untracked and does not survive a clone; the tracked record of what is deployable is
+`docs/R_A9F_PRODUCTION_MANIFEST.md`.
+
+The sealed staging evidence behind the two ticks above is
+`/var/backups/contraclaim-stg-evidence/R-A9E-20260916T081258Z/candidate-fe728b2/` — **65 files**,
+`SHA256SUMS` sha256 `26ee94123faa121bd093c482d17627d67ab20617a868dd2406b3db271fe8b76a`, verified
+with **0 non-OK lines**, secret scan CLEAN (69 files scanned, 13 values hunted). Segment A seal
+`ac92b552a9c6245b` (50 files), Segment B seal `3e2c948af8bcd4e8` (60 files). It is sealed: read
+it, never edit it.
 Release commits **after** that fast-forward are documentation and release-control commits only; they
 change no runtime source, no Dockerfile, no compose file, no migration, no seed and no script, which
 is what keeps the R-A9E images and their scans valid for this HEAD. No staging run has been executed
