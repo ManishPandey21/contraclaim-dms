@@ -145,8 +145,11 @@ What that binds the R-A9G window to:
   before.
 * The rescue archive and the commit snapshot are kept as independent nets regardless.
 
-R-A9E already exercised the first three steps of the sequence against live production,
-read-only, on 2026-09-20: a hot rescue archive was taken from `/FalkorDB`
+R-A9E already exercised the first three steps of the sequence against live production on
+2026-09-20. It was not purely read-only, and the distinction matters: the rescue script issues a
+`BGSAVE` so the snapshot on disk is current, which writes inside production's own persistence
+directory. Nothing else about production was touched - the container object was the same object,
+still running, 0 restarts, before and after. What ran: a hot rescue archive taken from `/FalkorDB`
 (`falkordb-persistence-20260920T110319Z-RA9E-hot.tar.gz`, sha256 `ebecc4cea8a273a5...`),
 semantically validated under the `redis-persistence` contract, and restored into a
 **disposable** run-owned volume and engine that came up with `dir=/data` and reproduced the
