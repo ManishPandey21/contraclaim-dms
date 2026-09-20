@@ -75,7 +75,9 @@ Total fixable CRITICAL/HIGH under exception: **556** (273 + 148 + 84 + 51). Exce
 
 ## 4. Service-set change the cutover introduces
 
-Production runs 13 containers today. The release production compose declares three services
+Production runs **11 compose-managed service containers** today (14 containers in total: the
+11 services, plus the three non-service containers named at the end of this section). The
+release production compose declares three services
 production does **not** currently run:
 
 | Service | Profile | Starts at cutover? | Note |
