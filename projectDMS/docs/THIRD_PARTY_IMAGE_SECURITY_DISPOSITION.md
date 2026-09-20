@@ -289,6 +289,20 @@ read from the JSON, not from the exit code. No tag moved and nothing was pulled.
 | ClamAV | `clamav/clamav:1.4.6@sha256:71fbb76b397cd84a90043caf1178a7f81bd0c131a031e7b0619afd721fbfad41` | **0** | Remediated in R-A8Y/R-A8Z after its own disposable drill. Held in production by the untracked `docker-compose.clamav-r-a8z.yml` override, which must be present in EVERY production compose command until it is folded into the tracked compose at cutover. |
 | Redis | `redis:7.4-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99` | **0** | Clean. Keep the current digest. |
 
+### Post-cutover ownership of the exception (added R-A9F, 2026-09-20)
+
+The exception record above carried every field the owner asked for except the standing
+owner of the remediation after cutover. That is recorded here for all four images, so it
+cannot be lost with the phase that wrote it.
+
+| Field | Value |
+|---|---|
+| **POST-CUTOVER OWNER** | The release owner (the account that signs Gate 9 bullet 6). Not delegated: the same person who accepts this exception owns closing it. |
+| **What the owner owns** | Running the prepared compatibility drill for each candidate on disposable infrastructure inside 2026-10-06 → 2026-10-15; adopting in the order httpd → MongoDB → (FalkorDB, Qdrant decision); re-running Trivy against the adopted digests under the exact CI policy; and re-earning whatever release evidence the adoption stales. |
+| **Review trigger before expiry** | On **2026-10-06**, the first day of the remediation window, the owner re-measures the four digests. A count that has grown, or a new CRITICAL with a public-path exposure on `httpd:2.4`, brings the remediation forward rather than waiting for 2026-10-15. |
+| **On expiry with no adoption** | The exception lapses automatically on **2026-10-15**. It is not renewed by silence: either a new dated owner decision is written into this document, or the cutover blocker is live again for any image still on these digests. |
+| **Where the state is held** | `docker-compose.prod.yml` / `docker-compose.mongo-replicaset.yml` hold the digests; `backend/rbac_backend/tests/test_third_party_image_pins.py` fails if one moves without a documented decision, so a silent upgrade cannot happen either. |
+
 ### What this exception does not do
 
 It does **not** accept these findings permanently, and it does not survive its expiry.
