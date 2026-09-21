@@ -27,11 +27,21 @@ HINDRANCE_PERMISSIONS = {
 
 
 def _mounted() -> set[tuple[str, str]]:
+    """Flatten both FastAPI representations: eager `APIRoute`s and the lazy
+    `include_router` wrappers (FastAPI 0.139+, as CI installs) whose
+    `effective_candidates` are the fully prefixed routes."""
+    routes = []
+    for mounted in app.routes:
+        if isinstance(mounted, APIRoute):
+            routes.append(mounted)
+            continue
+        candidates = getattr(mounted, "effective_candidates", None)
+        if callable(candidates):
+            routes.extend(candidates())
     pairs = set()
-    for route in app.routes:
-        if isinstance(route, APIRoute):
-            for method in route.methods or ():
-                pairs.add((method, route.path))
+    for route in routes:
+        for method in getattr(route, "methods", None) or ():
+            pairs.add((method, str(getattr(route, "path", ""))))
     return pairs
 
 
