@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, Response, status
 
 from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user
@@ -20,6 +22,9 @@ from ..utils.error_handler import handle_exceptions
 
 
 router = APIRouter()
+
+#: RFC 9745 structured Deprecation value: deprecated 2026-09-21 00:00 UTC.
+HISTORY_DEPRECATED_AT = "@1789948800"
 
 
 async def get_document_relationship_service(db=Depends(get_db)) -> DocumentRelationshipService:
@@ -104,16 +109,44 @@ async def remove_document_link(
 
 
 @router.get(
+    "/document-links/{link_id}",
+    response_model=DocumentRelationshipResponse,
+)
+@handle_exceptions
+async def get_document_link(
+    link_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    service: DocumentRelationshipService = Depends(get_document_relationship_service),
+) -> DocumentRelationshipResponse:
+    """Current state of one link, including its removal tombstone. Not history."""
+    return DocumentRelationshipResponse(link=await service.get(current_user, link_id))
+
+
+@router.get(
     "/document-links/{link_id}/history",
     response_model=DocumentRelationshipListResponse,
+    deprecated=True,
 )
 @handle_exceptions
 async def document_link_history(
     link_id: str,
+    response: Response,
     current_user: CurrentUser = Depends(get_current_user),
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
 ) -> DocumentRelationshipListResponse:
-    return DocumentRelationshipListResponse(links=await service.history(current_user, link_id))
+    """Deprecated: returns the link's CURRENT row as a one-element list.
+
+    No revision history is stored - links are soft-removed in place - so this
+    route never returned history despite its name. It is kept for compatibility;
+    use ``GET /document-links/{link_id}``. The change record is the
+    ``document_relationship.linked`` / ``.unlinked`` audit trail.
+    """
+    links = await service.history(current_user, link_id)
+    response.headers["Deprecation"] = HISTORY_DEPRECATED_AT
+    response.headers["Link"] = (
+        f'</api/document-links/{quote(link_id, safe="")}>; rel="successor-version"'
+    )
+    return DocumentRelationshipListResponse(links=links)
 
 
 @router.get(

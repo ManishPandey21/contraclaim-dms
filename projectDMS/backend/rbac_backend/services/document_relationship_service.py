@@ -14,7 +14,12 @@ from ..models.document_relationship import (
     DocumentRelationshipView,
 )
 from .audit_event_service import AuditEventService
-from .entity_adapter_registry import EntityAdapterRegistry, EntityContext
+from .entity_adapter_registry import (
+    CORRESPONDENCE_ROLES,
+    EntityAdapterRegistry,
+    EntityContext,
+    is_correspondence_document,
+)
 from .policy_service import PolicyService
 from .publication_policy import is_consumable, resolve_canonical_document
 from ..utils.error_handler import BaseDomainError
@@ -99,8 +104,27 @@ class DocumentRelationshipService:
             if freeze
             else context.manage_permission if manage else context.view_permission
         )
-        await self.policy.authorize_document(actor, permission, context.entity, resource_type=context.target_type)
+        await self.policy.authorize_document(
+            actor, permission, self._authorization_subject(context), resource_type=context.target_type
+        )
         return context
+
+    @staticmethod
+    def _authorization_subject(context: EntityContext) -> dict[str, Any]:
+        """The target as PolicyService must see it: with its CANONICAL scope.
+
+        Adapters resolve a target's organisation/project from wherever the
+        register keeps it (a Contract Document's anchor is ``scope_project_id``,
+        not ``project_id``). Authorizing on the raw row let PolicyService read
+        no project at all and decide at organisation level, so a project-tier
+        user of another project passed the target gate. The context's scope is
+        the one every other relationship check already uses.
+        """
+        return {
+            **context.entity,
+            "organization_id": context.organization_id,
+            "project_id": context.project_id,
+        }
 
     async def _document(
         self,
@@ -201,6 +225,41 @@ class DocumentRelationshipService:
         }
 
     @staticmethod
+    def _audit_identity(stored: dict[str, Any]) -> dict[str, Any]:
+        """What a relationship audit event is about, readable without before/after."""
+        return {
+            "target_type": stored.get("target_type"),
+            "target_id": stored.get("target_id"),
+            "document_id": stored.get("document_id"),
+            "relationship_role": stored.get("relationship_role"),
+        }
+
+    @staticmethod
+    def _view(
+        stored: dict[str, Any],
+        context: EntityContext,
+        document: Optional[dict[str, Any]],
+    ) -> DocumentRelationshipView:
+        return DocumentRelationshipView(
+            **stored,
+            document=document,
+            target_label=context.label,
+            target_route=context.route,
+        )
+
+    @staticmethod
+    def _require_role_semantics(
+        role: str,
+        document: Optional[dict[str, Any]],
+    ) -> None:
+        if role in CORRESPONDENCE_ROLES and not is_correspondence_document(document):
+            raise DocumentRelationshipError(
+                "Only incoming or outgoing correspondence can be linked as correspondence; "
+                "use supporting_document for other Documents",
+                422,
+            )
+
+    @staticmethod
     def _active_identity(context: EntityContext, link: DocumentRelationshipInput) -> dict[str, Any]:
         return {
             "organization_id": context.organization_id,
@@ -231,6 +290,7 @@ class DocumentRelationshipService:
             if link.relationship_role not in context.allowed_roles:
                 raise DocumentRelationshipError("Relationship role is not valid for this target", 422)
             document = await self._document(actor, context, link.document_id)
+            self._require_role_semantics(link.relationship_role, document)
             version_id = link.document_version_id
             if version_id:
                 version = await self.db.document_versions.find_one(
@@ -257,7 +317,10 @@ class DocumentRelationshipService:
             )
             prepared.append((link, document, relationship, relationship.model_dump(by_alias=True)))
 
-        async def persist(session: Any) -> list[DocumentRelationshipView]:
+        # The transaction returns raw rows only. Presentation happens after the
+        # commit, so nothing about building a response can abort - or be
+        # mistaken for the failure of - a write that has already happened.
+        async def persist(session: Any) -> list[tuple[dict[str, Any], dict[str, Any]]]:
             adapter = self.registry.get(context.target_type)
             if not await adapter.guard_relationship_write(
                 self.db,
@@ -267,7 +330,7 @@ class DocumentRelationshipService:
                 raise DocumentRelationshipError(
                     "Relationship target changed or evidence is frozen", 409
                 )
-            results: list[DocumentRelationshipView] = []
+            results: list[tuple[dict[str, Any], dict[str, Any]]] = []
             for link, _, relationship, payload in prepared:
                 document = await self._guard_document_relationship_write(
                     actor,
@@ -275,6 +338,9 @@ class DocumentRelationshipService:
                     link.document_id,
                     session=session,
                 )
+                # Re-checked on the in-transaction read: the Document may have been
+                # reclassified since the preflight.
+                self._require_role_semantics(link.relationship_role, document)
                 identity = self._active_identity(context, link)
                 result = await self.db.entity_document_links.update_one(
                     identity,
@@ -293,6 +359,7 @@ class DocumentRelationshipService:
                         organization_id=context.organization_id,
                         project_id=context.project_id,
                         after=payload,
+                        metadata=self._audit_identity(payload),
                         correlation_id=idempotency_key,
                         session=session,
                     )
@@ -304,17 +371,11 @@ class DocumentRelationshipService:
                         raise DocumentRelationshipError(
                             "Document relationship changed during link", 409
                         )
-                results.append(
-                    DocumentRelationshipView(
-                        **stored,
-                        document=document,
-                        target_label=context.label,
-                        target_route=context.route,
-                    )
-                )
+                results.append((stored, document))
             return results
 
-        return await self._run_transaction(persist)
+        committed = await self._run_transaction(persist)
+        return [self._view(stored, context, document) for stored, document in committed]
 
     async def _stored_link(self, link_id: str) -> dict[str, Any]:
         stored = await self.db.entity_document_links.find_one({"_id": link_id})
@@ -343,12 +404,7 @@ class DocumentRelationshipService:
             raise DocumentRelationshipError("Document relationship is already removed", 409)
         if int(stored.get("_revision") or 1) != int(expected_revision):
             raise DocumentRelationshipError("Document relationship was modified", 409)
-        document = await self._document(
-            actor,
-            context,
-            str(stored.get("document_id") or ""),
-            require_consumable=False,
-        )
+        document = await self._document_for_removal(actor, context, stored)
         now = datetime.utcnow()
         update = {
             "removed_at": now,
@@ -377,15 +433,68 @@ class DocumentRelationshipService:
                 project_id=context.project_id,
                 before=stored,
                 after=updated,
+                metadata=self._audit_identity(stored),
                 reason=reason,
                 session=session,
             )
-        return DocumentRelationshipView(
-            **updated,
-            document=document,
-            target_label=context.label,
-            target_route=context.route,
+        return self._view(updated, context, document)
+
+    @staticmethod
+    def _require_link_scope_matches_target(
+        stored: dict[str, Any],
+        context: EntityContext,
+    ) -> None:
+        """A link is only ever created inside its target's org/project.
+
+        A row that says otherwise was not written by this service, and nothing
+        it claims - least of all its scope - is trusted to authorize a change.
+        """
+        if (
+            str(stored.get("organization_id") or "") != context.organization_id
+            or str(stored.get("project_id") or "") != context.project_id
+        ):
+            raise DocumentRelationshipError(
+                "Document relationship scope does not match its target", 409
+            )
+
+    async def _document_for_removal(
+        self,
+        actor: Any,
+        context: EntityContext,
+        stored: dict[str, Any],
+    ) -> Optional[dict[str, Any]]:
+        """Authorize the Document side of an unlink, even if its row is gone.
+
+        A present Document is checked exactly as before (scope + DOCUMENT_VIEW).
+        A hard-deleted one must not make the link permanent, and must not make
+        removal *easier* either: the same DOCUMENT_VIEW decision is taken against
+        the link's stored scope, after ``_require_link_scope_matches_target`` has
+        tied it to the target record the actor was authorized to manage.
+        The deleted Document is never recreated.
+
+        The present-Document path is unchanged from before CL-1: the Document's
+        own scope must equal the target's.
+        """
+        document_id = str(stored.get("document_id") or "")
+        if await resolve_canonical_document(self.db, document_id) is not None:
+            return await self._document(
+                actor,
+                context,
+                document_id,
+                require_consumable=False,
+            )
+        self._require_link_scope_matches_target(stored, context)
+        await self.policy.authorize_document(
+            actor,
+            Permissions.DOCUMENT_VIEW,
+            {
+                "_id": document_id,
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+            },
+            resource_type="document",
         )
+        return None
 
     async def freeze(
         self,
@@ -494,7 +603,7 @@ class DocumentRelationshipService:
         now = datetime.utcnow()
         actor_id = getattr(actor, "id", None)
 
-        async def persist(session: Any) -> list[DocumentRelationshipView]:
+        async def persist(session: Any) -> list[tuple[dict[str, Any], dict[str, Any], str]]:
             await adapter.freeze(
                 self.db,
                 context,
@@ -554,28 +663,35 @@ class DocumentRelationshipService:
                 reason=reason,
                 session=session,
             )
-            return [
-                DocumentRelationshipView(
-                    **{
-                        **stored,
-                        "document_version_id": version_id,
-                        "frozen_at": now,
-                        "frozen_by": actor_id,
-                        "_revision": int(stored.get("_revision") or 1) + 1,
-                    },
-                    document=document,
-                    target_label=context.label,
-                    target_route=context.route,
-                )
-                for stored, document, version_id in prepared
-            ]
+            return prepared
 
         try:
-            return await self._run_transaction(persist)
+            committed = await self._run_transaction(persist)
         except RuntimeError as exc:
             raise DocumentRelationshipError(str(exc), 409) from exc
+        # Presented after the commit, for the same reason as link_batch.
+        return [
+            self._view(
+                {
+                    **stored,
+                    "document_version_id": version_id,
+                    "frozen_at": now,
+                    "frozen_by": actor_id,
+                    "_revision": int(stored.get("_revision") or 1) + 1,
+                },
+                context,
+                document,
+            )
+            for stored, document, version_id in committed
+        ]
 
-    async def history(self, actor: Any, link_id: str) -> list[DocumentRelationshipView]:
+    async def get(self, actor: Any, link_id: str) -> DocumentRelationshipView:
+        """The current state of one link row, including a removal tombstone.
+
+        This is *current state*, not history: links are soft-removed in place and
+        no prior revisions are stored. The durable change record is the
+        ``document_relationship.linked`` / ``.unlinked`` audit trail.
+        """
         stored = await self._stored_link(link_id)
         context = await self._target(
             actor,
@@ -589,14 +705,15 @@ class DocumentRelationshipService:
             stored,
             fail_closed=True,
         )
-        return [
-            DocumentRelationshipView(
-                **stored,
-                document=document,
-                target_label=context.label,
-                target_route=context.route,
-            )
-        ]
+        return self._view(stored, context, document)
+
+    async def history(self, actor: Any, link_id: str) -> list[DocumentRelationshipView]:
+        """Deprecated alias of :meth:`get`, kept for the published route.
+
+        Despite the name it has only ever returned the current row: there is no
+        revision history to return.
+        """
+        return [await self.get(actor, link_id)]
 
     async def list_for_document(
         self,
@@ -639,14 +756,7 @@ class DocumentRelationshipService:
                 continue
             if context.organization_id != organization_id or context.project_id != project_id:
                 continue
-            results.append(
-                DocumentRelationshipView(
-                    **stored,
-                    document=document,
-                    target_label=context.label,
-                    target_route=context.route,
-                )
-            )
+            results.append(self._view(stored, context, document))
         canonical_targets = {
             (str(link.target_type), str(link.target_id)) for link in results
         }
@@ -706,14 +816,7 @@ class DocumentRelationshipService:
             )
             if document is None:
                 continue
-            results.append(
-                DocumentRelationshipView(
-                    **stored,
-                    document=document,
-                    target_label=context.label,
-                    target_route=context.route,
-                )
-            )
+            results.append(self._view(stored, context, document))
         canonical_document_ids = {str(link.document_id) for link in results}
         adapter = self.registry.get(context.target_type)
         for legacy_id in context.entity.get("linked_document_ids") or []:
@@ -761,7 +864,7 @@ class DocumentRelationshipService:
         await self.policy.authorize_document(
             actor,
             context.delete_permission,
-            context.entity,
+            self._authorization_subject(context),
             resource_type=context.target_type,
         )
         if context.frozen:
@@ -822,6 +925,7 @@ class DocumentRelationshipService:
                     project_id=context.project_id,
                     before=stored,
                     after=updated,
+                    metadata=self._audit_identity(stored),
                     reason=reason,
                     session=session,
                 )
@@ -960,7 +1064,7 @@ class DocumentRelationshipService:
                 await self.policy.authorize_document(
                     actor,
                     context.view_permission,
-                    context.entity,
+                    self._authorization_subject(context),
                     resource_type=context.target_type,
                 )
             except HTTPException:
