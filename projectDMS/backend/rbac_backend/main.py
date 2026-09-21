@@ -33,6 +33,7 @@ from .routers import (
     ipc_bills,
     evidence_graph,
     evidence_registers,
+    hindrances,
     ipc_categories,
     sla,
     dashboard,
@@ -263,6 +264,7 @@ app.include_router(insurance.router, prefix="/api", tags=["insurance"])
 app.include_router(ipc_bills.router, prefix="/api", tags=["ipc-bills"])
 app.include_router(evidence_graph.router, prefix="/api", tags=["evidence-graph"])
 app.include_router(evidence_registers.router, prefix="/api", tags=["evidence-registers"])
+app.include_router(hindrances.router, prefix="/api", tags=["hindrances"])
 app.include_router(arbitration_drafting.router, prefix="/api", tags=["arbitration-drafting"])
 app.include_router(chronology.router, prefix="/api", tags=["chronology"])
 app.include_router(ipc_categories.router, prefix="/api", tags=["ipc-categories"])

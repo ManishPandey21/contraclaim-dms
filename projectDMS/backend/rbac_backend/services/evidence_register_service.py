@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Type
@@ -16,7 +17,6 @@ from ..models.evidence_graph import (
     ProjectEventType,
 )
 from ..models.evidence_registers import (
-    DelayEvent,
     DelayEventCreate,
     DelayEventUpdate,
     DrawingReference,
@@ -29,6 +29,8 @@ from ..models.evidence_registers import (
 from .audit_event_service import AuditEventService
 from .evidence_graph_service import EvidenceGraphService
 from .publication_policy import is_consumable, resolve_canonical_document
+
+logger = logging.getLogger(__name__)
 
 
 def _actor_id(user: Any) -> Optional[str]:
@@ -81,20 +83,16 @@ class EvidenceRegisterService:
         )
         return doc
 
+    # `delay_events` belong to the Hindrance & Constraint Register; these
+    # methods keep the historical entry points and delegate to its service.
+
+    def _hindrances(self) -> Any:
+        from .hindrance_register_service import HindranceRegisterService
+
+        return HindranceRegisterService(self.db)
+
     async def create_delay_event(self, payload: DelayEventCreate, current_user: Any) -> Dict[str, Any]:
-        doc = await self._create("delay_events", DelayEvent, payload, current_user)
-        await self._emit_graph_event(
-            doc,
-            current_user,
-            entity_type=EvidenceEntityType.DELAY_EVENT,
-            event_type=ProjectEventType.DELAY,
-            event_date=doc.get("start_date"),
-            event_end_date=doc.get("end_date"),
-            title=f"{doc.get('delay_ref')} - {doc.get('title')}",
-            description=doc.get("description"),
-            relation_type=EventRelationType.CAUSES_DELAY,
-        )
-        return doc
+        return await self._hindrances().create(payload, current_user)
 
     async def create_programme_milestone(self, payload: ProgrammeMilestoneCreate, current_user: Any) -> Dict[str, Any]:
         doc = await self._create("programme_milestones", ProgrammeMilestone, payload, current_user)
@@ -121,8 +119,7 @@ class EvidenceRegisterService:
         self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None, status: Optional[str] = None,
         responsibility: Optional[str] = None, location: Optional[str] = None, skip: int = 0, limit: int = 200
     ) -> List[Dict[str, Any]]:
-        return await self._list(
-            "delay_events",
+        rows, _ = await self._hindrances().list_entries(
             scope_filter,
             project_id=project_id,
             status=status,
@@ -130,8 +127,8 @@ class EvidenceRegisterService:
             location=location,
             skip=skip,
             limit=limit,
-            sort_field="start_date",
         )
+        return rows
 
     async def list_programme_milestones(
         self, scope_filter: Dict[str, Any], *, project_id: Optional[str] = None, status: Optional[str] = None,
@@ -153,7 +150,7 @@ class EvidenceRegisterService:
         return await self._get("drawing_references", item_id)
 
     async def get_delay_event(self, item_id: str) -> Optional[Dict[str, Any]]:
-        return await self._get("delay_events", item_id)
+        return await self._hindrances().get(item_id)
 
     async def get_programme_milestone(self, item_id: str) -> Optional[Dict[str, Any]]:
         return await self._get("programme_milestones", item_id)
@@ -162,7 +159,7 @@ class EvidenceRegisterService:
         return await self._update("drawing_references", item_id, payload.model_dump(exclude_unset=True), current_user)
 
     async def update_delay_event(self, item_id: str, payload: DelayEventUpdate, current_user: Any) -> Dict[str, Any]:
-        return await self._update("delay_events", item_id, payload.model_dump(exclude_unset=True), current_user)
+        return await self._hindrances().update(item_id, payload.model_dump(exclude_unset=True), current_user)
 
     async def update_programme_milestone(self, item_id: str, payload: ProgrammeMilestoneUpdate, current_user: Any) -> Dict[str, Any]:
         return await self._update("programme_milestones", item_id, payload.model_dump(exclude_unset=True), current_user)
@@ -226,7 +223,10 @@ class EvidenceRegisterService:
         existing = await db[collection_name].find_one({"_id": item_id})
         if not existing:
             raise EvidenceRegisterNotFound(item_id)
-        update = {key: _jsonable(value) for key, value in payload.items() if value is not None}
+        # `payload` is `model_dump(exclude_unset=True)`: an omitted field is
+        # absent, so a None here is an explicit clear and is written as such.
+        # The Update models refuse null for fields that cannot be cleared.
+        update = {key: _jsonable(value) for key, value in payload.items()}
         if "linked_document_ids" in update:
             update["linked_document_ids"] = await self._authorized_document_links(
                 db,
@@ -408,4 +408,11 @@ class EvidenceRegisterService:
                 current_user=current_user,
             )
         except Exception:
-            return
+            # Mongo is canonical; the graph row is derived. Record the miss
+            # visibly rather than returning as if the projection had succeeded.
+            logger.warning(
+                "Evidence graph projection failed for %s %s",
+                entity_type.value,
+                doc.get("_id"),
+                exc_info=True,
+            )

@@ -90,14 +90,24 @@ class _Collection:
         return None
 
     async def find_one_and_update(
-        self, query: dict[str, Any], update: dict[str, Any], **_kwargs
+        self, query: dict[str, Any], update: dict[str, Any], upsert: bool = False, **_kwargs
     ):
         self._transition()
         for record_id, row in self.documents.items():
             if _matches(row, query):
                 row.update(deepcopy(update.get("$set", {})))
+                for field, amount in update.get("$inc", {}).items():
+                    row[field] = int(row.get(field) or 0) + int(amount)
                 self.documents[record_id] = row
                 return deepcopy(row)
+        if upsert:
+            # Reference counters (`delay_event_reference_counters`) upsert on _id.
+            row = {key: value for key, value in query.items() if not key.startswith("$")}
+            row.update(deepcopy(update.get("$set", {})))
+            for field, amount in update.get("$inc", {}).items():
+                row[field] = int(amount)
+            self.documents[str(row["_id"])] = row
+            return deepcopy(row)
         return None
 
     def find(self, query: dict[str, Any]):
@@ -119,6 +129,12 @@ class _Database:
             "documents",
         ):
             self._collections[name] = _Collection()
+        # The register resolves the organisation from the owning project.
+        self._collections["projects"] = _Collection()
+        self._collections["projects"].documents["proj-A"] = {
+            "_id": "proj-A",
+            "organization_id": "org-A",
+        }
 
     def __getitem__(self, name: str) -> _Collection:
         return self._collections.setdefault(name, _Collection())
