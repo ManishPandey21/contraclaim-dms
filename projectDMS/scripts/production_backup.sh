@@ -68,6 +68,7 @@ echo "Flushing Redis/FalkorDB persistence, and proving it landed..."
 # alias, and LASTSAVE has to advance before the flush counts (R-A9H D1).
 # shellcheck source=scripts/lib/redis_flush.sh
 . "$ROOT_DIR/scripts/lib/redis_flush.sh"
+REDIS_FLUSH_PROJECT=$project_name
 flush_failures=0
 flush_status_redis=ok
 flush_status_falkordb=ok

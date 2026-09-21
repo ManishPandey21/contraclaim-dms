@@ -17,10 +17,12 @@ repository keeps rediscovering: success marked on a skipped step.
 Two separate defects are fixed, and each one is measured here rather than read.
 
 RESOLUTION. The compose service name is a deployment detail; the engine's
-identity, as far as every consumer is concerned, is the network alias. So the
-engine is looked up through compose first - the normal case, and the only one
-that survives the service being renamed - and then by a real alias lookup, which
-is the same question the backend's DNS asks. An out-of-band engine is found.
+identity, as far as every consumer is concerned, is the network alias. So every
+running container that answers - the compose container, and any holder of the
+alias on this project's networks - is collected, and exactly one is required. An
+out-of-band engine is found; another stack's `falkordb` is ignored; and two
+holders at once, which is the Variant-A hazard itself, is refused rather than
+guessed at.
 
 VERIFICATION. `BGSAVE` replies as soon as the fork starts, so its reply is not
 evidence that anything was written. `LASTSAVE` advancing is. A BGSAVE that
@@ -183,6 +185,7 @@ class _Docker:
         container: str,
         *,
         aliases: tuple[str, ...] = (),
+        network: str = f"{PROJECT}_data-net",
         compose_service: str | None = None,
         lastsave: int = 1000,
         frozen: bool = False,
@@ -190,7 +193,10 @@ class _Docker:
         with (self.root / "ps").open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(container + "\n")
         (self.root / "aliases" / container).write_text(
-            "".join(f"{alias}\n" for alias in (container, *aliases)), encoding="utf-8", newline="\n"
+            # The format the resolver asks docker for: "<network> <alias>" per line.
+            "".join(f"{network} {alias}\n" for alias in (container, *aliases)),
+            encoding="utf-8",
+            newline="\n",
         )
         (self.root / "lastsave" / container).write_text(str(lastsave), encoding="utf-8", newline="\n")
         if compose_service:
@@ -229,8 +235,8 @@ def backup(tmp_path: Path):
     env_file.write_text(
         "DATABASE_URL=mongodb://mongo1:27017,mongo2:27017/contraclaim?replicaSet=rs0\n"
         "MONGO_DB=contraclaim\n"
-        "REDIS_PASSWORD=stub\n"
-        "FALKORDB_PASSWORD=stub\n",
+        f"REDIS_PASSWORD={REDIS_SENTINEL}\n"
+        f"FALKORDB_PASSWORD={FALKOR_SENTINEL}\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -297,8 +303,8 @@ def _manifest(root: Path) -> dict:
 
 
 def _both_engines_compose_managed(backup) -> None:
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
-    backup.docker.engine("cidfalkor00001", aliases=("falkordb",), compose_service="falkordb")
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidfalkor001", aliases=("falkordb",), compose_service="falkordb")
 
 
 # --------------------------------------------------------------------------- #
@@ -309,31 +315,46 @@ def _both_engines_compose_managed(backup) -> None:
 def test_an_out_of_band_engine_is_found_by_its_network_alias(backup) -> None:
     """`compose ps -q falkordb` returns nothing; a cutover container answers."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
-    backup.docker.engine("cidcutover0001", aliases=("falkordb",))  # no compose service
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidcutover01", aliases=("falkordb",))  # no compose service
 
     result = backup()
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "FLUSH falkordb: ok" in result.stdout, result.stdout
-    assert backup.docker.lastsave("cidcutover0001") == 1001
+    assert backup.docker.lastsave("cidcutover01") == 1001
     assert any(
-        call.startswith("docker exec cidcutover0001") and call.endswith("BGSAVE")
+        call.startswith("docker exec cidcutover01") and call.endswith("BGSAVE")
         for call in _calls(backup)
     ), _calls(backup)
     assert _manifest(backup.root)["persistence_flush"] == {"redis": "ok", "falkordb": "ok"}
 
 
-def test_the_compose_service_is_preferred_when_it_is_running(backup) -> None:
-    """Normalised topology: compose answers, and the alias scan is not needed."""
+def test_the_normalised_compose_engine_is_flushed(backup) -> None:
+    """After normalization the compose container is also the alias holder: one engine."""
 
     _both_engines_compose_managed(backup)
 
     result = backup()
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert backup.docker.lastsave("cidfalkor00001") == 1001
-    assert "docker ps -q" not in _calls(backup), _calls(backup)
+    assert backup.docker.lastsave("cidfalkor001") == 1001
+    assert "FLUSH falkordb: ok (container cidfalkor001" in result.stdout, result.stdout
+
+
+def test_two_engines_answering_to_falkordb_is_refused(backup) -> None:
+    """The preserved original started next to the live engine: flush neither, say so."""
+
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidorigin001", aliases=("falkordb",), compose_service="falkordb")
+    backup.docker.engine("cidcutover01", aliases=("falkordb",))
+
+    result = backup()
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "more than one running container answers" in result.stderr, result.stderr
+    assert backup.docker.lastsave("cidorigin001") == 1000
+    assert backup.docker.lastsave("cidcutover01") == 1000
 
 
 # --------------------------------------------------------------------------- #
@@ -344,7 +365,7 @@ def test_the_compose_service_is_preferred_when_it_is_running(backup) -> None:
 def test_a_flush_that_reaches_nothing_is_reported_and_fails_the_run(backup) -> None:
     """The exact R-A9G state, minus the cutover container: nothing is listening."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
 
     result = backup()
 
@@ -357,7 +378,7 @@ def test_a_flush_that_reaches_nothing_is_reported_and_fails_the_run(backup) -> N
 def test_a_failed_flush_still_writes_every_artefact(backup) -> None:
     """Exit 3 and not 1: the run completed, one guarantee did not hold."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
 
     result = backup()
 
@@ -370,7 +391,7 @@ def test_a_failed_flush_still_writes_every_artefact(backup) -> None:
 def test_the_manifest_records_which_engine_was_not_flushed(backup) -> None:
     """A cron log rotates away; the manifest is what a later audit reads."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
 
     assert backup().returncode == 3
     assert _manifest(backup.root)["persistence_flush"] == {"redis": "ok", "falkordb": "FAILED"}
@@ -379,23 +400,23 @@ def test_the_manifest_records_which_engine_was_not_flushed(backup) -> None:
 def test_a_bgsave_that_never_lands_is_not_reported_as_ok(backup) -> None:
     """BGSAVE replies when the fork starts. Only LASTSAVE proves a write."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
-    backup.docker.engine("cidfalkor00001", aliases=("falkordb",), compose_service="falkordb", frozen=True)
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidfalkor001", aliases=("falkordb",), compose_service="falkordb", frozen=True)
 
     result = backup()
 
     assert result.returncode == 3, result.stdout + result.stderr
     assert "FLUSH falkordb: FAILED" in result.stderr
     assert "did not land" in result.stderr, result.stderr
-    assert backup.docker.lastsave("cidfalkor00001") == 1000
+    assert backup.docker.lastsave("cidfalkor001") == 1000
 
 
 def test_an_unreadable_lastsave_is_a_failure_not_a_flush(backup) -> None:
     """A resolved container with a wrong credential answers nothing usable."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
-    backup.docker.engine("cidfalkor00001", aliases=("falkordb",), compose_service="falkordb")
-    (backup.tmp / "dockerstate" / "lastsave" / "cidfalkor00001").unlink()
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidfalkor001", aliases=("falkordb",), compose_service="falkordb")
+    (backup.tmp / "dockerstate" / "lastsave" / "cidfalkor001").unlink()
 
     result = backup()
 
@@ -419,6 +440,41 @@ def test_the_password_is_never_an_argument_on_the_host(backup) -> None:
     for call in calls:
         assert REDIS_SENTINEL not in call, call
         assert FALKOR_SENTINEL not in call, call
+
+
+def test_the_argv_capture_would_see_a_leaked_password(backup) -> None:
+    """Positive control: a check that cannot fail proves nothing.
+
+    The script loads the sentinel from the env file into its own environment;
+    the one-line variant of the old flush that expands it on the host must be
+    caught by the same log the test above reads.
+    """
+
+    driver = backup.tmp / "leaky.sh"
+    driver.write_text(
+        f'. "{(REPO_ROOT / "scripts" / "lib" / "env_file.sh").as_posix()}"\n'
+        'env_file_load "$ENV_FILE"\n'
+        'docker exec cidleak redis-cli -a "$FALKORDB_PASSWORD" LASTSAVE || true\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    backup(driver)
+
+    assert any(FALKOR_SENTINEL in call for call in _calls(backup)), _calls(backup)
+
+
+def test_an_alias_on_another_projects_network_is_not_flushed(backup) -> None:
+    """Another stack on the host may run its own `falkordb`. It is not ours."""
+
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidforeign01", aliases=("falkordb",), network="otherstack_default")
+
+    result = backup()
+
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "FLUSH falkordb: FAILED" in result.stderr
+    assert backup.docker.lastsave("cidforeign01") == 1000
+    assert not any(call.startswith("docker exec cidforeign01") for call in _calls(backup))
 
 
 # --------------------------------------------------------------------------- #
@@ -494,7 +550,7 @@ def test_retention_is_silent_when_everything_expired_could_be_removed(tmp_path: 
 def test_the_offsite_sync_still_runs_after_an_unproven_flush(backup, tmp_path: Path) -> None:
     """Losing replication is worse than an unflushed engine; 3 is carried, not swallowed."""
 
-    backup.docker.engine("cidredis00001", aliases=("redis",), compose_service="redis")
+    backup.docker.engine("cidredis0001", aliases=("redis",), compose_service="redis")
 
     aws_log = tmp_path / "aws.log"
     aws = tmp_path / "bin" / "aws"
