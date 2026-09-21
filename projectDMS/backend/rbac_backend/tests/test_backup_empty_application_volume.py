@@ -335,9 +335,12 @@ def _working_bash() -> str | None:
 
 BASH = _working_bash()
 
-#: Speaks only the four docker invocations production_backup.sh makes. Volume
+#: Speaks only the docker invocations production_backup.sh makes. Volume
 #: `NAME` is served from `$STUB_VOLUMES/NAME`; `STUB_CORRUPT_VOLUME` makes the
-#: archive of that one volume garbage, as a disk or a killed tar would.
+#: archive of that one volume garbage, as a disk or a killed tar would. Both
+#: persistence engines are compose-managed and flush successfully - LASTSAVE
+#: advances on every BGSAVE - because the flush itself is measured in
+#: `test_backup_persistence_flush.py`, not here.
 _DOCKER_STUB = r"""#!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "docker $*" >>"$STUB_LOG"
@@ -346,11 +349,23 @@ if [[ "${1:-}" == "volume" && "${2:-}" == "inspect" ]]; then
   [[ -d "$STUB_VOLUMES/${3:-}" ]] && { echo "[{}]"; exit 0; }
   echo "Error response from daemon: get ${3:-}: no such volume" >&2; exit 1
 fi
+if [[ "${1:-}" == "inspect" ]]; then
+  echo true; exit 0
+fi
+if [[ "${1:-}" == "exec" ]]; then
+  clock="$(dirname "$STUB_LOG")/lastsave-${2:-engine}"
+  [[ -f "$clock" ]] || printf '1000' >"$clock"
+  case "${!#}" in
+    LASTSAVE) cat "$clock" ;;
+    BGSAVE) printf '%s' "$(($(cat "$clock") + 1))" >"$clock"; echo "Background saving started" ;;
+  esac
+  exit 0
+fi
 if [[ "${1:-}" == "compose" ]]; then
   case " $* " in
+    *" ps -q "*) echo "stub-${!#}"; exit 0 ;;
     *" ps "*) echo "stub ps"; exit 0 ;;
     *" mongodump "*) printf 'mongodump archive' | gzip -c; exit 0 ;;
-    *" BGSAVE"*) echo "Background saving started"; exit 0 ;;
   esac
   echo "unexpected compose call: $*" >&2; exit 97
 fi

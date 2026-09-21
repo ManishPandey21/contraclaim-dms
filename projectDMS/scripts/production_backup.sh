@@ -61,11 +61,20 @@ backup_volume() {
   bash "$ROOT_DIR/scripts/backup_volume.sh" "$volume" "$archive" "$@"
 }
 
-echo "Flushing Redis/FalkorDB persistence where available..."
-docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T redis \
-  sh -c 'redis-cli -a "$REDIS_PASSWORD" BGSAVE' || true
-docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T falkordb \
-  sh -c 'redis-cli -a "$FALKORDB_PASSWORD" BGSAVE' || true
+echo "Flushing Redis/FalkorDB persistence, and proving it landed..."
+# `|| true` around a compose exec made a flush that reached nothing look exactly
+# like one that worked, and R-A9G's out-of-band FalkorDB engine turned that into
+# a nightly no-op. The engine is now resolved by compose service *or* network
+# alias, and LASTSAVE has to advance before the flush counts (R-A9H D1).
+# shellcheck source=scripts/lib/redis_flush.sh
+. "$ROOT_DIR/scripts/lib/redis_flush.sh"
+flush_failures=0
+flush_status_redis=ok
+flush_status_falkordb=ok
+redis_flush redis REDIS_PASSWORD redis ||
+  { flush_status_redis=FAILED; flush_failures=$((flush_failures + 1)); }
+redis_flush falkordb FALKORDB_PASSWORD falkordb ||
+  { flush_status_falkordb=FAILED; flush_failures=$((flush_failures + 1)); }
 
 # Uploads and Qdrant's snapshot scratch are legitimately empty on a fresh install.
 # With no contract, backup_volume.sh refused that archive and set -e aborted the
@@ -100,16 +109,29 @@ cat >"$manifest_json" <<EOF
     "$BACKUP_ROOT/volumes/falkordb-data-$STAMP.tar.gz",
     "$BACKUP_ROOT/volumes/redis-data-$STAMP.tar.gz"
   ],
-  "checksum_file": "$checksum_file"
+  "checksum_file": "$checksum_file",
+  "persistence_flush": {
+    "redis": "$flush_status_redis",
+    "falkordb": "$flush_status_falkordb"
+  }
 }
 EOF
 cp "$manifest_json" "$BACKUP_ROOT/manifests/latest.json"
 
-if ! find "$BACKUP_ROOT" -type f -mtime "+$RETENTION_DAYS" -delete 2>/dev/null; then
-  # Do not invalidate a freshly completed backup when a legacy artifact is
-  # owned by another account. Keep the warning actionable and leave the
-  # inaccessible artifact untouched for an authorized retention cleanup.
-  echo "WARN: unable to remove one or more expired backup artifacts; retention cleanup is required" >&2
-fi
+# Do not invalidate a freshly completed backup when a legacy artifact is owned
+# by another account. The warning now names the artifact, so the cleanup is an
+# action rather than a hunt (R-A9H D2).
+# shellcheck source=scripts/lib/retention.sh
+. "$ROOT_DIR/scripts/lib/retention.sh"
+retention_prune "$BACKUP_ROOT" "$RETENTION_DAYS" || true
 
 echo "Production backup complete: $BACKUP_ROOT ($STAMP)"
+
+# 3, not 1 and not 0. Every artefact above was written and is worth replicating,
+# but the persistence flush was not proven, so an archive may hold only what
+# happened to be on disk. `backup_offsite_s3.sh` carries 3 through its own sync
+# for exactly that reason. Reporting 0 here is the defect R-A9G shipped with.
+if [ "$flush_failures" -ne 0 ]; then
+  echo "WARN: $flush_failures persistence flush(es) did not reach a live engine; the archives above hold only what was already on disk" >&2
+  exit 3
+fi
