@@ -48,6 +48,8 @@ const EVENT_TYPES = [
   "letter",
   "instruction",
   "delay",
+  "hindrance",
+  "constraint",
   "payment",
   "drawing",
   "milestone",

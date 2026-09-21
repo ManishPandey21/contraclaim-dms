@@ -8,6 +8,19 @@ import {
   type DocumentRelationship,
 } from "@/services/document-relationships-api";
 
+/** Readable names for relationship target types; unknown types show raw. */
+const TARGET_TYPE_LABELS: Record<string, string> = {
+  delay_event: "Hindrance / constraint",
+  claim: "Claim",
+  ipc_bill: "IPC / bill",
+  insurance: "Insurance",
+  bank_guarantee_event: "Bank guarantee",
+  key_date_achievement: "Key date achievement",
+  eot_submission: "EOT submission",
+  eot_determination: "EOT determination",
+  contract_document: "Contract document",
+};
+
 export default function LinkedRecordsPanel({ documentId }: { documentId: string }) {
   const [links, setLinks] = useState<DocumentRelationship[]>([]);
   const [loading, setLoading] = useState(true);
@@ -72,7 +85,8 @@ export default function LinkedRecordsPanel({ documentId }: { documentId: string 
               {link.target_label || link.target_id || "Linked record"}
             </span>
             <span className="text-xs text-muted-foreground">
-              {link.target_type} · {link.relationship_role}
+              {TARGET_TYPE_LABELS[link.target_type || ""] || link.target_type} ·{" "}
+              {link.relationship_role.replace(/_/g, " ")}
             </span>
           </span>
         </Link>

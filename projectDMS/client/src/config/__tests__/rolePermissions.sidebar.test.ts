@@ -48,6 +48,7 @@ const SIDEBAR_PATHS = [
   "/claims",
   "/sla",
   "/key-dates",
+  "/hindrances",
   "/contracts/master",
   "/variations",
   "/bank-guarantees",

@@ -27,7 +27,25 @@ export type DocumentRelationshipRole =
   | "eot_determination"
   | "engineer_determination"
   | "policy"
-  | "certificate";
+  | "certificate"
+  | "instruction"
+  | "site_record"
+  | "photograph"
+  | "programme_record";
+
+/** Evidence roles for a Hindrance & Constraint Register entry (target type `delay_event`). */
+export const HINDRANCE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
+  value: DocumentRelationshipRole;
+  label: string;
+}> = [
+  { value: "site_record", label: "Site record" },
+  { value: "notice", label: "Notice" },
+  { value: "correspondence", label: "Correspondence" },
+  { value: "instruction", label: "Instruction" },
+  { value: "photograph", label: "Photograph" },
+  { value: "programme_record", label: "Programme record" },
+  { value: "supporting_document", label: "Supporting document" },
+];
 
 export const INSURANCE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
   value: DocumentRelationshipRole;
