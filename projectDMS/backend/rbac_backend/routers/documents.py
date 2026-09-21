@@ -2769,6 +2769,24 @@ def _resolve_document_search_term(
     return normalized_q or normalized_search
 
 
+#: Pseudo upload type accepted by the listing: "incoming OR outgoing".
+CORRESPONDENCE_UPLOAD_TYPE_FILTER = "correspondence"
+
+
+def _resolve_upload_type_filter(upload_type: Optional[str]) -> Any:
+    """Map ``uploadType=correspondence`` onto the stored taxonomy.
+
+    Stored values are ``incoming | outgoing | contract`` and the Document model
+    accepts them case-insensitively, so the match is case-insensitive too. The
+    relationship service enforces the same definition server-side
+    (``is_correspondence_document``); this filter only keeps the link selector
+    from offering Documents the server would refuse.
+    """
+    if upload_type and upload_type.strip().lower() == CORRESPONDENCE_UPLOAD_TYPE_FILTER:
+        return {"$regex": "^(incoming|outgoing)$", "$options": "i"}
+    return upload_type
+
+
 def _apply_linkable_document_constraints(query: Dict[str, Any]) -> Dict[str, Any]:
     constrained = dict(query or {})
     constrained.setdefault("project_id", {"$nin": [None, ""]})
@@ -2808,7 +2826,7 @@ async def list_documents(
         "project_id": project_id,
         "tags": tags,
         "subTags": subTags,
-        "uploadType": uploadType,
+        "uploadType": _resolve_upload_type_filter(uploadType),
         "status": status,
         "search": _resolve_document_search_term(q, search),
         "date_from": date_from,

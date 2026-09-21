@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Optional
+from urllib.parse import quote
 
 from ..core.permissions import Permissions
 from .publication_policy import document_id_candidates
@@ -85,6 +86,32 @@ INSURANCE_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
         "supporting_document",
     }
 )
+
+
+#: Roles that assert the linked Document *is correspondence*.
+#:
+#: Other roles (supporting_document, notice, determination, ...) describe the
+#: Document's purpose for the target and may point at any Document type; these
+#: two make a claim about the Document itself, so the server checks it.
+CORRESPONDENCE_ROLES: FrozenSet[str] = frozenset({"correspondence", "payment_correspondence"})
+
+#: The correspondence values of the Document ``uploadType`` taxonomy
+#: (``incoming | outgoing | contract``, case-insensitive per the Document model).
+CORRESPONDENCE_UPLOAD_TYPES: FrozenSet[str] = frozenset({"incoming", "outgoing"})
+
+
+def is_correspondence_document(document: Optional[Dict[str, Any]]) -> bool:
+    """Is this Document incoming or outgoing correspondence?
+
+    Fails closed: a missing or unrecognised ``uploadType`` is not correspondence.
+    The legacy ``upload_type`` spelling is read only when ``uploadType`` is absent.
+    """
+    if not document:
+        return False
+    raw = document.get("uploadType")
+    if raw is None:
+        raw = document.get("upload_type")
+    return str(raw or "").strip().lower() in CORRESPONDENCE_UPLOAD_TYPES
 
 
 @dataclass(frozen=True)
@@ -1169,10 +1196,69 @@ class ContractDocumentEntityAdapter(EntityAdapter):
 
     Loading a target is a read. It creates no lifecycle event, resolves no
     classification, and never touches document_id.
+
+    Writing a link (CL-1) bumps only ``document_relationship_revision``, fenced on
+    the same structural anchor ``load`` read, so an instrument re-scoped between
+    load and commit refuses the write instead of gaining a link in its old
+    project. Deleting an instrument is a Contract Master lifecycle act, never a
+    side effect of relationship management, so ``delete`` always refuses.
     """
 
     target_type = "contract_document"
     supports_freeze = False
+
+    @staticmethod
+    def _route(record: Dict[str, Any]) -> str:
+        """Deep link to the instrument's canonical Document in the contract viewer.
+
+        There is no SPA route keyed by ContractDocument id (the old
+        ``/contract-documents/{id}`` never existed, and the Contract Master
+        workspace does not read one). The contract viewer route, keyed by
+        Document id, is live and loads the instrument's own content, and
+        ContractDocument.document_id is its canonical identity.
+        """
+        document_id = str(record.get("document_id") or "")
+        return f"/contracts/viewer/{quote(document_id, safe='')}" if document_id else "/contracts/viewer"
+
+    async def freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        actor_id: Optional[str],
+        frozen_at: Any,
+        reason: str,
+        session: Any = None,
+    ) -> None:
+        raise RuntimeError("Contract Document evidence freeze is not supported")
+
+    async def guard_relationship_write(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        result = await db["contract_documents"].update_one(
+            {
+                "_id": context.entity.get("_id"),
+                "organization_id": context.organization_id,
+                "scope_level": "project",
+                "scope_project_id": context.project_id,
+            },
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        return bool(getattr(result, "matched_count", 0))
+
+    async def delete(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        return False
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         record = None
@@ -1205,7 +1291,7 @@ class ContractDocumentEntityAdapter(EntityAdapter):
             delete_permission=Permissions.CONTRACT_MASTER_MANAGE,
             allowed_roles=CONTRACT_DOCUMENT_ROLES,
             label=label,
-            route=f"/contract-documents/{contract_document_id}",
+            route=self._route(record),
             frozen=False,
         )
 

@@ -98,6 +98,11 @@ class ContractDocumentRecord(BaseModel):
         default=PromotionState.RECONCILIATION, description="OPERATIONAL"
     )
 
+    #: Write fence for canonical Document relationships targeting this
+    #: instrument (CL-1). Bumped inside each link transaction so a concurrent
+    #: re-scope conflicts instead of racing; carries no legal meaning.
+    document_relationship_revision: int = Field(default=0, ge=0, description="OPERATIONAL")
+
     created_at: datetime = Field(default_factory=_now, description="AUDIT")
     created_by: Optional[str] = Field(default=None, description="AUDIT")
 

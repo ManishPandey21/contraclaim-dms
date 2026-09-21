@@ -259,6 +259,9 @@ class _Database:
                     "_id": "doc-1",
                     "filename": "Notice.pdf",
                     "subject": "Notice of delay",
+                    # A received notice is incoming correspondence; the
+                    # correspondence roles are only accepted for such Documents.
+                    "uploadType": "incoming",
                     "organization_id": "org-1",
                     "project_id": "project-1",
                     "processing_status": "metadata_extracted",

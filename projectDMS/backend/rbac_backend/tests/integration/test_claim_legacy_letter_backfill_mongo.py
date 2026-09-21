@@ -89,6 +89,8 @@ async def _seed(
         "organization_id": "org-1",
         "project_id": "project-1",
         "filename": "Correspondence.pdf",
+        # Letter-sourced correspondence; the correspondence role requires it.
+        "uploadType": "outgoing",
         "lifecycle_state": "active",
         "processing_status": "completed",
         "duplicate_status": "unique",
