@@ -182,6 +182,9 @@ should be cleared before the window: `ra9bs-e2e` (a leftover R-A9B staging Playw
 | `docker-compose.yml` | `d607bc04be870c078387fee1e68580e36c872a5df4470343fbb0b6d6dca1ba92` |
 | `docker-compose.staging.yml` | `e6b0bf37904fcc633bfcf52aaf91953b2c75f70d6c14f008d62d3c4901b1d0d7` |
 
+> **R-A9H: RETIRED 2026-09-20T21:40Z (R-A9G §13a).** The paragraph below is the frozen
+> pre-cutover record.
+>
 > The temporary `docker-compose.clamav-r-a8z.yml` is **untracked** and lives only on the
 > production host, so it has no hash here by design. Its render hash is recorded in the R-A8Z
 > and R-A9C evidence (`8ab39508…`). It is retired at checklist section 13a, after the release
@@ -330,10 +333,10 @@ assert the catalogue rather than trusting the seeder's log, which is best-effort
 | Container | `contraclaim-falkordb-1`, id `de249ee3df2009c0ac12655cad95a9edc6d995d152d4632131d5fe74e5a712fc` |
 | Started | 2026-09-15T06:02:51Z, 0 restarts |
 | Persistence directory | **`/FalkorDB`** (release target: `/data`) |
-| Graph | `contraclaim` — **156 nodes, 220 edges, 7 labels** |
+| Graph | `contraclaim` — **156 nodes, 220 edges, 4 labels** (`Contract`, `ContractDocument`, `Clause`, `Letter`). *R-A9H correction: this row first said "7 labels", a count of `CALL db.labels()` output lines (header + 4 labels + 2 statistics lines)* |
 | Rescue archive taken 2026-09-20 | `falkordb-persistence-20260920T110319Z-RA9E-hot.tar.gz`, sha256 `ebecc4cea8a273a597e256b1eb2bd6763d6608da7c5fb233b8e8c2c212c0c7d4`, 63,639 bytes |
 | Archive validation | semantic, `redis-persistence` contract — `dump.rdb` + `appendonlydir/` at the canonical root |
-| Disposable restore proof | restored engine came up `dir=/data`, `PONG`, graph `contraclaim`, **156 / 220 / 7** — parity with production; 0 residual containers, volumes or networks |
+| Disposable restore proof | restored engine came up `dir=/data`, `PONG`, graph `contraclaim`, **156 / 220 / 4 labels** (R-A9H correction of "7") — parity with production; 0 residual containers, volumes or networks |
 | Cutover variant | **A** (owner decision, R-A9F) |
 
 That archive proves the *procedure*. A **fresh** rescue archive must still be taken inside the

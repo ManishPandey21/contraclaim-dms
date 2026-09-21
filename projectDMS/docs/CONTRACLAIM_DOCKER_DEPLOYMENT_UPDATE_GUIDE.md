@@ -4,7 +4,24 @@ This guide explains how to update the ContraClaim Docker deployment on the Ubunt
 
 Use it as a deployment checklist. Do not overwrite production configuration, environment files, uploaded documents, database volumes, backup directories, or runtime data.
 
-> **TEMPORARY WARNING — PRODUCTION CLAMAV OVERRIDE (since R-A8Z, 2026-09-14).**
+> **CURRENT PRODUCTION FACTS (R-A9H, 2026-09-21) — read these first.**
+>
+> 1. **Branch.** Production tracks `release/contraclaim-rc1`, not `main`. Read
+>    `git branch --show-current` on the server; §5 below says `main` and is wrong for now.
+> 2. **Compose file set.** `docker-compose.prod.yml` + `docker-compose.mongo-replicaset.yml`.
+>    The R-A8Z ClamAV override was **retired** on 2026-09-20; never add it.
+> 3. **FalkorDB is in a temporary out-of-band topology** until normalization. Never run a
+>    blanket `docker compose up -d`/`start`, and always pass `--no-deps` when recreating
+>    `backend`, `contract-worker` or `document-worker` — each `depends_on` the compose
+>    `falkordb` service, which is the preserved rollback container and must stay stopped.
+>    See `PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` (status banner).
+> 4. **Application services are four:** `backend` (web only), `contract-worker` (contract
+>    queue + the only scheduler), `document-worker` (the only extraction owner, `legacy_v0`),
+>    `client`. `document-worker-canary` runs **0** replicas outside an authorised canary.
+> 5. **A certified release is retagged, not rebuilt** (§6).
+>
+> ~~TEMPORARY WARNING — PRODUCTION CLAMAV OVERRIDE (since R-A8Z, 2026-09-14).~~ *Retired
+> 2026-09-20; kept below as history.*
 > **UNTIL FULL CUTOVER, EVERY PRODUCTION COMPOSE COMMAND THAT CAN RECREATE CLAMAV
 > MUST INCLUDE THE R-A8Z CLAMAV OVERRIDE:**
 >
@@ -123,6 +140,24 @@ git rev-parse HEAD
 If `git pull --ff-only` fails, stop and inspect the cause. Do not use force reset or overwrite local files unless the impact is reviewed and approved.
 
 ## 6. Rebuild the Required Docker Images
+
+> **A certified release is NOT rebuilt.** When the release programme has certified image ids
+> (the production manifest records them), retag those ids onto the compose image names and
+> start with `--no-build`; a rebuild yields a different, uncertified image:
+>
+> ```bash
+> docker tag <certified-backend-id> contraclaim-backend:latest
+> docker tag <certified-backend-id> contraclaim-contract-worker:latest
+> docker tag <certified-backend-id> contraclaim-document-worker:latest
+> docker tag <certified-client-id>  contraclaim-client:latest
+> docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml \
+>   up -d --no-deps --no-build backend contract-worker document-worker client
+> ```
+>
+> The build path below is for ad-hoc fixes outside a certified release. Wherever it lists
+> `backend contract-worker`, **add `document-worker`**: it runs the same backend image and
+> owns document extraction. Leaving it out is how R-A9G reached `post_deploy_verify.sh` with
+> no extraction owner.
 
 Rebuild only the services affected by the release.
 

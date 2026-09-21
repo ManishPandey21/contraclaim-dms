@@ -1,6 +1,10 @@
 # R-A9G production cutover plan — scope, window, ordering
 
-**Status: PLAN ONLY. NOT SCHEDULED. NOT EXECUTED.**
+**Status: EXECUTED — R-A9G Attempt 2, 2026-09-20T21:00Z window, DEPLOYMENT SUCCESS (outage
+9 m 28 s). Post-production closure is recorded in `docs/R_A9H_POST_PRODUCTION_CLOSURE.md`.**
+The text below is the plan as frozen before the window; it is kept as written.
+
+~~Status: PLAN ONLY. NOT SCHEDULED. NOT EXECUTED.~~
 Written 2026-09-20 in release programme R-A9F, which made no production change of any kind.
 
 **Updated 2026-09-20 (R-A9G-0): six of the seven preconditions below are now recorded.** The
@@ -106,7 +110,8 @@ document as follows — it is not a second procedure.
 | 17 | Keep the original container until the rollback-retention rule is satisfied | §5.4 |
 
 Parity target, measured read-only on 2026-09-20: graph `contraclaim`, **156 nodes, 220 edges,
-7 labels**. R-A9E reproduced exactly those numbers from a rescue archive in a disposable
+4 labels (`Contract`, `ContractDocument`, `Clause`, `Letter`)**. *(R-A9H correction: first written "7 labels", a count of `CALL db.labels()` output lines.
+Relationship types: `CITES` 215, `HAS_CLAUSE` 3, `HAS_DOCUMENT` 1, `HAS_SUBCLAUSE` 1.)* R-A9E reproduced exactly those numbers from a rescue archive in a disposable
 `/data` engine, which proves the procedure — it does **not** substitute for taking a fresh
 archive inside the window.
 
@@ -128,3 +133,5 @@ archive inside the window.
 2. **The compose file set.** The running `clamav` container carries a **three**-file
    `com.docker.compose.project.config_files` label. Read the label rather than assuming, and
    keep the ClamAV override in every production compose command until §13a retires it.
+   **R-A9H: retired 2026-09-20T21:40Z. The production compose file set is now the two tracked
+   files only; do not add `docker-compose.clamav-r-a8z.yml` to any command.**

@@ -141,10 +141,36 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   never deployed.
 - Deploy = get the commit onto the branch the server tracks (push to both remotes; the
   feature branch alone does not reach production) → on the server
-  `git pull --ff-only origin <that branch>` → rebuild only affected services
-  (`build client` for a frontend-only change) → `up -d --no-deps <service>`.
+  `git pull --ff-only origin <that branch>` → for an ad-hoc fix, rebuild only affected
+  services (`build client` for a frontend-only change); for a certified release, retag
+  instead (next bullet) → `up -d --no-deps <service>`.
   Gates: `scripts/pre_deploy_readiness.sh`, migration dry-run; after:
   `scripts/post_deploy_verify.sh`.
+- **A certified release is retagged, never rebuilt.** Tag the certified image ids from the
+  production manifest onto `contraclaim-{backend,contract-worker,document-worker,client}`
+  and start with `up -d --no-deps --no-build`; a rebuild is a different, uncertified image.
+  Application services are **four** — `document-worker` (sole extraction owner) is easy to
+  forget because the old deploy guide never listed it, and R-A9G shipped without it until
+  `post_deploy_verify.sh` failed. `document-worker-canary` runs 0 replicas.
+- **Production state after R-A9G/R-A9H (verified 2026-09-21):** tracks
+  `release/contraclaim-rc1`; the compose file set is the two tracked files — the R-A8Z ClamAV
+  override was **retired** 2026-09-20, never add it back. Receipt:
+  `docs/R_A9H_POST_PRODUCTION_CLOSURE.md`.
+- **FalkorDB is in a temporary out-of-band topology until normalization.** The live engine is
+  `contraclaim-falkordb-cutover` (alias `falkordb`); the compose `falkordb` service is the
+  preserved original — stopped, stale, on a dead credential. `backend`, `contract-worker` and
+  `document-worker` `depends_on` it, so **never run a blanket `up -d`/`start`, and always pass
+  `--no-deps`**, or two containers answer to `falkordb`.
+- **`docker stop` does not gracefully stop `falkordb:v4.0.8`**: PID 1 is `/bin/sh -c run.sh`
+  and does not forward SIGTERM. Set the restart policy to `no`, run an authenticated
+  `redis-cli SHUTDOWN SAVE` inside the container, and require `Exited (0)`.
+- **Never put a credential on a host command line.** `sudo` logs argv to `/var/log/auth.log`
+  and the journal keeps it. R-A9H leaked the live Falkor password there by *checking* for it
+  with `sudo grep -F -- "$PW" /var/log`; search as root inside `sudo bash -s <<'EOF'`, reading
+  the value from the env file there, so it never becomes an argument. Expand secrets
+  inside the container as `REDISCLI_AUTH="$FALKORDB_PASSWORD" redis-cli …` — not `-a`, whose
+  argv is world-readable in the host's `/proc` — and redact evidence **by value**
+  with `scripts/evidence_secret_scan.py`, never by key name.
 - **`preflight.py` and the migration dry-run must run inside the backend container.** The
   host interpreter has none of the app's dependencies, so on the host they fail with
   `No module named 'motor'` / `'dotenv'` — an environment artefact, not a real gate failure
@@ -199,6 +225,12 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   the normalized form.
 
 ## Known open debt
+
+- **FalkorDB compose normalization is pending** (R-A9H §4, earliest 2026-09-22): until then the
+  live engine has no healthcheck and unbounded logs, the original container and
+  `.env.bak-ra9g-a2` are retained for rollback, and the current Falkor credential sits in
+  `/var/log/auth.log` (re-rotate in the same window). Third-party image exception expires
+  2026-10-15 (re-scan 2026-10-06). G32 not run.
 
 - Client consumes neither `selection_required` nor `context_forbidden` (no scope-selection
   prompt exists yet).

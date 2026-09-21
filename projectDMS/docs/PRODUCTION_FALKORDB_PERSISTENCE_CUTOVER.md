@@ -1,7 +1,28 @@
 # Production FalkorDB persistence cutover — `/FalkorDB` → `/data`
 
-**Status: PROCEDURE ONLY. NOT EXECUTED. Requires its own owner authorisation and
-a maintenance window.** Nothing in R-A8R touched production; every state below
+**Status (R-A9H, 2026-09-21): EXECUTED in R-A9G Attempt 2 (2026-09-20, Variant A). The graph
+now persists on `/data` in `contraclaim_falkordb_data`; parity 156 / 220 / 4 labels held.**
+
+> **CURRENT TEMPORARY TOPOLOGY — READ BEFORE ANY COMPOSE COMMAND.** The live engine is the
+> out-of-band container `contraclaim-falkordb-cutover` (holds the `falkordb` alias on
+> `contraclaim_data-net`). The compose `falkordb` service is the **preserved original**
+> `contraclaim-falkordb-1` (`de249ee3df20…`), stopped, `restart: no`, still configured with
+> the `falkordb` alias, `dir=/FalkorDB` and the **pre-rotation** password. `backend`,
+> `contract-worker`, `document-worker` and `document-worker-canary` all declare
+> `depends_on: falkordb: service_healthy`, so **any** `docker compose up` that names one of
+> them without `--no-deps` — and every blanket `docker compose up -d` — starts that original:
+> two containers answer to `falkordb`, and one of them serves stale data on a dead credential.
+>
+> * Never run a blanket `docker compose up -d` or `docker compose start`.
+> * Always pass `--no-deps` when recreating an application service.
+> * A host reboot is safe: Docker restart policies do not evaluate compose `depends_on`, the
+>   original is `restart: no`, the cutover engine is `unless-stopped`.
+>
+> This warning is retired by the normalization in §5.4, which is **deferred** until its
+> retention conditions hold (`docs/R_A9H_POST_PRODUCTION_CLOSURE.md` §4).
+
+~~Status: PROCEDURE ONLY. NOT EXECUTED. Requires its own owner authorisation and
+a maintenance window.~~ Nothing in R-A8R touched production; every state below
 was read from the running deployment on 2026-09-08 and is re-derivable with the
 commands quoted.
 
@@ -157,7 +178,9 @@ still running, 0 restarts, before and after. What ran: a hot rescue archive take
 (`falkordb-persistence-20260920T110319Z-RA9E-hot.tar.gz`, sha256 `ebecc4cea8a273a5...`),
 semantically validated under the `redis-persistence` contract, and restored into a
 **disposable** run-owned volume and engine that came up with `dir=/data` and reproduced the
-production graph exactly - **156 nodes, 220 edges, 7 labels**, matching the live inventory -
+production graph exactly - **156 nodes, 220 edges, 4 labels (`Contract`, `ContractDocument`, `Clause`, `Letter`)**, matching the live inventory -
+*(R-A9H correction, 2026-09-21: first written as "7 labels", which counted the output lines of
+`CALL db.labels()` - a `label` header, the four labels and two statistics lines - not labels.)*
 after which the original container was re-checked and found to be the same object, running,
 0 restarts. That proves the procedure; it does **not** substitute for step 4.2, which must
 take a **fresh** archive inside the window.
@@ -170,6 +193,10 @@ Every step is quoted with its own verification. A step that cannot be verified i
 a step that has not been done.
 
 `COMPOSE="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml"`
+
+> **R-A9H: the ClamAV override was RETIRED on 2026-09-20T21:40Z (R-A9G §13a).** From then on
+> `COMPOSE="-f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml"`. The note below
+> describes the pre-retirement state and is kept as written.
 
 > **The ClamAV override is part of that variable until it is retired.** Production's running
 > `clamav` container carries a three-file `com.docker.compose.project.config_files` label, so a
@@ -275,6 +302,24 @@ docker ps -a --filter name=contraclaim-falkordb-1 --format '{{.ID}} {{.Status}}'
 Required: the container still **exists**, `Exited (0)`. Its id must still be
 `de249ee3df20…`. If it is gone, the rollback in §5 is unavailable and the cutover
 must stop.
+
+> **R-A9G correction — how FalkorDB is actually stopped.** On `falkordb/falkordb:v4.0.8`,
+> `docker stop` (and therefore `docker compose stop`) is **not** a reliable graceful stop: the
+> image's PID 1 is a shell wrapper that does not forward `SIGTERM` to `redis-server`, so the
+> engine is killed at the stop timeout without its final save. The canonical graceful stop,
+> as executed in R-A9G Attempt 2 (evidence `21-falkor-shutdown-save.txt`), is:
+>
+> ```bash
+> docker update --restart=no <container>        # FIRST, or the policy restarts it
+> docker exec <container> sh -c 'REDISCLI_AUTH="$FALKORDB_PASSWORD" redis-cli SHUTDOWN SAVE'
+> docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' <container>   # REQUIRED: exited 0
+> ```
+>
+> The password is expanded **inside** the container. Never pass it on a host command line:
+> `sudo` records argv in `/var/log/auth.log` and the journal keeps it (R-A9H receipt §9). Use
+> `REDISCLI_AUTH` rather than `-a` even inside the container: a container process is a host
+> process, and `-a` puts the password in its world-readable `/proc/<pid>/cmdline`. Anything
+> other than `Exited (0)` is a failed stop and the persistence on disk is not trusted.
 
 ### 4.8 Seed the volume at the correct root
 
@@ -590,6 +635,11 @@ Adopt the engine back into compose in the same window:
 docker stop contraclaim-falkordb-cutover && docker rm contraclaim-falkordb-cutover
 docker compose $COMPOSE up -d --no-deps falkordb
 ```
+
+> **R-A9H: use the §4.7 graceful stop, not `docker stop`,** for the cutover engine as well —
+> `update --restart=no`, authenticated `SHUTDOWN SAVE`, require `Exited (0)` — before `docker rm`.
+> The full normalization sequence, its verification and its rollback are specified in
+> `docs/R_A9H_POST_PRODUCTION_CLOSURE.md` §4; that is the version to execute.
 
 The volume is now the state, so this recreate is safe — which was the entire
 point of the cutover.

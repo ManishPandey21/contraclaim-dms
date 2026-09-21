@@ -22,10 +22,10 @@ ordering from here, and re-derive every number.
 | P2 | Maintenance window booked, with a reserve | **NOT BOOKED — this is the one outstanding owner act.** Book **8 h** (not the older 5–6 h figure, which was sized for a deploy plus migrations and predates the role alignment, the Falkor Variant-A move, the password rotation and the ClamAV retirement): minimum **120-minute** execution budget, minimum **90-minute** protected recovery reserve, `LATEST_SAFE_STOP = WINDOW_START + 270 min`. See §2 and `docs/R_A9G_CUTOVER_PLAN.md` |
 | P3 | Release branch reaches a deployable branch | **CLOSED 2026-09-20 (R-A9F)** — `release/contraclaim-rc1` fast-forwarded to the certified candidate `fe728b2` and pushed to both trusted remotes; PR #20 open, draft, unmerged |
 | P4 | Readiness ≥ 85 for Gate 9 | **CLOSED 2026-09-20 (R-A9G-0)** — Gate 9 is **6/6** and the scorer reads **91/100 (raw 90.67, verdict "Ready")**. The threshold was met **before** b5 was ticked (85 / raw 85.33), which is the non-circularity condition; the move to 91 is four checkboxes and **no new measurement**. Re-derive with `scripts/production_readiness_score.py` rather than trusting this figure |
-| P5 | FalkorDB `/data` cutover sequenced with the deploy | **PLANNED, NOT EXECUTED** — `docs/PRODUCTION_FALKORDB_PERSISTENCE_CUTOVER.md` |
+| P5 | FalkorDB `/data` cutover sequenced with the deploy | **EXECUTED in R-A9G Attempt 2 (2026-09-20), Variant A.** Compose normalization deferred — `docs/R_A9H_POST_PRODUCTION_CLOSURE.md` §4 |
 | P6 | S3 failure-domain disposition confirmed | **OWNER-ACCEPTED DEBT** — confirmed at §8; the standing decisions are listed at the end of this file |
 | P7 | Every open launch-gate bullet formally disposed | **CLOSED 2026-09-20 (R-A9G-0)** — all eleven open bullets are disposed in `docs/R_A9F_OPEN_GATE_MATRIX.md`: Gate 9 b1, b2, b5 and b6 are checked, and Gate 3 b3–b9 are **dated owner-accepted debt with a 2026-10-15 follow-up**. Six of the seven owner acts are recorded (`docs/R_A9G_OWNER_DECISION_RECORD.md`); only the window grant (P2) remains |
-| P8 | ClamAV temporary override retired | **PLANNED for §13a** — production depends on the untracked `docker-compose.clamav-r-a8z.yml` today; it is retired **after** the release stack is running and verified, never before |
+| P8 | ClamAV temporary override retired | **RETIRED 2026-09-20T21:40Z (R-A9G §13a).** `clamav` now carries the two-file label, same `clamav_db` volume, same image. Recorded deviation: the render-equivalence proof ran immediately before retirement, not before the deploy — `docs/R_A9H_POST_PRODUCTION_CLOSURE.md` §12 |
 
 P4 is a Gate 9 condition, not a cutover condition. A deploy can technically
 proceed below 85; **Gate 9 cannot close**, and the release is then deployed
@@ -105,6 +105,8 @@ exist only because of a decision recorded there.
 - [ ] Migration dry run **inside the backend container**:
       `migrate_database --list`, then `--fail-on-warning`.
 - [ ] `docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml -f docker-compose.clamav-r-a8z.yml config`
+      *(R-A9H: the override was retired at §13a on 2026-09-20; from then on use the two
+      tracked files only.)*
       **The ClamAV override belongs in every production compose command** until §13a retires
       it. The running `clamav` container's own
       `com.docker.compose.project.config_files` label carries three files; a two-file render
@@ -206,7 +208,13 @@ profile — is the only definition. Do not substitute a file listing for it.
 
 ## 13. Release image deployment
 
-- [ ] Rebuild only affected services; a frontend fix is not deployed until the
+- [ ] **A certified release is not rebuilt.** Retag the certified image ids recorded in the
+      production manifest onto the compose image names, then start with
+      `up -d --no-deps --no-build <service>` — a rebuild produces a different, uncertified
+      image (R-A9G Attempt 2, evidence `26-retag-certified.txt`). The retag covers
+      **`backend`, `contract-worker`, `document-worker` and `client`**; `document-worker` is a
+      release service and was missed in R-A9G until `post_deploy_verify.sh` failed on it.
+- [ ] (Ad-hoc fixes outside a certified release only) Rebuild only affected services; a frontend fix is not deployed until the
       `client` image is rebuilt. Confirm by fetching the hashed asset from the
       public edge and reading the compiled code — the chunk name changes on every
       content change, so the old name still being served means the build did not
@@ -217,6 +225,11 @@ profile — is the only definition. Do not substitute a file listing for it.
       metrics token / Redis / backup config, and it is deliberate.
 
 ## 13a. ClamAV temporary-override retirement
+
+> **DONE — RETIRED 2026-09-20T21:40Z in R-A9G Attempt 2** (evidence `37-clamav-retirement.txt`).
+> The render-equivalence proof below was run **later than this section specifies** —
+> immediately before retirement rather than before the deploy. Result: 0 differing keys.
+> Disposition and follow-up: `docs/R_A9H_POST_PRODUCTION_CLOSURE.md` §12.
 
 Production depends on the **untracked** `docker-compose.clamav-r-a8z.yml`, applied in R-A8Z
 because the deployed production source predates the ClamAV fix. The release source already

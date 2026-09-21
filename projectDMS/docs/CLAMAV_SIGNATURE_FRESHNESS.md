@@ -1,6 +1,11 @@
 # ClamAV signature freshness — diagnosis, release fix, and gate
 
-> **TEMPORARY PRODUCTION OPERATIONAL WARNING (R-A8Z, re-verified read-only in R-A9A at 2026-09-14T17:56Z).**
+> **RETIRED 2026-09-20T21:40Z (R-A9G §13a; re-verified in R-A9H 2026-09-21).** Production's
+> `clamav` now runs from the tracked release compose with the **two**-file set. Do **not** add
+> `docker-compose.clamav-r-a8z.yml` to any production command. The warning below is kept as
+> the historical record of the R-A8Z → R-A9G period.
+>
+> ~~TEMPORARY PRODUCTION OPERATIONAL WARNING (R-A8Z, re-verified read-only in R-A9A at 2026-09-14T17:56Z).~~
 > **UNTIL FULL CUTOVER, EVERY PRODUCTION COMPOSE COMMAND THAT CAN RECREATE CLAMAV
 > MUST INCLUDE THE R-A8Z CLAMAV OVERRIDE.** Production's checkout is still the old
 > deployed source (`main` @ `b2d5025`); only the `clamav` service runs the release
@@ -249,6 +254,7 @@ container changed: daily 28051 (July) -> 28123, loaded age 8.87 h, clean accepte
 EICAR rejected through the production backend, peak 1,675 MiB of 3 GiB. Until the
 cutover, production compose commands on clamav must include
 `docker-compose.clamav-r-a8z.yml`, or they recreate the old definition.
+**(R-A9H: that period ended at the R-A9G §13a retirement, 2026-09-20T21:40Z.)**
 
 **Cutover notes.** On adoption, compose recreates clamav with the new network and an
 empty `clamav_db` (seeded from the 1.4.6 image, database built 2026-09-06, older than
