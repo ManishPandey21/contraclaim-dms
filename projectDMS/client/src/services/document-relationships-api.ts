@@ -174,6 +174,8 @@ export async function searchLinkableDocuments(params: {
   q: string;
   organization_id?: string;
   project_id?: string;
+  /** "correspondence" matches incoming or outgoing Documents only. */
+  uploadType?: "incoming" | "outgoing" | "contract" | "correspondence";
   limit?: number;
   skip?: number;
 }) {
