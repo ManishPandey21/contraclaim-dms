@@ -867,6 +867,40 @@ async def test_evidence_graph_access_alone_no_longer_reaches_the_register() -> N
     assert legacy_list.status_code == 403
 
 
+async def test_evidence_graph_manage_is_not_a_write_bypass_on_the_compatibility_api() -> None:
+    """Owner decision (hindrance staging certification): /api/delay-events stays on
+    dms.hindrance.*. A principal that can read the register and holds
+    dms.evidence_graph.manage, but neither dms.hindrance.create nor .edit, must get
+    403 on compatibility create and update. The reads and the editor's PATCH are
+    positive controls: they prove the requests reach authorization with valid bodies."""
+    db = _seeded()
+    created = await _create(db)
+    GRANTS["u-graph-manager"] = {"dms.hindrance.view"} | {
+        "dms.evidence_graph.view",
+        "dms.evidence_graph.verify",
+        "dms.evidence_graph.manage",
+    }
+    graph_manager = _principal("u-graph-manager", ["projectuser"], "org-A", ["proj-A1"])
+    body = {"project_id": "proj-A1", "delay_ref": "D-2", "title": "x", "start_date": "2026-01-01T00:00:00"}
+    try:
+        async with _as(db, graph_manager) as client:
+            listed = await client.get("/api/delay-events")
+            fetched = await client.get(f"/api/delay-events/{created['id']}")
+            legacy_create = await client.post("/api/delay-events", json=body)
+            legacy_update = await client.patch(f"/api/delay-events/{created['id']}", json={"title": "bypass"})
+        async with _as(db, EDITOR_A1) as client:
+            control_update = await client.patch(f"/api/delay-events/{created['id']}", json={"title": "editor control"})
+    finally:
+        GRANTS.pop("u-graph-manager", None)
+
+    assert (listed.status_code, fetched.status_code) == (200, 200)
+    assert legacy_create.status_code == 403, legacy_create.text
+    assert legacy_update.status_code == 403, legacy_update.text
+    assert control_update.status_code == 200, control_update.text
+    assert len(db.delay_events.docs) == 1
+    assert _stored(db, created["id"])["title"] == "editor control"
+
+
 async def test_superadmin_cannot_file_a_record_under_the_wrong_organisation() -> None:
     db = _seeded()
 
