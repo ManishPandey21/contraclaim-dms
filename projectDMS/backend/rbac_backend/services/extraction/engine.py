@@ -42,7 +42,11 @@ from .models import (
 )
 from .page_classifier import PageClassifier
 from .page_store import MeterCallback, OcrRunner, PageStore
-from .text_quality import NativeTextQuality, assess_native_text_quality
+from .text_quality import (
+    NativeTextQuality,
+    assess_native_text_quality,
+    withhold_unusable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +185,9 @@ class PageExtractionEngine:
             ocr_failed_pages=failed,
             ocr_deferred_pages=sorted(deferred),
             unrenderable_pages=unrenderable,
+            withheld_pages=sorted(
+                page.number for page in pages if page.raw_text is not None
+            ),
             completeness=Completeness.PARTIAL if unresolved else Completeness.COMPLETE,
             engine_version=ENGINE_VERSION,
         )
@@ -289,6 +296,16 @@ class PageExtractionEngine:
                 page_source = PageSource.OCR
             else:
                 text = native_text
+
+            # Unusable text is evidence, never published: `text` - and so
+            # combined_text, page records, chunking and embeddings - carries
+            # none of it, and `raw_text` keeps it whole beside the page's
+            # fail-visible status. Tables read from the same unusable layer
+            # go with it.
+            text, withheld = withhold_unusable(text)
+            if withheld is not None:
+                tables = []
+            if number not in overrides:
                 page_source = (
                     PageSource.TEXT_LAYER if text.strip() else PageSource.EMPTY
                 )
@@ -303,6 +320,7 @@ class PageExtractionEngine:
                     tables=tables,
                     batch_id=batch_id,
                     error=error,
+                    raw_text=withheld,
                 )
             )
         return pages

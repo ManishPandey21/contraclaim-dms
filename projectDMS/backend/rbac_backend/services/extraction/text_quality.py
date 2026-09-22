@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 #: pdfminer's exact rendering of an unmapped glyph (``PDFLayoutAnalyzer.handle_undefined_char``).
 UNDEFINED_GLYPH = re.compile(r"\(cid:\d+\)")
@@ -82,3 +83,17 @@ def assess_native_text_quality(text: str) -> NativeTextQuality:
         readable_chars=readable,
         longest_undefined_run=longest,
     )
+
+
+def withhold_unusable(text: str) -> Tuple[str, Optional[str]]:
+    """Split text into what may be published and what is only evidence.
+
+    The one rule every consumer shares: unusable text is never published -
+    not indexed, embedded, summarised or chunked - and is not regex-stripped
+    into something that looks usable either. It is returned whole as evidence,
+    for the caller to keep beside a fail-visible status.
+    """
+    body = text or ""
+    if body and assess_native_text_quality(body).unusable:
+        return "", body
+    return body, None

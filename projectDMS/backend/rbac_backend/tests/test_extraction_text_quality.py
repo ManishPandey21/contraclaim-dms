@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from rbac_backend.services.extraction.text_quality import assess_native_text_quality
+from rbac_backend.services.extraction.text_quality import (
+    assess_native_text_quality,
+    withhold_unusable,
+)
 
 _GARBAGE = "".join(f"(cid:{ord(character)})" for character in "Claim summary page 3")
 
@@ -129,3 +132,21 @@ def test_isolated_placeholders_scattered_through_text_are_tolerated() -> None:
     assert quality.undefined_glyphs == 5
     assert quality.longest_undefined_run == 1
     assert quality.unusable is False
+
+
+def test_withhold_unusable_keeps_usable_text_published() -> None:
+    text = "Readable clause text (cid:127) with one symbol"
+
+    assert withhold_unusable(text) == (text, None)
+
+
+def test_withhold_unusable_moves_unusable_text_to_evidence_whole() -> None:
+    # Not a regex strip: the readable remainder is not published either,
+    # because a page that is mostly unreadable does not say what it says.
+    text = "Page 4\n" + _GARBAGE * 3
+
+    assert withhold_unusable(text) == ("", text)
+
+
+def test_withhold_unusable_on_empty_text_withholds_nothing() -> None:
+    assert withhold_unusable("") == ("", None)

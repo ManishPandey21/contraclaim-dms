@@ -100,9 +100,12 @@ async def test_cid_dominated_page_with_ocr_disabled_is_partial_not_complete(
     assert page.status is PageStatus.OCR_DISABLED
     assert result.completeness is Completeness.PARTIAL
     assert page.error is not None and "(cid:N)" in page.error
-    # Fail-visible, not laundered: what the text layer actually held is kept
-    # as evidence rather than stripped into a page that looks merely short.
-    assert "(cid:" in page.text
+    # Fail-visible, not laundered: what the text layer held is kept whole as
+    # evidence, and none of it is published for indexing.
+    assert page.text == ""
+    assert page.source is PageSource.EMPTY
+    assert page.raw_text is not None and page.raw_text.startswith("(cid:")
+    assert "(cid:" not in result.combined_text
 
 
 async def test_structural_class_stays_textual_while_quality_forces_ocr(
@@ -210,6 +213,9 @@ async def test_ocr_output_dominated_by_placeholders_is_not_accepted(
     assert page.source is not PageSource.OCR
     assert page.error is not None and "(cid:N)" in page.error
     assert result.completeness is Completeness.PARTIAL
+    # Neither the unusable OCR output nor the unusable native text is published.
+    assert page.text == ""
+    assert "(cid:" not in result.combined_text
 
 
 async def test_encoded_fixture_routing_is_unchanged(tmp_path: Path) -> None:
@@ -254,7 +260,8 @@ page = result.pages[0]
 print(json.dumps({
     "status": page.status.value,
     "completeness": result.completeness.value,
-    "has_placeholders": "(cid:" in page.text,
+    "published_placeholders": "(cid:" in page.text or "(cid:" in result.combined_text,
+    "evidence_kept": "(cid:" in (page.raw_text or ""),
 }))
 """
 
@@ -272,5 +279,110 @@ def test_ocrmypdf_imported_first_cannot_make_placeholders_complete(
     assert state == {
         "status": "ocr_disabled",
         "completeness": "partial",
-        "has_placeholders": True,
+        "published_placeholders": False,
+        "evidence_kept": True,
     }
+
+
+class _FailingRunner(_Runner):
+    async def run(
+        self, source: Path, page_numbers: Sequence[int], language: str
+    ) -> Dict[int, str]:
+        self.requested.append(list(page_numbers))
+        raise RuntimeError("OCRmyPDF batch failed (exit=2)")
+
+
+async def test_failed_ocr_of_a_cid_page_publishes_nothing(tmp_path: Path) -> None:
+    source = build_composite_font_pdf(tmp_path / "cid.pdf", composite_lines=_BODY)
+
+    result = await _engine(_FailingRunner()).extract(source)
+    page = result.pages[0]
+
+    assert page.status is PageStatus.OCR_FAILED
+    assert page.text == ""
+    assert page.raw_text is not None and "(cid:" in page.raw_text
+    assert "(cid:" not in result.combined_text
+    assert result.completeness is Completeness.PARTIAL
+
+
+class _Meter:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def __call__(
+        self, *, page_count: int, page_numbers: Sequence[int], retry: bool
+    ) -> None:
+        self.calls.append(
+            {"page_count": page_count, "page_numbers": list(page_numbers), "retry": retry}
+        )
+
+
+def _metered(
+    runner: _Runner, meter: _Meter, *, ocr_enabled: bool = True, max_pages: int = 100
+) -> PageExtractionEngine:
+    return PageExtractionEngine(
+        policy=PageExtractionPolicy(
+            ocr_enabled=ocr_enabled,
+            min_text_chars_per_page=40,
+            batch_size=25,
+            max_ocr_pages_per_attempt=max_pages,
+            ocr_language="eng",
+        ),
+        ocr_runner=runner,
+        store=NullPageStore(),
+        meter=meter,
+    )
+
+
+async def test_a_cid_page_sent_to_ocr_is_metered_once(tmp_path: Path) -> None:
+    source = build_composite_font_pdf(tmp_path / "cid.pdf", composite_lines=_BODY)
+    meter = _Meter()
+
+    await _metered(_Runner(), meter).extract(source)
+
+    assert meter.calls == [{"page_count": 1, "page_numbers": [1], "retry": False}]
+
+
+async def test_a_detected_cid_page_is_not_metered_when_ocr_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = build_composite_font_pdf(tmp_path / "cid.pdf", composite_lines=_BODY)
+    meter = _Meter()
+    runner = _Runner()
+
+    await _metered(runner, meter, ocr_enabled=False).extract(source)
+
+    assert runner.requested == []
+    assert meter.calls == []
+
+
+async def test_a_cid_page_deferred_past_the_attempt_boundary_is_not_metered(
+    tmp_path: Path,
+) -> None:
+    import pikepdf
+
+    first = build_composite_font_pdf(tmp_path / "a.pdf", composite_lines=_BODY)
+    second = build_composite_font_pdf(tmp_path / "b.pdf", composite_lines=_BODY)
+    combined = pikepdf.new()
+    for part in (first, second):
+        with pikepdf.open(part) as pdf:
+            combined.pages.extend(pdf.pages)
+    source = tmp_path / "two.pdf"
+    combined.save(source)
+    meter = _Meter()
+    runner = _Runner()
+
+    result = await _metered(runner, meter, max_pages=1).extract(source)
+
+    assert runner.requested == [[1]]
+    assert meter.calls == [{"page_count": 1, "page_numbers": [1], "retry": False}]
+    assert result.ocr_deferred_pages == [2]
+
+
+async def test_a_retry_meters_only_the_retried_pages_as_a_retry(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    meter = _Meter()
+
+    await _metered(_Runner(), meter).extract(source, retry_pages=[2])
+
+    assert meter.calls == [{"page_count": 1, "page_numbers": [2], "retry": True}]
