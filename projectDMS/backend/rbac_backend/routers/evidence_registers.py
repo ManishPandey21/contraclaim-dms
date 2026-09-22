@@ -194,6 +194,16 @@ async def update_delay_event(
         raise exc.as_http() from exc
 
 
+# ---------------------------------------------------------------------------
+# Programme Milestones follow the selected navbar project (CL-3B), exactly like
+# the Hindrance routes above: lists are bounded by the selection (membership-
+# bounded with none), a record or a write needs a selected project that the
+# milestone is in (400 `selection_required` / 403 `context_forbidden`). The same
+# boundary holds on the shared relationship routes through the adapter's
+# `active_scope_enforced`.
+# ---------------------------------------------------------------------------
+
+
 @router.get("/programme-milestones", response_model=List[ProgrammeMilestone])
 async def list_programme_milestones(
     organization_id: Optional[str] = Query(None),
@@ -206,8 +216,17 @@ async def list_programme_milestones(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    await policy.authorize(current_user, Permissions.EVIDENCE_GRAPH_VIEW, resource_type="programme_milestones", organization_id=organization_id, project_id=project_id, audit=False)
+    if selection.has_project:
+        if project_id or organization_id:
+            await selection.require_project(project_id or selection.project_id, organization_id)
+        project_id = selection.project_id
+        organization_id = selection.organization_id
+    elif selection.organization_id:
+        await selection.require_organization(organization_id)
+        organization_id = selection.organization_id
+    await policy.authorize(current_user, Permissions.EVIDENCE_GRAPH_VIEW, resource_type="programme_milestones", organization_id=organization_id or getattr(current_user, "organization_id", None), project_id=project_id, audit=False)
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     rows = await EvidenceRegisterService(db).list_programme_milestones(scope, project_id=project_id, status=status_filter, milestone_type=milestone_type, location=location, skip=skip, limit=limit)
     return [ProgrammeMilestone(**row) for row in rows]
@@ -219,8 +238,10 @@ async def create_programme_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    org = payload.organization_id or getattr(current_user, "organization_id", None)
+    await selection.require_project(payload.project_id, payload.organization_id)
+    org = payload.organization_id or selection.organization_id
     await policy.authorize(current_user, Permissions.EVIDENCE_GRAPH_MANAGE, resource_type="programme_milestone", organization_id=org, project_id=payload.project_id)
     return ProgrammeMilestone(**await EvidenceRegisterService(db).create_programme_milestone(payload, current_user))
 
@@ -231,10 +252,13 @@ async def get_programme_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    selection.require_selection()
     item = await EvidenceRegisterService(db).get_programme_milestone(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Programme milestone not found")
+    await selection.require_record(item)
     await policy.authorize_document(current_user, Permissions.EVIDENCE_GRAPH_VIEW, item, resource_type="programme_milestone")
     return ProgrammeMilestone(**item)
 
@@ -246,11 +270,14 @@ async def update_programme_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    selection.require_selection()
     svc = EvidenceRegisterService(db)
     item = await svc.get_programme_milestone(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Programme milestone not found")
+    await selection.require_record(item)
     await policy.authorize_document(current_user, Permissions.EVIDENCE_GRAPH_MANAGE, item, resource_type="programme_milestone")
     try:
         return ProgrammeMilestone(**await svc.update_programme_milestone(item_id, payload, current_user))

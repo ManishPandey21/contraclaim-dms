@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 from fastapi import HTTPException
 from pymongo import ReturnDocument
@@ -222,7 +223,8 @@ LINK_TARGETS: Dict[str, _LinkTarget] = {
         label_fields=("milestone_ref", "title"),
         date_fields=("forecast_date", "planned_date"),
         kind_field="milestone_type",
-        route=lambda row: None,
+        # CL-3B: the Programme Milestone detail page is the deep-link target.
+        route=lambda row: f"/programme-milestones/{quote(str(row.get('_id') or ''), safe='')}",
     ),
     "key_date": _LinkTarget(
         collection="key_date_milestones",

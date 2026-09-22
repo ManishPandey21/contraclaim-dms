@@ -1,7 +1,8 @@
 """Public HTTP seam for canonical entity-to-Document relationships.
 
 Active project scope (``core/tenant_context.py``) binds the target types whose
-adapter sets ``active_scope_enforced`` - Variation and Hindrance (CL-3A). For
+adapter sets ``active_scope_enforced`` - Variation and Hindrance (CL-3A),
+Programme Milestone and Chronology event (CL-3B). For
 those targets every forward route (link, list, freeze, get/remove/history of a
 link) needs a selected project that the target is in: 400 ``selection_required``
 with nothing selected, 403 ``context_forbidden`` for a target in another project.
@@ -289,6 +290,37 @@ async def list_document_link_targets(
         selected_project_id=selected_project_id,
     )
     return {"document_id": document_id, "target_type": target_type, "targets": targets}
+
+
+@router.get("/documents/{document_id}/link-target-types")
+@handle_exceptions
+async def list_document_link_target_types(
+    document_id: str,
+    current_user: CurrentUser = Depends(get_current_user),
+    service: DocumentRelationshipService = Depends(get_document_relationship_service),
+    requested: RequestedScope = Depends(requested_scope),
+) -> dict:
+    """Register types the caller could link this Document to (CL-3B).
+
+    Drives whether the Document Viewer offers "Link to Record" at all. Decided
+    from the caller's own manage permissions on the Document's scope - no
+    register record is read, so nothing about which records exist leaks. A
+    selection-bound type appears only while the navbar selection is the
+    Document's project; an unusable selection leaves those types out rather
+    than refusing the request.
+    """
+    await LINK_TARGETS_RATE_LIMITER.check_user_limit(str(getattr(current_user, "id", "") or ""))
+
+    async def selected_project_id() -> Optional[str]:
+        try:
+            return (await requested.resolve()).project_id
+        except TenantContextError:
+            return None
+
+    target_types = await service.link_target_types_for_document(
+        current_user, document_id, selected_project_id=selected_project_id
+    )
+    return {"document_id": document_id, "target_types": target_types}
 
 
 @router.get("/documents/{document_id}/link-dependencies")
