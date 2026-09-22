@@ -121,10 +121,12 @@ extraction runs, so even the first document a process handles is affected.
 patch the parent process. However, the parent re-reads the output PDF with
 pdfplumber.
 
-The legacy path still imports OCRmyPDF inside the process, and does so
-legitimately: `OCRService._run_ocr_with_sidecar` calls `ocrmypdf.ocr`, and is
-reached through `process_pdf` from `_extract_legacy` and
-`MetadataProcessorService`.
+The legacy path used to import OCRmyPDF inside the process:
+`OCRService._run_ocr_with_sidecar` called `ocrmypdf.ocr`, reached through
+`process_pdf` from `_extract_legacy` and `MetadataProcessorService`. It no
+longer does - see *Legacy path*, item 3 below - so no backend process imports
+OCRmyPDF at all, and a test walks every production module's AST to keep it that
+way.
 
 ## Changes
 
@@ -168,6 +170,63 @@ reached through `process_pdf` from `_extract_legacy` and
    pipeline needs only the `ocrmypdf` executable, which `REQUIRED_BINARIES`
    already checks. Nothing relies on import-order avoidance to be correct.
 
+## Legacy path (`legacy_v0`)
+
+`legacy_v0` is the default pipeline for every tenant not on the unified canary
+(`services/pipeline_routing.py`), so `OCRService.process_pdf` is a live
+production path, reached from `DocumentProcessor._extract_legacy`,
+`MetadataProcessorService` and `BulkUploadService`. It decided whether a PDF had
+text with `text.strip()` alone, so a CID-dominated PDF was classified textual,
+never OCR'd, and its placeholders were returned as the document's text.
+
+1. **One quality policy.** `OCRService.assess_text_layer` judges the inspected
+   pages with the same `assess_native_text_quality` the engine uses - no second
+   detector - and returns `textual`, `ocr_required_empty` or
+   `ocr_required_unusable_text`. The two OCR verdicts stay apart because an
+   unusable layer has to be *replaced*: unforced, OCRmyPDF refuses a PDF that
+   already has text (exit 6). `is_pdf_textual` remains as a boolean wrapper.
+2. **Every copy-the-original exit is guarded.** The assessment inspects five
+   pages; `_unusable_pages` reads them all, tolerating a page pdfplumber cannot
+   parse so one malformed page cannot hide an unusable one after it. It runs
+   before every exit that would hand the original on: OCR unavailable, the
+   textual branch's sidecar, exit 6 (prior OCR), a generic OCR failure, and a
+   sidecar read error. `_extract_sidecar_text` raises rather than return
+   placeholder text, and never strips placeholders.
+3. **OCRmyPDF runs out of process.** `_ocrmypdf` runs the CLI exactly as
+   `OcrMyPdfRunner` does (`shutil.which("ocrmypdf")`, else
+   `sys.executable -m ocrmypdf`), so the parent's pdfminer is never patched.
+   Exit codes map to typed errors - 6 prior OCR, 8 encrypted, anything else a
+   failure - mirrored from `ocrmypdf.exceptions.ExitCode` (16.10.4) and pinned
+   by a test that reads the installed enum in a child interpreter. Streams are
+   captured as bytes and reported as lengths plus the exit name, never decoded
+   text: OCRmyPDF reads the customer's PDF, so both streams can quote it.
+4. **Only the unusable pages are forced.** Forced replacement passes
+   `--pages`, so a 400-page born-digital contract with one bad page does not
+   have its other 399 pages rasterised.
+5. **Failures are visible.** A forced replacement has no fallback: OCRmyPDF
+   missing, refusing the text, any other error, or OCR output that is itself
+   unusable raises `UnusableTextLayerError` (a `DocumentProcessingError`),
+   which carries page numbers and glyph counts only. An encrypted PDF is now a
+   refusal too; it used to be caught by the same function's `except Exception`,
+   copied, and returned as a processed document with no text at all. Ordinary
+   scans keep their historical copy-and-return-`None` fallback.
+6. **Run-scoped outputs.** Each call writes into `process_dir/run-<uuid>/` and
+   returns a path inside it. `process_dir/<filename>` was shared, so two
+   documents of the same file name overwrote and deleted each other's processed
+   PDF and sidecar. A failed run removes only its own directory; a run
+   directory older than twice the OCR timeout is swept, because a killed worker
+   never reaches that cleanup and `process_dir` is a backed-up volume.
+7. **The OCR run is bounded.** The in-process call had no timeout. A flat one
+   would fail long scans that used to finish, so the bound is 900s or 6s per
+   page being OCR'd, whichever is larger, capped at two hours. On timeout the
+   whole process group is killed, so ghostscript and tesseract do not outlive
+   the run that started them.
+
+Measured on the fixtures (the repository tracks no PDFs): a composite-font PDF
+that read `textual` before now reads `ocr_required_unusable_text`; the same
+unencoded-font PDF gets the same verdict before and after a legacy OCR job in
+one long-lived worker, which it did not when the job imported OCRmyPDF.
+
 ## Sidecar: not adopted
 
 The OCRmyPDF sidecar file separates pages with `\f`. However, runs of
@@ -184,19 +243,94 @@ patched interpreter.
 data.** The repository tracks no PDFs (`*.pdf` is gitignored), and the only
 local PDFs are customer uploads, which were not read.
 
-## Residual risks (not addressed on this branch)
+## Owner decisions, 2026-09-22 (second pass on this branch)
 
-- **Legacy path unguarded.** `is_pdf_textual` and `_extract_sidecar_text`, used
-  by the legacy `legacy_v0` rollback path and by
-  `MetadataProcessorService.extract_metadata`, still accept `(cid:N)` text.
-- **Metering.** On the contract path, CID pages now count as metered OCR pages.
-  A tenant close to quota can hit `QuotaExceededError` on documents that used
-  to pass.
-- **Retry loop.** `ocr_disabled` does not use up a retry attempt. Documents
-  with CID pages on a deployment where OCR is off will therefore resume as
-  `partially_processed` indefinitely. The same loop already existed for thin
-  pages.
-- **Placeholder indexing.** The `(cid:N)` text of unresolved pages still goes
-  into `combined_text`.
+The owner approved two behaviours as intended:
+
+1. **OCR routing.** A page whose native text is unusable, including a
+   CID-dominated page, is an OCR candidate even though the PDF has a text
+   layer.
+2. **Metering.** OCR metering counts only the pages actually submitted to OCR
+   (`attempted`).
+   - A CID page that is detected while OCR is disabled is not metered.
+   - A page deferred past `max_ocr_pages_per_attempt` is not metered.
+   - A retry meters only the retried pages, with `retry=True`.
+
+   Pinned by tests in `test_extraction_engine_cid_text.py`.
+
+They also required three fixes.
+
+3. **`ocr_disabled` lifecycle.** First, the retry path as traced in the code:
+   - Every claim increments `document_processing_jobs.attempts`
+     (`_claim_next_processing_job`, `process_document_job`).
+   - `attempts_exhausted` is `attempts >= max_attempts` (3).
+   - `PARTIALLY_PROCESSED` is requeued by `_schedule_page_resume` with a 5 s
+     back-off.
+
+   So the old behaviour was bounded, not infinite. But a permanent capability
+   condition still ran extraction **three times** (measured, red) before
+   reaching `human_review_required`.
+
+   `derive_processing_state` now treats any `ocr_disabled` page like an
+   unrenderable one: the document goes straight to `human_review_required`.
+   That state is terminal, not a success, and the page is kept in
+   `remaining_page_numbers` for the reviewer. After a configuration fix, the
+   document is reprocessed by queueing a new job.
+
+   `test_ocr_disabled_is_not_reclaimed_by_repeated_worker_passes` drives the
+   real claim loop ten times and sees exactly one extraction. The contract
+   path has no automatic page resume, so it cannot loop.
+
+4. **Indexing.** One rule, `text_quality.withhold_unusable`, is applied once
+   by the producer (`PageExtractionEngine._merge`). For a page with unusable
+   text:
+   - `page.text` becomes `""`;
+   - the unusable text is kept whole as evidence in `page.raw_text`, which
+     `DocumentPageStore` persists as `original_text`;
+   - tables read from that same text layer are dropped;
+   - the status stays unresolved (`ocr_disabled` / `ocr_failed` /
+     `ocr_empty`).
+
+   Every downstream consumer therefore sees only published text:
+   `combined_text`, `DocumentProcessor` (OpenAI text extraction, `full_text`,
+   embeddings), the document page records, the contract page records (whose
+   `raw_text` is the published text, read by the contract clause agent) and
+   contract chunking.
+
+   The placeholders are not regex-stripped: an unusable page publishes nothing
+   at all. `test_cid_text_indexing_seam.py` runs `DocumentProcessor` on the
+   unified path with the real `OCRService`, engine and quality gate. It
+   asserts that no `(cid:` reaches `save_document_data` or the OpenAI text
+   call, in three cases:
+   - OCR unavailable;
+   - OCR failed;
+   - OCR output itself unusable.
+
+   These tests fail against the previous engine.
+5. **Legacy path.** Implemented in `OCRService`. See
+   `tests/test_legacy_ocr_cid_guard.py`, which uses the same
+   `assess_native_text_quality` policy.
+
+## Residual risks
+
 - **`BUFSIZ`.** The 256 MiB `BUFSIZ` still applies in any process that imports
-  OCRmyPDF. Reversing another library's global patch was out of scope.
+  OCRmyPDF. No backend process does any more, so this now bites only a tool
+  that imports it deliberately.
+- **Deterministic legacy failures still retry.** `document_service` decides
+  terminal status from the attempt count alone, so a document that fails for a
+  reason no retry can change - OCR unavailable, a refusal, unusable OCR output
+  - still uses all three attempts before it is dead-lettered. Retries are
+  bounded, unusable text cannot publish, and run-scoped outputs mean no attempt
+  can damage another document's artefacts, so this is accepted debt rather than
+  a blocker. Giving the job contract a non-retryable classification is a
+  separate change across `ProcessingResult`, `documents.processing_error` and
+  `_mark_processing_failure`.
+- **A large scan whose OCR fails still completes with no text.** In the
+  `ocr_required_empty` branch, an OCR failure on a PDF with nothing unusable in
+  it copies the original and returns `None`, unmarked. That predates this work.
+- **Force-OCR is still document-level in one case.** Only the unusable pages
+  are forced, but a document with many such pages is largely rasterised, and
+  the legacy path has no per-page `withheld_pages` equivalent.
+- **Retries replace page records.** A retry attempt replaces the page records
+  of pages outside its retry set. This behaviour predates this branch, was
+  observed during this work and was not investigated.
