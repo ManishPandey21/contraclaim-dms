@@ -163,6 +163,9 @@ app.add_middleware(
         "X-Requested-With",
         "X-Step-Up-Token",
         "Idempotency-Key",
+        # Active organisation / project selection (core/tenant_context.py).
+        "X-Org-Id",
+        "X-Proj-Id",
     ],
     expose_headers=["X-Request-ID", "Content-Disposition"],
 )

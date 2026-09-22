@@ -17,12 +17,15 @@ const api = vi.hoisted(() => ({
 }));
 const keyDates = vi.hoisted(() => ({ getMilestones: vi.fn(), getKeyDateWorkflow: vi.fn() }));
 const rbac = vi.hoisted(() => ({ granted: new Set<string>() }));
+/** The navbar selection the page is held to (owner decision 2026-09-22). */
+const tenant = vi.hoisted(() => ({ value: { loading: false, selectedProjectId: "proj-A1", selectedOrganizationId: "org-A" } }));
 
 vi.mock("@/services/hindrance-api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/services/hindrance-api")>()),
   ...api,
 }));
 vi.mock("@/services/key-dates-api", () => keyDates);
+vi.mock("@/contexts/TenantContext", () => ({ useTenant: () => tenant.value }));
 vi.mock("@/hooks/useRBAC", () => ({
   default: () => ({ can: (permission: string) => rbac.granted.has(permission), loading: false, roles: [], permissions: new Set() }),
 }));
@@ -93,6 +96,7 @@ function renderPage() {
 describe("HindranceDetailPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    tenant.value = { loading: false, selectedProjectId: "proj-A1", selectedOrganizationId: "org-A" };
     rbac.granted = new Set(["dms.hindrance.view", "dms.hindrance.edit", "dms.hindrance.archive"]);
     api.getHindrance.mockResolvedValue(entry());
     api.listHindranceLinks.mockResolvedValue([keyDateLink]);
@@ -203,6 +207,56 @@ describe("HindranceDetailPage", () => {
 
     expect(await screen.findByText(message)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Back to register/ })).toHaveAttribute("href", "/hindrances");
+  });
+
+  it("refuses an entry from another project than the one selected, even if the API returned it", async () => {
+    tenant.value = { ...tenant.value, selectedProjectId: "proj-A2" };
+    renderPage();
+
+    expect(await screen.findByText("This register entry is not available in the project selected in the navbar.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Site access blocked/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit/ })).not.toBeInTheDocument();
+    expect(api.listHindranceLinks).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["context_forbidden", 403, "This register entry is not available in the project selected in the navbar."],
+    ["selection_required", 400, "Select a project in the navbar to open this register entry."],
+  ])("shows the backend's %s scope refusal as its own state", async (code, status, message) => {
+    api.getHindrance.mockRejectedValue({ response: { status, data: { detail: { code, message: "x" } } } });
+    renderPage();
+
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit/ })).not.toBeInTheDocument();
+  });
+
+  it("waits for the tenant scope before loading, then loads under it", async () => {
+    tenant.value = { ...tenant.value, loading: true };
+    const view = renderPage();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.getHindrance).not.toHaveBeenCalled();
+
+    tenant.value = { ...tenant.value, loading: false };
+    view.rerender(
+      <MemoryRouter initialEntries={["/hindrances/h-1"]}>
+        <Routes><Route path="/hindrances/:id" element={<HindranceDetailPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByRole("heading", { name: /Site access blocked/ })).toBeInTheDocument();
+  });
+
+  it("drops the entry when the navbar switches to another project", async () => {
+    const view = renderPage();
+    expect(await screen.findByRole("heading", { name: /Site access blocked/ })).toBeInTheDocument();
+
+    tenant.value = { ...tenant.value, selectedProjectId: "proj-A2" };
+    view.rerender(
+      <MemoryRouter initialEntries={["/hindrances/h-1"]}>
+        <Routes><Route path="/hindrances/:id" element={<HindranceDetailPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("This register entry is not available in the project selected in the navbar.")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Site access blocked/ })).not.toBeInTheDocument();
   });
 
   it("says so when history cannot be loaded instead of claiming there is none", async () => {

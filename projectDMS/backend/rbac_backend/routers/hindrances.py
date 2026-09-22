@@ -10,6 +10,13 @@ the row first and authorize against ITS organisation and project, inline in the
 handler; a foreign record answers 403, matching the register contract since
 its introduction. Relationship targets (key dates, activities, EOT submissions)
 are authorized by the service, which is the only code that loads them.
+
+Active project scope (owner decision 2026-09-22, `core/tenant_context.py`): the
+navbar selection (`X-Org-Id` / `X-Proj-Id`) is a request boundary. With a project
+selected, a record, create body or reverse-lookup target in another project is
+403 `context_forbidden`; record-level and mutating routes with no selection are
+400 `selection_required`. The list with no selection stays bounded by
+`build_scope_query`, never global.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.evidence_registers import (
     DelayEvent,
     DelayEventStatus,
@@ -70,10 +78,13 @@ def _fail(exc: HindranceError) -> NoReturn:
     raise exc.as_http() from exc
 
 
-async def _load(service: HindranceRegisterService, item_id: str) -> dict:
+async def _load(service: HindranceRegisterService, item_id: str, scope: ActiveScope) -> dict:
+    """Load a record and hold it to the selected project (400 when none is selected)."""
+    scope.require_selection()
     item = await service.get(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Register entry not found")
+    await scope.require_record(item)
     return item
 
 
@@ -99,7 +110,14 @@ async def list_hindrances(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    if selection.has_project:
+        # A filter may narrow the selection, never leave it.
+        if project_id or organization_id:
+            await selection.require_project(project_id or selection.project_id, organization_id)
+        project_id = selection.project_id
+        organization_id = selection.organization_id
     await policy.authorize(
         current_user,
         Permissions.HINDRANCE_VIEW,
@@ -146,8 +164,11 @@ async def create_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    selected_org = payload.organization_id or getattr(current_user, "organization_id", None)
+    # The body's project must BE the selection: refused, never rewritten.
+    await selection.require_project(payload.project_id, payload.organization_id)
+    selected_org = payload.organization_id or selection.organization_id
     # Authorize before resolving, so an unauthorised caller learns nothing about
     # whether a project exists.
     await policy.authorize(
@@ -177,12 +198,15 @@ async def list_hindrances_affecting(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
     try:
         target = await service.load_link_target(target_type, target_id)
     except HindranceError as exc:
         _fail(exc)
+    if selection.has_project:
+        await selection.require_record(target)
     await policy.authorize_document(
         current_user, LINK_TARGETS[target_type].view_permission, target, resource_type=target_type
     )
@@ -204,8 +228,9 @@ async def get_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    item = await _load(HindranceRegisterService(db), item_id)
+    item = await _load(HindranceRegisterService(db), item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_VIEW, item, resource_type="delay_event")
     return DelayEvent(**item)
 
@@ -217,9 +242,10 @@ async def update_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_EDIT, item, resource_type="delay_event")
     try:
         updated = await service.update(item_id, payload.model_dump(exclude_unset=True), current_user)
@@ -237,9 +263,10 @@ async def archive_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_ARCHIVE, item, resource_type="delay_event")
     try:
         return DelayEvent(**await service.archive(item_id, current_user, reason=body.reason))
@@ -254,9 +281,10 @@ async def restore_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_ARCHIVE, item, resource_type="delay_event")
     try:
         return DelayEvent(**await service.restore(item_id, current_user, reason=body.reason))
@@ -270,9 +298,10 @@ async def resync_hindrance_timeline(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_EDIT, item, resource_type="delay_event")
     return DelayEvent(**await service.sync_timeline(item, current_user))
 
@@ -283,9 +312,10 @@ async def hindrance_history(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_VIEW, item, resource_type="delay_event")
     entries = await service.history(item_id)
     return HindranceHistoryResponse(entries=[HindranceHistoryEntry(**entry) for entry in entries])
@@ -297,9 +327,10 @@ async def list_hindrance_links(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_VIEW, item, resource_type="delay_event")
     links = await service.list_links(current_user, item, policy)
     return HindranceLinkListResponse(links=[HindranceLink(**link) for link in links])
@@ -318,9 +349,10 @@ async def link_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_EDIT, item, resource_type="delay_event")
     try:
         link, created = await service.link(current_user, item, payload, policy)
@@ -343,9 +375,10 @@ async def unlink_hindrance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
-    item = await _load(service, item_id)
+    item = await _load(service, item_id, selection)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_EDIT, item, resource_type="delay_event")
     try:
         link = await service.remove_link(current_user, item, link_id, body.reason, policy)

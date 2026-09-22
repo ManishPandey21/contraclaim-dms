@@ -11,9 +11,13 @@ import { expect, Page, Route, test } from "@playwright/test";
  * There is no deployed-stack spec for the register yet; staging evidence for it
  * is still to be written and captured.
  *
- * The mock enforces the two scope rules the backend enforces, so the browser
- * really sees a refusal: entries belong to one project, and a user assigned to
- * another project gets 403 on read and write.
+ * The mock enforces the scope rules the backend enforces, so the browser
+ * really sees a refusal: entries belong to one project, a user assigned to
+ * another project gets 403 on read and write, and - since the active-scope
+ * decision (2026-09-22, `core/tenant_context.py`) - the navbar selection sent as
+ * `X-Proj-Id` bounds every request: a record in another project is 403
+ * `context_forbidden`, a record-level request with no selection is 400
+ * `selection_required`, and the list follows the selection.
  */
 
 const ORG = { _id: "org-A", id: "org-A", name: "Aurora Engineering" };
@@ -43,9 +47,19 @@ const FOREIGN_PROJECT_USER: Actor = {
   permissions: ["dms.hindrance.view", "dms.hindrance.edit", "dms.document.view"],
 };
 
+/** An organisation admin: org-wide, so the navbar project selector is live. */
+const ORG_ADMIN: Actor = {
+  id: "u-orgadmin-a",
+  roles: ["orgadmin"],
+  projects: ["proj-A1", "proj-A2"],
+  permissions: PROJECT_ADMIN.permissions,
+};
+
 type Entry = Record<string, any>;
 
 class RegisterState {
+  /** Every register request as the backend would see it: method, path, selected project. */
+  requests: Array<{ method: string; path: string; project: string }> = [];
   entries: Entry[] = [];
   links: Entry[] = [];
   documentLinks: Entry[] = [];
@@ -75,6 +89,12 @@ async function mockApi(page: Page, actor: Actor, state: RegisterState) {
     const method = request.method();
     const body = request.postDataJSON?.() ?? null;
     const inScope = (entry: Entry) => actor.projects.includes(entry.project_id);
+    const selected = request.headers()["x-proj-id"] || "";
+    const registerPath = path.startsWith("/hindrances") || path.startsWith("/entities/delay_event");
+    if (registerPath) state.requests.push({ method, path, project: selected });
+    const refuse = () => json(route, { detail: { code: "context_forbidden", message: "not available in the selected project" } }, 403);
+    const selectFirst = () => json(route, { detail: { code: "selection_required", message: "select a project" } }, 400);
+    if (registerPath && selected && !actor.projects.includes(selected)) return refuse();
 
     if (path === "/csrf-token") return json(route, { csrf_token: "test-csrf" });
     if (path === "/me" || path === "/users/me") {
@@ -98,10 +118,15 @@ async function mockApi(page: Page, actor: Actor, state: RegisterState) {
       const includeArchived = url.searchParams.get("include_archived") === "true";
       const projectId = url.searchParams.get("project_id");
       if (projectId && !actor.projects.includes(projectId)) return json(route, { detail: "Not authorized" }, 403);
-      const items = state.entries.filter((entry) => inScope(entry) && (includeArchived || !entry.archived_at));
+      if (selected && projectId && projectId !== selected) return refuse();
+      const items = state.entries.filter(
+        (entry) => inScope(entry) && (!selected || entry.project_id === selected) && (includeArchived || !entry.archived_at),
+      );
       return json(route, { items, total: items.length, skip: 0, limit: 25 });
     }
     if (path === "/hindrances" && method === "POST") {
+      if (!selected) return selectFirst();
+      if (body.project_id !== selected) return refuse();
       if (!actor.projects.includes(body.project_id)) return json(route, { detail: "Not authorized" }, 403);
       state.seq += 1;
       const entry = {
@@ -121,8 +146,10 @@ async function mockApi(page: Page, actor: Actor, state: RegisterState) {
     }
     const item = path.match(/^\/hindrances\/([^/]+)(\/.*)?$/);
     if (item && item[1] !== "affecting") {
+      if (!selected) return selectFirst();
       const entry = state.entries.find((candidate) => candidate.id === item[1]);
       if (!entry) return json(route, { detail: "Register entry not found" }, 404);
+      if (entry.project_id !== selected) return refuse();
       if (!inScope(entry)) return json(route, { detail: "Not authorized: scope_denied" }, 403);
       const tail = item[2] || "";
       if (!tail && method === "GET") return json(route, entry);
@@ -179,7 +206,9 @@ async function mockApi(page: Page, actor: Actor, state: RegisterState) {
     // ---- canonical document relationships --------------------------------
     const documentLinks = path.match(/^\/entities\/delay_event\/([^/]+)\/document-links(:batch)?$/);
     if (documentLinks) {
+      if (!selected) return selectFirst();
       const entry = state.entries.find((candidate) => candidate.id === documentLinks[1]);
+      if (entry && entry.project_id !== selected) return refuse();
       if (!entry || !inScope(entry)) return json(route, { detail: "Not authorized" }, 403);
       if (documentLinks[2] && method === "POST") {
         const created = body.links.map((link: any, index: number) => ({
@@ -217,6 +246,8 @@ async function openRegister(page: Page) {
 }
 
 test.describe("Hindrance & Constraint Register workflow", () => {
+  // Measured 27-40 s per workflow on a dev host against the 45 s default: too close for CI.
+  test.describe.configure({ timeout: 90_000 });
   test("a project admin records, edits, links, reloads and archives an entry", async ({ page }) => {
     const state = new RegisterState();
     await mockApi(page, PROJECT_ADMIN, state);
@@ -316,19 +347,87 @@ test.describe("Hindrance & Constraint Register workflow", () => {
 
     // 8b. A crafted URL is refused, not rendered.
     await page.goto("/hindrances/h-1");
-    await expect(page.getByText("You do not have access to this register entry.")).toBeVisible();
+    await expect(page.getByText("This register entry is not available in the project selected in the navbar.")).toBeVisible();
     await expect(page.getByRole("button", { name: /Edit/ })).toHaveCount(0);
 
-    // 8c. A direct API write from the page's own session is refused too.
-    const status = await page.evaluate(async () => {
-      const response = await fetch("/api/hindrances/h-1", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Hijacked" }),
-      });
-      return response.status;
+    // 8c. A direct API write from the page's own session is refused too: under the
+    // user's own selection (403) and with no selection at all (400).
+    const statuses = await page.evaluate(async () => {
+      const write = (headers: Record<string, string>) =>
+        fetch("/api/hindrances/h-1", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...headers },
+          body: JSON.stringify({ title: "Hijacked" }),
+        }).then((response) => response.status);
+      return [await write({ "X-Proj-Id": "proj-A2" }), await write({})];
     });
-    expect(status).toBe(403);
+    expect(statuses).toEqual([403, 400]);
     expect(state.entries[0].title).toBe("Site access blocked at Station S2");
+  });
+
+  test("switching the navbar project re-scopes the register, its requests and its detail pages", async ({ page }) => {
+    const state = new RegisterState();
+    state.seq = 2;
+    const entry = (id: string, project: string, ref: string, title: string) => ({
+      id,
+      organization_id: "org-A",
+      project_id: project,
+      event_type: "hindrance",
+      hindrance_ref: ref,
+      title,
+      start_date: "2026-02-10T00:00:00",
+      responsibility: "employer",
+      critical_path_impact: false,
+      status: "open",
+      linked_document_ids: [],
+      archived_at: null,
+      timeline_sync_status: "synced",
+      created_at: "2026-02-10T08:00:00",
+    });
+    state.entries.push(entry("h-1", "proj-A1", "HIN-0001", "A1 station access"), entry("h-2", "proj-A2", "HIN-0001", "A2 depot crane"));
+    await mockApi(page, ORG_ADMIN, state);
+
+    // A1 selected: only A1 rows; the A1 detail opens.
+    await openRegister(page);
+    await page.getByLabel("Select project").selectOption({ label: PROJECT_A1.name });
+    await expect(page.getByRole("row", { name: /A1 station access/ })).toBeVisible();
+    await expect(page.getByRole("row", { name: /A2 depot crane/ })).toHaveCount(0);
+    await page.goto("/hindrances/h-1");
+    await expect(page.getByRole("heading", { name: /A1 station access/ })).toBeVisible();
+
+    // Switch to A2: the A1 row goes at once, and every later request carries A2.
+    await openRegister(page);
+    const switchedAt = state.requests.length;
+    await page.getByLabel("Select project").selectOption({ label: PROJECT_A2.name });
+    await expect(page.getByRole("row", { name: /A1 station access/ })).toHaveCount(0);
+    await expect(page.getByRole("row", { name: /A2 depot crane/ })).toBeVisible();
+    const afterSwitch = state.requests.slice(switchedAt);
+    expect(afterSwitch.length).toBeGreaterThan(0);
+    expect(afterSwitch.every((request) => request.project === "proj-A2")).toBe(true);
+
+    // The old A1 detail URL is refused under A2, and nothing of it renders.
+    await page.goto("/hindrances/h-1");
+    await expect(page.getByText("This register entry is not available in the project selected in the navbar.")).toBeVisible();
+    await expect(page.getByRole("heading", { name: /A1 station access/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /Edit/ })).toHaveCount(0);
+
+    // Create under A2 lands in A2.
+    await openRegister(page);
+    await page.getByRole("button", { name: /Record entry/ }).first().click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Title *").fill("A2 new constraint");
+    await dialog.getByLabel("Start / occurrence date *").fill("2026-02-12");
+    await dialog.getByRole("button", { name: "Record entry" }).click();
+    await expect(page.getByRole("row", { name: /A2 new constraint/ })).toBeVisible();
+    const created = state.entries.find((candidate) => candidate.title === "A2 new constraint");
+    expect(created?.project_id).toBe("proj-A2");
+    const post = state.requests.find((request) => request.method === "POST" && request.path === "/hindrances");
+    expect(post?.project).toBe("proj-A2");
+
+    // Switch back to A1: access to the A1 entry is restored.
+    await page.getByLabel("Select project").selectOption({ label: PROJECT_A1.name });
+    await expect(page.getByRole("row", { name: /A1 station access/ })).toBeVisible();
+    await page.goto("/hindrances/h-1");
+    await expect(page.getByRole("heading", { name: /A1 station access/ })).toBeVisible();
   });
 });

@@ -416,10 +416,30 @@ def _app(db: _Database, user: CurrentUser) -> FastAPI:
     return app
 
 
+_AUTO: Any = object()
+
+
+def _default_selection(user: CurrentUser) -> str | None:
+    """The navbar selection an ordinary session of this principal would send."""
+    if user.projects:
+        return user.projects[0]
+    return {"org-A": "proj-A1", "org-B": "proj-B1"}.get(user.organization_id or "")
+
+
 @asynccontextmanager
-async def _as(db: _Database, user: CurrentUser):
+async def _as(db: _Database, user: CurrentUser, project: Any = _AUTO, org: str | None = None):
+    """A client for ``user`` whose requests carry the navbar selection as the browser does.
+
+    ``project=None`` sends no selection at all.
+    """
+    selected = _default_selection(user) if project is _AUTO else project
+    headers = {}
+    if selected:
+        headers["X-Proj-Id"] = selected
+    if org:
+        headers["X-Org-Id"] = org
     transport = httpx.ASGITransport(app=_app(db, user))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", headers=headers) as client:
         yield client
 
 
@@ -442,7 +462,7 @@ def _payload(**overrides: Any) -> dict[str, Any]:
 
 
 async def _create(db: _Database, user: CurrentUser = PROJECT_A1_ADMIN, **overrides: Any) -> dict[str, Any]:
-    async with _as(db, user) as client:
+    async with _as(db, user, project=overrides.get("project_id", "proj-A1")) as client:
         response = await client.post("/api/hindrances", json=_payload(**overrides))
     assert response.status_code == 201, response.text
     return response.json()
@@ -904,13 +924,18 @@ async def test_evidence_graph_manage_is_not_a_write_bypass_on_the_compatibility_
 async def test_superadmin_cannot_file_a_record_under_the_wrong_organisation() -> None:
     db = _seeded()
 
-    async with _as(db, SUPERADMIN) as client:
+    # Since the active-scope decision (2026-09-22) the selection is checked first: a body
+    # naming another organisation or project than the selected one never reaches the service.
+    async with _as(db, SUPERADMIN, project="proj-B1") as client:
         mismatched = await client.post("/api/hindrances", json=_payload(project_id="proj-B1", organization_id="org-A"))
         missing_project = await client.post("/api/hindrances", json=_payload(project_id="proj-missing"))
         derived = await client.post("/api/hindrances", json=_payload(project_id="proj-B1"))
+    async with _as(db, SUPERADMIN, project="proj-missing") as client:
+        missing_selection = await client.post("/api/hindrances", json=_payload(project_id="proj-missing"))
 
-    assert mismatched.status_code == 422
-    assert missing_project.status_code == 404
+    assert mismatched.status_code == 403 and mismatched.json()["detail"]["code"] == "context_forbidden"
+    assert missing_project.status_code == 403
+    assert missing_selection.status_code == 403
     assert derived.status_code == 201 and derived.json()["organization_id"] == "org-B"
 
 
@@ -1325,3 +1350,277 @@ async def test_backfill_projects_register_rows_with_the_register_mapping() -> No
 
     events = {row["source_entity_id"]: row["event_type"] for row in db.project_events.docs if row.get("source_entity_type") == "delay_event"}
     assert events == {"h-no-event": "constraint", "legacy-no-event": "delay"}
+
+
+# ---------------------------------------------------------------------------
+# Owner decision 2026-09-22: the selected navbar project is an authorization
+# boundary. EffectiveScope = Entitlement ∩ Navbar Selection. A member of BOTH
+# projects is the subject throughout: membership alone must not be enough.
+# ---------------------------------------------------------------------------
+
+PROJECT_AB_ADMIN = _principal("u-projadmin-ab", ["projectadmin"], "org-A", ["proj-A1", "proj-A2"])
+GRANTS[PROJECT_AB_ADMIN.id] = HINDRANCE_ALL | READ_TARGETS
+
+
+async def _two_projects(db: _Database) -> tuple[dict[str, Any], dict[str, Any]]:
+    a1 = await _create(db, PROJECT_AB_ADMIN, project_id="proj-A1", title="A1 entry")
+    a2 = await _create(db, PROJECT_AB_ADMIN, project_id="proj-A2", title="A2 entry")
+    return a1, a2
+
+
+def _code(response: httpx.Response) -> str | None:
+    detail = response.json().get("detail")
+    return detail.get("code") if isinstance(detail, dict) else None
+
+
+def _refused(response: httpx.Response) -> bool:
+    return response.status_code == 403 and _code(response) == "context_forbidden"
+
+
+def _selection_required(response: httpx.Response) -> bool:
+    return response.status_code == 400 and _code(response) == "selection_required"
+
+
+async def test_scope_list_follows_the_selected_project_and_never_goes_global() -> None:
+    db = _seeded()
+    a1, a2 = await _two_projects(db)
+    b1 = await _create(db, ORG_B_ADMIN, project_id="proj-B1", title="B1 entry")
+
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        selected_a1 = (await client.get("/api/hindrances")).json()["items"]
+        filter_mismatch = await client.get("/api/hindrances", params={"project_id": "proj-A2"})
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        selected_a2 = (await client.get("/api/hindrances")).json()["items"]
+    async with _as(db, PROJECT_AB_ADMIN, project=None) as client:
+        unselected = (await client.get("/api/hindrances")).json()["items"]
+
+    assert [row["id"] for row in selected_a1] == [a1["id"]]
+    assert [row["id"] for row in selected_a2] == [a2["id"]]
+    assert {row["id"] for row in unselected} == {a1["id"], a2["id"]}
+    assert b1["id"] not in {row["id"] for row in unselected}
+    assert _refused(filter_mismatch), "a query filter widened the selected scope"
+
+
+async def test_scope_detail_requires_the_selected_project() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        allowed = await client.get(f"/api/hindrances/{a1['id']}")
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        mismatched = await client.get(f"/api/hindrances/{a1['id']}")
+    async with _as(db, PROJECT_AB_ADMIN, project=None) as client:
+        unselected = await client.get(f"/api/hindrances/{a1['id']}")
+
+    assert allowed.status_code == 200
+    assert _refused(mismatched), mismatched.text
+    assert "proj-A1" not in mismatched.text, "the refusal disclosed the record's project"
+    assert _selection_required(unselected), unselected.text
+    [audit] = _audits(db, "tenant.context.rejected")
+    assert audit["project_id"] == "proj-A1", "the audit must keep the attempted target"
+
+
+async def test_scope_create_never_rewrites_the_project() -> None:
+    db = _seeded()
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        allowed = await client.post("/api/hindrances", json=_payload(project_id="proj-A1"))
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        mismatched = await client.post("/api/hindrances", json=_payload(project_id="proj-A1"))
+    async with _as(db, PROJECT_AB_ADMIN, project=None) as client:
+        unselected = await client.post("/api/hindrances", json=_payload(project_id="proj-A1"))
+
+    assert allowed.status_code == 201 and allowed.json()["project_id"] == "proj-A1"
+    assert _refused(mismatched), mismatched.text
+    assert _selection_required(unselected), unselected.text
+    assert len(db.delay_events.docs) == 1
+
+
+async def test_scope_every_record_operation_is_refused_under_another_selection() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    archived = await _create(db, PROJECT_AB_ADMIN, project_id="proj-A1", title="archived A1")
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        assert (await client.post(f"/api/hindrances/{archived['id']}/archive", json={"reason": "x"})).status_code == 200
+
+    base = f"/api/hindrances/{a1['id']}"
+    document_batch = f"/api/entities/delay_event/{a1['id']}/document-links:batch"
+    document_body = {"links": [{"document_id": "doc-A1", "relationship_role": "site_record"}]}
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        responses = {
+            "get": await client.get(base),
+            "patch": await client.patch(base, json={"title": "moved"}),
+            "archive": await client.post(f"{base}/archive", json={"reason": "x"}),
+            "restore": await client.post(f"/api/hindrances/{archived['id']}/restore", json={"reason": "x"}),
+            "timeline_sync": await client.post(f"{base}/timeline-sync"),
+            "history": await client.get(f"{base}/history"),
+            "links": await client.get(f"{base}/links"),
+            "link_milestone": await client.post(f"{base}/links", json={"target_type": "programme_milestone", "target_id": "act-A1"}),
+            "link_key_date": await client.post(f"{base}/links", json={"target_type": "key_date", "target_id": "kd-A1"}),
+            "link_eot": await client.post(f"{base}/links", json={"target_type": "eot_submission", "target_id": "eot-A1"}),
+            "document_link": await client.post(document_batch, json=document_body),
+            "document_links": await client.get(f"/api/entities/delay_event/{a1['id']}/document-links"),
+        }
+    async with _as(db, PROJECT_AB_ADMIN, project=None) as client:
+        unselected = {
+            "patch": await client.patch(base, json={"title": "moved"}),
+            "archive": await client.post(f"{base}/archive", json={"reason": "x"}),
+            "timeline_sync": await client.post(f"{base}/timeline-sync"),
+            "history": await client.get(f"{base}/history"),
+            "link": await client.post(f"{base}/links", json={"target_type": "key_date", "target_id": "kd-A1"}),
+            "document_link": await client.post(document_batch, json=document_body),
+        }
+
+    for operation, response in responses.items():
+        assert _refused(response), f"{operation}: {response.status_code} {response.text}"
+    for operation, response in unselected.items():
+        assert _selection_required(response), f"{operation} without selection: {response.status_code} {response.text}"
+    assert _stored(db, a1["id"])["title"] == "A1 entry"
+    assert _stored(db, a1["id"])["archived_at"] is None
+    assert db.delay_event_links.docs == [] and db.entity_document_links.docs == []
+
+
+async def test_scope_unlink_by_link_id_is_bound_by_the_selection() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        relationship = (await client.post(f"/api/hindrances/{a1['id']}/links", json={"target_type": "key_date", "target_id": "kd-A1"})).json()
+        linked = await client.post(
+            f"/api/entities/delay_event/{a1['id']}/document-links:batch",
+            json={"links": [{"document_id": "doc-A1", "relationship_role": "site_record"}]},
+        )
+    link_id = db.entity_document_links.docs[0]["_id"]
+    assert linked.status_code == 201, linked.text
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        unlink = await client.post(f"/api/hindrances/{a1['id']}/links/{relationship['id']}/remove", json={"reason": "x"})
+        document_unlink = await client.post(f"/api/document-links/{link_id}:remove", json={"reason": "x", "expected_revision": 1})
+        document_history = await client.get(f"/api/document-links/{link_id}/history")
+
+    assert _refused(unlink), unlink.text
+    assert _refused(document_unlink), document_unlink.text
+    assert _refused(document_history), document_history.text
+    assert db.delay_event_links.docs[0]["removed_at"] is None
+    assert db.entity_document_links.docs[0]["removed_at"] is None
+
+
+async def test_scope_link_targets_must_be_in_the_selected_project() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    base = f"/api/hindrances/{a1['id']}/links"
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        foreign = {
+            "milestone": await client.post(base, json={"target_type": "programme_milestone", "target_id": "act-A2"}),
+            "key_date": await client.post(base, json={"target_type": "key_date", "target_id": "kd-A2"}),
+            "document": await client.post(
+                f"/api/entities/delay_event/{a1['id']}/document-links:batch",
+                json={"links": [{"document_id": "doc-A2", "relationship_role": "site_record"}]},
+            ),
+        }
+        same = await client.post(base, json={"target_type": "eot_submission", "target_id": "eot-A1"})
+
+    for name, response in foreign.items():
+        assert response.status_code == 403, f"{name}: {response.status_code} {response.text}"
+    assert same.status_code == 201, same.text
+
+
+async def test_scope_non_member_is_refused_whatever_it_selects() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    async with _as(db, PROJECT_A2_USER, project="proj-A1") as client:
+        selected_foreign = await client.get(f"/api/hindrances/{a1['id']}")
+        listed = await client.get("/api/hindrances")
+    async with _as(db, PROJECT_A2_USER, project="proj-A2") as client:
+        own_selection = await client.get(f"/api/hindrances/{a1['id']}")
+
+    assert _refused(selected_foreign), selected_foreign.text
+    assert _refused(listed), "an unreachable selection was accepted for a listing"
+    assert own_selection.status_code == 403
+
+
+async def test_scope_superadmin_is_bound_by_an_explicit_selection() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    async with _as(db, SUPERADMIN, project="proj-A2") as client:
+        mismatched = await client.get(f"/api/hindrances/{a1['id']}")
+        mismatched_patch = await client.patch(f"/api/hindrances/{a1['id']}", json={"title": "x"})
+    async with _as(db, SUPERADMIN, project=None) as client:
+        unselected = await client.get(f"/api/hindrances/{a1['id']}")
+        listed = await client.get("/api/hindrances")
+    async with _as(db, SUPERADMIN, project="proj-A1") as client:
+        matched = await client.get(f"/api/hindrances/{a1['id']}")
+
+    assert _refused(mismatched) and _refused(mismatched_patch)
+    assert _selection_required(unselected), unselected.text
+    assert listed.status_code == 200 and listed.json()["total"] == 2
+    assert matched.status_code == 200
+
+
+async def test_scope_compatibility_api_is_not_a_bypass() -> None:
+    db = _seeded()
+    a1, a2 = await _two_projects(db)
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A2") as client:
+        detail = await client.get(f"/api/delay-events/{a1['id']}")
+        patch = await client.patch(f"/api/delay-events/{a1['id']}", json={"title": "moved"})
+        create = await client.post(
+            "/api/delay-events",
+            json={"project_id": "proj-A1", "delay_ref": "D-9", "title": "x", "start_date": "2026-01-01T00:00:00"},
+        )
+        listed = await client.get("/api/delay-events")
+    async with _as(db, PROJECT_AB_ADMIN, project=None) as client:
+        unselected_detail = await client.get(f"/api/delay-events/{a1['id']}")
+        unselected_patch = await client.patch(f"/api/delay-events/{a1['id']}", json={"title": "moved"})
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        matched = await client.get(f"/api/delay-events/{a1['id']}")
+
+    assert _refused(detail) and _refused(patch) and _refused(create)
+    assert [row["_id"] for row in listed.json()] == [a2["id"]]
+    assert _selection_required(unselected_detail) and _selection_required(unselected_patch)
+    assert matched.status_code == 200
+    assert _stored(db, a1["id"])["title"] == "A1 entry"
+
+
+async def test_scope_reverse_lookups_hide_other_projects_hindrances() -> None:
+    db = _seeded()
+    a1, _ = await _two_projects(db)
+    async with _as(db, PROJECT_AB_ADMIN, project="proj-A1") as client:
+        await client.post(
+            f"/api/entities/delay_event/{a1['id']}/document-links:batch",
+            json={"links": [{"document_id": "doc-A1", "relationship_role": "site_record"}]},
+        )
+        await client.post(f"/api/hindrances/{a1['id']}/links", json={"target_type": "key_date", "target_id": "kd-A1"})
+    # A non-Hindrance relationship on the same document: its behaviour must not change.
+    db.key_date_baselines.docs.append(
+        {"_id": "bl-A1", "organization_id": "org-A", "project_id": "proj-A1", "contract_id": "primary", "status": "frozen"}
+    )
+    db.entity_document_links.docs.append(
+        {
+            **deepcopy(db.entity_document_links.docs[0]),
+            "_id": "edl-eot",
+            "target_type": "eot_submission",
+            "target_id": "eot-A1",
+            "relationship_role": "supporting_document",
+        }
+    )
+
+    async def reverse(project: Any) -> tuple[list[str], httpx.Response]:
+        async with _as(db, PROJECT_AB_ADMIN, project=project) as client:
+            links = (await client.get("/api/documents/doc-A1/entity-links")).json()["links"]
+            affecting = await client.get("/api/hindrances/affecting/key_date/kd-A1")
+        return sorted(link["target_type"] for link in links), affecting
+
+    selected_a1, affecting_a1 = await reverse("proj-A1")
+    selected_a2, affecting_a2 = await reverse("proj-A2")
+    unselected, _ = await reverse(None)
+
+    assert "delay_event" in selected_a1
+    assert "delay_event" not in selected_a2, "Hindrance A1 leaked through the document viewer under A2"
+    assert "delay_event" in unselected
+    other = [kind for kind in selected_a1 if kind != "delay_event"]
+    assert other, f"control row missing: {selected_a1}"
+    assert other == [kind for kind in selected_a2 if kind != "delay_event"] == [
+        kind for kind in unselected if kind != "delay_event"
+    ], "a non-Hindrance relationship row changed behaviour"
+    assert affecting_a1.status_code == 200 and len(affecting_a1.json()["items"]) == 1
+    assert _refused(affecting_a2), affecting_a2.text
+
+    async with _as(db, ORG_B_ADMIN, project="proj-B1") as client:
+        foreign = await client.get("/api/documents/doc-A1/entity-links")
+    assert foreign.status_code == 403

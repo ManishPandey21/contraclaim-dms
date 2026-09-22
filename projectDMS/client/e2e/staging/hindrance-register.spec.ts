@@ -19,6 +19,7 @@ import {
   expectNoFailures,
   guardedSession,
   hindranceEnvironment,
+  inProject,
   runTitle,
   writeEvidence,
   type RegisterEntry,
@@ -34,7 +35,9 @@ import { stagingTeardownHasWork } from "./staging-target";
  * enforces both whenever `E2E_BASE_URL` is set).
  *
  * Accounts (seeded for the run, see docs/HINDRANCE_STAGING_CERTIFICATION_PLAN.md):
- *   E2E_HIN_ORGADMIN_*  orgadmin of the fixture organisation - seeds targets
+ *   E2E_HIN_ORGADMIN_*  orgadmin of the fixture organisation - seeds targets and
+ *                       drives the browser: the navbar project selector is live
+ *                       only for superadmin/orgadmin/orguser (TenantContext)
  *   E2E_HIN_PA_AB_*     projectadmin assigned to run-owned projects A and B
  *   E2E_HIN_PA_B_*      projectadmin assigned to project B only
  *
@@ -72,8 +75,11 @@ test.beforeAll(async ({ playwright }) => {
   if (!state.env.E2E_HIN_PROJECT_A_ID) return; // skipped (non-strict, no target)
   expect(process.env.E2E_STAGING_PROJECT_ID, "E2E_STAGING_PROJECT_ID must be project A").toBe(state.env.E2E_HIN_PROJECT_A_ID);
   state.seederContext = await newFixtureContext(playwright);
-  state.seeder = guardedSession(await signIn(state.seederContext, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD"));
   const projectA = state.env.E2E_HIN_PROJECT_A_ID;
+  state.seeder = inProject(
+    guardedSession(await signIn(state.seederContext, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD")),
+    projectA,
+  );
   state.document = await ensureDisposableDocument(state.seeder, "hin-site-diary");
   state.milestone = await ensureProgrammeMilestone(state.seeder, projectA, "ACT");
   state.keyDate = await ensureKeyDate(state.seeder, projectA, "KD");
@@ -98,7 +104,7 @@ test.afterAll(async () => {
 
 test("an allowed role records, links, reloads, archives and restores an entry", async ({ page }) => {
   const title = runTitle("workflow");
-  await signInThroughBrowser(page, "E2E_HIN_PA_AB_EMAIL", "E2E_HIN_PA_AB_PASSWORD");
+  await signInThroughBrowser(page, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD");
   await openRegister(page);
   await selectProject(page, state.env.E2E_HIN_PROJECT_A_NAME);
 
@@ -188,13 +194,17 @@ test("a project admin of another project is refused the entry", async ({ page, p
   await signInThroughBrowser(page, "E2E_HIN_PA_B_EMAIL", "E2E_HIN_PA_B_PASSWORD");
   await openRegister(page);
   await expect(page.getByText(runTitle("workflow"))).toHaveCount(0);
+  // CASE C: not a member of A. Its only project (B) is selected; the A URL is refused.
   await page.goto(`/hindrances/${id}`);
-  await expect(page.getByText("You do not have access to this register entry.")).toBeVisible();
+  await expect(page.getByText("This register entry is not available in the project selected in the navbar.")).toBeVisible();
   await expect(page.getByRole("button", { name: /Edit/ })).toHaveCount(0);
 
   // The API refuses too, with 403 - not a masked 401, not a 200.
   const request = await newFixtureContext(playwright);
-  const foreign = guardedSession(await signIn(request, "E2E_HIN_PA_B_EMAIL", "E2E_HIN_PA_B_PASSWORD"));
+  const foreign = inProject(
+    guardedSession(await signIn(request, "E2E_HIN_PA_B_EMAIL", "E2E_HIN_PA_B_PASSWORD")),
+    state.env.E2E_HIN_PROJECT_B_ID,
+  );
   expect((await foreign.request.get(`/api/hindrances/${id}`)).status()).toBe(403);
   const patch = await foreign.request.patch(`/api/hindrances/${id}`, { headers: foreign.headers(), data: { title: "x" } });
   expect(patch.status()).toBe(403);
@@ -204,11 +214,14 @@ test("a project admin of another project is refused the entry", async ({ page, p
 test("switching project in the navbar re-scopes the register and targets new records", async ({ page, playwright }) => {
   const projectA = state.env.E2E_HIN_PROJECT_A_ID;
   const request = await newFixtureContext(playwright);
-  const admin = guardedSession(await signIn(request, "E2E_HIN_PA_AB_EMAIL", "E2E_HIN_PA_AB_PASSWORD"));
+  const admin = inProject(
+    guardedSession(await signIn(request, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD")),
+    projectA,
+  );
   state.projectAEntry = await createEntry(admin, projectA, "navbar-A");
   await request.dispose();
 
-  await signInThroughBrowser(page, "E2E_HIN_PA_AB_EMAIL", "E2E_HIN_PA_AB_PASSWORD");
+  await signInThroughBrowser(page, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD");
   await openRegister(page);
   await selectProject(page, state.env.E2E_HIN_PROJECT_A_NAME);
   await expect(page.getByRole("row", { name: new RegExp(runTitle("navbar-A")) })).toBeVisible();
@@ -230,15 +243,21 @@ test("switching project in the navbar re-scopes the register and targets new rec
   await expect(page.getByRole("row", { name: new RegExp(runTitle("navbar-B")) })).toBeVisible();
   await expect(page.getByRole("row", { name: new RegExp(runTitle("navbar-A")) })).toHaveCount(0);
 
-  // House policy: selection scopes collections, membership gates a direct fetch.
-  // This user is a member of A, so the old detail URL opens the A record under
-  // its own project; a non-member is refused (previous test). Recorded, not assumed.
+  // CASE B: a member of A and B with B selected - the old A URL is refused, and
+  // nothing of the A record renders (owner decision 2026-09-22).
+  await page.goto(`/hindrances/${state.projectAEntry.id}`);
+  await expect(page.getByText("This register entry is not available in the project selected in the navbar.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: new RegExp(runTitle("navbar-A")) })).toHaveCount(0);
+
+  // CASE A: switch back to A - the same URL opens.
+  await openRegister(page);
+  await selectProject(page, state.env.E2E_HIN_PROJECT_A_NAME);
   await page.goto(`/hindrances/${state.projectAEntry.id}`);
   await expect(page.getByRole("heading", { name: new RegExp(runTitle("navbar-A")) })).toBeVisible();
   writeEvidence("hindrance-navbar-direct-url", {
-    selected_project: state.env.E2E_HIN_PROJECT_B_ID,
-    fetched_record_project: state.projectAEntry.project_id,
-    outcome: "opened (member of the record's project)",
+    case_b: "A URL refused while B selected",
+    case_a: "A URL opens while A selected",
+    record_project: state.projectAEntry.project_id,
   });
 });
 
@@ -251,14 +270,19 @@ test("switching project in the navbar re-scopes the register and targets new rec
 test("a failed timeline projection shows a retry button that repairs it", async ({ page, playwright }) => {
   test.skip((process.env.E2E_HIN_TIMELINE_FAULT ?? "").trim() !== "disarmed", "runs only in the runbook's disarmed phase");
   const request = await newFixtureContext(playwright);
-  const admin = guardedSession(await signIn(request, "E2E_HIN_PA_AB_EMAIL", "E2E_HIN_PA_AB_PASSWORD"));
+  const admin = inProject(
+    guardedSession(await signIn(request, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD")),
+    state.env.E2E_HIN_PROJECT_A_ID,
+  );
   const listed = await admin.request.get("/api/hindrances", { params: { project_id: state.env.E2E_HIN_PROJECT_A_ID, q: runTitle("TLFAIL") } });
   const [entry] = ((await listed.json()).items as any[]).filter((row) => row.title === runTitle("TLFAIL"));
   await request.dispose();
   expect(entry, "the armed phase left no TLFAIL entry").toBeTruthy();
   expect(entry.timeline_sync_status).toBe("failed");
 
-  await signInThroughBrowser(page, "E2E_HIN_PA_AB_EMAIL", "E2E_HIN_PA_AB_PASSWORD");
+  await signInThroughBrowser(page, "E2E_HIN_ORGADMIN_EMAIL", "E2E_HIN_ORGADMIN_PASSWORD");
+  await openRegister(page);
+  await selectProject(page, state.env.E2E_HIN_PROJECT_A_NAME);
   await openProtectedPage(page, `/hindrances/${entry.id}`, page.getByRole("heading", { name: new RegExp(runTitle("TLFAIL")) }));
   await expect(page.getByText("not synced", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /Retry timeline sync/ }).click();

@@ -316,6 +316,13 @@ class DocumentRelationshipService:
 
         return await self._run_transaction(persist)
 
+    async def link_target(self, link_id: str) -> Optional[tuple[str, str]]:
+        """``(target_type, target_id)`` of a stored link, or ``None``. Read-only."""
+        stored = await self.db.entity_document_links.find_one({"_id": link_id})
+        if stored is None:
+            return None
+        return str(stored.get("target_type") or ""), str(stored.get("target_id") or "")
+
     async def _stored_link(self, link_id: str) -> dict[str, Any]:
         stored = await self.db.entity_document_links.find_one({"_id": link_id})
         if stored is None:

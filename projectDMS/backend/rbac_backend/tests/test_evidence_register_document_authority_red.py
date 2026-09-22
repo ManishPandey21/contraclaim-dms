@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import pytest
 
+from rbac_backend.core.tenant_context import ActiveScope
 from rbac_backend.models.evidence_graph import EvidenceEntityType
 from rbac_backend.models.evidence_registers import DelayEventCreate, DelayEventUpdate
 from rbac_backend.routers import evidence_registers as evidence_register_routes
@@ -155,6 +156,11 @@ def _user() -> SimpleNamespace:
     return SimpleNamespace(id="user-A", organization_id="org-A")
 
 
+def _selection(db: Any) -> ActiveScope:
+    """The navbar selection the routes now require (core/tenant_context.py)."""
+    return ActiveScope(db, _user(), "org-A", "proj-A")
+
+
 def _document(document_id: str, **overrides: Any) -> dict[str, Any]:
     row = {
         "_id": document_id,
@@ -212,6 +218,7 @@ async def _create_through_route(
         db=db,
         current_user=_user(),
         policy=_Policy(),
+        selection=_selection(db),
     )
 
 
@@ -239,6 +246,7 @@ async def _update_through_route(
         db=db,
         current_user=_user(),
         policy=_Policy(),
+        selection=_selection(db),
     )
 
 
@@ -604,7 +612,7 @@ RETRACTING_STATES = [
 
 async def _get_through_route(db: _Database, item_id: str):
     return await evidence_register_routes.get_delay_event(
-        item_id, db=db, current_user=_user(), policy=_Policy()
+        item_id, db=db, current_user=_user(), policy=_Policy(), selection=_selection(db)
     )
 
 

@@ -12,6 +12,7 @@ import {
   expectNoFailures,
   guardedSession,
   hindranceEnvironment,
+  inProject,
   runTitle,
   writeEvidence,
   type Target,
@@ -64,7 +65,9 @@ const contexts: APIRequestContext[] = [];
 const suite: {
   env: Record<string, string>;
   foreign: Record<string, string>;
+  /** The org admin with project A selected; `seederB` with project B. */
   seeder?: FixtureSession;
+  seederB?: FixtureSession;
   documentId?: string;
   projectBDocumentId?: string;
   milestone?: Target;
@@ -87,8 +90,10 @@ test.beforeAll(async ({ playwright }) => {
   requireStagingEnvironment(...MATRIX.flatMap((m) => [`${m.env}_EMAIL`, `${m.env}_PASSWORD`]));
   if (!suite.env.E2E_HIN_PROJECT_A_ID) return;
   expect(process.env.E2E_STAGING_PROJECT_ID, "E2E_STAGING_PROJECT_ID must be project A").toBe(suite.env.E2E_HIN_PROJECT_A_ID);
-  suite.seeder = await session(playwright, "E2E_HIN_ORGADMIN");
+  const orgAdmin = await session(playwright, "E2E_HIN_ORGADMIN");
   const a = suite.env.E2E_HIN_PROJECT_A_ID;
+  suite.seeder = inProject(orgAdmin, a);
+  suite.seederB = inProject(orgAdmin, suite.env.E2E_HIN_PROJECT_B_ID);
   suite.documentId = (await ensureDisposableDocument(suite.seeder, "hin-api-doc")).id;
   suite.projectBDocumentId = await ensureDocumentInProject(suite.seeder, suite.env.E2E_HIN_PROJECT_B_ID, "hin-api-doc-b");
   suite.milestone = await ensureProgrammeMilestone(suite.seeder, a, "API-ACT");
@@ -111,7 +116,7 @@ test.afterAll(async () => {
 test("references are server-generated, prefixed, project-scoped, unique and immutable", async () => {
   const a = suite.env.E2E_HIN_PROJECT_A_ID;
   const b = suite.env.E2E_HIN_PROJECT_B_ID;
-  const before = await suite.seeder!.request.get("/api/hindrances", { params: { project_id: b, include_archived: "true" } });
+  const before = await suite.seederB!.request.get("/api/hindrances", { params: { project_id: b, include_archived: "true" } });
   const bWasFresh = (await before.json()).total === 0;
 
   const hin = await createEntry(suite.seeder!, a, "ref-hin", "hindrance");
@@ -120,7 +125,7 @@ test("references are server-generated, prefixed, project-scoped, unique and immu
   expect(hin.ref).toMatch(/^HIN-\d{4,}$/);
   expect(cns.ref).toMatch(/^CNS-\d{4,}$/);
   expect(dly.ref).toMatch(/^DLY-\d{4,}$/);
-  const firstB = await createEntry(suite.seeder!, b, "ref-hin-b", "hindrance");
+  const firstB = await createEntry(suite.seederB!, b, "ref-hin-b", "hindrance");
   if (bWasFresh) expect(firstB.ref, "project B's counter is not independent of A").toBe("HIN-0001");
 
   // A client cannot supply or change the reference.
@@ -134,7 +139,7 @@ test("references are server-generated, prefixed, project-scoped, unique and immu
   expect((await (await suite.seeder!.request.get(`/api/hindrances/${hin.id}`)).json()).hindrance_ref).toBe(hin.ref);
 
   // Concurrent creates never share a reference.
-  const burst = await Promise.all(Array.from({ length: 10 }, (_, i) => createEntry(suite.seeder!, b, `ref-burst-${i}`)));
+  const burst = await Promise.all(Array.from({ length: 10 }, (_, i) => createEntry(suite.seederB!, b, `ref-burst-${i}`)));
   const refs = burst.map((entry) => entry.ref);
   expect(new Set(refs).size).toBe(refs.length);
   writeEvidence("hindrance-refs", { a: [hin.ref, cns.ref, dly.ref], b_first: firstB.ref, b_was_fresh: bWasFresh, burst: refs });
@@ -147,7 +152,7 @@ test("the RBAC matrix grants exactly the roles the release and the owner approve
   const existing = await createEntry(suite.seeder!, a, "rbac-target");
 
   for (const persona of MATRIX) {
-    const who = await session(playwright, persona.env);
+    const who = inProject(await session(playwright, persona.env), a);
     const row: Record<string, number> = {};
     const post = (url: string, data: unknown) => who.request.post(url, { headers: who.headers(), data });
     row.list = (await who.request.get("/api/hindrances", { params: { project_id: a } })).status();
@@ -178,7 +183,7 @@ test("the RBAC matrix grants exactly the roles the release and the owner approve
 });
 
 test("a direct URL is authorized independently of menu visibility", async ({ playwright }) => {
-  const who = await session(playwright, "E2E_HIN_PROJECTUSER");
+  const who = inProject(await session(playwright, "E2E_HIN_PROJECTUSER"), suite.env.E2E_HIN_PROJECT_A_ID);
   const entry = await createEntry(suite.seeder!, suite.env.E2E_HIN_PROJECT_A_ID, "direct-url");
   for (const url of [`/api/hindrances/${entry.id}`, `/api/hindrances/${entry.id}/history`, `/api/hindrances/${entry.id}/links`, `/api/delay-events/${entry.id}`]) {
     expect((await who.request.get(url)).status(), url).toBe(403);
@@ -190,7 +195,12 @@ test("a direct URL is authorized independently of menu visibility", async ({ pla
 test("no foreign organisation, project, record, document or target leaks", async ({ playwright }) => {
   const f = suite.foreign;
   const own = await createEntry(suite.seeder!, suite.env.E2E_HIN_PROJECT_A_ID, "isolation");
-  const outsider = await session(playwright, "E2E_HIN_FOREIGN_ORGADMIN");
+  // The foreign org admin works under its own organisation's selection.
+  const outsider = inProject(
+    await session(playwright, "E2E_HIN_FOREIGN_ORGADMIN"),
+    f.E2E_HIN_FOREIGN_PROJECT_ID,
+    f.E2E_HIN_FOREIGN_ORG_ID,
+  );
   const results: Record<string, number> = {};
 
   // A foreign org admin reaching into this org.
@@ -215,13 +225,56 @@ test("no foreign organisation, project, record, document or target leaks", async
   for (const [key, value] of Object.entries(inbound)) expect(value, key).toBe(403);
 
   // Foreign project inside the same organisation: a project-B-only admin on an A record.
-  const projectB = await session(playwright, "E2E_HIN_PA_B");
+  const projectB = inProject(await session(playwright, "E2E_HIN_PA_B"), suite.env.E2E_HIN_PROJECT_B_ID);
   expect((await projectB.request.get(`/api/hindrances/${own.id}`)).status()).toBe(403);
   expect((await projectB.request.get(`/api/hindrances/affecting/key_date/${suite.keyDate!.id}`)).status()).toBe(403);
   const listed = await projectB.request.get("/api/hindrances");
   expect(listed.status()).toBe(200);
   expect(((await listed.json()).items as any[]).some((row) => row.project_id === suite.env.E2E_HIN_PROJECT_A_ID)).toBe(false);
   writeEvidence("hindrance-isolation", { outbound: results, inbound });
+});
+
+// ------------------------------------------------ Active project scope (API) --
+
+test("the selected project bounds every record-level request (CASE A/B/C)", async ({ playwright }) => {
+  const a = suite.env.E2E_HIN_PROJECT_A_ID;
+  const b = suite.env.E2E_HIN_PROJECT_B_ID;
+  const entry = await createEntry(suite.seeder!, a, "active-scope");
+  const code = async (response: any) => (await response.json())?.detail?.code;
+  const memberOfBoth = await session(playwright, "E2E_HIN_PA_AB");
+  const nonMember = await session(playwright, "E2E_HIN_PA_B");
+
+  // CASE A: member of A and B, A selected -> allowed.
+  const underA = inProject(memberOfBoth, a);
+  expect((await underA.request.get(`/api/hindrances/${entry.id}`)).status()).toBe(200);
+
+  // CASE B: same member, B selected -> refused, reads and writes.
+  const underB = inProject(memberOfBoth, b);
+  const read = await underB.request.get(`/api/hindrances/${entry.id}`);
+  const write = await underB.request.patch(`/api/hindrances/${entry.id}`, { headers: underB.headers(), data: { title: "moved" } });
+  const compat = await underB.request.get(`/api/delay-events/${entry.id}`);
+  expect([read.status(), write.status(), compat.status()]).toEqual([403, 403, 403]);
+  expect([await code(read), await code(write), await code(compat)]).toEqual(["context_forbidden", "context_forbidden", "context_forbidden"]);
+
+  // No selection at all -> 400 selection_required for the record; the list stays bounded.
+  const unselected = await memberOfBoth.request.get(`/api/hindrances/${entry.id}`);
+  expect(unselected.status()).toBe(400);
+  expect(await code(unselected)).toBe("selection_required");
+  const bounded = await memberOfBoth.request.get("/api/hindrances");
+  expect(bounded.status()).toBe(200);
+
+  // CASE C: not a member of A -> refused whatever it selects.
+  const cSelectsA = await inProject(nonMember, a).request.get(`/api/hindrances/${entry.id}`);
+  const cSelectsB = await inProject(nonMember, b).request.get(`/api/hindrances/${entry.id}`);
+  expect([cSelectsA.status(), cSelectsB.status()]).toEqual([403, 403]);
+
+  expect((await (await suite.seeder!.request.get(`/api/hindrances/${entry.id}`)).json()).title).toContain("active-scope");
+  writeEvidence("hindrance-active-scope-api", {
+    case_a: 200,
+    case_b: { read: read.status(), write: write.status(), compat: compat.status() },
+    no_selection: unselected.status(),
+    case_c: { selects_a: cSelectsA.status(), selects_b: cSelectsB.status() },
+  });
 });
 
 // ----------------------------------------------------------------- Stage 6 --

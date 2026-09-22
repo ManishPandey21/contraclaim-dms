@@ -257,3 +257,50 @@ Recorded, not changed:
   answers membership") means that for a member of A it opens. The spec records that
   outcome. If the owner wants detail access bound to the selected project, that is a new
   behaviour, not a certification fix.
+
+## 13. Active project scope (owner decision 2026-09-22)
+
+**Policy: ENFORCED on the register, its `/api/delay-events` compatibility routes, the
+`delay_event` document-link routes and the document reverse lookup's Hindrance rows.**
+`EffectiveScope = Entitlement ∩ Navbar Selection`.
+
+- **Mechanism.** This is a minimal port of the codex `tenant_context` design into
+  `backend/rbac_backend/core/tenant_context.py`: the `X-Org-Id` / `X-Proj-Id` headers, the
+  `selection_required` (400) and `context_forbidden` (403) codes, and a
+  `tenant.context.rejected` audit event on every refusal. A selected project must exist, be
+  active, belong to the selected organisation, and pass
+  `ScopeService.is_client_scope_allowed`, the membership test `PolicyService` uses. Ids are
+  read from headers only; `project_id` on these routes stays a filter and can never widen
+  the selection.
+- **Client.** `services/active-scope.ts` holds the selection. `TenantContext` is its only
+  writer and updates it synchronously on a switch, before the routed page remounts.
+  `createHttpClient` (the common request layer) adds both headers to every API request.
+- **No selection.** The list stays bounded by `build_scope_query`, never global. Every
+  record-level or mutating route returns 400 `selection_required`, and the project is never
+  inferred from the record or the body.
+- **Superadmin.** An explicit selection binds superadmin too. With no selection, a broad
+  list follows the existing rules and record-level operations are 400.
+- **Refusal disclosure.** A record refusal echoes no ids. The audit event keeps the target.
+- **Other targets are unchanged.** On the shared routes the selection is only validated
+  when the target is `delay_event`, so a stale header never refuses another register's link.
+
+**Staging consequences:**
+- The navbar project selector is live only for superadmin, orgadmin and orguser
+  (`TenantContext.canSwitchProject`). The browser workflow and the navbar test therefore
+  run as `E2E_HIN_ORGADMIN`. `E2E_HIN_PA_AB` (projectadmin assigned to A and B) proves
+  CASE A/B at the API.
+- `contractmgr_org` has no org-wide project reach in `ScopeService` (only orgadmin and
+  orguser do). The `E2E_HIN_CONTRACTMGR` account must therefore be **assigned to project
+  A**, or its selection of A is refused.
+- Every staging API call names its project (`inProject(session, projectId)`), exactly as
+  the browser does.
+
+**Recorded, not changed (for the owner):**
+- A projectadmin assigned to several projects cannot switch between them in the navbar.
+  That is existing behaviour. Under the new boundary it means such a user can only work in
+  the project `TenantContext` picks for them.
+- **CROSS-MODULE ACTIVE-SCOPE CONSISTENCY DEBT.** Variation, IPC/Billing, Insurance, Bank
+  Guarantee, Key Dates, Documents, Claims and the other project-scoped modules enforce
+  membership but not the selected project. The register is now stricter than they are.
+  Follow-up ticket: ManishPandey21/contraclaim-dms#24. PR #22 does not change those
+  modules.

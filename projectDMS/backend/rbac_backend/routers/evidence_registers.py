@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.evidence_registers import (
     DelayEvent,
     DelayEventCreate,
@@ -98,7 +99,9 @@ async def update_drawing_reference(
 # /delay-events is the compatibility API of the Hindrance & Constraint Register
 # (canonical API: routers/hindrances.py). Both call HindranceRegisterService and
 # both are gated by the register's own `dms.hindrance.*` permissions: one
-# resource, one authorization model. Deprecation: new clients use
+# resource, one authorization model - and by the same active project scope
+# (`core/tenant_context.py`), so the compatibility routes are never a scope
+# bypass. Deprecation: new clients use
 # /api/hindrances; these four routes stay until no caller remains.
 # ---------------------------------------------------------------------------
 
@@ -115,7 +118,13 @@ async def list_delay_events(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    if selection.has_project:
+        if project_id or organization_id:
+            await selection.require_project(project_id or selection.project_id, organization_id)
+        project_id = selection.project_id
+        organization_id = selection.organization_id
     await policy.authorize(current_user, Permissions.HINDRANCE_VIEW, resource_type="delay_events", organization_id=organization_id, project_id=project_id, audit=False)
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     rows = await EvidenceRegisterService(db).list_delay_events(scope, project_id=project_id, status=status_filter, responsibility=responsibility, location=location, skip=skip, limit=limit)
@@ -128,8 +137,10 @@ async def create_delay_event(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    org = payload.organization_id or getattr(current_user, "organization_id", None)
+    await selection.require_project(payload.project_id, payload.organization_id)
+    org = payload.organization_id or selection.organization_id
     await policy.authorize(current_user, Permissions.HINDRANCE_CREATE, resource_type="delay_event", organization_id=org, project_id=payload.project_id)
     try:
         owner = await HindranceRegisterService(db).resolve_project_organization(payload.project_id, org)
@@ -145,10 +156,13 @@ async def get_delay_event(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    selection.require_selection()
     item = await EvidenceRegisterService(db).get_delay_event(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delay event not found")
+    await selection.require_record(item)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_VIEW, item, resource_type="delay_event")
     return DelayEvent(**item)
 
@@ -160,11 +174,14 @@ async def update_delay_event(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    selection.require_selection()
     svc = EvidenceRegisterService(db)
     item = await svc.get_delay_event(item_id)
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delay event not found")
+    await selection.require_record(item)
     await policy.authorize_document(current_user, Permissions.HINDRANCE_EDIT, item, resource_type="delay_event")
     try:
         return DelayEvent(**await svc.update_delay_event(item_id, payload, current_user))

@@ -91,6 +91,22 @@ cutover, and staging certification depends on it:
 3. Before either, list the custom roles holding `dms.evidence_graph.*`; each loses
    `/api/delay-events` and needs its own decision.
 
+Step 2 is `role_contract_alignment.grant()` (`OWNER_APPROVED_GRANTS`), run by the
+same command. Step 3 was measured on production on 2026-09-21: no custom role holds
+those permissions ([staging plan](HINDRANCE_STAGING_CERTIFICATION_PLAN.md) §4).
+
+## Active project scope
+
+Owner decision 2026-09-22: the navbar selection is an authorization boundary for the
+register (`core/tenant_context.py`). The browser sends `X-Org-Id` / `X-Proj-Id` on every
+API request. With a project selected, a record, create body, link target or
+reverse-lookup target in another project is 403 `context_forbidden`, for superadmin too.
+With none selected, record-level and mutating routes are 400 `selection_required`, and
+the list stays bounded by `build_scope_query`. The same rule covers `/api/delay-events`,
+the `delay_event` document-link routes and the Hindrance rows of
+`/api/documents/{id}/entity-links`. Other modules are not yet bound by the selection;
+that is recorded as cross-module debt.
+
 ## Compatibility and migration
 
 No data migration is required and none is written:

@@ -76,6 +76,29 @@ export function guardedSession(session: FixtureSession): FixtureSession {
   };
 }
 
+const REQUEST_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "fetch"]);
+
+/**
+ * The same session with a navbar selection: every request carries `X-Org-Id` /
+ * `X-Proj-Id`, exactly as the browser's API client sends them. Since the
+ * active-scope decision (2026-09-22) a record-level Hindrance request without a
+ * selection is 400 `selection_required`, and one under another project's
+ * selection is 403 `context_forbidden` - so every register call names its project.
+ */
+export function inProject(session: FixtureSession, projectId: string, organizationId = fixtureOrganizationId()): FixtureSession {
+  const scope = { "X-Org-Id": organizationId, "X-Proj-Id": projectId };
+  const request = new Proxy(session.request, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      if (!REQUEST_METHODS.has(String(property))) return value.bind(target);
+      return (url: string, options: Record<string, any> = {}) =>
+        value.call(target, url, { ...options, headers: { ...scope, ...(options.headers ?? {}) } });
+    },
+  });
+  return { ...session, request };
+}
+
 /** A register-entry body that names the fixture organisation and carries the run tag. */
 export function entryBody(projectId: string, label: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const title = runTitle(label);
@@ -266,16 +289,17 @@ export async function archiveRunOwned(session: FixtureSession, projectIds: strin
     residual_register_ids: [],
   };
   for (const projectId of projectIds) {
-    for (const row of await listRunOwned(session, projectId)) {
+    const scoped = inProject(session, projectId);
+    for (const row of await listRunOwned(scoped, projectId)) {
       const id = String(row.id ?? row._id);
       report.residual_register_ids.push(id);
-      const links = await session.request.get(`/api/hindrances/${id}/links`);
+      const links = await scoped.request.get(`/api/hindrances/${id}/links`);
       if (links.ok()) {
         for (const link of (await links.json()).links ?? []) {
           if (link.removed_at) continue;
           const linkId = String(link.id ?? link._id);
-          const removed = await session.request.post(`/api/hindrances/${id}/links/${linkId}/remove`, {
-            headers: session.headers(),
+          const removed = await scoped.request.post(`/api/hindrances/${id}/links/${linkId}/remove`, {
+            headers: scoped.headers(),
             data: { reason: `certification teardown ${RUN_ID}` },
           });
           if (removed.ok()) report.links_removed.push(linkId);
@@ -284,13 +308,13 @@ export async function archiveRunOwned(session: FixtureSession, projectIds: strin
       } else {
         report.failures.push(`links of ${id}: ${links.status()}`);
       }
-      const documentLinks = await session.request.get(`/api/entities/delay_event/${id}/document-links`);
+      const documentLinks = await scoped.request.get(`/api/entities/delay_event/${id}/document-links`);
       if (documentLinks.ok()) {
         for (const link of (await documentLinks.json()).links ?? []) {
           if (link.removed_at) continue;
           const linkId = String(link.id ?? link._id);
-          const removed = await session.request.post(`/api/document-links/${linkId}:remove`, {
-            headers: session.headers(),
+          const removed = await scoped.request.post(`/api/document-links/${linkId}:remove`, {
+            headers: scoped.headers(),
             data: { reason: `certification teardown ${RUN_ID}`, expected_revision: Number(link.revision ?? link._revision ?? 1) },
           });
           if (removed.ok()) report.document_links_removed.push(linkId);
@@ -303,8 +327,8 @@ export async function archiveRunOwned(session: FixtureSession, projectIds: strin
         report.already_archived.push(id);
         continue;
       }
-      const archived = await session.request.post(`/api/hindrances/${id}/archive`, {
-        headers: session.headers(),
+      const archived = await scoped.request.post(`/api/hindrances/${id}/archive`, {
+        headers: scoped.headers(),
         data: { reason: `certification teardown ${RUN_ID}` },
       });
       if (archived.ok()) report.archived_now.push(id);

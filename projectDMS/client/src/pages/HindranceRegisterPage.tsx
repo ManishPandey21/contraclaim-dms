@@ -130,6 +130,14 @@ export default function HindranceRegisterPage() {
     [filters, order, organizationId, page, projectId, sort],
   );
 
+  // A project switch clears the previous project's rows at once, before the new
+  // list arrives: no Project-A row is ever rendered under Project B.
+  useEffect(() => {
+    setItems([]);
+    setTotal(0);
+    setPage(0);
+  }, [organizationId, projectId]);
+
   const load = useCallback(async () => {
     const current = ++sequence.current;
     setState("loading");

@@ -20,7 +20,9 @@ import { Textarea } from "@/components/ui/textarea";
 import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
 import HindranceFormDialog from "@/components/hindrances/HindranceFormDialog";
 import HindranceRelationshipLinks from "@/components/hindrances/HindranceRelationshipLinks";
+import { useTenant } from "@/contexts/TenantContext";
 import useRBAC from "@/hooks/useRBAC";
+import { scopeErrorCode } from "@/services/active-scope";
 import {
   formatRegisterDate,
   hindranceCategoryLabel,
@@ -44,7 +46,8 @@ import {
   type HindranceLinkDTO,
 } from "@/services/hindrance-api";
 
-type LoadState = "loading" | "ready" | "not_found" | "forbidden" | "error";
+/** `other_project` / `select_project`: the navbar selection does not cover this entry. */
+type LoadState = "loading" | "ready" | "not_found" | "forbidden" | "other_project" | "select_project" | "error";
 
 const HISTORY_LABELS: Record<string, string> = {
   "delay_events.created": "Recorded",
@@ -79,6 +82,8 @@ export default function HindranceDetailPage() {
   const canEdit = can("dms.hindrance.edit");
   const canArchive = can("dms.hindrance.archive");
 
+  const tenant = useTenant();
+  const selectedProjectId = tenant.selectedProjectId || "";
   const [item, setItem] = useState<HindranceDTO | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [links, setLinks] = useState<HindranceLinkDTO[]>([]);
@@ -106,17 +111,38 @@ export default function HindranceDetailPage() {
     }
   }, [id]);
 
+  // Re-runs on every project switch: an entry from the previous project must not
+  // stay on screen under the new selection. The backend refuses it too (403
+  // `context_forbidden`); the project check here is defense in depth.
   const load = useCallback(async () => {
+    if (tenant.loading) return;
+    setItem(null);
     setState("loading");
     try {
-      setItem(await getHindrance(id));
+      const loaded = await getHindrance(id);
+      if (selectedProjectId && loaded.project_id !== selectedProjectId) {
+        setState("other_project");
+        return;
+      }
+      setItem(loaded);
       setState("ready");
       await loadRelations();
     } catch (error) {
       const status = statusOf(error);
-      setState(status === 404 ? "not_found" : status === 403 ? "forbidden" : "error");
+      const code = scopeErrorCode(error);
+      setState(
+        code === "selection_required"
+          ? "select_project"
+          : code === "context_forbidden"
+            ? "other_project"
+            : status === 404
+              ? "not_found"
+              : status === 403
+                ? "forbidden"
+                : "error",
+      );
     }
-  }, [id, loadRelations]);
+  }, [id, loadRelations, selectedProjectId, tenant.loading]);
 
   useEffect(() => {
     void load();
@@ -172,7 +198,11 @@ export default function HindranceDetailPage() {
         ? "This register entry does not exist."
         : state === "forbidden"
           ? "You do not have access to this register entry."
-          : "The register entry could not be loaded.";
+          : state === "other_project"
+            ? "This register entry is not available in the project selected in the navbar."
+            : state === "select_project"
+              ? "Select a project in the navbar to open this register entry."
+              : "The register entry could not be loaded.";
     return (
       <div role="alert" className="space-y-3 p-6">
         <p className="text-sm">{message}</p>
