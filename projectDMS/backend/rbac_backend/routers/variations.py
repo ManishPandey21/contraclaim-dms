@@ -1,14 +1,25 @@
-"""Variation Register API. PolicyService-gated, tenant-scoped, audited."""
+"""Variation Register API. PolicyService-gated, tenant-scoped, audited.
+
+Active project scope (CL-3A, ``core/tenant_context.py``, the mechanism the
+Hindrance register introduced): the navbar selection (``X-Org-Id`` /
+``X-Proj-Id``) is a request boundary, intersected with membership. With a project
+selected, a record, a create body or a list filter in another project is 403
+``context_forbidden`` - for a member of both projects and for superadmin alike.
+Record-level and mutating routes with nothing selected are 400
+``selection_required``. Lists with nothing selected stay bounded by
+``build_scope_query``, never global. A body's project is refused, never rewritten.
+"""
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.variation import (
     Variation,
     VariationCreate,
@@ -29,12 +40,28 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-async def _load(variation_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load(variation_id: str, permission: str, db, current_user, policy, selection: ActiveScope) -> dict:
+    """Load a Variation held to the selected project (400 when none is selected), then authorize."""
+    selection.require_selection()
     v = await VariationService(db).get(variation_id)
     if not v:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Variation not found")
+    # A legacy Variation with no project stays readable and deletable (CL-2);
+    # one that names a project is held to the selection.
+    await selection.require_record(v, allow_unscoped=True)
     await policy.authorize_document(current_user, permission, v, resource_type="variation")
     return v
+
+
+async def _list_scope(
+    selection: ActiveScope, organization_id: Optional[str], project_id: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """A list filter may narrow the selection, never leave it. Nothing selected: unchanged."""
+    if not selection.has_project:
+        return organization_id, project_id
+    if project_id or organization_id:
+        await selection.require_project(project_id or selection.project_id, organization_id)
+    return selection.organization_id, selection.project_id
 
 
 async def _present_variation(variation: dict, db, current_user: CurrentUser) -> Variation:
@@ -85,7 +112,9 @@ async def list_variations(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await _list_scope(selection, organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.VARIATION_VIEW, resource_type="variations",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -108,7 +137,9 @@ async def variation_summary(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await _list_scope(selection, organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.VARIATION_VIEW, resource_type="variations",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -129,7 +160,9 @@ async def export_variations(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await _list_scope(selection, organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.VARIATION_EXPORT, resource_type="variations",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -148,8 +181,11 @@ async def create_variation(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    org = payload.organization_id or getattr(current_user, "organization_id", None)
+    # The body's project must BE the selection: refused, never rewritten.
+    await selection.require_project(payload.project_id, payload.organization_id)
+    org = payload.organization_id or selection.organization_id
     await policy.authorize(
         current_user, Permissions.VARIATION_CREATE, resource_type="variation",
         organization_id=org, project_id=payload.project_id,
@@ -158,6 +194,9 @@ async def create_variation(
     # refused before anything is written. An empty array is a no-op.
     if payload.linked_document_ids:
         raise _refuse_legacy_write()
+    if not payload.organization_id and org:
+        # The owner organisation of the validated selected project.
+        payload = payload.model_copy(update={"organization_id": org})
     created = await VariationService(db).create(payload, current_user)
     return await _present_variation(created, db, current_user)
 
@@ -168,9 +207,10 @@ async def get_variation(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     return await _present_variation(
-        await _load(variation_id, Permissions.VARIATION_VIEW, db, current_user, policy), db, current_user
+        await _load(variation_id, Permissions.VARIATION_VIEW, db, current_user, policy, selection), db, current_user
     )
 
 
@@ -181,12 +221,13 @@ async def update_variation(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     # Status moves into approved/rejected require the approve permission.
     perm = Permissions.VARIATION_EDIT
     if payload.status in {"approved", "rejected"}:
         perm = Permissions.VARIATION_APPROVE
-    v = await _load(variation_id, perm, db, current_user, policy)
+    v = await _load(variation_id, perm, db, current_user, policy, selection)
     changes = payload.model_dump(exclude_unset=True)
     if "linked_document_ids" in changes:
         requested = changes.pop("linked_document_ids")
@@ -209,8 +250,9 @@ async def delete_variation(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    v = await _load(variation_id, Permissions.VARIATION_DELETE, db, current_user, policy)
+    v = await _load(variation_id, Permissions.VARIATION_DELETE, db, current_user, policy, selection)
     try:
         await VariationService(db).delete(v, current_user, policy=policy)
     except DocumentRelationshipError as exc:

@@ -1,9 +1,20 @@
 """Active Organisation / Active Project context: the navbar selection as a request boundary.
 
 Minimal port of the tenant-context design on `codex/csv-import-scope`
-(`core/tenant_context.py`), bounded by owner decision (2026-09-22) to the Hindrance &
-Constraint Register and its `/api/delay-events` compatibility routes. Same header
-names, same `selection_required` / `context_forbidden` semantics, same refusal audit.
+(`core/tenant_context.py`). Same header names, same `selection_required` /
+`context_forbidden` semantics, same refusal audit. It is shared infrastructure, but
+by owner decision it binds only the registers that opt in:
+
+* the Hindrance & Constraint Register and its `/api/delay-events` compatibility
+  routes (PR #22, 2026-09-22);
+* the Variation Register (CL-3A, closing the CL-2 debt);
+* on the shared relationship routes, the target types whose adapter sets
+  `active_scope_enforced` (`services/entity_adapter_registry.py`).
+
+Every other register keeps its existing semantics until it is moved deliberately
+(SYSTEM-WIDE ACTIVE-SCOPE CONSISTENCY DEBT, contraclaim-dms#24). The browser sends
+the headers on every request, but a route that does not depend on this module never
+reads them.
 
 What it answers, and what it deliberately does not:
 
@@ -124,11 +135,31 @@ class ActiveScope:
                 disclose=False,
             )
 
-    async def require_record(self, record: Mapping[str, Any]) -> None:
-        await self.require_project(
-            record.get("project_id") or record.get("projectId"),
-            record.get("organization_id") or record.get("organizationId"),
-        )
+    async def require_record(self, record: Mapping[str, Any], *, allow_unscoped: bool = False) -> None:
+        """Refuse a record outside the selected project (400 when none is selected).
+
+        ``allow_unscoped`` is for registers that must keep legacy rows with NO
+        project readable and removable (Variation, CL-2): such a row is in no
+        other project, so only its organisation is held to the selection - and
+        the membership/permission gate still decides. A row that names a project
+        is always held to it.
+        """
+        project_id = record.get("project_id") or record.get("projectId")
+        organization_id = record.get("organization_id") or record.get("organizationId")
+        if allow_unscoped and not _as_id(project_id):
+            self.require_selection()
+            target_org = _as_id(organization_id)
+            if target_org and self.organization_id and target_org != self.organization_id:
+                raise await _forbid(
+                    self.db,
+                    self.user,
+                    "This record is not available in the organisation selected in the navbar.",
+                    target_org,
+                    "",
+                    disclose=False,
+                )
+            return
+        await self.require_project(project_id, organization_id)
 
     def narrows(self, project_id: Any) -> bool:
         """For listings: whether a row in ``project_id`` is visible under the selection."""
@@ -225,8 +256,8 @@ class RequestedScope:
     """The raw selection, validated only on demand.
 
     Shared routes (``/api/entities/...``, ``/api/documents/{id}/entity-links``) serve
-    every relationship target; only their ``delay_event`` paths are bound by the
-    selection in this phase, so an unrelated target must not be refused over a header.
+    every relationship target; only selection-bound targets (``active_scope_enforced``)
+    resolve it, so an unrelated target is never refused over a header.
     """
 
     db: Any

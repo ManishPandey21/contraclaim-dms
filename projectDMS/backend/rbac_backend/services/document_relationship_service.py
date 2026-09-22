@@ -17,6 +17,7 @@ from ..models.document_relationship import (
 from .audit_event_service import AuditEventService
 from .entity_adapter_registry import (
     CORRESPONDENCE_ROLES,
+    EntityAdapter,
     EntityAdapterRegistry,
     EntityContext,
     is_correspondence_document,
@@ -41,6 +42,7 @@ LINK_TO_RECORD_TARGET_TYPES: tuple[str, ...] = (
     "eot_submission",
     "eot_determination",
     "variation",
+    "delay_event",
 )
 
 #: Rows read per Link-to-Record listing before label filtering.
@@ -395,6 +397,21 @@ class DocumentRelationshipService:
 
         committed = await self._run_transaction(persist)
         return [self._view(stored, context, document) for stored, document in committed]
+
+    def active_scope_adapter(self, target_type: str) -> Optional[EntityAdapter]:
+        """The target's adapter when the selected project bounds it, else ``None``."""
+        return self.registry.active_scope_adapter(target_type)
+
+    async def active_scope_target(self, target_type: str, target_id: str) -> Optional[EntityContext]:
+        """Load a selection-bound target for the scope check. Grants nothing.
+
+        ``None`` when the type is not selection-bound or the target does not exist
+        (the relationship operation then answers its own 404).
+        """
+        adapter = self.active_scope_adapter(target_type)
+        if adapter is None:
+            return None
+        return await adapter.load(self.db, target_id)
 
     async def link_target(self, link_id: str) -> Optional[tuple[str, str]]:
         """``(target_type, target_id)`` of a stored link, or ``None``. Read-only."""
@@ -827,6 +844,7 @@ class DocumentRelationshipService:
         *,
         query: str = "",
         limit: int = 25,
+        selected_project_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Register records this actor may link this Document to ("Link to Record").
 
@@ -836,6 +854,11 @@ class DocumentRelationshipService:
         adapter's ``load`` (so parent/baseline integrity checks apply), and the
         actor holds the target's *manage* permission there. ``link_batch`` still
         re-checks everything on write; this listing grants nothing.
+
+        ``selected_project_id`` is the caller's validated navbar selection for a
+        target type bound by it (``active_scope_enforced``): a Document outside the
+        selection offers no candidates, because every candidate shares the
+        Document's project.
         """
         normalized_type = str(target_type or "").strip().lower()
         if normalized_type not in LINK_TO_RECORD_TARGET_TYPES:
@@ -853,11 +876,17 @@ class DocumentRelationshipService:
         project_id = str(document.get("project_id") or document.get("projectId") or "")
         if not organization_id or not project_id:
             return []
+        if selected_project_id is not None and selected_project_id != project_id:
+            return []
 
         needle = str(query or "").strip().lower()
         bounded = max(1, min(int(limit or 25), 50))
         decisions: dict[str, bool] = {}
-        scope_query: dict[str, Any] = {"organization_id": organization_id, "project_id": project_id}
+        scope_query: dict[str, Any] = {
+            **adapter.link_target_query(),
+            "organization_id": organization_id,
+            "project_id": project_id,
+        }
         if needle and adapter.target_label_fields:
             # Narrow in the database so a large register is searchable past the
             # scan limit; the label check below stays the authority.

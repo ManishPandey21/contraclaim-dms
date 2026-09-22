@@ -173,6 +173,14 @@ class EntityAdapter:
     #: Row fields the display label is built from, for a server-side search
     #: prefilter. Empty when the label comes from a parent row.
     target_label_fields: tuple[str, ...] = ()
+    #: Whether the selected navbar project (``X-Proj-Id``, ``core/tenant_context``)
+    #: bounds this target on the shared relationship routes: a target outside the
+    #: selection is 403 ``context_forbidden``, a record-level request with nothing
+    #: selected is 400 ``selection_required``, and the Document reverse lookup
+    #: hides the target's rows outside the selection. Only registers that enforce
+    #: the selection on their own routes opt in (CL-3A: Variation, Hindrance);
+    #: every other target keeps its selection-blind behaviour.
+    active_scope_enforced: bool = False
     legacy_relationship_role = "manual_review"
     supports_freeze = True
     freeze_requires_lifecycle_orchestration = False
@@ -223,6 +231,10 @@ class EntityAdapter:
         session: Any = None,
     ) -> bool:
         raise NotImplementedError
+
+    def link_target_query(self) -> Dict[str, Any]:
+        """Extra row filter for "Link to Record" candidates (rows that may take a new link)."""
+        return {}
 
 
 class ClaimEntityAdapter(EntityAdapter):
@@ -1242,6 +1254,7 @@ class VariationEntityAdapter(EntityAdapter):
     target_type = "variation"
     target_collection = "variations"
     target_label_fields = ('variation_number',)
+    active_scope_enforced = True
     supports_freeze = False
     legacy_relationship_role = "manual_review"
 
@@ -1473,8 +1486,14 @@ class DelayEventEntityAdapter(EntityAdapter):
     target_type = "delay_event"
     target_collection = "delay_events"
     target_label_fields = ("hindrance_ref", "delay_ref", "title")
+    active_scope_enforced = True
     supports_freeze = False
     legacy_relationship_role = "supporting_document"
+
+    def link_target_query(self) -> Dict[str, Any]:
+        # An archived entry is read-only (the write guard refuses it), so it is
+        # never offered as a Link-to-Record candidate.
+        return {"archived_at": None}
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         row = None
@@ -1591,3 +1610,8 @@ class EntityAdapterRegistry:
 
     def adapters(self) -> tuple[EntityAdapter, ...]:
         return tuple(self._adapters.values())
+
+    def active_scope_adapter(self, target_type: str) -> Optional[EntityAdapter]:
+        """The adapter when ``target_type`` is bound by the selected project, else ``None``."""
+        adapter = self._adapters.get(str(target_type or "").strip().lower())
+        return adapter if adapter is not None and adapter.active_scope_enforced else None

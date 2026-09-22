@@ -1,10 +1,14 @@
 """Public HTTP seam for canonical entity-to-Document relationships.
 
-Active project scope applies ONLY to the `delay_event` (Hindrance) target in this
-phase (owner decision 2026-09-22): its forward routes need a matching selected
-project, and the document reverse lookup hides Hindrance rows outside the
-selection. Every other target type keeps its existing semantics - an unrelated
-target is never refused over the selection headers.
+Active project scope (``core/tenant_context.py``) binds the target types whose
+adapter sets ``active_scope_enforced`` - Variation and Hindrance (CL-3A). For
+those targets every forward route (link, list, freeze, get/remove/history of a
+link) needs a selected project that the target is in: 400 ``selection_required``
+with nothing selected, 403 ``context_forbidden`` for a target in another project.
+The Document reverse lookups hide their rows outside the selection, and Link to
+Record offers them only for a Document in the selected project. Every other
+target type keeps its existing semantics - it is never refused over the selection
+headers.
 """
 
 from __future__ import annotations
@@ -47,20 +51,61 @@ async def get_document_relationship_service(db=Depends(get_db)) -> DocumentRelat
     return DocumentRelationshipService(db)
 
 
-SCOPED_TARGET_TYPE = "delay_event"
+async def _hold_to_selection(
+    requested: RequestedScope,
+    service: DocumentRelationshipService,
+    target_type: str,
+    target_id: str,
+) -> None:
+    """A selection-bound target must be in the selected project (400 when none is selected).
 
-
-async def _hold_to_selection(requested: RequestedScope, target_type: str, target_id: str) -> None:
-    """A Hindrance target must be in the selected project (400 when none is selected)."""
-    if target_type != SCOPED_TARGET_TYPE:
+    A missing target passes through so the relationship operation answers its own
+    404 - but only once a project is selected, so the refusal order is the same
+    whether or not the id exists.
+    """
+    if service.active_scope_adapter(target_type) is None:
         return
-    from ..services.hindrance_register_service import HindranceRegisterService
-
     selection = await requested.resolve()
     selection.require_selection()
-    item = await HindranceRegisterService(requested.db).get(target_id)
-    if item:
-        await selection.require_record(item)
+    context = await service.active_scope_target(target_type, target_id)
+    if context is not None:
+        await selection.require_project(context.project_id, context.organization_id)
+
+
+async def _hold_link_to_selection(
+    requested: RequestedScope,
+    service: DocumentRelationshipService,
+    link_id: str,
+) -> None:
+    target = await service.link_target(link_id)
+    if target:
+        await _hold_to_selection(requested, service, *target)
+
+
+async def _visible_under_selection(
+    requested: RequestedScope,
+    service: DocumentRelationshipService,
+    links: list,
+) -> list:
+    """Reverse lookups: drop selection-bound rows outside the selected project.
+
+    With no project selected the rows stay, bounded by membership exactly like a
+    register list (``list_for_document`` already authorized each target). An
+    unusable selection (403 on resolve) hides every selection-bound row - fail
+    closed for those targets only. Other rows keep their existing behaviour.
+    """
+    if not any(service.active_scope_adapter(link.target_type) for link in links):
+        return links
+    try:
+        selection = await requested.resolve()
+    except TenantContextError:
+        selection = None
+    return [
+        link
+        for link in links
+        if service.active_scope_adapter(link.target_type) is None
+        or (selection is not None and selection.narrows(link.project_id))
+    ]
 
 
 @router.post(
@@ -77,7 +122,7 @@ async def batch_link_documents(
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
     requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipListResponse:
-    await _hold_to_selection(requested, target_type, target_id)
+    await _hold_to_selection(requested, service, target_type, target_id)
     links = await service.link_batch(
         current_user,
         target_type,
@@ -100,7 +145,7 @@ async def list_entity_document_links(
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
     requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipListResponse:
-    await _hold_to_selection(requested, target_type, target_id)
+    await _hold_to_selection(requested, service, target_type, target_id)
     links = await service.list_for_target(current_user, target_type, target_id)
     return DocumentRelationshipListResponse(links=links)
 
@@ -118,7 +163,7 @@ async def freeze_entity_document_links(
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
     requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipListResponse:
-    await _hold_to_selection(requested, target_type, target_id)
+    await _hold_to_selection(requested, service, target_type, target_id)
     return DocumentRelationshipListResponse(
         links=await service.freeze(
             current_user, target_type, target_id, reason=body.reason
@@ -138,9 +183,7 @@ async def remove_document_link(
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
     requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipResponse:
-    target = await service.link_target(link_id)
-    if target:
-        await _hold_to_selection(requested, *target)
+    await _hold_link_to_selection(requested, service, link_id)
     link = await service.remove(
         current_user,
         link_id,
@@ -159,8 +202,10 @@ async def get_document_link(
     link_id: str,
     current_user: CurrentUser = Depends(get_current_user),
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
+    requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipResponse:
     """Current state of one link, including its removal tombstone. Not history."""
+    await _hold_link_to_selection(requested, service, link_id)
     return DocumentRelationshipResponse(link=await service.get(current_user, link_id))
 
 
@@ -184,9 +229,7 @@ async def document_link_history(
     use ``GET /document-links/{link_id}``. The change record is the
     ``document_relationship.linked`` / ``.unlinked`` audit trail.
     """
-    target = await service.link_target(link_id)
-    if target:
-        await _hold_to_selection(requested, *target)
+    await _hold_link_to_selection(requested, service, link_id)
     links = await service.history(current_user, link_id)
     response.headers["Deprecation"] = HISTORY_DEPRECATED_AT
     response.headers["Link"] = (
@@ -207,18 +250,7 @@ async def list_document_entity_links(
     requested: RequestedScope = Depends(requested_scope),
 ) -> DocumentRelationshipListResponse:
     links = await service.list_for_document(current_user, document_id)
-    if any(link.target_type == SCOPED_TARGET_TYPE for link in links):
-        try:
-            selection = await requested.resolve()
-        except TenantContextError:
-            # An unusable selection hides every Hindrance row (fail closed for the
-            # scoped target only); other rows keep their existing behaviour.
-            selection = None
-        links = [
-            link
-            for link in links
-            if link.target_type != SCOPED_TARGET_TYPE or (selection is not None and selection.narrows(link.project_id))
-        ]
+    links = await _visible_under_selection(requested, service, links)
     return DocumentRelationshipListResponse(links=links)
 
 
@@ -231,17 +263,28 @@ async def list_document_link_targets(
     limit: int = Query(25, ge=1, le=50),
     current_user: CurrentUser = Depends(get_current_user),
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
+    requested: RequestedScope = Depends(requested_scope),
 ) -> dict:
     """Register records the caller may link this Document to ("Link to Record").
 
     Offers only targets in the Document's own organisation/project on which the
     caller holds the target's manage permission. The write itself still goes
     through ``POST /entities/{target_type}/{target_id}/document-links:batch``,
-    which re-authorizes everything.
+    which re-authorizes everything. A selection-bound target type needs a
+    selected project (the write will), and offers nothing for a Document outside it.
     """
     await LINK_TARGETS_RATE_LIMITER.check_user_limit(str(getattr(current_user, "id", "") or ""))
+    selected_project_id: Optional[str] = None
+    if service.active_scope_adapter(target_type) is not None:
+        selection = await requested.resolve()
+        selected_project_id = selection.require_selection()
     targets = await service.link_targets_for_document(
-        current_user, document_id, target_type, query=q or "", limit=limit
+        current_user,
+        document_id,
+        target_type,
+        query=q or "",
+        limit=limit,
+        selected_project_id=selected_project_id,
     )
     return {"document_id": document_id, "target_type": target_type, "targets": targets}
 
@@ -252,8 +295,11 @@ async def list_document_link_dependencies(
     document_id: str,
     current_user: CurrentUser = Depends(get_current_user),
     service: DocumentRelationshipService = Depends(get_document_relationship_service),
+    requested: RequestedScope = Depends(requested_scope),
 ) -> dict:
-    links = await service.list_for_document(current_user, document_id)
+    links = await _visible_under_selection(
+        requested, service, await service.list_for_document(current_user, document_id)
+    )
     return {
         "document_id": document_id,
         "active_count": len(links),

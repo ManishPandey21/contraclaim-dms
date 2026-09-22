@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from rbac_backend.core.database import get_db
 from rbac_backend.core.permissions import Permissions
 from rbac_backend.core.security import get_current_user
+from rbac_backend.core.tenant_context import ActiveScope, RequestedScope, active_scope, requested_scope
 from rbac_backend.models.document_relationship import DocumentRelationshipInput
 from rbac_backend.models.variation import VariationCreate
 from rbac_backend.routers.document_relationships import (
@@ -90,8 +91,23 @@ class _VariationDatabase(_Database):
         self.contract_master = _Collection("contract_master")
 
 
+class _SelectedScope(RequestedScope):
+    """The navbar selection, already validated: CL-3A binds Variation to it.
+
+    These CL-2 guards are about the relationship framework, so every request
+    carries the Variation's own project (``project-1``), as the browser does.
+    The selection semantics themselves are pinned against the real
+    ``resolve_active_scope`` in ``test_active_scope_variation_hindrance_http.py``.
+    """
+
+    async def resolve(self) -> ActiveScope:
+        return ActiveScope(self.db, self.user, self.organization_id, self.project_id)
+
+
 def _app(db: _VariationDatabase, *, policy: Any = None, user: Any = None) -> FastAPI:
     app = FastAPI()
+    app.dependency_overrides[active_scope] = lambda: ActiveScope(db, None, "org-1", "project-1")
+    app.dependency_overrides[requested_scope] = lambda: _SelectedScope(db, None, "org-1", "project-1")
     app.include_router(relationship_router, prefix="/api")
     app.include_router(variation_router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
@@ -547,7 +563,9 @@ async def test_link_targets_offer_only_in_scope_records_of_a_verified_type() -> 
         claims = await client.get("/api/documents/doc-1/link-targets", params={"target_type": "claim"})
         unsupported = [
             await client.get("/api/documents/doc-1/link-targets", params={"target_type": kind})
-            for kind in ("contract_document", "bank_guarantee", "delay_event", "hindrance")
+            # CL-3A offers `delay_event` (Hindrance) too; it is pinned in
+            # test_active_scope_variation_hindrance_http.py.
+            for kind in ("contract_document", "bank_guarantee", "hindrance")
         ]
         missing = await client.get("/api/documents/nope/link-targets", params={"target_type": "variation"})
 
