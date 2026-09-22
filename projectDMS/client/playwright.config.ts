@@ -29,6 +29,7 @@ const MOCKED_SUITES = [
   "**/correspondence-linking.spec.ts",
   "**/hindrance-register.spec.ts",
   "**/cl3a-cross-register-scope.spec.ts",
+  "**/cl3b-programme-chronology.spec.ts",
 ];
 
 export default defineConfig({
