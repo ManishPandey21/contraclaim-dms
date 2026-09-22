@@ -56,3 +56,18 @@ def test_empty_search_is_never_narrowed() -> None:
     for adapter in (BankGuaranteeEventEntityAdapter(), KeyDateAchievementEntityAdapter(),
                     ProgrammeMilestoneEntityAdapter(), ChronologyEventEntityAdapter()):
         assert _search(adapter, "") is None
+
+
+def test_only_the_registers_that_always_blocked_deletion_still_do() -> None:
+    """Legacy references of the CL-3B registers never blocked a Document's deletion.
+
+    `DocumentService.delete_document` refuses while a legacy read-through names
+    the Document. A chronology event's source is provenance (a deleted source is
+    withheld by the publication policy), and neither register ever blocked, so
+    making them block would strand every extracted letter. Canonical links still
+    block deletion for every register.
+    """
+    from rbac_backend.services.entity_adapter_registry import EntityAdapterRegistry
+
+    blocking = {adapter.target_type: adapter.legacy_blocks_document_deletion for adapter in EntityAdapterRegistry().adapters()}
+    assert {name for name, blocks in blocking.items() if not blocks} == {"programme_milestone", "chronology_event"}

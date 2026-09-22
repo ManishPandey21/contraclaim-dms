@@ -268,6 +268,12 @@ class EntityAdapter:
     #: Fixed text every label of this type ends with (" · Achievement"): a
     #: search for part of it matches every row, so no row prefilter applies.
     target_label_suffix: str = ""
+    #: Does a legacy reference to a Document (read through by
+    #: ``legacy_targets_for_document``) block that Document's deletion? True for
+    #: the registers that already blocked it; the CL-3B registers never did, and a
+    #: chronology event's source is provenance the publication policy already
+    #: handles for a deleted Document, so they keep deletion as it was.
+    legacy_blocks_document_deletion: bool = True
     legacy_relationship_role = "manual_review"
     supports_freeze = True
     freeze_requires_lifecycle_orchestration = False
@@ -1840,6 +1846,7 @@ class ProgrammeMilestoneEntityAdapter(EntityAdapter):
     link_to_record = True
     link_manage_permissions = (Permissions.EVIDENCE_GRAPH_MANAGE,)
     active_scope_enforced = True
+    legacy_blocks_document_deletion = False
     supports_freeze = False
     legacy_relationship_role = "supporting_document"
 
@@ -1964,6 +1971,7 @@ class ChronologyEventEntityAdapter(EntityAdapter):
     link_to_record = True
     link_manage_permissions = (Permissions.CHRONOLOGY_EDIT,)
     active_scope_enforced = True
+    legacy_blocks_document_deletion = False
     supports_freeze = False
     legacy_relationship_role = "supporting_document"
 
@@ -2094,7 +2102,6 @@ class ChronologyEventEntityAdapter(EntityAdapter):
             row.get("_id")
             async for row in chronologies.find(
                 {"organization_id": organization_id, "project_id": project_id, "deleted_at": {"$exists": False}},
-                {"_id": 1},
                 session=session,
             )
         ]
@@ -2105,7 +2112,6 @@ class ChronologyEventEntityAdapter(EntityAdapter):
                 "chronology_id": {"$in": parents},
                 "$or": [{"source_document_id": document_id}, {"related_document_ids": document_id}],
             },
-            {"_id": 1},
             session=session,
         )
         return [str(row.get("_id")) async for row in cursor if row.get("_id")]

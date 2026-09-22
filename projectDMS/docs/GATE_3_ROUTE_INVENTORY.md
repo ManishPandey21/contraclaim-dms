@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **94**
-- Authenticated routes: **87**
+- Routes: **95**
+- Authenticated routes: **88**
 - Routes owing an empty state: **60**
-- Routes owing a loading state: **87**
+- Routes owing a loading state: **88**
 
 ## The inventory
 
@@ -123,6 +123,7 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/permissions` | GET | yes | `PermissionsPage` | yes | yes | `client/src/pages/__tests__/PermissionsPage.permission-catalog.test.ts` |
 | `/plan-settings` | GET | yes | `PlanSettingsPage` | no | yes | MISSING - no fault-injection coverage yet |
 | `/profile` | GET | yes | `ProfilePage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/programme-milestones/:id` | GET | yes | `ProgrammeMilestoneDetailPage` | no | yes | `client/src/pages/__tests__/ProgrammeMilestoneDetailPage.test.tsx` |
 | `/projects` | GET | yes | `ProjectsPage` | yes | yes | `client/src/pages/__tests__/ProjectsPage.organization-filter.test.tsx` |
 | `/reference/:id` | GET | yes | `ReferencePage` | no | yes | `client/src/pages/__tests__/ReferencePage.parsed-references.test.tsx` |
 | `/register` | GET | yes | `RegisterPage` | no | yes | `client/src/pages/__tests__/RegisterPage.subscription.test.tsx` |
