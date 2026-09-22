@@ -151,6 +151,12 @@ arbitration register) - debt #24.
 * Archived chronology: read-only, not offered. Programme Milestone: no delete or archive exists;
   `delete_target` refuses; superseded milestones keep taking evidence.
 * A foreign link id cannot be removed: the link's own target is loaded and authorized.
+* **Document deletion is unchanged for these registers.** `DocumentService.delete_document` refuses
+  while a canonical link or a *blocking* legacy reference names the Document. Legacy references of
+  `programme_milestone` / `chronology_event` never blocked deletion before CL-3B and still do not
+  (`legacy_blocks_document_deletion = False`): otherwise every letter extracted into a chronology would
+  become undeletable with no UI to clear it (caught by the full suite, `test_letter_deletion_cascade`).
+  Canonical links to them block deletion like every other register.
 
 ## 11. Independent reviews and dispositions
 
