@@ -4,7 +4,7 @@ import { AlertCircle, Link2, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 import LinkToRecordDialog from "@/components/document-viewer/LinkToRecordDialog";
-import { relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
+import { LINK_TO_RECORD_TARGETS, relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
 import {
   listDocumentEntityLinks,
   listDocumentLinkTargetTypes,
@@ -26,7 +26,8 @@ export default function LinkedRecordsPanel({ documentId }: { documentId: string 
     setLinkableTypes(null);
     listDocumentLinkTargetTypes(documentId)
       .then((types) => {
-        if (active) setLinkableTypes(types);
+        // Only registers this client can present; an unknown type never opens an empty dialog.
+        if (active) setLinkableTypes(types.filter((type) => LINK_TO_RECORD_TARGETS.some((item) => item.value === type)));
       })
       .catch(() => {
         // Fail closed: without an answer the action is not offered.

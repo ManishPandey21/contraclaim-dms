@@ -114,7 +114,9 @@ const EventCard: React.FC<{
   onToggleDocuments: (event: ChronologyEventDTO) => void;
   canManageDocuments: boolean;
   focused: boolean;
-}> = ({ event, busy, onVerify, onReject, documentsOpen, onToggleDocuments, canManageDocuments, focused }) => (
+  /** The chronology's scope: an older event may carry none of its own. */
+  scope: { organizationId?: string | null; projectId?: string | null };
+}> = ({ event, busy, onVerify, onReject, documentsOpen, onToggleDocuments, canManageDocuments, focused, scope }) => (
   <Card
     className={cn("rounded-md", focused && "border-sky-300 ring-1 ring-sky-200")}
     data-testid="chronology-event"
@@ -182,7 +184,7 @@ const EventCard: React.FC<{
           size="sm"
           variant="ghost"
           aria-expanded={documentsOpen}
-          aria-controls={`chronology-event-documents-${event.id}`}
+          aria-controls={documentsOpen ? `chronology-event-documents-${event.id}` : undefined}
           onClick={() => onToggleDocuments(event)}
         >
           <Link2 className="mr-1 h-3.5 w-3.5" />
@@ -193,8 +195,8 @@ const EventCard: React.FC<{
             <EntityDocumentLinks
               targetType="chronology_event"
               targetId={event.id}
-              organizationId={event.organization_id}
-              projectId={event.project_id}
+              organizationId={scope.organizationId || event.organization_id}
+              projectId={scope.projectId || event.project_id}
               roles={CHRONOLOGY_EVENT_DOCUMENT_RELATIONSHIP_ROLES}
               defaultRole="correspondence"
               canManage={canManageDocuments}
@@ -275,6 +277,8 @@ const ChronologyBuilderPage: React.FC = () => {
   // Chronology list + selection
   const [chronologies, setChronologies] = useState<MatterChronologyDTO[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
+  // A deep-linked chronology that the navbar selection does not contain.
+  const [deepLinkRefused, setDeepLinkRefused] = useState(false);
   const [events, setEvents] = useState<ChronologyEventDTO[]>([]);
   const [loading, setLoading] = useState(false);
   const [eventLoading, setEventLoading] = useState(false);
@@ -343,10 +347,13 @@ const ChronologyBuilderPage: React.FC = () => {
       setLoading(true);
       const rows = await listChronologies();
       setChronologies(rows);
-      // A chronology of the previous project never stays selected.
+      const refused = Boolean(routeChronologyId) && !rows.some((row) => row.id === routeChronologyId);
+      setDeepLinkRefused(refused);
+      // A chronology of the previous project never stays selected, and a refused
+      // deep link never silently opens another chronology in its place.
       setSelectedId((current) => {
+        if (routeChronologyId) return refused ? "" : current && rows.some((row) => row.id === current) ? current : routeChronologyId;
         if (current && rows.some((row) => row.id === current)) return current;
-        if (routeChronologyId && rows.some((row) => row.id === routeChronologyId)) return routeChronologyId;
         return rows[0]?.id || "";
       });
     } catch (error) {
@@ -358,7 +365,9 @@ const ChronologyBuilderPage: React.FC = () => {
     }
   }, [routeChronologyId, scopeProjectId, tenant.loading]);
 
+  const eventSequence = useRef(0);
   const loadEvents = useCallback(async () => {
+    const current = ++eventSequence.current;
     if (!selectedId) {
       setEvents([]);
       setContextCount(0);
@@ -368,14 +377,26 @@ const ChronologyBuilderPage: React.FC = () => {
       setEventLoading(true);
       const params = filterStatus === "all" ? undefined : { verification_status: filterStatus };
       const rows = await listChronologyEvents(selectedId, params);
+      // A response for a chronology that is no longer selected is dropped.
+      if (current !== eventSequence.current) return;
       setEvents(rows);
-      const context = await getChronologyPleadingContext(selectedId);
-      setContextCount(context.source_ledger.length);
     } catch (error) {
+      if (current !== eventSequence.current) return;
       setEvents([]);
       toast.error(scopeMessage(error, "Failed to load chronology events"));
+      return;
     } finally {
-      setEventLoading(false);
+      if (current === eventSequence.current) setEventLoading(false);
+    }
+    // The drafting-source count is separate: its failure keeps the events on screen.
+    try {
+      const context = await getChronologyPleadingContext(selectedId);
+      if (current === eventSequence.current) setContextCount(context.source_ledger.length);
+    } catch {
+      if (current === eventSequence.current) {
+        setContextCount(0);
+        toast.error("Drafting sources could not be counted");
+      }
     }
   }, [filterStatus, selectedId]);
 
@@ -488,6 +509,11 @@ const ChronologyBuilderPage: React.FC = () => {
         </Button>
       </div>
 
+      {deepLinkRefused && scopeProjectId && (
+        <div role="alert" className="rounded-md border border-destructive/40 bg-white p-4 text-sm text-destructive">
+          This chronology is not available in the project selected in the navbar.
+        </div>
+      )}
       {!tenant.loading && !scopeProjectId && (
         <div role="status" className="rounded-md border border-dashed bg-white p-4 text-sm text-muted-foreground">
           Select a project in the navbar to work on its chronologies.
@@ -720,6 +746,7 @@ const ChronologyBuilderPage: React.FC = () => {
                   // An archived chronology is read-only for its evidence (the server refuses too).
                   canManageDocuments={canEditChronology && selected?.status !== "archived"}
                   focused={event.id === focusEventId}
+                  scope={{ organizationId: selected?.organization_id, projectId: selected?.project_id }}
                 />
               ))}
             </div>

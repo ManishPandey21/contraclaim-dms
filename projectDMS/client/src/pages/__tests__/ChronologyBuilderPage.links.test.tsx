@@ -104,6 +104,24 @@ describe("ChronologyBuilderPage Documents and deep links (CL-3B)", () => {
     expect(within(archivedCard).getByTestId("event-documents")).toHaveAttribute("data-can-manage", "false");
   });
 
+  it("refuses a deep link outside the selection instead of opening another chronology", async () => {
+    renderAt("/chronology/chr-other?event_id=ev-x");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This chronology is not available in the project selected in the navbar.",
+    );
+    await waitFor(() => expect(chronologyApi.listChronologies).toHaveBeenCalled());
+    expect(chronologyApi.listChronologyEvents).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("chronology-event")).not.toBeInTheDocument();
+  });
+
+  it("keeps the events when only the drafting-source count fails", async () => {
+    chronologyApi.getChronologyPleadingContext.mockRejectedValue(new Error("500"));
+    renderAt("/chronology");
+    expect(await screen.findAllByTestId("chronology-event")).toHaveLength(1);
+    await waitFor(() => expect(toastApi.error).toHaveBeenCalledWith("Drafting sources could not be counted"));
+    expect(screen.getAllByTestId("chronology-event")).toHaveLength(1);
+  });
+
   it("follows the navbar selection and asks for one when none is selected", async () => {
     tenant.value = { loading: false, selectedProjectId: "", selectedOrganizationId: "org-A" };
     renderAt("/chronology");

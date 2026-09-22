@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -162,6 +162,8 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
     renderPanel();
     await screen.findByText("No linked records.");
     await waitFor(() => expect(relationshipApi.listDocumentLinkTargetTypes).toHaveBeenCalledWith(DOC));
+    // Let the resolved answer render, so "absent" is the settled state, not the pending one.
+    await act(async () => { await Promise.resolve(); });
     expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
     expect(relationshipApi.listDocumentLinkTargets).not.toHaveBeenCalled();
   });
@@ -171,6 +173,15 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
     renderPanel();
     await screen.findByText("No linked records.");
     await waitFor(() => expect(relationshipApi.listDocumentLinkTargetTypes).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
+  });
+
+  it("never opens an empty dialog for a register this client does not know", async () => {
+    relationshipApi.listDocumentLinkTargetTypes.mockResolvedValue(["some_future_register"]);
+    renderPanel();
+    await screen.findByText("No linked records.");
+    await act(async () => { await Promise.resolve(); });
     expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
   });
 

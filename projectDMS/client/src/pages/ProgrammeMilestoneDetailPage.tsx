@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Loader2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +40,7 @@ function statusOf(error: unknown): number | undefined {
  */
 export default function ProgrammeMilestoneDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const { can } = useRBAC();
   const canManage = can("dms.evidence_graph.manage");
   const tenant = useTenant();
@@ -104,8 +105,8 @@ export default function ProgrammeMilestoneDetailPage() {
       <div role="alert" className="space-y-3 p-6">
         <p className="text-sm">{message}</p>
         <div className="flex gap-2">
-          <Button asChild variant="outline" size="sm">
-            <Link to="/hindrances"><ArrowLeft className="mr-2 h-4 w-4" />Hindrance &amp; Constraint Register</Link>
+          <Button type="button" variant="outline" size="sm" onClick={() => navigate(-1)}>
+            <ArrowLeft className="mr-2 h-4 w-4" />Back
           </Button>
           {state === "error" && <Button type="button" size="sm" onClick={() => void load()}>Retry</Button>}
         </div>

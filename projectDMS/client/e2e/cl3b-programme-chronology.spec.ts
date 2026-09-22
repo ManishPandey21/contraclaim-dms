@@ -268,14 +268,25 @@ test("one letter across Programme and Chronology, bounded by the navbar selectio
   await expect(page.getByText("This programme milestone is not available in the project selected in the navbar.")).toBeVisible();
   await expect(page.getByRole("heading", { name: /Pier P4 piling/ })).toHaveCount(0);
   await page.goto("/chronology/chr-A1?event_id=ev-A1");
+  // The deep link is refused, never silently replaced by another chronology.
+  await expect(page.getByRole("alert")).toContainText("This chronology is not available in the project selected in the navbar.");
   await expect(page.getByRole("button", { name: /Depot chronology/ })).toBeVisible();
   await expect(page.locator('[data-event-id="ev-A1"]')).toHaveCount(0);
+  await expect(page.locator('[data-event-id="ev-A2"]')).toHaveCount(0);
   const afterSwitch = store.requests.slice(switchedAt);
   expect(afterSwitch.length).toBeGreaterThan(0);
   expect(afterSwitch.every((request) => request.project === A2.id)).toBe(true);
 
-  // Switch back to A1: both are reachable again.
+  // Switch back to A1 while standing on the Programme page: it follows in place.
+  await page.goto("/programme-milestones/pm-A1");
+  await expect(page.getByText("This programme milestone is not available in the project selected in the navbar.")).toBeVisible();
   await selectProject(page, A1.name);
+  await expect(page.getByRole("heading", { name: /Pier P4 piling/ })).toBeVisible();
+  // ...and in place on the Programme page again, back to A2 and to A1.
+  await selectProject(page, A2.name);
+  await expect(page.getByRole("heading", { name: /Pier P4 piling/ })).toHaveCount(0);
+  await selectProject(page, A1.name);
+  await expect(page.getByRole("heading", { name: /Pier P4 piling/ })).toBeVisible();
   await page.goto("/chronology/chr-A1?event_id=ev-A1");
   await expect(page.locator('[data-event-id="ev-A1"]').getByTestId("linked-document")).toContainText("ENG-VO-014.pdf");
   await page.goto("/programme-milestones/pm-A1");
