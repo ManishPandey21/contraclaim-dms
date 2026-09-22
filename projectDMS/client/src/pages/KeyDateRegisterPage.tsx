@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -107,7 +107,12 @@ const KeyDateRegisterPage: React.FC = () => {
   const [items, setItems] = useState<MilestoneDTO[]>([]);
   const [dash, setDash] = useState<KeyDateDashboardDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // Deep link from a Document's Linked Records:
+  // /key-dates?project_id=...&submission_id=... | &determination_id=...
+  const [searchParams] = useSearchParams();
+  const focusSubmissionId = searchParams.get("submission_id");
+  const focusDeterminationId = searchParams.get("determination_id");
+  const [projectFilter, setProjectFilter] = useState(() => searchParams.get("project_id") || "all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [csvOpen, setCsvOpen] = useState(false);
@@ -307,6 +312,8 @@ const KeyDateRegisterPage: React.FC = () => {
       {projectFilter !== "all" && (
         <KeyDateRevisionWorkflow
           projectId={projectFilter}
+          focusSubmissionId={focusSubmissionId}
+          focusDeterminationId={focusDeterminationId}
           milestones={items}
           onChanged={load}
           onBaselineStatusChange={setBaselineFrozen}

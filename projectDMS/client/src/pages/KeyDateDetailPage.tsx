@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -54,6 +54,10 @@ const Field: React.FC<{ label: string; value: React.ReactNode }> = ({ label, val
 
 const KeyDateDetailPage: React.FC = () => {
   const { id = "" } = useParams<{ id: string }>();
+  // Deep link from a Document's Linked Records: /key-dates/{id}?achievement_id=...
+  const [searchParams] = useSearchParams();
+  const focusAchievementId = searchParams.get("achievement_id");
+  const achievementEvidenceRef = useRef<HTMLDivElement | null>(null);
   const [m, setM] = useState<MilestoneDTO | null>(null);
   const [eots, setEots] = useState<EOTDTO[]>([]);
   const [history, setHistory] = useState<ExtensionHistoryDTO[]>([]);
@@ -92,6 +96,11 @@ const KeyDateDetailPage: React.FC = () => {
   }, [id]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const achievementFocused = Boolean(m && focusAchievementId && focusAchievementId === `${m.id}:ach`);
+  useEffect(() => {
+    if (achievementFocused) achievementEvidenceRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [achievementFocused]);
 
   const onSubmitEot = async () => {
     if (!eotForm.requested_extension_days || !eotForm.eot_letter_reference.trim()) {
@@ -238,7 +247,9 @@ const KeyDateDetailPage: React.FC = () => {
       </Card>
 
       {achieved && (
-        <Card>
+        <Card ref={achievementEvidenceRef} id="achievement-evidence"
+          data-focused={achievementFocused ? "true" : undefined}
+          className={achievementFocused ? "ring-2 ring-primary" : undefined}>
           <CardHeader>
             <CardTitle className="text-base">Achievement evidence</CardTitle>
             <CardDescription>

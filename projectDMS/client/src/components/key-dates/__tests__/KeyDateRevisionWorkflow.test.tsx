@@ -178,4 +178,26 @@ describe("KeyDateRevisionWorkflow", () => {
     ]);
     expect(evidence.every((node) => node.getAttribute("data-frozen") === "true")).toBe(true);
   });
+
+  it("highlights and scrolls to a deep-linked submission's evidence", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const { container } = render(
+      <KeyDateRevisionWorkflow projectId="p" milestones={MILESTONES} onChanged={vi.fn()} focusSubmissionId="s-2" />,
+    );
+    await screen.findAllByTestId("entity-document-links");
+    const focused = container.querySelector("#submission-evidence-s-2");
+    expect(focused).toHaveAttribute("data-focused", "true");
+    expect(container.querySelectorAll("[data-focused]")).toHaveLength(1);
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
+  });
+
+  it("highlights a deep-linked determination's evidence", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const { container } = render(
+      <KeyDateRevisionWorkflow projectId="p" milestones={MILESTONES} onChanged={vi.fn()} focusDeterminationId="d-2" />,
+    );
+    await screen.findAllByTestId("entity-document-links");
+    expect(container.querySelector("#determination-evidence-d-2")).toHaveAttribute("data-focused", "true");
+  });
 });
