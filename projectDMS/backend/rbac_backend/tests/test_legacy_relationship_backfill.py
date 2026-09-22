@@ -583,6 +583,23 @@ async def test_an_unknown_module_is_refused(tmp_path: Path, monkeypatch) -> None
     assert excinfo.value.status_code == 400
 
 
+def _seed_variation_legacy(db) -> None:
+    """CL-2: one Variation legacy array row, so the registry guards measure the
+    Variation classifier rather than an absent collection."""
+    db.variations = _Collection(
+        "variations",
+        [
+            {
+                "_id": "var-1",
+                "variation_number": "VO-001",
+                "organization_id": "org-1",
+                "project_id": "project-1",
+                "linked_document_ids": ["doc-1"],
+            }
+        ],
+    )
+
+
 def _seed_key_date_legacy(db) -> None:
     """Realistic Key Date legacy state for the registry honesty gates.
 
@@ -668,6 +685,7 @@ async def test_every_registered_module_can_actually_yield_candidates(
         ],
     )
     _seed_key_date_legacy(db)
+    _seed_variation_legacy(db)
 
     for name, entry in backfill_router._MODULES.items():
         report = await entry.classify(db, **entry.classifier_kwargs())
@@ -770,6 +788,7 @@ async def test_a_write_backfill_module_yields_a_genuinely_migratable_candidate(
           "project_id": "project-1", "linked_document_ids": ["doc-1"]}],
     )
     _seed_key_date_legacy(db)
+    _seed_variation_legacy(db)
 
     for name, entry in backfill_router._MODULES.items():
         if entry.capability is not BackfillCapability.WRITE_BACKFILL:
@@ -838,6 +857,7 @@ async def test_no_writable_module_exposes_an_ambiguous_event_candidate(
           "project_id": "project-1", "linked_document_ids": ["doc-1"]}],
     )
     _seed_key_date_legacy(db)
+    _seed_variation_legacy(db)
 
     for name, entry in backfill_router._MODULES.items():
         if entry.capability is not BackfillCapability.WRITE_BACKFILL:
@@ -885,6 +905,10 @@ EXPECTED_CAPABILITY_MATRIX = {
             "legacy_key_date_parent_array",
             "legacy_key_date_unclassified_source",
         ],
+    ),
+    "variation": (
+        "WRITE_BACKFILL",
+        ["legacy_letter_reference", "legacy_linked_document_id"],
     ),
 }
 
