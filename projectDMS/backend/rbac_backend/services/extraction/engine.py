@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 from .models import (
     Completeness,
@@ -35,18 +35,21 @@ from .page_store import (
     MeterCallback,
     OcrRunner,
     PageStore,
+    ResumablePageStore,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _is_resumable(store: PageStore) -> bool:
-    """Whether this store can hand back the run's already-recorded pages.
+def _run_loader(store: PageStore) -> Optional[ResumablePageStore]:
+    """The store itself when it can hand back the run's recorded pages.
 
     A feature test, not an isinstance check: the capability is optional and
     only the document adapter has a run-scoped identity to answer it with.
     """
-    return callable(getattr(store, "load_run_pages", None))
+    if callable(getattr(store, "load_run_pages", None)):
+        return cast(ResumablePageStore, store)
+    return None
 
 ENGINE_VERSION = "1"
 
@@ -123,8 +126,9 @@ class PageExtractionEngine:
         # retry pages at all - would re-extract and replace every resolved row
         # of the same run. The run, not the retry list, is the authority.
         stored: Dict[int, ExtractedPage] = {}
-        if _is_resumable(self.store):
-            stored = {page.number: page for page in await self.store.load_run_pages()}
+        resumable = _run_loader(self.store)
+        if resumable is not None:
+            stored = {page.number: page for page in await resumable.load_run_pages()}
         elif retry_set:
             logger.warning(
                 "Retrying pages %s of %s against a page store with no "
@@ -138,7 +142,7 @@ class PageExtractionEngine:
             self._mutable_page_numbers(
                 native_numbers=sorted(native), stored=stored, retry_set=retry_set
             )
-            if _is_resumable(self.store)
+            if resumable is not None
             else None
         )
 
