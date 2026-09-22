@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
+from rbac_backend.core.tenant_context import ActiveScope
 from rbac_backend.models.bank_guarantee import BankGuaranteeCreate, BGExtendRequest
 from rbac_backend.models.variation import VariationCreate
 from rbac_backend.routers.bank_guarantees import create_bg
@@ -297,10 +298,31 @@ def _policy():
 
 @pytest.mark.asyncio
 async def test_create_variation_denies_cross_tenant():
+    """The permission gate refuses a foreign tenant even when the selection agrees.
+
+    CL-3A holds the create to the selected project first, so the selection here is
+    the one the body names: what this test is about - the tenant gate - is then the
+    thing that refuses. The selection boundary itself is proven in
+    test_active_scope_variation_hindrance_http.py.
+    """
     payload = VariationCreate(project_id="proj-B", organization_id="org-B", variation_number="VO-1")
+    db = _DB()
+    user = _user(org="org-A")
     with pytest.raises(HTTPException) as exc:
-        await create_variation(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
+        await create_variation(
+            payload, db=db, current_user=user, policy=_policy(),
+            selection=ActiveScope(db, user, "org-B", "proj-B"),
+        )
     assert exc.value.status_code == 403
+
+    # And a selection that does not match the body is refused before that.
+    with pytest.raises(HTTPException) as mismatched:
+        await create_variation(
+            payload, db=db, current_user=user, policy=_policy(),
+            selection=ActiveScope(db, user, "org-A", "proj-A"),
+        )
+    assert mismatched.value.status_code == 403
+    assert mismatched.value.detail["code"] == "context_forbidden"
 
 
 @pytest.mark.asyncio
