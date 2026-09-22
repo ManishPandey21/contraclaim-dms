@@ -343,4 +343,3 @@ What the certification run must now also cover:
 
 Gate D1a is unchanged: **no same-host staging until R-A9I Falkor normalization is complete and the
 owner grants the maintenance window.** Nothing in CL-3A starts, schedules or approves it.
-
