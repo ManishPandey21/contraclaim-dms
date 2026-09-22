@@ -1,5 +1,6 @@
 import axios from "axios";
 import { API_BASE_URL } from "../config/api";
+import { activeScopeHeaders } from "./active-scope";
 
 const SAFE_METHODS = ["GET", "HEAD", "OPTIONS", "TRACE"];
 
@@ -120,6 +121,18 @@ export const createHttpClient = () => {
       if (csrfToken) {
         config.headers = config.headers || {};
         config.headers["X-CSRF-Token"] = csrfToken;
+      }
+    }
+    // The navbar selection travels with every API request (see active-scope.ts).
+    // A header the caller set explicitly wins, so a request can target a scope
+    // deliberately; the backend validates it either way.
+    if (headers) {
+      for (const [name, value] of Object.entries(activeScopeHeaders())) {
+        const existing = typeof headers.get === "function" ? headers.get(name) : headers[name];
+        if (!existing) {
+          if (typeof headers.set === "function") headers.set(name, value);
+          else headers[name] = value;
+        }
       }
     }
     return config;

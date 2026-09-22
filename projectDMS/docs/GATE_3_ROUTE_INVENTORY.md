@@ -36,10 +36,10 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 ## Counts
 
 - Source: `client/src/routes.tsx`
-- Routes: **92**
-- Authenticated routes: **85**
-- Routes owing an empty state: **59**
-- Routes owing a loading state: **85**
+- Routes: **94**
+- Authenticated routes: **87**
+- Routes owing an empty state: **60**
+- Routes owing a loading state: **87**
 
 ## The inventory
 
@@ -96,6 +96,8 @@ Gate 3's execution plan; it is not a licence to ship a page with no error state.
 | `/email-groups` | GET | yes | `EmailGroupsPage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/folders` | GET | yes | `FolderStructurePage` | yes | yes | MISSING - no fault-injection coverage yet |
 | `/health` | GET | yes | `HealthPage` | no | yes | MISSING - no fault-injection coverage yet |
+| `/hindrances` | GET | yes | `HindranceRegisterPage` | yes | yes | `client/src/pages/__tests__/HindranceRegisterPage.test.tsx` |
+| `/hindrances/:id` | GET | yes | `HindranceDetailPage` | no | yes | `client/src/pages/__tests__/HindranceDetailPage.test.tsx` |
 | `/insurance` | GET | yes | `InsuranceRegisterPage` | yes | yes | `client/src/pages/__tests__/InsuranceRegisterPage.document-links.test.tsx` |
 | `/ipc-bills` | GET | yes | `IPCBillRegisterPage` | yes | yes | `client/src/pages/__tests__/IPCBillRegisterPage.document-links.test.tsx` |
 | `/key-dates` | GET | yes | `KeyDateRegisterPage` | yes | yes | MISSING - no fault-injection coverage yet |

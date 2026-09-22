@@ -297,6 +297,9 @@ export const ROUTE_PERMISSIONS: Record<string, string[]> = {
   "/claims": ["dms.claim.view", "dms.document.view"],
   "/sla": ["dms.claim.view", "dms.document.view"],
   "/key-dates": ["dms.keydate.view", "dms.document.view"],
+  // Deliberately the register's own permission only: document or evidence-graph
+  // access does not open it (backend gates every route on dms.hindrance.*).
+  "/hindrances": ["dms.hindrance.view"],
   "/variations": ["dms.variation.view", "dms.document.view"],
   "/bank-guarantees": ["dms.bankguarantee.view", "dms.document.view"],
   "/insurance": ["dms.insurance.view", "dms.document.view"],

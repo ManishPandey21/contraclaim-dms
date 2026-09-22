@@ -23,7 +23,7 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 if __package__ in {None, ""}:  # pragma: no cover - direct script execution
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -32,10 +32,16 @@ from rbac_backend.core.database import disconnect, get_database
 from rbac_backend.services import role_contract_alignment as alignment
 
 
-def summarise(operations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def summarise(
+    operations: List[Dict[str, Any]], approved: Optional[Mapping[str, Iterable[str]]] = None
+) -> List[Dict[str, Any]]:
+    """`approved` checks additions against an owner grant instead of the release definition."""
     rows = []
     for row in operations:
-        contract = set(alignment.release_contract(row["role_id"]))
+        if approved is None:
+            contract = set(alignment.release_contract(row["role_id"]))
+        else:
+            contract = set(approved.get(row["role_id"], ()))
         unapproved = sorted(set(row["additions"]) - contract)
         rows.append(
             {
@@ -84,8 +90,32 @@ async def run(apply: bool) -> Dict[str, Any]:
                 not row["additions"] and not row.get("removals") for row in second.operations
             ) and all(row["status"] in (alignment.ALIGNED, alignment.ABSENT) for row in second.operations)
             report["warnings"] = sorted(set(report["warnings"]) | set(applied.warnings) | set(second.warnings))
-        report["unapproved_additions_total"] = sum(len(row["unapproved_additions"]) for row in report["before"])
+        grants = {role_id: list(permissions) for role_id, permissions in alignment.OWNER_APPROVED_GRANTS.items()}
+        granted_before = await alignment.grant(db, dry_run=True)
+        report["owner_approved_grants"] = grants
+        report["grant_before"] = summarise(granted_before.operations, approved=grants)
+        report["grant_before_permissions"] = {row["role_id"]: row["before"] for row in granted_before.operations}
+        report["warnings"] = sorted(set(report["warnings"]) | set(granted_before.warnings))
+        report["notices"] = [*report["notices"], *granted_before.notices]
+        if apply:
+            granted = await alignment.grant(db, dry_run=False)
+            granted_again = await alignment.grant(db, dry_run=False)
+            report["grant_apply"] = summarise(granted.operations, approved=grants)
+            report["grant_after_permissions"] = {row["role_id"]: row.get("after") for row in granted.operations}
+            report["grant_second_apply"] = summarise(granted_again.operations, approved=grants)
+            report["second_apply_is_noop"] = (
+                report["second_apply_is_noop"]
+                and all(not row["additions"] for row in granted_again.operations)
+                and all(row["status"] in (alignment.ALIGNED, alignment.ABSENT) for row in granted_again.operations)
+            )
+            report["warnings"] = sorted(set(report["warnings"]) | set(granted.warnings) | set(granted_again.warnings))
+        report["unapproved_additions_total"] = sum(
+            len(row["unapproved_additions"]) for row in [*report["before"], *report["grant_before"]]
+        )
         report["unapproved_removals_total"] = sum(len(row["unapproved_removals"]) for row in report["before"])
+        #: A grant outside the release definition disagrees with the release, like an
+        #: unapproved removal does: refused by the operation and fatal here.
+        report["refused_grants_total"] = sum(len(row["outside_release_contract"]) for row in granted_before.operations)
         return report
     finally:
         await disconnect()
@@ -95,6 +125,7 @@ def exit_code(report: Dict[str, Any]) -> int:
     if (
         report["unapproved_additions_total"]
         or report.get("unapproved_removals_total")
+        or report.get("refused_grants_total")
         or report.get("second_apply_is_noop") is False
     ):
         return 3

@@ -587,3 +587,142 @@ def test_the_command_fails_on_a_removal_outside_the_owner_decision() -> None:
         ]
     )
     assert rows[0]["unapproved_removals"] == ["dms.document.view"]
+
+
+# --------------------------------------------------------------------------- #
+# Owner decision (Hindrance staging certification, 2026-09-21): an explicit,
+# bounded grant of exactly the four `dms.hindrance.*` permissions to
+# `contractmgr_org`. That role stays OUTSIDE the alignment: its production
+# document is not brought up to its release definition, it receives these four
+# permissions and nothing else, and `dms.evidence_graph.*` is not a substitute.
+# --------------------------------------------------------------------------- #
+
+
+HINDRANCE_FAMILY = ("dms.hindrance.view", "dms.hindrance.create", "dms.hindrance.edit", "dms.hindrance.archive")
+#: Production-shaped: lacks most of its release definition, holds the graph family and an extra.
+CONTRACTMGR_HELD = ["dms.document.view", "dms.evidence_graph.view", "dms.evidence_graph.manage", BILLING_MANAGE]
+
+
+@pytest.fixture
+def production_with_contract_manager():
+    return _db(
+        [
+            _production_shaped("orgadmin", ORGADMIN_HELD),
+            _production_shaped("contractmgr_org", CONTRACTMGR_HELD),
+            _production_shaped("orguser", ["dms.document.view"]),
+        ]
+    )
+
+
+def test_the_owner_approved_grant_is_exactly_the_hindrance_family_for_contractmgr_org() -> None:
+    assert alignment.OWNER_APPROVED_GRANTS == {"contractmgr_org": HINDRANCE_FAMILY}
+    assert not set(alignment.OWNER_APPROVED_GRANTS) & set(alignment.ALIGNED_ROLE_IDS)
+
+
+def test_every_owner_grant_is_inside_the_release_definition_of_its_role() -> None:
+    """A fresh seed and a granted production document must end up agreeing."""
+    for role_id, granted in alignment.OWNER_APPROVED_GRANTS.items():
+        assert set(granted) <= set(alignment.release_contract(role_id)), role_id
+
+
+async def test_the_grant_plan_adds_only_the_missing_hindrance_permissions(production_with_contract_manager) -> None:
+    result = await alignment.grant(production_with_contract_manager, dry_run=True)
+
+    [row] = result.operations
+    assert row["role_id"] == "contractmgr_org"
+    assert row["status"] == "align"
+    assert row["additions"] == sorted(HINDRANCE_FAMILY)
+    assert row["removals"] == []
+    assert row["retained_outside_contract"] == sorted(CONTRACTMGR_HELD)
+    assert production_with_contract_manager.roles.writes == []
+
+
+async def test_apply_grants_exactly_four_permissions_and_nothing_else_from_the_release_definition(
+    production_with_contract_manager,
+) -> None:
+    result = await alignment.grant(production_with_contract_manager, dry_run=False)
+
+    stored = production_with_contract_manager.roles.docs["contractmgr_org"]["permissions"]
+    assert stored[: len(CONTRACTMGR_HELD)] == CONTRACTMGR_HELD, "the grant removed or reordered"
+    assert sorted(stored[len(CONTRACTMGR_HELD) :]) == sorted(HINDRANCE_FAMILY), "the grant widened"
+    assert set(RELEASE["contractmgr_org"]) - set(stored), "the grant aligned the whole release definition"
+    assert result.operations[0]["after"] == sorted(set(stored))
+    assert result.warnings == []
+    assert production_with_contract_manager.roles.docs["orgadmin"]["permissions"] == ORGADMIN_HELD
+    assert production_with_contract_manager.roles.docs["orguser"]["permissions"] == ["dms.document.view"]
+    assert {query["_id"] for query, _ in production_with_contract_manager.roles.writes} == {"contractmgr_org"}
+
+
+async def test_a_second_grant_is_a_noop(production_with_contract_manager) -> None:
+    await alignment.grant(production_with_contract_manager, dry_run=False)
+    writes = len(production_with_contract_manager.roles.writes)
+    snapshot = copy.deepcopy(production_with_contract_manager.roles.docs)
+
+    again = await alignment.grant(production_with_contract_manager, dry_run=False)
+
+    assert len(production_with_contract_manager.roles.writes) == writes
+    assert production_with_contract_manager.roles.docs == snapshot
+    assert [row["status"] for row in again.operations] == ["aligned"]
+    assert again.warnings == []
+
+
+async def test_the_grant_never_touches_users_or_announces_an_authority_change(
+    production_with_contract_manager, announcements
+) -> None:
+    await alignment.grant(production_with_contract_manager, dry_run=False)  # `_Untouchable` users
+    assert announcements == []
+
+
+async def test_the_grant_leaves_absent_deactivated_and_bound_documents_alone() -> None:
+    absent = _db([])
+    inactive = _db([_production_shaped("contractmgr_org", ["dms.document.view"], is_active=False)])
+    bound = _db([_production_shaped("contractmgr_org", [], organization_id="org-A")])
+
+    absent_result = await alignment.grant(absent, dry_run=False)
+    inactive_result = await alignment.grant(inactive, dry_run=False)
+    bound_result = await alignment.grant(bound, dry_run=False)
+
+    assert absent.roles.docs == {} and absent.roles.writes == [] and absent_result.warnings == []
+    assert inactive.roles.writes == [] and inactive.roles.docs["contractmgr_org"]["is_active"] is False
+    assert bound.roles.writes == []
+    assert [row["status"] for row in inactive_result.operations] == ["inactive"]
+    assert [row["status"] for row in bound_result.operations] == ["organization_bound"]
+    assert inactive_result.warnings and bound_result.warnings
+
+
+async def test_a_release_seeded_database_already_holds_the_grant() -> None:
+    db = _db([dict(role) for role in DEFAULT_ROLES])
+    result = await alignment.grant(db, dry_run=True)
+    assert [row["status"] for row in result.operations] == ["aligned"]
+
+
+async def test_a_grant_outside_the_release_definition_is_refused(monkeypatch, production_with_contract_manager) -> None:
+    monkeypatch.setitem(alignment.OWNER_APPROVED_GRANTS, "contractmgr_org", (*HINDRANCE_FAMILY, "platform.admin"))
+
+    result = await alignment.grant(production_with_contract_manager, dry_run=False)
+
+    assert production_with_contract_manager.roles.writes == []
+    assert [row["status"] for row in result.operations] == ["refused"], "a refused grant reads as pending work"
+    assert any("platform.admin" in warning for warning in result.warnings)
+
+
+def test_the_command_fails_hard_on_a_refused_grant() -> None:
+    from rbac_backend.scripts import align_role_contract as command
+
+    clean = {"unapproved_additions_total": 0, "unapproved_removals_total": 0, "warnings": [], "second_apply_is_noop": True}
+    assert command.exit_code({**clean, "refused_grants_total": 0}) == 0
+    assert command.exit_code({**clean, "refused_grants_total": 1, "warnings": ["refused"]}) == 3
+
+
+async def test_the_command_reports_the_grant_and_flags_nothing_unapproved(production_with_contract_manager) -> None:
+    from rbac_backend.scripts import align_role_contract as command
+
+    operations = (await alignment.grant(production_with_contract_manager, dry_run=True)).operations
+    [row] = command.summarise(operations, approved=alignment.OWNER_APPROVED_GRANTS)
+    assert row["proposed_additions"] == sorted(HINDRANCE_FAMILY)
+    assert row["unapproved_additions"] == []
+
+    [widened] = command.summarise(
+        [{**operations[0], "additions": ["dms.contract.clause.read"]}], approved=alignment.OWNER_APPROVED_GRANTS
+    )
+    assert widened["unapproved_additions"] == ["dms.contract.clause.read"], "a grant row was checked against the release definition"

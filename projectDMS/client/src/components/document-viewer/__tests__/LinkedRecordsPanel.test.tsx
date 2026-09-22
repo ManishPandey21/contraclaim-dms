@@ -23,6 +23,20 @@ describe("LinkedRecordsPanel", () => {
     expect(screen.getByRole("link")).toHaveAttribute("href", "/claims/claim-1");
   });
 
+  it("names a Hindrance & Constraint Register entry and links to it", async () => {
+    relationshipApi.listDocumentEntityLinks.mockResolvedValue([
+      {
+        _id: "link-2", target_type: "delay_event", target_id: "h-1",
+        target_label: "HIN-0001", target_route: "/hindrances/h-1",
+        relationship_role: "site_record",
+      },
+    ]);
+    render(<MemoryRouter><LinkedRecordsPanel documentId="doc-1" /></MemoryRouter>);
+    expect(await screen.findByText("HIN-0001")).toBeInTheDocument();
+    expect(screen.getByText(/Hindrance \/ constraint/)).toBeInTheDocument();
+    expect(screen.getByRole("link")).toHaveAttribute("href", "/hindrances/h-1");
+  });
+
   it("fails visibly and retries instead of claiming there are no links", async () => {
     relationshipApi.listDocumentEntityLinks
       .mockRejectedValueOnce(new Error("denied"))

@@ -29,7 +29,11 @@ export type DocumentRelationshipRole =
   | "policy"
   | "certificate"
   | "variation_submission"
-  | "variation_approval";
+  | "variation_approval"
+  | "instruction"
+  | "site_record"
+  | "photograph"
+  | "programme_record";
 
 export { CORRESPONDENCE_ROLES, isCorrespondenceRole } from "@/lib/relationship-roles";
 
@@ -40,6 +44,20 @@ export const VARIATION_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
   { value: "correspondence", label: "Correspondence" },
   { value: "variation_submission", label: "Variation submission" },
   { value: "variation_approval", label: "Variation approval" },
+  { value: "supporting_document", label: "Supporting document" },
+];
+
+/** Evidence roles for a Hindrance & Constraint Register entry (target type `delay_event`). */
+export const HINDRANCE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
+  value: DocumentRelationshipRole;
+  label: string;
+}> = [
+  { value: "site_record", label: "Site record" },
+  { value: "notice", label: "Notice" },
+  { value: "correspondence", label: "Correspondence" },
+  { value: "instruction", label: "Instruction" },
+  { value: "photograph", label: "Photograph" },
+  { value: "programme_record", label: "Programme record" },
   { value: "supporting_document", label: "Supporting document" },
 ];
 
