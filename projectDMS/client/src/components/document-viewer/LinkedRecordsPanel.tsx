@@ -4,9 +4,10 @@ import { AlertCircle, Link2, Loader2, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 import LinkToRecordDialog from "@/components/document-viewer/LinkToRecordDialog";
-import { relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
+import { LINK_TO_RECORD_TARGETS, relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
 import {
   listDocumentEntityLinks,
+  listDocumentLinkTargetTypes,
   type DocumentRelationship,
 } from "@/services/document-relationships-api";
 
@@ -16,6 +17,26 @@ export default function LinkedRecordsPanel({ documentId }: { documentId: string 
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [linking, setLinking] = useState(false);
+  // Register types this caller could link to, from their own permissions in the
+  // current selection (no record is read to decide). `null` while unknown.
+  const [linkableTypes, setLinkableTypes] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLinkableTypes(null);
+    listDocumentLinkTargetTypes(documentId)
+      .then((types) => {
+        // Only registers this client can present; an unknown type never opens an empty dialog.
+        if (active) setLinkableTypes(types.filter((type) => LINK_TO_RECORD_TARGETS.some((item) => item.value === type)));
+      })
+      .catch(() => {
+        // Fail closed: without an answer the action is not offered.
+        if (active) setLinkableTypes([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [documentId]);
 
   useEffect(() => {
     let active = true;
@@ -88,19 +109,24 @@ export default function LinkedRecordsPanel({ documentId }: { documentId: string 
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-end">
-        <Button type="button" variant="outline" size="sm" onClick={() => setLinking(true)}>
-          <Plus className="mr-1 h-4 w-4" /> Link to Record
-        </Button>
-      </div>
+      {linkableTypes && linkableTypes.length > 0 && (
+        <div className="flex items-center justify-end">
+          <Button type="button" variant="outline" size="sm" onClick={() => setLinking(true)}>
+            <Plus className="mr-1 h-4 w-4" /> Link to Record
+          </Button>
+        </div>
+      )}
       {body}
-      <LinkToRecordDialog
-        documentId={documentId}
-        open={linking}
-        onOpenChange={setLinking}
-        linkedKeys={linkedKeys}
-        onLinked={() => setReload((value) => value + 1)}
-      />
+      {linkableTypes && linkableTypes.length > 0 && (
+        <LinkToRecordDialog
+          documentId={documentId}
+          open={linking}
+          onOpenChange={setLinking}
+          linkedKeys={linkedKeys}
+          targetTypes={linkableTypes}
+          onLinked={() => setReload((value) => value + 1)}
+        />
+      )}
     </div>
   );
 }

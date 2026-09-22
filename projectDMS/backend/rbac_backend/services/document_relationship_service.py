@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
@@ -29,39 +29,38 @@ from ..utils.error_handler import BaseDomainError
 
 _TransactionResult = TypeVar("_TransactionResult")
 
-#: Targets offered by "Link to Record" from the Document side (CL-2): only those
-#: whose adapter, deep link and register UI are verified end to end. The legacy
-#: ``bank_guarantee`` parent (no writable roles) and ``contract_document``
-#: (linked from the Contract Master side) are deliberately absent.
-LINK_TO_RECORD_TARGET_TYPES: tuple[str, ...] = (
-    "claim",
-    "ipc_bill",
-    "insurance",
-    "bank_guarantee_event",
-    "key_date_achievement",
-    "eot_submission",
-    "eot_determination",
-    "variation",
-    "delay_event",
+logger = logging.getLogger(__name__)
+
+#: Targets offered by "Link to Record" from the Document side: the registered
+#: adapters that set ``link_to_record`` (one list, owned by the registry; CL-3B
+#: retired the hand-kept copy that used to sit here).
+LINK_TO_RECORD_TARGET_TYPES: tuple[str, ...] = tuple(
+    adapter.target_type for adapter in EntityAdapterRegistry().adapters() if adapter.link_to_record
 )
+
 
 def _label_matches(
     needle: str,
     context: EntityContext,
-    row: dict[str, Any],
     label_fields: tuple[str, ...],
 ) -> bool:
     """Does this candidate match the search text?
 
-    The rendered label first, then the row fields the database prefilter used -
-    a Hindrance labelled by its reference is still findable by its title.
+    The rendered label first, then the label fields of the LOADED entity - a
+    Hindrance labelled by its reference is still findable by its title. The
+    loaded entity, not the raw row: an adapter may withhold a field (a
+    chronology title lifted from a Document that lost publication authority),
+    and a search must not become an oracle for withheld text.
     """
     if needle in context.label.lower():
         return True
-    return any(needle in str(row.get(field) or "").lower() for field in label_fields)
+    return any(needle in str(context.entity.get(field) or "").lower() for field in label_fields)
 
 
-#: Rows read per Link-to-Record listing before label filtering.
+#: Rows loaded per Link-to-Record listing. With a search the rows are already
+#: narrowed in the database (``EntityAdapter.link_target_search``), so the budget
+#: bounds work per request without hiding older matches behind newer
+#: non-matching rows.
 LINK_TARGET_SCAN_LIMIT = 200
 
 
@@ -830,14 +829,24 @@ class DocumentRelationshipService:
                 organization_id=organization_id,
                 project_id=project_id,
             )
+            canonical_document_id = str(document.get("_id") or document_id)
             for legacy_target_id in legacy_target_ids:
-                if (adapter.target_type, legacy_target_id) in canonical_targets:
-                    continue
                 try:
                     context = await self._target(
                         actor, adapter.target_type, legacy_target_id, manage=False
                     )
                 except (DocumentRelationshipError, HTTPException):
+                    continue
+                # The same rule as the canonical rows above: only a target in the
+                # Document's own scope. An adapter may return unscoped candidates
+                # (chronology events are scoped by their parent).
+                if context.organization_id != organization_id or context.project_id != project_id:
+                    continue
+                role = adapter.legacy_role_for(context.entity, canonical_document_id)
+                if (
+                    adapter.target_type,
+                    context.target_id,
+                ) in canonical_targets and adapter.legacy_superseded_by_link(role):
                     continue
                 results.append(
                     DocumentRelationshipView(
@@ -846,8 +855,8 @@ class DocumentRelationshipService:
                         project_id=project_id,
                         target_type=adapter.target_type,
                         target_id=legacy_target_id,
-                        document_id=str(document.get("_id") or document_id),
-                        relationship_role=adapter.legacy_relationship_role,
+                        document_id=canonical_document_id,
+                        relationship_role=role,
                         source="legacy_read_through",
                         document=document,
                         target_label=context.label,
@@ -881,37 +890,37 @@ class DocumentRelationshipService:
         Document's project.
         """
         normalized_type = str(target_type or "").strip().lower()
-        if normalized_type not in LINK_TO_RECORD_TARGET_TYPES:
-            raise DocumentRelationshipError("Unsupported relationship target", 404)
-        adapter = self.registry.get(normalized_type)
-        document = await resolve_canonical_document(self.db, document_id)
-        if not document:
-            raise DocumentRelationshipError("Document not found", 404)
-        await self.policy.authorize_document(
-            actor, Permissions.DOCUMENT_VIEW, document, resource_type="document"
-        )
-        if not is_consumable(document):
-            raise DocumentRelationshipError("Document is not currently consumable", 409)
-        organization_id = str(document.get("organization_id") or document.get("organizationId") or "")
-        project_id = str(document.get("project_id") or document.get("projectId") or "")
+        adapter = self._link_to_record_adapter(normalized_type)
+        _, organization_id, project_id = await self._link_to_record_document(actor, document_id)
         if not organization_id or not project_id:
             return []
         if selected_project_id is not None and selected_project_id != project_id:
             return []
 
+        # One decision per permission, taken on the Document's scope: sound
+        # because `authorize()` decides only from permission/org/project. A caller
+        # holding none of the type's manage permissions there can link nothing of
+        # it, so no record is read at all.
+        decisions = await self._manage_decisions(actor, adapter, organization_id, project_id)
+        if not any(decisions.values()):
+            return []
+
         needle = str(query or "").strip().lower()
         bounded = max(1, min(int(limit or 25), 50))
-        decisions: dict[str, bool] = {}
         scope_query: dict[str, Any] = {
             **adapter.link_target_query(),
-            "organization_id": organization_id,
-            "project_id": project_id,
+            **await adapter.link_target_scope(
+                self.db, organization_id=organization_id, project_id=project_id
+            ),
         }
-        if needle and adapter.target_label_fields:
-            # Narrow in the database so a large register is searchable past the
-            # scan limit; the label check below stays the authority.
-            pattern = {"$regex": re.escape(needle), "$options": "i"}
-            scope_query["$or"] = [{field: pattern} for field in adapter.target_label_fields]
+        predicate = await adapter.link_target_search(
+            self.db, needle, organization_id=organization_id, project_id=project_id
+        )
+        if predicate:
+            # Narrowed in the database, before the scan budget applies, so an old
+            # matching record is found behind any number of newer non-matching
+            # ones. The label check below stays the authority.
+            scope_query = {"$and": [scope_query, predicate]}
         cursor = (
             self.db[adapter.target_collection]
             .find(scope_query)
@@ -925,21 +934,11 @@ class DocumentRelationshipService:
                 continue
             if context.organization_id != organization_id or context.project_id != project_id:
                 continue
-            if needle and not _label_matches(needle, context, row, adapter.target_label_fields):
+            if not adapter.offers_link(context):
                 continue
-            permission = context.manage_permission
-            if permission not in decisions:
-                try:
-                    await self.policy.authorize_document(
-                        actor,
-                        permission,
-                        {"organization_id": organization_id, "project_id": project_id},
-                        resource_type=context.target_type,
-                    )
-                    decisions[permission] = True
-                except (DocumentRelationshipError, HTTPException):
-                    decisions[permission] = False
-            if not decisions[permission]:
+            if needle and not _label_matches(needle, context, adapter.target_label_fields):
+                continue
+            if not decisions.get(context.manage_permission):
                 continue
             results.append(
                 {
@@ -956,6 +955,189 @@ class DocumentRelationshipService:
             if len(results) >= bounded:
                 break
         return sorted(results, key=lambda row: (row["label"].lower(), row["target_id"]))
+
+    def _link_to_record_adapter(self, target_type: str) -> EntityAdapter:
+        try:
+            adapter = self.registry.get(target_type)
+        except KeyError as exc:
+            raise DocumentRelationshipError("Unsupported relationship target", 404) from exc
+        if not adapter.link_to_record:
+            raise DocumentRelationshipError("Unsupported relationship target", 404)
+        return adapter
+
+    async def _link_to_record_document(
+        self, actor: Any, document_id: str
+    ) -> tuple[dict[str, Any], str, str]:
+        document = await resolve_canonical_document(self.db, document_id)
+        if not document:
+            raise DocumentRelationshipError("Document not found", 404)
+        await self.policy.authorize_document(
+            actor, Permissions.DOCUMENT_VIEW, document, resource_type="document"
+        )
+        if not is_consumable(document):
+            raise DocumentRelationshipError("Document is not currently consumable", 409)
+        organization_id = str(document.get("organization_id") or document.get("organizationId") or "")
+        project_id = str(document.get("project_id") or document.get("projectId") or "")
+        return document, organization_id, project_id
+
+    async def _manage_decisions(
+        self,
+        actor: Any,
+        adapter: EntityAdapter,
+        organization_id: str,
+        project_id: str,
+    ) -> dict[str, bool]:
+        """One PolicyService decision per manage permission of ``adapter``, on this scope."""
+        decisions: dict[str, bool] = {}
+        for permission in adapter.link_manage_permissions:
+            if permission in decisions:
+                continue
+            try:
+                await self.policy.authorize_document(
+                    actor,
+                    permission,
+                    {"organization_id": organization_id, "project_id": project_id},
+                    resource_type=adapter.target_type,
+                )
+                decisions[permission] = True
+            except (DocumentRelationshipError, HTTPException):
+                decisions[permission] = False
+        return decisions
+
+    async def link_target_types_for_document(
+        self,
+        actor: Any,
+        document_id: str,
+        *,
+        selected_project_id: Callable[[], Awaitable[Optional[str]]],
+    ) -> list[str]:
+        """Link-to-Record register types this caller could link this Document to.
+
+        Answered from the caller's own permissions on the Document's scope - one
+        policy decision per permission, no register row is read - so it reveals
+        nothing about which records exist. A selection-bound type is included only
+        when the navbar selection covers the Document's project (its link would be
+        refused otherwise). ``selected_project_id`` is awaited at most once, and
+        only when a selection-bound type is otherwise available.
+        """
+        _, organization_id, project_id = await self._link_to_record_document(actor, document_id)
+        if not organization_id or not project_id:
+            return []
+        selection: dict[str, Optional[str]] = {}
+        available: list[str] = []
+        for adapter in self.registry.adapters():
+            if not adapter.link_to_record:
+                continue
+            decisions = await self._manage_decisions(actor, adapter, organization_id, project_id)
+            if not any(decisions.values()):
+                continue
+            if adapter.active_scope_enforced:
+                if "project" not in selection:
+                    selection["project"] = await selected_project_id()
+                if selection["project"] != project_id:
+                    continue
+            available.append(adapter.target_type)
+        return available
+
+    async def retire_target_links(
+        self,
+        actor: Any,
+        target_type: str,
+        *,
+        organization_id: str,
+        project_id: str,
+        target_ids: Callable[[Any], Awaitable[list[str]]],
+        reason: str,
+        before: Optional[Callable[[Any], Awaitable[None]]] = None,
+    ) -> int:
+        """Soft-remove every active link of targets that are going away, atomically.
+
+        For a register act that removes targets without going through
+        ``delete_target`` one at a time - deleting a chronology retires its
+        events. ``before`` performs that act inside the same transaction and
+        ``target_ids`` is read inside it too, so the act and the retirement
+        commit or fail together. The caller has already authorized the register
+        act. Each removal is audited exactly once as
+        ``document_relationship.unlinked``; Documents are never touched.
+        """
+        adapter = self.registry.get(target_type)
+        now = datetime.utcnow()
+        actor_id = getattr(actor, "id", None)
+
+        async def persist(session: Any) -> int:
+            if before is not None:
+                await before(session)
+            ids = [str(item) for item in await target_ids(session) if str(item or "")]
+            if not ids:
+                return 0
+            links = await self.db.entity_document_links.find(
+                {
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "target_type": adapter.target_type,
+                    "target_id": {"$in": ids},
+                    "removed_at": None,
+                },
+                session=session,
+            ).to_list(length=None)
+            for stored in links:
+                await self._retire_stored_link(
+                    stored, actor_id=actor_id, now=now, reason=reason, session=session
+                )
+            return len(links)
+
+        return await self._run_transaction(persist)
+
+    async def _retire_stored_link(
+        self,
+        stored: dict[str, Any],
+        *,
+        actor_id: Optional[str],
+        now: datetime,
+        reason: str,
+        session: Any,
+    ) -> None:
+        """Soft-remove one active link row and audit it (shared by the target-deletion paths)."""
+        updated = {
+            **stored,
+            "removed_at": now,
+            "removed_by": actor_id,
+            "removal_reason": reason,
+            "_revision": int(stored.get("_revision") or 1) + 1,
+        }
+        result = await self.db.entity_document_links.update_one(
+            {
+                "_id": stored.get("_id"),
+                "removed_at": None,
+                "_revision": int(stored.get("_revision") or 1),
+            },
+            {
+                "$set": {
+                    "removed_at": now,
+                    "removed_by": actor_id,
+                    "removal_reason": reason,
+                },
+                "$inc": {"_revision": 1},
+            },
+            session=session,
+        )
+        if not getattr(result, "matched_count", 0):
+            raise DocumentRelationshipError(
+                "Document relationship changed during target deletion", 409
+            )
+        await self.audit.emit(
+            action="document_relationship.unlinked",
+            actor_id=actor_id,
+            resource_type="entity_document_link",
+            resource_id=str(stored.get("_id") or ""),
+            organization_id=str(stored.get("organization_id") or ""),
+            project_id=str(stored.get("project_id") or ""),
+            before=stored,
+            after=updated,
+            metadata=self._audit_identity(stored),
+            reason=reason,
+            session=session,
+        )
 
     async def list_for_target(
         self,
@@ -981,11 +1163,14 @@ class DocumentRelationshipService:
             if document is None:
                 continue
             results.append(self._view(stored, context, document))
-        canonical_document_ids = {str(link.document_id) for link in results}
+        linked_document_ids = {str(link.document_id) for link in results}
+        presented: set[str] = set()
+        withheld = 0
         adapter = self.registry.get(context.target_type)
-        for legacy_id in context.entity.get("linked_document_ids") or []:
-            candidate = str(legacy_id or "")
-            if not candidate or candidate in canonical_document_ids:
+        for candidate in adapter.legacy_document_ids(context.entity):
+            role = adapter.legacy_role_for(context.entity, candidate)
+            superseded = adapter.legacy_superseded_by_link(role)
+            if candidate in presented or (superseded and candidate in linked_document_ids):
                 continue
             document = await self._document(
                 actor,
@@ -994,9 +1179,10 @@ class DocumentRelationshipService:
                 fail_closed=False,
             )
             if document is None:
+                withheld += 1
                 continue
             canonical_id = str(document.get("_id") or candidate)
-            if canonical_id in canonical_document_ids:
+            if canonical_id in presented or (superseded and canonical_id in linked_document_ids):
                 continue
             results.append(
                 DocumentRelationshipView(
@@ -1006,14 +1192,23 @@ class DocumentRelationshipService:
                     target_type=context.target_type,
                     target_id=context.target_id,
                     document_id=canonical_id,
-                    relationship_role=adapter.legacy_relationship_role,
+                    relationship_role=role,
                     source="legacy_read_through",
                     document=document,
                     target_label=context.label,
                     target_route=context.route,
                 )
             )
-            canonical_document_ids.add(canonical_id)
+            presented.update({candidate, canonical_id})
+        if withheld:
+            # Fail visible: a missing, foreign-scope, non-consumable or unviewable
+            # legacy reference is never served, but it is counted.
+            logger.info(
+                "legacy document references withheld: target=%s:%s withheld=%d",
+                context.target_type,
+                context.target_id,
+                withheld,
+            )
         return results
 
     async def delete_target(
@@ -1053,45 +1248,8 @@ class DocumentRelationshipService:
                 session=session,
             ).to_list(length=None)
             for stored in links:
-                updated = {
-                    **stored,
-                    "removed_at": now,
-                    "removed_by": actor_id,
-                    "removal_reason": reason,
-                    "_revision": int(stored.get("_revision") or 1) + 1,
-                }
-                result = await self.db.entity_document_links.update_one(
-                    {
-                        "_id": stored.get("_id"),
-                        "removed_at": None,
-                        "_revision": int(stored.get("_revision") or 1),
-                    },
-                    {
-                        "$set": {
-                            "removed_at": now,
-                            "removed_by": actor_id,
-                            "removal_reason": reason,
-                        },
-                        "$inc": {"_revision": 1},
-                    },
-                    session=session,
-                )
-                if not getattr(result, "matched_count", 0):
-                    raise DocumentRelationshipError(
-                        "Document relationship changed during target deletion", 409
-                    )
-                await self.audit.emit(
-                    action="document_relationship.unlinked",
-                    actor_id=actor_id,
-                    resource_type="entity_document_link",
-                    resource_id=str(stored.get("_id") or ""),
-                    organization_id=context.organization_id,
-                    project_id=context.project_id,
-                    before=stored,
-                    after=updated,
-                    metadata=self._audit_identity(stored),
-                    reason=reason,
-                    session=session,
+                await self._retire_stored_link(
+                    stored, actor_id=actor_id, now=now, reason=reason, session=session
                 )
             await self.audit.emit(
                 action=f"{context.target_type}.deleted",

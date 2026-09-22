@@ -343,3 +343,43 @@ What the certification run must now also cover:
 
 Gate D1a is unchanged: **no same-host staging until R-A9I Falkor normalization is complete and the
 owner grants the maintenance window.** Nothing in CL-3A starts, schedules or approves it.
+
+## 15. CL-3B update: Programme Milestone and Chronology (2026-09-23)
+
+CL-3B (`feat/cl3b-programme-chronology-links`, stacked on CL-3A @ `11473f7`) adds two canonical
+relationship targets and one Link-to-Record query. **The candidate SHA is the CL-3B PR HEAD at the
+moment its CI is green**; restate it in the window record, never this document's text. §14 still
+applies in full.
+
+What the certification run must now also cover:
+
+1. **Programme relationship proof.** As `E2E_HIN_PA_AB` selected A: link a run-owned incoming
+   letter to a run-owned Programme Milestone in A (`programme_milestone`, roles
+   `progress_evidence` / `programme_record` / `correspondence` / `supporting_document`) -> the
+   milestone page `/programme-milestones/{id}` lists it -> relink is idempotent (one
+   `document_relationship.linked` audit) -> unlink audits once. Selected B: the milestone page and
+   `/api/entities/programme_milestone/{A}/document-links` answer 403 `context_forbidden`; no
+   selection: 400 `selection_required`. The G31 raw `linked_document_ids` PATCH is unchanged
+   (debt); record whether any staging caller uses it.
+2. **Chronology relationship proof.** Same letter to an event of a run-owned chronology in A
+   (`chronology_event`, roles `correspondence` / `supporting_document`) through
+   `/chronology/{chronologyId}?event_id={eventId}`. Verify: an extracted event shows its source
+   Document read-only as **Source document** and it cannot be linked under that role (422);
+   `PATCH .../events/{id}` with a changed `related_document_ids` answers 409; an archived
+   chronology's events are refused (409) and not offered; deleting the run-owned chronology retires
+   its events' links (one `document_relationship.unlinked` per link, reason "Chronology deleted")
+   while the letter survives. The chronology routes now follow the selection; exports stay
+   selection-blind (plain browser downloads).
+3. **Cross-register reverse lookup.** One letter linked to Variation, Hindrance, Programme
+   Milestone and Chronology event in A -> Linked Records shows all four with working deep links ->
+   under B none -> unlink the Programme link only -> the other three and the letter remain.
+4. **Link-to-Record permission and >200 search.** A project-tier viewer without any manage
+   permission sees no "Link to Record" button (`GET /api/documents/{id}/link-target-types` returns
+   `[]`). If the staging project holds more than 200 Bank Guarantee events or Key Date
+   achievements, a search for an old record's BG number / Key Date reference finds it; otherwise
+   record "not exercised on staging - real-Mongo suite evidence only".
+5. The mocked browser workflow `client/e2e/cl3b-programme-chronology.spec.ts` is development
+   evidence only; the staging specs must repeat its steps against the real stack.
+
+Gate D1a is unchanged: **no same-host staging until R-A9I Falkor normalization is complete and the
+owner grants the maintenance window.** Nothing in CL-3B starts, schedules or approves it.

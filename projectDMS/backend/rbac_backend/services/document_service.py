@@ -2853,6 +2853,8 @@ class DocumentService:
                     and project_id
                 ):
                     for adapter in EntityAdapterRegistry().adapters():
+                        if not adapter.legacy_blocks_document_deletion:
+                            continue
                         count += len(
                             await adapter.legacy_targets_for_document(
                                 db,

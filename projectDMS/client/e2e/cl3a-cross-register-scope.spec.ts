@@ -249,6 +249,9 @@ test("one letter across Variation and Hindrance, bounded by the navbar selection
 
   // Switch the navbar to A2: A1 records leave both registers' list state.
   await page.goto("/variations");
+  // Let the A1 page settle first: a list request still in flight under A1 would
+  // otherwise land after the snapshot and read as a post-switch request.
+  await expect(page.getByRole("cell", { name: "VO-A1-001", exact: true })).toBeVisible();
   const switchedAt = store.requests.length;
   await selectProject(page, A2.name);
   await expect(page.getByRole("cell", { name: "VO-A2-001", exact: true })).toBeVisible();

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, FrozenSet, Optional
 from urllib.parse import quote
 
@@ -121,6 +123,49 @@ VARIATION_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
 )
 
 
+#: Programme Milestone evidence (CL-3B), derived from the ProgrammeMilestone
+#: model (``planned_date`` / ``forecast_date`` / ``actual_date`` / ``status``):
+#:
+#: * ``programme_record`` - the programme submission or update behind the
+#:   planned/forecast dates (the role a Hindrance already uses for it);
+#: * ``progress_evidence`` - what backs ``actual_date`` or a progress ``status``
+#:   (achieved / in progress / delayed): site reports, inspection records;
+#: * ``correspondence`` - any letter about the milestone;
+#: * ``supporting_document`` - the generic fallback, and the meaning of the
+#:   legacy ``linked_document_ids`` (G31's "supporting documents").
+#:
+#: The model has no approval or instruction concept, so neither role exists.
+PROGRAMME_MILESTONE_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
+    {
+        "programme_record",
+        "progress_evidence",
+        "correspondence",
+        "supporting_document",
+    }
+)
+
+#: Chronology event evidence a user may LINK (CL-3B). ``related_document_ids``
+#: were generic "related documents", so the linkable roles are the generic pair.
+#:
+#: ``source_document`` is deliberately NOT linkable. An event's
+#: ``source_document_id`` is its extraction provenance: exactly one Document,
+#: the one its title/description/spans were lifted from and whose publication
+#: authority governs whether that text may be served (``publication_policy``).
+#: Expressing it a second time as a link row would be a second representation
+#: of the same fact to keep in sync - the Contract Master precedent above - and
+#: would let one source become many. It is surfaced read-only, as the
+#: ``source_document`` role of the legacy read-through, and never written.
+CHRONOLOGY_EVENT_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
+    {
+        "correspondence",
+        "supporting_document",
+    }
+)
+
+#: Read-only role under which a chronology event's ``source_document_id`` is shown.
+CHRONOLOGY_SOURCE_DOCUMENT_ROLE = "source_document"
+
+
 #: Roles that assert the linked Document *is correspondence*.
 #:
 #: Other roles (supporting_document, notice, determination, ...) describe the
@@ -145,6 +190,37 @@ def is_correspondence_document(document: Optional[Dict[str, Any]]) -> bool:
     if raw is None:
         raw = document.get("upload_type")
     return str(raw or "").strip().lower() in CORRESPONDENCE_UPLOAD_TYPES
+
+
+#: A trailing count ("Extension 2", "2") is label text no row field holds.
+_TRAILING_COUNT = re.compile(r"(^|\s)\d+$")
+
+
+def _label_tail_search(needle: str) -> bool:
+    """Does ``needle`` reach past the parent part of a composed label?
+
+    Composed labels read "<parent> · <event> <n>"; a search spanning the
+    separator or ending in the count is matched only by the rendered label, so
+    such a search must not be narrowed by parent fields (it would drop matches).
+    """
+    return "·" in needle or bool(_TRAILING_COUNT.search(needle))
+
+
+async def _matching_parent_ids(collection: Any, query: Dict[str, Any]) -> list[Any]:
+    """Ids of the parent rows matching ``query``, in the forms a child may store.
+
+    Children keep their parent's id as a string; the parent's own ``_id`` may be
+    an ObjectId. Both forms are returned so ``$in`` matches either spelling.
+    """
+    ids: list[Any] = []
+    async for row in collection.find(query, {"_id": 1}):
+        raw = row.get("_id")
+        if raw is None:
+            continue
+        ids.append(raw)
+        if not isinstance(raw, str):
+            ids.append(str(raw))
+    return ids
 
 
 @dataclass(frozen=True)
@@ -181,9 +257,83 @@ class EntityAdapter:
     #: the selection on their own routes opt in (CL-3A: Variation, Hindrance);
     #: every other target keeps its selection-blind behaviour.
     active_scope_enforced: bool = False
+    #: Offered by "Link to Record" from the Document side. Only targets whose
+    #: adapter, deep link and register UI are verified end to end opt in; the
+    #: legacy ``bank_guarantee`` parent (no writable roles) and
+    #: ``contract_document`` (linked from the Contract Master side) do not.
+    link_to_record: bool = False
+    #: Every permission that can be this type's ``manage_permission``. Holding
+    #: none of them in a scope means no record of the type can take a link
+    #: there - answerable without reading a single record.
+    link_manage_permissions: tuple[str, ...] = ()
+    #: Fixed text every label of this type ends with (" · Achievement"): a
+    #: search for part of it matches every row, so no row prefilter applies.
+    target_label_suffix: str = ""
+    #: Does a legacy reference to a Document (read through by
+    #: ``legacy_targets_for_document``) block that Document's deletion? True for
+    #: the registers that already blocked it; the CL-3B registers never did, and a
+    #: chronology event's source is provenance the publication policy already
+    #: handles for a deleted Document, so they keep deletion as it was.
+    legacy_blocks_document_deletion: bool = True
     legacy_relationship_role = "manual_review"
     supports_freeze = True
     freeze_requires_lifecycle_orchestration = False
+
+    async def link_target_search(
+        self,
+        db: Any,
+        needle: str,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Database predicate narrowing Link-to-Record candidates to ``needle``.
+
+        ``None`` means no narrowing: every in-scope row is a candidate. The label
+        check after ``load`` stays the authority; this must keep every matching
+        row and should drop the rest, so a large register is searchable past
+        the scan budget instead of only within its first rows.
+        """
+        if not needle or not self.target_label_fields:
+            return None
+        if needle in self.target_label_suffix.lower():
+            return None
+        pattern = {"$regex": re.escape(needle), "$options": "i"}
+        return {"$or": [{field: pattern} for field in self.target_label_fields]}
+
+    async def link_target_scope(
+        self,
+        db: Any,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Dict[str, Any]:
+        """Row filter for the Link-to-Record candidates of one Document scope."""
+        return {"organization_id": organization_id, "project_id": project_id}
+
+    def legacy_document_ids(self, entity: Dict[str, Any]) -> list[str]:
+        """Document ids a target row carries outside ``entity_document_links``."""
+        return [str(item) for item in (entity.get("linked_document_ids") or []) if str(item or "")]
+
+    def legacy_role_for(self, entity: Dict[str, Any], document_id: str) -> str:
+        """The role a legacy (read-through) reference is presented under."""
+        return self.legacy_relationship_role
+
+    def legacy_superseded_by_link(self, role: str) -> bool:
+        """Does a canonical link of the same Document hide this legacy reference?
+
+        True for plain legacy arrays: the canonical row is the same fact, re-stated.
+        A provenance field (a chronology event's source) is a different fact and
+        stays visible beside any link of the same Document.
+        """
+        return True
+
+    def offers_link(self, context: EntityContext) -> bool:
+        """May this loaded target be offered by Link to Record?
+
+        For read-only states a row query cannot express (a parent's status).
+        """
+        return True
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         raise NotImplementedError
@@ -254,6 +404,8 @@ class EntityAdapter:
 
 class ClaimEntityAdapter(EntityAdapter):
     target_type = "claim"
+    link_to_record = True
+    link_manage_permissions = (Permissions.CLAIM_EDIT,)
     target_collection = "claims"
     target_label_fields = ('claim_ref', 'title')
     legacy_relationship_role = "supporting_document"
@@ -375,6 +527,8 @@ class IPCBillEntityAdapter(EntityAdapter):
     """
 
     target_type = "ipc_bill"
+    link_to_record = True
+    link_manage_permissions = (Permissions.IPC_EDIT,)
     target_collection = "ipc_bills"
     target_label_fields = ('ipc_number', 'ipc_period')
     supports_freeze = False
@@ -472,6 +626,8 @@ class InsuranceEntityAdapter(EntityAdapter):
     """Parent evidence owner for the current event-less Insurance model."""
 
     target_type = "insurance"
+    link_to_record = True
+    link_manage_permissions = (Permissions.INSURANCE_EDIT,)
     target_collection = "insurance_policies"
     target_label_fields = ('policy_number', 'insurance_type')
     supports_freeze = False
@@ -581,8 +737,37 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
     """Event-level evidence owner for the Bank Guarantee lifecycle."""
 
     target_type = "bank_guarantee_event"
+    link_to_record = True
+    link_manage_permissions = (Permissions.BG_EDIT, Permissions.BG_EXTEND, Permissions.BG_RELEASE)
     target_collection = "bank_guarantee_events"
     supports_freeze = False
+
+    async def link_target_search(
+        self,
+        db: Any,
+        needle: str,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        # The label is "<parent BG number or type or id> · <Event type> <n>":
+        # resolve the matching parents in scope first, so an old event of a
+        # matching guarantee is found however many events precede it. A search
+        # into the composed tail is not narrowed (the label check decides).
+        if not needle or _label_tail_search(needle):
+            return None
+        pattern = {"$regex": re.escape(needle), "$options": "i"}
+        parents = await _matching_parent_ids(
+            db.bank_guarantees,
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "$or": [{"bg_number": pattern}, {"bg_type": pattern}, {"_id": pattern}],
+            },
+        )
+        # Event types are stored snake_case and rendered title-cased.
+        type_pattern = {"$regex": re.escape(needle.replace(" ", "_")), "$options": "i"}
+        return {"$or": [{"bank_guarantee_id": {"$in": parents}}, {"event_type": type_pattern}]}
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         event = None
@@ -782,9 +967,35 @@ class KeyDateAchievementEntityAdapter(EntityAdapter):
     """Stable event-level evidence owner for a milestone achievement."""
 
     target_type = "key_date_achievement"
+    link_to_record = True
+    link_manage_permissions = (Permissions.KEYDATE_ACHIEVEMENT,)
+    target_label_suffix = " · Achievement"
     target_collection = "key_date_achievements"
     supports_freeze = False
     legacy_relationship_role = "manual_review"
+
+    async def link_target_search(
+        self,
+        db: Any,
+        needle: str,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        # The label is the parent Key Date's reference or title: resolve the
+        # matching Key Dates in scope, then take their achievements.
+        if not needle or needle in self.target_label_suffix.lower() or _label_tail_search(needle):
+            return None
+        pattern = {"$regex": re.escape(needle), "$options": "i"}
+        parents = await _matching_parent_ids(
+            db.key_date_milestones,
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "$or": [{"milestone_ref": pattern}, {"title": pattern}, {"_id": pattern}],
+            },
+        )
+        return {"milestone_id": {"$in": parents}}
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         achievement = await db.key_date_achievements.find_one({"_id": str(target_id)})
@@ -899,6 +1110,9 @@ class EOTSubmissionEntityAdapter(EntityAdapter):
     """Canonical event owner for one project-level Contractor EOT submission."""
 
     target_type = "eot_submission"
+    link_to_record = True
+    link_manage_permissions = (Permissions.KEYDATE_EOT_SUBMIT,)
+    target_label_suffix = " · Contractor Submission"
     target_collection = "key_date_eot_submissions"
     target_label_fields = ('revision_label',)
     legacy_relationship_role = "manual_review"
@@ -1058,6 +1272,9 @@ class EOTDeterminationEntityAdapter(EntityAdapter):
     """Canonical event owner for one Engineer/Employer EOT determination."""
 
     target_type = "eot_determination"
+    link_to_record = True
+    link_manage_permissions = (Permissions.KEYDATE_EOT_DETERMINE,)
+    target_label_suffix = " · Determination"
     target_collection = "key_date_eot_determinations"
     target_label_fields = ('determination_reference',)
     legacy_relationship_role = "manual_review"
@@ -1267,6 +1484,8 @@ class VariationEntityAdapter(EntityAdapter):
     """
 
     target_type = "variation"
+    link_to_record = True
+    link_manage_permissions = (Permissions.VARIATION_EDIT,)
     target_collection = "variations"
     target_label_fields = ('variation_number',)
     active_scope_enforced = True
@@ -1499,6 +1718,8 @@ class DelayEventEntityAdapter(EntityAdapter):
     """
 
     target_type = "delay_event"
+    link_to_record = True
+    link_manage_permissions = (Permissions.HINDRANCE_EDIT,)
     target_collection = "delay_events"
     target_label_fields = ("hindrance_ref", "delay_ref", "title")
     active_scope_enforced = True
@@ -1610,6 +1831,347 @@ class DelayEventEntityAdapter(EntityAdapter):
         return False
 
 
+class ProgrammeMilestoneEntityAdapter(EntityAdapter):
+    """Programme Milestones (``programme_milestones``) as relationship targets (CL-3B).
+
+    Scope is the row's own ``organization_id`` / ``project_id`` - the register
+    requires both on create. There is no delete, archive or read-only state in
+    the register: a ``superseded`` milestone is a programme status, not an
+    archive, and keeps taking evidence. Legacy ``linked_document_ids`` are the
+    register's G31-certified "supporting documents" and read through as such.
+    """
+
+    target_type = "programme_milestone"
+    target_collection = "programme_milestones"
+    target_label_fields = ("milestone_ref", "title")
+    link_to_record = True
+    link_manage_permissions = (Permissions.EVIDENCE_GRAPH_MANAGE,)
+    active_scope_enforced = True
+    legacy_blocks_document_deletion = False
+    supports_freeze = False
+    legacy_relationship_role = "supporting_document"
+
+    async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
+        row = None
+        for candidate in document_id_candidates(target_id):
+            row = await db.programme_milestones.find_one({"_id": candidate})
+            if row:
+                break
+        return self.context_from_entity(row) if row else None
+
+    def context_from_entity(self, row: Dict[str, Any]) -> EntityContext:
+        item_id = str(row.get("_id") or "")
+        reference = str(row.get("milestone_ref") or "").strip()
+        title = str(row.get("title") or "").strip()
+        label = " · ".join(part for part in (reference, title) if part) or item_id
+        return EntityContext(
+            target_type=self.target_type,
+            target_id=item_id,
+            entity=row,
+            organization_id=str(row.get("organization_id") or ""),
+            project_id=str(row.get("project_id") or ""),
+            view_permission=Permissions.EVIDENCE_GRAPH_VIEW,
+            manage_permission=Permissions.EVIDENCE_GRAPH_MANAGE,
+            delete_permission=Permissions.EVIDENCE_GRAPH_MANAGE,
+            allowed_roles=PROGRAMME_MILESTONE_DOCUMENT_ROLES,
+            label=label,
+            route=f"/programme-milestones/{quote(item_id, safe='')}",
+            frozen=False,
+        )
+
+    async def legacy_targets_for_document(
+        self,
+        db: Any,
+        *,
+        document_id: str,
+        organization_id: str,
+        project_id: str,
+        session: Any = None,
+    ) -> list[str]:
+        collection = getattr(db, "programme_milestones", None)
+        if collection is None:
+            return []
+        cursor = collection.find(
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "linked_document_ids": document_id,
+            },
+            session=session,
+        )
+        return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+    async def freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        actor_id: Optional[str],
+        frozen_at: Any,
+        reason: str,
+        session: Any = None,
+    ) -> None:
+        raise RuntimeError("Programme milestone evidence freeze is not supported")
+
+    async def guard_relationship_write(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # Fenced on the scope `load` read: a milestone moved to another project
+        # between load and commit refuses the write.
+        result = await db.programme_milestones.update_one(
+            {
+                "_id": context.entity.get("_id"),
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+            },
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        return bool(getattr(result, "matched_count", 0))
+
+    async def delete(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # The register has no delete. Refusing here makes `delete_target`
+        # answer 409 instead of removing a record the register cannot remove.
+        return False
+
+
+class ChronologyEventEntityAdapter(EntityAdapter):
+    """Chronology events (``matter_chronology_events``) as relationship targets (CL-3B).
+
+    The event, not the chronology, is the evidence owner: ``source_document_id``
+    and ``related_document_ids`` live on the event, and ``chronology_event`` is
+    already the event's name in ``publication_policy``.
+
+    Structural scope is the PARENT chronology's - the chronology routes authorize
+    the parent and anchor every event to it
+    (``ChronologyService._apply_chronology_authority_scope``). An event whose own
+    organisation/project contradicts its parent does not load (integrity), and
+    neither does an event of a deleted chronology. An archived chronology is
+    read-only: its events take and lose no evidence and are not offered.
+
+    Labels come from the publication-safe projection: a title lifted from a
+    source Document that is no longer consumable is never shown as a label.
+    """
+
+    target_type = "chronology_event"
+    target_collection = "matter_chronology_events"
+    # Only fields the publication-safe projection governs: `letter_no` may be
+    # lifted from the source Document's text and is not withheld, so it is not
+    # searchable here.
+    target_label_fields = ("title",)
+    link_to_record = True
+    link_manage_permissions = (Permissions.CHRONOLOGY_EDIT,)
+    active_scope_enforced = True
+    legacy_blocks_document_deletion = False
+    supports_freeze = False
+    legacy_relationship_role = "supporting_document"
+
+    async def _parent(self, db: Any, event: Dict[str, Any], *, session: Any = None) -> Optional[Dict[str, Any]]:
+        chronology_id = event.get("chronology_id")
+        if not chronology_id:
+            return None
+        return await db.matter_chronologies.find_one(
+            {"_id": chronology_id, "deleted_at": {"$exists": False}}, session=session
+        )
+
+    async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
+        from .publication_policy import safe_event_records
+
+        event = await db.matter_chronology_events.find_one({"_id": str(target_id)})
+        if not event:
+            return None
+        chronology = await self._parent(db, event)
+        if not chronology:
+            return None
+        for field in ("organization_id", "project_id"):
+            own = event.get(field)
+            if own not in (None, "") and str(own) != str(chronology.get(field) or ""):
+                return None
+        served = (
+            await safe_event_records(db, [event], ("description", "title"), span_fields=("source_spans",))
+        )[0]
+        return self.context_from_entity({**served, "_parent_chronology": chronology})
+
+    def context_from_entity(self, entity: Dict[str, Any]) -> EntityContext:
+        chronology = entity.get("_parent_chronology") or {}
+        event_id = str(entity.get("_id") or "")
+        chronology_id = str(entity.get("chronology_id") or chronology.get("_id") or "")
+        title = str(entity.get("title") or "").strip() or "Untitled event"
+        event_date = entity.get("event_date")
+        date_text = (
+            event_date.date().isoformat() if isinstance(event_date, datetime) else str(entity.get("date_text") or "")
+        )
+        label = " · ".join(part for part in (date_text, title) if part)
+        return EntityContext(
+            target_type=self.target_type,
+            target_id=event_id,
+            entity=entity,
+            organization_id=str(chronology.get("organization_id") or ""),
+            project_id=str(chronology.get("project_id") or ""),
+            view_permission=Permissions.CHRONOLOGY_VIEW,
+            manage_permission=Permissions.CHRONOLOGY_EDIT,
+            delete_permission=Permissions.CHRONOLOGY_ADMIN,
+            allowed_roles=CHRONOLOGY_EVENT_DOCUMENT_ROLES,
+            label=label,
+            route=(
+                f"/chronology/{quote(chronology_id, safe='')}"
+                f"?event_id={quote(event_id, safe='')}"
+            ),
+            frozen=False,
+            parent_type="matter_chronology",
+            parent_id=chronology_id,
+        )
+
+    def legacy_document_ids(self, entity: Dict[str, Any]) -> list[str]:
+        # The source first: when a Document is both the source and a related
+        # document (extraction writes it to both), it reads through once, as
+        # the source.
+        ordered = [entity.get("source_document_id"), *(entity.get("related_document_ids") or [])]
+        return list(dict.fromkeys(str(item) for item in ordered if str(item or "")))
+
+    def legacy_role_for(self, entity: Dict[str, Any], document_id: str) -> str:
+        source = str(entity.get("source_document_id") or "")
+        if source and source == str(document_id):
+            return CHRONOLOGY_SOURCE_DOCUMENT_ROLE
+        return self.legacy_relationship_role
+
+    def legacy_superseded_by_link(self, role: str) -> bool:
+        return role != CHRONOLOGY_SOURCE_DOCUMENT_ROLE
+
+    @staticmethod
+    def _read_only(context: EntityContext) -> bool:
+        return str((context.entity.get("_parent_chronology") or {}).get("status") or "") == "archived"
+
+    def offers_link(self, context: EntityContext) -> bool:
+        return not self._read_only(context)
+
+    async def link_target_scope(
+        self,
+        db: Any,
+        *,
+        organization_id: str,
+        project_id: str,
+    ) -> Dict[str, Any]:
+        # Scoped by the parent: an event row may predate the parent-scope anchor
+        # and carry no scope of its own. `load` re-derives and checks it.
+        cursor = db.matter_chronologies.find(
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "deleted_at": {"$exists": False},
+                "status": {"$ne": "archived"},
+            },
+            {"_id": 1},
+        )
+        return {"chronology_id": {"$in": [row.get("_id") async for row in cursor]}}
+
+    async def guard_relationship_remove(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        return not self._read_only(context)
+
+    async def legacy_targets_for_document(
+        self,
+        db: Any,
+        *,
+        document_id: str,
+        organization_id: str,
+        project_id: str,
+        session: Any = None,
+    ) -> list[str]:
+        # Scoped by the parent: events predating the parent-scope anchor may carry
+        # no scope of their own, so the candidates are the events of the
+        # Document's own (live) chronologies. `list_for_document` still loads each
+        # one and keeps it only when its structural scope is the Document's.
+        collection = getattr(db, "matter_chronology_events", None)
+        chronologies = getattr(db, "matter_chronologies", None)
+        if collection is None or chronologies is None:
+            return []
+        parents = [
+            row.get("_id")
+            async for row in chronologies.find(
+                {"organization_id": organization_id, "project_id": project_id, "deleted_at": {"$exists": False}},
+                session=session,
+            )
+        ]
+        if not parents:
+            return []
+        cursor = collection.find(
+            {
+                "chronology_id": {"$in": parents},
+                "$or": [{"source_document_id": document_id}, {"related_document_ids": document_id}],
+            },
+            session=session,
+        )
+        return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+    async def freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        actor_id: Optional[str],
+        frozen_at: Any,
+        reason: str,
+        session: Any = None,
+    ) -> None:
+        raise RuntimeError("Chronology event evidence freeze is not supported")
+
+    async def guard_relationship_write(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # The parent must still be live, in the loaded scope and not archived;
+        # the event must still belong to it.
+        parent = await db.matter_chronologies.update_one(
+            {
+                "_id": context.parent_id,
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+                "deleted_at": {"$exists": False},
+                "status": {"$ne": "archived"},
+            },
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        if not getattr(parent, "matched_count", 0):
+            return False
+        event = await db.matter_chronology_events.update_one(
+            {"_id": context.entity.get("_id"), "chronology_id": context.parent_id},
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        return bool(getattr(event, "matched_count", 0))
+
+    async def delete(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # Events have no delete of their own. Deleting the chronology retires
+        # its events' links (`DocumentRelationshipService.retire_target_links`).
+        return False
+
+
 class EntityAdapterRegistry:
     def __init__(self, adapters: list[EntityAdapter] | None = None) -> None:
         registered = adapters or [
@@ -1624,6 +2186,8 @@ class EntityAdapterRegistry:
             ContractDocumentEntityAdapter(),
             VariationEntityAdapter(),
             DelayEventEntityAdapter(),
+            ProgrammeMilestoneEntityAdapter(),
+            ChronologyEventEntityAdapter(),
         ]
         self._adapters = {adapter.target_type: adapter for adapter in registered}
 

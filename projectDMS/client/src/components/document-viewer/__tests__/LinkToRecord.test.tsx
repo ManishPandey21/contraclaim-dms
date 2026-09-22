@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel"
 
 const relationshipApi = vi.hoisted(() => ({
   listDocumentEntityLinks: vi.fn(), listDocumentLinkTargets: vi.fn(), batchLinkDocuments: vi.fn(),
+  listDocumentLinkTargetTypes: vi.fn(),
 }));
 const toastApi = vi.hoisted(() => ({ error: vi.fn(), success: vi.fn() }));
 vi.mock("@/services/document-relationships-api", async (importOriginal) => ({
@@ -48,12 +49,30 @@ const hindranceTargets = [
     frozen: false, parent_type: null, parent_id: null },
 ];
 
+/** Every type the server's `link_to_record` adapters offer (`/link-target-types` for an admin). */
+const ALL_TYPES = [
+  "claim", "ipc_bill", "insurance", "bank_guarantee_event", "key_date_achievement", "eot_submission",
+  "eot_determination", "variation", "delay_event", "programme_milestone", "chronology_event",
+];
+
+const programmeTargets = [
+  { target_type: "programme_milestone", target_id: "pm-1", label: "PM-110 · Pier P4 piling", route: "/programme-milestones/pm-1",
+    allowed_roles: ["correspondence", "programme_record", "progress_evidence", "supporting_document"],
+    frozen: false, parent_type: null, parent_id: null },
+];
+const chronologyTargets = [
+  { target_type: "chronology_event", target_id: "ev-1", label: "2026-02-10 · Engineer instruction",
+    route: "/chronology/chr-1?event_id=ev-1", allowed_roles: ["correspondence", "supporting_document"],
+    frozen: false, parent_type: "matter_chronology", parent_id: "chr-1" },
+];
+
 const renderPanel = () => render(<MemoryRouter><LinkedRecordsPanel documentId={DOC} /></MemoryRouter>);
 
 describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     relationshipApi.listDocumentEntityLinks.mockResolvedValue([]);
+    relationshipApi.listDocumentLinkTargetTypes.mockResolvedValue(ALL_TYPES);
     relationshipApi.listDocumentLinkTargets.mockImplementation(async (_doc: string, params: { target_type: string }) =>
       params.target_type === "claim" ? claimTargets : params.target_type === "variation" ? variationTargets : []);
     relationshipApi.batchLinkDocuments.mockResolvedValue([reverseLink("variation", "var-1", "VO-001", "/variations?variation_id=var-1")]);
@@ -67,6 +86,8 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
       reverseLink("eot_submission", "sub-1", "Rev A · Contractor Submission", "/key-dates?project_id=project-1&submission_id=sub-1"),
       reverseLink("eot_determination", "det-1", "DET-1 · Determination", "/key-dates?project_id=project-1&determination_id=det-1"),
       reverseLink("contract_document", "cd-1", "particular_conditions", `/contracts/viewer/${DOC}`, "supporting_document"),
+      reverseLink("programme_milestone", "pm-1", "PM-110 · Pier P4 piling", "/programme-milestones/pm-1", "progress_evidence"),
+      reverseLink("chronology_event", "ev-1", "2026-02-10 · Engineer instruction", "/chronology/chr-1?event_id=ev-1", "source_document"),
     ]);
     renderPanel();
     const rows = await screen.findAllByTestId("linked-record");
@@ -77,8 +98,12 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
       "/key-dates?project_id=project-1&submission_id=sub-1",
       "/key-dates?project_id=project-1&determination_id=det-1",
       `/contracts/viewer/${DOC}`,
+      "/programme-milestones/pm-1",
+      "/chronology/chr-1?event_id=ev-1",
     ]);
     expect(rows[0]).toHaveTextContent("Variation · Correspondence");
+    expect(rows[6]).toHaveTextContent("Programme milestone · Progress evidence");
+    expect(rows[7]).toHaveTextContent("Chronology event · Source document");
     expect(rows[1]).toHaveTextContent("Insurance · Policy");
   });
 
@@ -115,9 +140,78 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
     await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
     const options = within(await screen.findByRole("dialog")).getAllByRole("option").map((option) => (option as HTMLOptionElement).value);
     expect(options).toEqual([
-      "variation", "delay_event", "claim", "ipc_bill", "insurance", "bank_guarantee_event",
-      "key_date_achievement", "eot_submission", "eot_determination",
+      "variation", "delay_event", "programme_milestone", "chronology_event", "claim", "ipc_bill", "insurance",
+      "bank_guarantee_event", "key_date_achievement", "eot_submission", "eot_determination",
     ]);
+  });
+
+  it("offers only the register types the caller may link to", async () => {
+    relationshipApi.listDocumentLinkTargetTypes.mockResolvedValue(["claim", "chronology_event"]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
+    const options = within(await screen.findByRole("dialog")).getAllByRole("option").map((option) => (option as HTMLOptionElement).value);
+    expect(options).toEqual(["chronology_event", "claim"]);
+    // The first offered type is the one queried; nothing is asked for the others.
+    await waitFor(() => expect(relationshipApi.listDocumentLinkTargets).toHaveBeenCalledWith(DOC, { target_type: "chronology_event" }));
+    expect(relationshipApi.listDocumentLinkTargets).not.toHaveBeenCalledWith(DOC, expect.objectContaining({ target_type: "variation" }));
+  });
+
+  it("hides Link to Record from a viewer who can link nothing, without reading any record", async () => {
+    relationshipApi.listDocumentLinkTargetTypes.mockResolvedValue([]);
+    renderPanel();
+    await screen.findByText("No linked records.");
+    await waitFor(() => expect(relationshipApi.listDocumentLinkTargetTypes).toHaveBeenCalledWith(DOC));
+    // Let the resolved answer render, so "absent" is the settled state, not the pending one.
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
+    expect(relationshipApi.listDocumentLinkTargets).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the linkable types cannot be determined", async () => {
+    relationshipApi.listDocumentLinkTargetTypes.mockRejectedValue(new Error("offline"));
+    renderPanel();
+    await screen.findByText("No linked records.");
+    await waitFor(() => expect(relationshipApi.listDocumentLinkTargetTypes).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
+  });
+
+  it("never opens an empty dialog for a register this client does not know", async () => {
+    relationshipApi.listDocumentLinkTargetTypes.mockResolvedValue(["some_future_register"]);
+    renderPanel();
+    await screen.findByText("No linked records.");
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.queryByRole("button", { name: /Link to Record/ })).not.toBeInTheDocument();
+  });
+
+  it("links one letter to a Programme milestone and a Chronology event (CL-3B)", async () => {
+    relationshipApi.listDocumentLinkTargets.mockImplementation(async (_doc: string, params: { target_type: string }) =>
+      params.target_type === "programme_milestone" ? programmeTargets
+        : params.target_type === "chronology_event" ? chronologyTargets : []);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
+    const dialog = await screen.findByRole("dialog");
+
+    await user.selectOptions(within(dialog).getByLabelText("Register"), "programme_milestone");
+    await user.click(await within(dialog).findByRole("radio", { name: "PM-110 · Pier P4 piling" }));
+    const programmeRoles = Array.from((within(dialog).getByLabelText("Relationship role") as HTMLSelectElement).options).map((o) => o.value);
+    expect(programmeRoles).toEqual(["correspondence", "programme_record", "progress_evidence", "supporting_document"]);
+    await user.click(within(dialog).getByRole("button", { name: /^Link$/ }));
+    await waitFor(() => expect(relationshipApi.batchLinkDocuments).toHaveBeenCalledWith(
+      "programme_milestone", "pm-1", [{ document_id: DOC, relationship_role: "correspondence" }],
+    ));
+
+    await user.selectOptions(within(dialog).getByLabelText("Register"), "chronology_event");
+    await user.click(await within(dialog).findByRole("radio", { name: "2026-02-10 · Engineer instruction" }));
+    // The source role is provenance: never offered as a linkable role.
+    const roleOptions = Array.from((within(dialog).getByLabelText("Relationship role") as HTMLSelectElement).options).map((o) => o.value);
+    expect(roleOptions).toEqual(["correspondence", "supporting_document"]);
+    await user.click(within(dialog).getByRole("button", { name: /^Link$/ }));
+    await waitFor(() => expect(relationshipApi.batchLinkDocuments).toHaveBeenLastCalledWith(
+      "chronology_event", "ev-1", [{ document_id: DOC, relationship_role: "correspondence" }],
+    ));
   });
 
   it("marks an existing link and refuses to relink it", async () => {
