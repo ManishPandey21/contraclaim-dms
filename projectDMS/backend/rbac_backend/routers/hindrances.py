@@ -122,7 +122,10 @@ async def list_hindrances(
         current_user,
         Permissions.HINDRANCE_VIEW,
         resource_type="delay_events",
-        organization_id=organization_id,
+        # Nothing selected: gate on the principal's own organisation (as Variation
+        # does); rows stay bounded by build_scope_query. Without it a project-tier
+        # member fails the subscription check on an organisation of None.
+        organization_id=organization_id or getattr(current_user, "organization_id", None),
         project_id=project_id,
         audit=False,
     )
