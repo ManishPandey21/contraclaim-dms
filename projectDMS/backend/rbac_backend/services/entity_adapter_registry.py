@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, FrozenSet, Optional
 from urllib.parse import quote
 
@@ -2007,7 +2008,9 @@ class ChronologyEventEntityAdapter(EntityAdapter):
         chronology_id = str(entity.get("chronology_id") or chronology.get("_id") or "")
         title = str(entity.get("title") or "").strip() or "Untitled event"
         event_date = entity.get("event_date")
-        date_text = event_date.date().isoformat() if hasattr(event_date, "date") else str(entity.get("date_text") or "")
+        date_text = (
+            event_date.date().isoformat() if isinstance(event_date, datetime) else str(entity.get("date_text") or "")
+        )
         label = " · ".join(part for part in (date_text, title) if part)
         return EntityContext(
             target_type=self.target_type,
