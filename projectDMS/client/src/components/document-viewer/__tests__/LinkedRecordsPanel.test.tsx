@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import LinkedRecordsPanel from "@/components/document-viewer/LinkedRecordsPanel";
 
-const relationshipApi = vi.hoisted(() => ({ listDocumentEntityLinks: vi.fn() }));
+const relationshipApi = vi.hoisted(() => ({
+  listDocumentEntityLinks: vi.fn(),
+  listDocumentLinkTargetTypes: vi.fn(async () => [] as string[]),
+}));
 vi.mock("@/services/document-relationships-api", () => relationshipApi);
 
 describe("LinkedRecordsPanel", () => {

@@ -33,7 +33,8 @@ export type DocumentRelationshipRole =
   | "instruction"
   | "site_record"
   | "photograph"
-  | "programme_record";
+  | "programme_record"
+  | "progress_evidence";
 
 export { CORRESPONDENCE_ROLES, isCorrespondenceRole } from "@/lib/relationship-roles";
 
@@ -58,6 +59,30 @@ export const HINDRANCE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
   { value: "instruction", label: "Instruction" },
   { value: "photograph", label: "Photograph" },
   { value: "programme_record", label: "Programme record" },
+  { value: "supporting_document", label: "Supporting document" },
+];
+
+/** Evidence roles for a Programme Milestone (target type `programme_milestone`). */
+export const PROGRAMME_MILESTONE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
+  value: DocumentRelationshipRole;
+  label: string;
+}> = [
+  { value: "progress_evidence", label: "Progress evidence" },
+  { value: "programme_record", label: "Programme record" },
+  { value: "correspondence", label: "Correspondence" },
+  { value: "supporting_document", label: "Supporting document" },
+];
+
+/**
+ * Roles a user may link to a Chronology event (target type `chronology_event`).
+ * The event's source Document is its extraction provenance: shown read-only as
+ * "Source document", never linked.
+ */
+export const CHRONOLOGY_EVENT_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
+  value: DocumentRelationshipRole;
+  label: string;
+}> = [
+  { value: "correspondence", label: "Correspondence" },
   { value: "supporting_document", label: "Supporting document" },
 ];
 
@@ -243,6 +268,17 @@ export interface DocumentLinkTarget {
   frozen: boolean;
   parent_type?: string | null;
   parent_id?: string | null;
+}
+
+/**
+ * Register types this caller could link the Document to, in the current navbar
+ * selection. Decided from the caller's own permissions; no record is read.
+ */
+export async function listDocumentLinkTargetTypes(documentId: string) {
+  const { data } = await api.get(
+    `/documents/${encodeURIComponent(documentId)}/link-target-types`,
+  );
+  return (data?.target_types ?? []) as string[];
 }
 
 export async function listDocumentLinkTargets(

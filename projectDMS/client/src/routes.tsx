@@ -59,6 +59,7 @@ const KeyDateRegisterPage = lazyWithRetry(() => import("./pages/KeyDateRegisterP
 const KeyDateDetailPage = lazyWithRetry(() => import("./pages/KeyDateDetailPage"));
 const HindranceRegisterPage = lazyWithRetry(() => import("./pages/HindranceRegisterPage"));
 const HindranceDetailPage = lazyWithRetry(() => import("./pages/HindranceDetailPage"));
+const ProgrammeMilestoneDetailPage = lazyWithRetry(() => import("./pages/ProgrammeMilestoneDetailPage"));
 const VariationRegisterPage = lazyWithRetry(() => import("./pages/VariationRegisterPage"));
 const BankGuaranteeRegisterPage = lazyWithRetry(() => import("./pages/BankGuaranteeRegisterPage"));
 const InsuranceRegisterPage = lazyWithRetry(() => import("./pages/InsuranceRegisterPage"));
@@ -260,6 +261,14 @@ const AppRoutes = () => (
           element={
             <RoleGuard path="/hindrances" fallback="/overview">
               <HindranceDetailPage />
+            </RoleGuard>
+          }
+        />
+        <Route
+          path="programme-milestones/:id"
+          element={
+            <RoleGuard path="/programme-milestones" fallback="/overview">
+              <ProgrammeMilestoneDetailPage />
             </RoleGuard>
           }
         />

@@ -4,7 +4,7 @@ import { FileText, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
-import { isCorrespondenceRole } from "@/lib/relationship-roles";
+import { isCorrespondenceRole, relationshipRoleLabel, targetTypeLabel } from "@/lib/relationship-roles";
 import type { DocumentItem } from "@/services/documents-api";
 import {
   batchLinkDocuments,
@@ -235,8 +235,7 @@ export default function EntityDocumentLinks({
     setBusy(true);
     const generation = targetGeneration.current;
     try {
-      const targetLabel = targetType.charAt(0).toUpperCase() + targetType.slice(1);
-      await removeDocumentLink(link._id, link._revision, `Removed from ${targetLabel}`);
+      await removeDocumentLink(link._id, link._revision, `Removed from ${targetTypeLabel(targetType)}`);
       if (generation !== targetGeneration.current) return;
       setLinks((current) => current.filter((item) => item._id !== link._id));
       toast.success("Document unlinked");
@@ -280,7 +279,7 @@ export default function EntityDocumentLinks({
                 {details && <span className="block truncate text-xs text-muted-foreground">{details}</span>}
               </span>
               <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                {roleLabels.get(link.relationship_role) || link.relationship_role}
+                {roleLabels.get(link.relationship_role) || relationshipRoleLabel(link.relationship_role)}
               </span>
             </Link>
             {canManage && !frozen && link.source !== "legacy_read_through" && (

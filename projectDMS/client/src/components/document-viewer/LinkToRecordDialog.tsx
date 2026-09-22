@@ -22,7 +22,10 @@ import {
 } from "@/services/document-relationships-api";
 import { scopeErrorCode } from "@/services/active-scope";
 
-/** Variation and Hindrance are held to the navbar selection (CL-3A); say so plainly. */
+/**
+ * Variation, Hindrance, Programme Milestone and Chronology are held to the navbar
+ * selection (CL-3A/CL-3B); say so plainly.
+ */
 function scopeMessage(error: unknown): string | null {
   const code = scopeErrorCode(error);
   if (code === "selection_required") return "Select a project in the navbar to link this register.";
@@ -38,16 +41,25 @@ function scopeMessage(error: unknown): string | null {
  * several records.
  */
 export default function LinkToRecordDialog({
-  documentId, open, onOpenChange, linkedKeys, onLinked,
+  documentId, open, onOpenChange, linkedKeys, targetTypes, onLinked,
 }: {
   documentId: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** `${target_type}:${target_id}:${role}` of links that already exist. */
   linkedKeys: ReadonlySet<string>;
+  /** Register types this caller may link to (`GET /documents/{id}/link-target-types`). */
+  targetTypes: ReadonlyArray<string>;
   onLinked: () => void;
 }) {
-  const [targetType, setTargetType] = useState(LINK_TO_RECORD_TARGETS[0].value);
+  const registers = useMemo(
+    () => LINK_TO_RECORD_TARGETS.filter((item) => targetTypes.includes(item.value)),
+    [targetTypes],
+  );
+  const [targetType, setTargetType] = useState(registers[0]?.value ?? "");
+  useEffect(() => {
+    if (!registers.some((item) => item.value === targetType)) setTargetType(registers[0]?.value ?? "");
+  }, [registers, targetType]);
   const [query, setQuery] = useState("");
   const [targets, setTargets] = useState<DocumentLinkTarget[]>([]);
   const [loading, setLoading] = useState(false);
@@ -58,7 +70,7 @@ export default function LinkToRecordDialog({
   const sequence = useRef(0);
 
   useEffect(() => {
-    if (!open) return undefined;
+    if (!open || !targetType) return undefined;
     const current = ++sequence.current;
     setLoading(true);
     setLoadError(null);
@@ -131,7 +143,7 @@ export default function LinkToRecordDialog({
             Register
             <select id="link-to-record-type" className={inputClass} value={targetType}
               onChange={(event) => { setTargetType(event.target.value); setSelectedId(null); }}>
-              {LINK_TO_RECORD_TARGETS.map((item) => (
+              {registers.map((item) => (
                 <option key={item.value} value={item.value}>{item.label}</option>
               ))}
             </select>

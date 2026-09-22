@@ -16,13 +16,16 @@ export function isCorrespondenceRole(role: string): boolean {
 }
 
 /**
- * Register types the Document side may link to ("Link to Record"). Mirrors the
- * server's LINK_TO_RECORD_TARGET_TYPES: only targets whose adapter, deep link
- * and register page are verified. The server refuses anything else with 404.
+ * Register types the Document side may link to ("Link to Record"), with their
+ * labels. Mirrors the server's `link_to_record` adapters: only targets whose
+ * adapter, deep link and register page are verified. Which of them a caller is
+ * actually offered comes from `GET /documents/{id}/link-target-types`.
  */
 export const LINK_TO_RECORD_TARGETS: ReadonlyArray<{ value: string; label: string }> = [
   { value: "variation", label: "Variation" },
   { value: "delay_event", label: "Hindrance / Constraint" },
+  { value: "programme_milestone", label: "Programme milestone" },
+  { value: "chronology_event", label: "Chronology event" },
   { value: "claim", label: "Claim" },
   { value: "ipc_bill", label: "IPC / Bill" },
   { value: "insurance", label: "Insurance" },
@@ -76,6 +79,8 @@ const ROLE_LABELS: Record<string, string> = {
   site_record: "Site record",
   photograph: "Photograph",
   programme_record: "Programme record",
+  progress_evidence: "Progress evidence",
+  source_document: "Source document",
   manual_review: "Legacy link (review)",
 };
 
