@@ -281,7 +281,7 @@ test.describe("Hindrance & Constraint Register workflow", () => {
     // 4. Link an existing document through the canonical relationship API.
     await page.getByLabel("Search Documents").fill("diary");
     await page.getByRole("button", { name: "Link Site diary 10-Feb.pdf" }).click();
-    const linkedDocument = page.getByRole("link", { name: /^Site diary 10-Feb\.pdf site_record/ });
+    const linkedDocument = page.getByRole("link", { name: /^Site diary 10-Feb\.pdf .*Site record$/ });
     await expect(linkedDocument).toHaveAttribute("href", "/documentviewer/doc-A1");
 
     // 5. Link an activity.
@@ -299,7 +299,7 @@ test.describe("Hindrance & Constraint Register workflow", () => {
     await expect(page.getByText("Station S2 north gate")).toBeVisible();
     await expect(page.getByText("ACT-110", { exact: true })).toBeVisible();
     await expect(page.getByText("KD-03", { exact: true })).toBeVisible();
-    await expect(page.getByRole("link", { name: /^Site diary 10-Feb\.pdf site_record/ })).toBeVisible();
+    await expect(page.getByRole("link", { name: /^Site diary 10-Feb\.pdf .*Site record$/ })).toBeVisible();
     await shot(page, "02-detail");
 
     // 9. Archive, with a reason.
