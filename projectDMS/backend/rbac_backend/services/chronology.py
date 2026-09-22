@@ -187,7 +187,7 @@ class ChronologyService:
                 {"$set": {"deleted_at": now, "deleted_by": _actor_id(current_user), "updated_at": now}},
                 **kwargs,
             )
-            if not getattr(result, "matched_count", 1):
+            if not getattr(result, "matched_count", 0):
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Chronology changed during deletion")
 
         if relationships is None:

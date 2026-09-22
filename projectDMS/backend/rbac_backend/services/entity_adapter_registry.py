@@ -191,6 +191,20 @@ def is_correspondence_document(document: Optional[Dict[str, Any]]) -> bool:
     return str(raw or "").strip().lower() in CORRESPONDENCE_UPLOAD_TYPES
 
 
+#: A trailing count ("Extension 2", "2") is label text no row field holds.
+_TRAILING_COUNT = re.compile(r"(^|\s)\d+$")
+
+
+def _label_tail_search(needle: str) -> bool:
+    """Does ``needle`` reach past the parent part of a composed label?
+
+    Composed labels read "<parent> · <event> <n>"; a search spanning the
+    separator or ending in the count is matched only by the rendered label, so
+    such a search must not be narrowed by parent fields (it would drop matches).
+    """
+    return "·" in needle or bool(_TRAILING_COUNT.search(needle))
+
+
 async def _matching_parent_ids(collection: Any, query: Dict[str, Any]) -> list[Any]:
     """Ids of the parent rows matching ``query``, in the forms a child may store.
 
@@ -729,10 +743,11 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
         organization_id: str,
         project_id: str,
     ) -> Optional[Dict[str, Any]]:
-        # The label is "<parent BG number or type> · <Event type> <n>": resolve
-        # the matching parents in scope first, so an old event of a matching
-        # guarantee is found however many events precede it.
-        if not needle:
+        # The label is "<parent BG number or type or id> · <Event type> <n>":
+        # resolve the matching parents in scope first, so an old event of a
+        # matching guarantee is found however many events precede it. A search
+        # into the composed tail is not narrowed (the label check decides).
+        if not needle or _label_tail_search(needle):
             return None
         pattern = {"$regex": re.escape(needle), "$options": "i"}
         parents = await _matching_parent_ids(
@@ -740,7 +755,7 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
             {
                 "organization_id": organization_id,
                 "project_id": project_id,
-                "$or": [{"bg_number": pattern}, {"bg_type": pattern}],
+                "$or": [{"bg_number": pattern}, {"bg_type": pattern}, {"_id": pattern}],
             },
         )
         # Event types are stored snake_case and rendered title-cased.
@@ -962,7 +977,7 @@ class KeyDateAchievementEntityAdapter(EntityAdapter):
     ) -> Optional[Dict[str, Any]]:
         # The label is the parent Key Date's reference or title: resolve the
         # matching Key Dates in scope, then take their achievements.
-        if not needle or needle in self.target_label_suffix.lower():
+        if not needle or needle in self.target_label_suffix.lower() or _label_tail_search(needle):
             return None
         pattern = {"$regex": re.escape(needle), "$options": "i"}
         parents = await _matching_parent_ids(
@@ -970,7 +985,7 @@ class KeyDateAchievementEntityAdapter(EntityAdapter):
             {
                 "organization_id": organization_id,
                 "project_id": project_id,
-                "$or": [{"milestone_ref": pattern}, {"title": pattern}],
+                "$or": [{"milestone_ref": pattern}, {"title": pattern}, {"_id": pattern}],
             },
         )
         return {"milestone_id": {"$in": parents}}
@@ -1942,7 +1957,10 @@ class ChronologyEventEntityAdapter(EntityAdapter):
 
     target_type = "chronology_event"
     target_collection = "matter_chronology_events"
-    target_label_fields = ("title", "letter_no")
+    # Only fields the publication-safe projection governs: `letter_no` may be
+    # lifted from the source Document's text and is not withheld, so it is not
+    # searchable here.
+    target_label_fields = ("title",)
     link_to_record = True
     link_manage_permissions = (Permissions.CHRONOLOGY_EDIT,)
     active_scope_enforced = True
@@ -2064,15 +2082,29 @@ class ChronologyEventEntityAdapter(EntityAdapter):
         project_id: str,
         session: Any = None,
     ) -> list[str]:
-        # Events predating the parent-scope anchor may carry no scope of their
-        # own, so the scope is not filtered here: `list_for_document` loads each
-        # candidate and keeps it only when its structural (parent) scope is the
-        # Document's.
+        # Scoped by the parent: events predating the parent-scope anchor may carry
+        # no scope of their own, so the candidates are the events of the
+        # Document's own (live) chronologies. `list_for_document` still loads each
+        # one and keeps it only when its structural scope is the Document's.
         collection = getattr(db, "matter_chronology_events", None)
-        if collection is None:
+        chronologies = getattr(db, "matter_chronologies", None)
+        if collection is None or chronologies is None:
+            return []
+        parents = [
+            row.get("_id")
+            async for row in chronologies.find(
+                {"organization_id": organization_id, "project_id": project_id, "deleted_at": {"$exists": False}},
+                {"_id": 1},
+                session=session,
+            )
+        ]
+        if not parents:
             return []
         cursor = collection.find(
-            {"$or": [{"source_document_id": document_id}, {"related_document_ids": document_id}]},
+            {
+                "chronology_id": {"$in": parents},
+                "$or": [{"source_document_id": document_id}, {"related_document_ids": document_id}],
+            },
             {"_id": 1},
             session=session,
         )

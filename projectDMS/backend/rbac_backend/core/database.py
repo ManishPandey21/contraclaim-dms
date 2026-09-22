@@ -548,6 +548,14 @@ async def ensure_indexes(db):
         [("chronology_id", 1), ("event_classification", 1), ("supports_party", 1), ("pleading_use", 1)],
         background=True,
     )
+    # CL-3B: the Document reverse lookup reads events by their source / related
+    # Document (legacy read-through of chronology_event relationships).
+    await db.matter_chronology_events.create_index(
+        [("source_document_id", 1), ("chronology_id", 1)], background=True
+    )
+    await db.matter_chronology_events.create_index(
+        [("related_document_ids", 1), ("chronology_id", 1)], background=True
+    )
     await db.matter_chronology_event_revisions.create_index(
         [("chronology_id", 1), ("event_id", 1), ("revision", 1)],
         unique=True,

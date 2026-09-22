@@ -457,12 +457,25 @@ def test_chronology_raw_document_writes_are_closed() -> None:
             stored = await env.db.matter_chronology_events.find_one({"_id": EV_A1})
             assert stored["related_document_ids"] == [DOC_OUT_ID, DOC_CONTRACT_ID]
             assert stored["title"] == "Engineer instruction on added works"
-            cleared = await env.call("PATCH", "project_admin", f"{base}/{EV_A1}", PROJ_A1, json={"related_document_ids": []})
-            assert cleared.status_code == 409, cleared.text
+            nulled = await env.call("PATCH", "project_admin", f"{base}/{EV_A1}", PROJ_A1, json={"related_document_ids": None})
+            assert nulled.status_code == 422, nulled.text
             # An unchanged echo passes.
             echo = await env.call("PATCH", "project_admin", f"{base}/{EV_A1}", PROJ_A1,
                                   json={"related_document_ids": [DOC_CONTRACT_ID, DOC_OUT_ID], "manual_notes": "ok"})
             assert echo.status_code == 200, echo.text
+            # Removing a stale legacy reference stays possible, and is on the revision trail.
+            pruned = await env.call("PATCH", "project_admin", f"{base}/{EV_A1}", PROJ_A1,
+                                    json={"related_document_ids": [DOC_OUT_ID]})
+            assert pruned.status_code == 200, pruned.text
+            stored = await env.db.matter_chronology_events.find_one({"_id": EV_A1})
+            assert stored["related_document_ids"] == [DOC_OUT_ID]
+            revision = await env.db.matter_chronology_event_revisions.find_one(
+                {"event_id": EV_A1, "after.related_document_ids": [DOC_OUT_ID]}
+            )
+            assert revision is not None and set(revision["before"]["related_document_ids"]) == {DOC_OUT_ID, DOC_CONTRACT_ID}
+            readded = await env.call("PATCH", "project_admin", f"{base}/{EV_A1}", PROJ_A1,
+                                     json={"related_document_ids": [DOC_OUT_ID, DOC_CONTRACT_ID]})
+            assert readded.status_code == 409, readded.text
             # /link: documents refused, events still linkable.
             assert (await env.call("POST", "project_admin", f"{base}/{EV_A1}/link", PROJ_A1,
                                    json={"related_document_ids": [DOC_IN_ID]})).status_code == 409

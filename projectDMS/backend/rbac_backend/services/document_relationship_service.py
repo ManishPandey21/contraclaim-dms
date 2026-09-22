@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
@@ -27,6 +28,8 @@ from ..utils.error_handler import BaseDomainError
 
 
 _TransactionResult = TypeVar("_TransactionResult")
+
+logger = logging.getLogger(__name__)
 
 #: Targets offered by "Link to Record" from the Document side: the registered
 #: adapters that set ``link_to_record`` (one list, owned by the registry; CL-3B
@@ -1162,6 +1165,7 @@ class DocumentRelationshipService:
             results.append(self._view(stored, context, document))
         linked_document_ids = {str(link.document_id) for link in results}
         presented: set[str] = set()
+        withheld = 0
         adapter = self.registry.get(context.target_type)
         for candidate in adapter.legacy_document_ids(context.entity):
             role = adapter.legacy_role_for(context.entity, candidate)
@@ -1175,6 +1179,7 @@ class DocumentRelationshipService:
                 fail_closed=False,
             )
             if document is None:
+                withheld += 1
                 continue
             canonical_id = str(document.get("_id") or candidate)
             if canonical_id in presented or (superseded and canonical_id in linked_document_ids):
@@ -1195,6 +1200,15 @@ class DocumentRelationshipService:
                 )
             )
             presented.update({candidate, canonical_id})
+        if withheld:
+            # Fail visible: a missing, foreign-scope, non-consumable or unviewable
+            # legacy reference is never served, but it is counted.
+            logger.info(
+                "legacy document references withheld: target=%s:%s withheld=%d",
+                context.target_type,
+                context.target_id,
+                withheld,
+            )
         return results
 
     async def delete_target(

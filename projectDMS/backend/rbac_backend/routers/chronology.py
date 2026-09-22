@@ -87,12 +87,20 @@ async def _load_and_authorize_chronology(
 
 
 def _refuse_related_document_write(requested, stored=None) -> None:
-    """Refuse a raw ``related_document_ids`` write (409). An unchanged echo passes."""
+    """Refuse a raw ``related_document_ids`` write that ADDS a reference (409).
+
+    New relationships go through the canonical API. Removing a stored legacy
+    reference (a wrong, foreign or duplicate id written before CL-3B) stays
+    possible - a subset of the stored array, including an unchanged echo - and is
+    recorded by the event's revision trail. ``null`` is refused (422): it would
+    erase the array without saying which references went.
+    """
     if requested is None:
-        return
-    if stored is not None and set(map(str, requested)) == set(map(str, stored or [])):
-        return
-    if not requested and stored is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="related_document_ids cannot be null; send the references to keep",
+        )
+    if set(map(str, requested)) <= set(map(str, stored or [])):
         return
     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LEGACY_WRITE_REFUSAL)
 
@@ -102,7 +110,9 @@ async def _require_source_document_in_scope(db, chronology: dict, document_id: O
 
     Provenance is one Document; naming one from another tenant or project would
     attach its identity (and, on verification, its authority) to this chronology.
-    The response does not say whether the foreign Document exists.
+    The response does not say whether the foreign Document exists. (Whether the
+    writer may VIEW that Document is not asked: the G31 suite pins the exact
+    authorization sequence of event creation - recorded as CL-3B debt.)
     """
     if not document_id:
         return
@@ -307,7 +317,7 @@ async def create_chronology_event(
 ):
     chronology = await _load_and_authorize_chronology(chronology_id, Permissions.CHRONOLOGY_EDIT, db, current_user, policy, selection)
     if "related_document_ids" in payload.model_fields_set:
-        _refuse_related_document_write(payload.related_document_ids or [])
+        _refuse_related_document_write(payload.related_document_ids)
     await _require_source_document_in_scope(db, chronology, payload.source_document_id)
     payload.chronology_id = chronology_id
     return MatterChronologyEvent(**await ChronologyService(db).create_event(payload, current_user))
@@ -327,9 +337,9 @@ async def update_chronology_event(
     service = ChronologyService(db)
     before = await service.get_event(chronology_id, event_id)
     if "related_document_ids" in payload.model_fields_set:
-        # An unchanged echo of the stored array passes; any change is a
+        # An unchanged echo or a removal passes; adding a reference is a
         # relationship write and belongs to the canonical API.
-        _refuse_related_document_write(payload.related_document_ids or [], before.get("related_document_ids") or [])
+        _refuse_related_document_write(payload.related_document_ids, before.get("related_document_ids") or [])
     if "source_document_id" in payload.model_fields_set and str(payload.source_document_id or "") != str(
         before.get("source_document_id") or ""
     ):
