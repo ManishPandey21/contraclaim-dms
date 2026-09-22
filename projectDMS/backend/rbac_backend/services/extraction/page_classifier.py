@@ -1,7 +1,10 @@
 """Classify a PDF page by what it actually contains.
 
-Classification is descriptive metadata, not a second OCR gate: the character
-threshold remains the routing decision. Only SCANNED_IMAGE and BLANK change
+Classification is descriptive metadata, not a second OCR gate: the engine's
+character threshold and native-text quality check make the routing decision.
+A page of ``(cid:N)`` placeholders is still classified as text here - its
+glyphs are really there - and the engine sends it to OCR regardless (see
+text_quality). Only SCANNED_IMAGE and BLANK change
 behaviour downstream - the first suppresses whole-page-raster asset
 candidates, the second suppresses a pointless OCR call.
 

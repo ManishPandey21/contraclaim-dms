@@ -10,6 +10,17 @@ caller.
 Resumability, not truncation: max_ocr_pages_per_attempt bounds one attempt.
 Pages beyond it are marked OCR_DEFERRED and the result is PARTIAL, so the
 caller re-claims them. Nothing is ever silently dropped.
+
+A text layer is not trusted by its length alone. A page whose text is unusable
+pdfminer's ``(cid:N)`` placeholders (see text_quality) is an OCR candidate
+however long that text is, so it ends a first attempt either OCR'd or in an
+unresolved status - never as a TEXT_LAYER page. A retry OCRs exactly the pages
+the caller's checkpoint still owes, which includes any such page left
+unresolved; placeholder pages outside that set are not re-selected, because
+they were resolved by an earlier attempt and re-OCRing them each retry would
+spend metered calls without end. The structural classification is left as it
+is - the page does carry a text layer - because classification describes the
+page and routing is this module's decision.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ from .models import (
 )
 from .page_classifier import PageClassifier
 from .page_store import MeterCallback, OcrRunner, PageStore
+from .text_quality import NativeTextQuality, assess_native_text_quality
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +111,8 @@ class PageExtractionEngine:
     ) -> PageExtractionResult:
         native = await asyncio.to_thread(self._read_native_pages, source)
 
+        unusable_native = self._unusable_native_text(native)
+
         retry_set = {int(page) for page in (retry_pages or []) if int(page) > 0}
         if retry_set:
             candidates = [number for number in sorted(native) if number in retry_set]
@@ -109,7 +123,10 @@ class PageExtractionEngine:
                 # A page that could not be rendered cannot be OCR'd either;
                 # sending it would burn a metered OCR call to learn nothing.
                 if classification.page_class is not PageClass.UNRENDERABLE
-                and len(text.strip()) < self.policy.min_text_chars_per_page
+                and (
+                    len(text.strip()) < self.policy.min_text_chars_per_page
+                    or number in unusable_native
+                )
             ]
 
         attempted, deferred = self._split_at_attempt_boundary(candidates)
@@ -119,7 +136,13 @@ class PageExtractionEngine:
 
         if not self.policy.ocr_enabled:
             for number in candidates:
-                statuses[number] = (PageStatus.OCR_DISABLED, None, "OCR is disabled")
+                reason = "OCR is disabled"
+                if number in unusable_native:
+                    reason = (
+                        "OCR is disabled and the native text layer is unusable: "
+                        f"{unusable_native[number].describe()}"
+                    )
+                statuses[number] = (PageStatus.OCR_DISABLED, None, reason)
         else:
             if attempted and self.meter is not None:
                 await self.meter(
@@ -162,6 +185,20 @@ class PageExtractionEngine:
             engine_version=ENGINE_VERSION,
         )
 
+    @staticmethod
+    def _unusable_native_text(
+        native: Dict[int, _NativePage],
+    ) -> Dict[int, NativeTextQuality]:
+        """Pages whose native text is unusable ``(cid:N)`` placeholders."""
+        unusable: Dict[int, NativeTextQuality] = {}
+        for number, (text, classification, _) in native.items():
+            if classification.page_class is PageClass.UNRENDERABLE:
+                continue
+            quality = assess_native_text_quality(text)
+            if quality.unusable:
+                unusable[number] = quality
+        return unusable
+
     def _split_at_attempt_boundary(
         self, candidates: Sequence[int]
     ) -> Tuple[List[int], List[int]]:
@@ -203,7 +240,17 @@ class PageExtractionEngine:
 
         for number in batch:
             text = (extracted.get(number) or "").strip()
-            if text:
+            quality = assess_native_text_quality(text)
+            if text and quality.unusable:
+                # Re-read from OCRmyPDF's output PDF, so the same placeholder
+                # hazard applies; OCR output that is itself unreadable is not a
+                # completed page.
+                statuses[number] = (
+                    PageStatus.OCR_EMPTY,
+                    batch_id,
+                    f"OCR completed but its text is unusable: {quality.describe()}",
+                )
+            elif text:
                 overrides[number] = extracted[number]
                 statuses[number] = (PageStatus.OCR_COMPLETED, batch_id, None)
             else:
