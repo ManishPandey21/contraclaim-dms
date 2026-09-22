@@ -300,3 +300,137 @@ async def test_every_page_carries_a_classification(tmp_path: Path) -> None:
     assert all(page.classification is not None for page in result.pages)
     # Page 5 of the fixture is landscape.
     assert result.pages[4].classification.is_landscape is True
+
+
+# --- Cumulative runs: a retry must not rewrite what it did not re-extract --
+
+#: Every page of the nine-page mixed fixture, in order.
+_ALL_PAGES = list(range(1, GOLDEN["pages_total"] + 1))
+
+
+class _ResumableStore(NullPageStore):
+    """A NullPageStore that can also hand the run's pages back.
+
+    Stands in for DocumentPageStore's run-scoped read without pulling Mongo
+    into an engine test.
+    """
+
+    extraction_run_id = "run-1"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.run: dict[int, object] = {}
+        self.write_batches: list[list[int]] = []
+
+    async def record_pages(self, pages) -> None:  # type: ignore[no-untyped-def]
+        await super().record_pages(pages)
+        self.write_batches.append([page.number for page in pages])
+        for page in pages:
+            self.run[page.number] = page
+
+    async def load_run_pages(self):  # type: ignore[no-untyped-def]
+        return [self.run[number] for number in sorted(self.run)]
+
+
+async def test_a_retry_writes_only_the_pages_it_re_extracted(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = _ResumableStore()
+    engine = PageExtractionEngine(
+        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+    )
+
+    await engine.extract(source)
+    first_write = list(store.write_batches)
+    await engine.extract(source, retry_pages=[2])
+
+    assert first_write == [_ALL_PAGES]
+    assert store.write_batches[-1] == [2]
+
+
+async def test_a_retry_returns_the_whole_run_in_page_order(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = _ResumableStore()
+    # One page per batch, so page 2's failure is page 2's alone.
+    engine = PageExtractionEngine(
+        policy=_policy(batch_size=1),
+        ocr_runner=_RecordingOcrRunner(fail_pages={2}),
+        store=store,
+    )
+
+    first = await engine.extract(source)
+    assert first.completeness is Completeness.PARTIAL
+
+    engine.ocr_runner = _RecordingOcrRunner()
+    second = await engine.extract(source, retry_pages=[2])
+
+    assert [page.number for page in second.pages] == _ALL_PAGES
+    assert second.completeness is Completeness.COMPLETE
+    by_number = {page.number: page for page in second.pages}
+    # Page 1 was resolved by the first attempt and not retried: its text,
+    # source and status survive untouched.
+    assert by_number[1].text == "OCR TEXT PAGE 1"
+    assert by_number[1].source is PageSource.OCR
+    assert by_number[1].status is PageStatus.OCR_COMPLETED
+    assert by_number[1].carried_forward is True
+    assert by_number[2].text == "OCR TEXT PAGE 2"
+    assert by_number[2].carried_forward is False
+    assert "OCR TEXT PAGE 1" in second.combined_text
+    assert second.combined_text.index("OCR TEXT PAGE 1") < second.combined_text.index(
+        "OCR TEXT PAGE 2"
+    )
+
+
+async def test_a_retry_whose_run_lost_a_page_fails_closed(tmp_path: Path) -> None:
+    from rbac_backend.services.extraction.page_store import (
+        InconsistentExtractionRunError,
+    )
+
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = _ResumableStore()
+    engine = PageExtractionEngine(
+        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+    )
+
+    await engine.extract(source)
+    del store.run[1]  # the row an earlier attempt wrote is gone
+
+    try:
+        await engine.extract(source, retry_pages=[2])
+    except InconsistentExtractionRunError as error:
+        assert error.missing_page_numbers == [1]
+        assert error.expected_page_numbers == _ALL_PAGES
+        assert 1 not in error.persisted_page_numbers
+        # Page numbers only: nothing customer-readable in the message.
+        assert "OCR TEXT PAGE" not in str(error)
+    else:  # pragma: no cover - the whole point is that it raises
+        raise AssertionError("a missing prior page must not be silently regenerated")
+
+
+async def test_a_retry_against_a_store_without_run_reads_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    # The contract adapter has no run-scoped read; it must keep the behaviour
+    # it had rather than be forced to fake document-run semantics.
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = NullPageStore()
+    engine = PageExtractionEngine(
+        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+    )
+
+    result = await engine.extract(source, retry_pages=[2])
+
+    assert [page.number for page in result.pages] == _ALL_PAGES
+    assert len(store.recorded_pages) == GOLDEN["pages_total"]
+
+
+async def test_a_first_attempt_still_records_every_page(tmp_path: Path) -> None:
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = _ResumableStore()
+    engine = PageExtractionEngine(
+        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+    )
+
+    result = await engine.extract(source)
+
+    assert store.write_batches == [_ALL_PAGES]
+    assert all(page.carried_forward is False for page in result.pages)
