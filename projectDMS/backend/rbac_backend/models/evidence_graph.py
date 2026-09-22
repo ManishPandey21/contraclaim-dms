@@ -38,6 +38,9 @@ class ProjectEventType(str, Enum):
     VARIATION = "variation"
     BANK_GUARANTEE = "bank_guarantee"
     KEY_DATE = "key_date"
+    # Hindrance & Constraint Register entries that are not presumed delays.
+    HINDRANCE = "hindrance"
+    CONSTRAINT = "constraint"
     OTHER = "other"
 
 

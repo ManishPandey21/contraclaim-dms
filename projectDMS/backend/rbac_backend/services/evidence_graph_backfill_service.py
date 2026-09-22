@@ -148,11 +148,18 @@ class EvidenceGraphBackfillService:
                 missing.append(row)
                 if dry_run:
                     continue
+                event_type = spec["event_type"]
+                if collection_name == "delay_events":
+                    # One mapping for the register and its backfill: a hindrance
+                    # or constraint is not presumed to be a delay.
+                    from .hindrance_register_service import event_type_of, project_event_type_for
+
+                    event_type = project_event_type_for(event_type_of(row))
                 event = await graph.create_project_event(
                     ProjectEventCreate(
                         organization_id=row.get("organization_id"),
                         project_id=row.get("project_id"),
-                        event_type=spec["event_type"],
+                        event_type=event_type,
                         event_date=self._event_date(row, spec["date_fields"]),
                         title=self._title(row, spec["title_fields"], fallback=collection_name),
                         description=row.get("description") or row.get("summary"),

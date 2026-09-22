@@ -42,6 +42,12 @@ const claimTargets = [
     frozen: false, parent_type: null, parent_id: null },
 ];
 
+const hindranceTargets = [
+  { target_type: "delay_event", target_id: "hin-1", label: "HIN-0001", route: "/hindrances/hin-1",
+    allowed_roles: ["correspondence", "instruction", "notice", "photograph", "programme_record", "site_record", "supporting_document"],
+    frozen: false, parent_type: null, parent_id: null },
+];
+
 const renderPanel = () => render(<MemoryRouter><LinkedRecordsPanel documentId={DOC} /></MemoryRouter>);
 
 describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
@@ -109,7 +115,7 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
     await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
     const options = within(await screen.findByRole("dialog")).getAllByRole("option").map((option) => (option as HTMLOptionElement).value);
     expect(options).toEqual([
-      "variation", "claim", "ipc_bill", "insurance", "bank_guarantee_event",
+      "variation", "delay_event", "claim", "ipc_bill", "insurance", "bank_guarantee_event",
       "key_date_achievement", "eot_submission", "eot_determination",
     ]);
   });
@@ -142,5 +148,36 @@ describe("LinkedRecordsPanel reverse lookup and Link to Record", () => {
 
     await user.selectOptions(within(dialog).getByLabelText("Register"), "insurance");
     expect(await within(dialog).findByText("No records you can link in this project.")).toBeInTheDocument();
+  });
+
+  it("links a letter to a Hindrance / Constraint Register entry (CL-3A)", async () => {
+    relationshipApi.listDocumentLinkTargets.mockImplementation(async (_doc: string, params: { target_type: string }) =>
+      params.target_type === "delay_event" ? hindranceTargets : []);
+    relationshipApi.batchLinkDocuments.mockResolvedValue([
+      reverseLink("delay_event", "hin-1", "HIN-0001", "/hindrances/hin-1"),
+    ]);
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
+    const dialog = await screen.findByRole("dialog");
+    await user.selectOptions(within(dialog).getByLabelText("Register"), "delay_event");
+    await user.click(await within(dialog).findByRole("radio", { name: "HIN-0001" }));
+    expect(within(dialog).getByLabelText("Relationship role")).toHaveValue("correspondence");
+    await user.click(within(dialog).getByRole("button", { name: /^Link$/ }));
+    await waitFor(() => expect(relationshipApi.batchLinkDocuments).toHaveBeenCalledWith(
+      "delay_event", "hin-1", [{ document_id: DOC, relationship_role: "correspondence" }],
+    ));
+    expect(relationshipApi.listDocumentLinkTargets).toHaveBeenCalledWith(DOC, expect.objectContaining({ target_type: "delay_event" }));
+  });
+
+  it("explains a Link-to-Record refusal by the selected project", async () => {
+    relationshipApi.listDocumentLinkTargets.mockRejectedValue({
+      response: { status: 400, data: { detail: { code: "selection_required", message: "Select a project" } } },
+    });
+    const user = userEvent.setup();
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: /Link to Record/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Select a project in the navbar to link this register.");
   });
 });

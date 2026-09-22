@@ -78,6 +78,19 @@ EOT_DETERMINATION_ROLES: FrozenSet[str] = frozenset(
     }
 )
 
+#: Evidence roles for a Hindrance & Constraint Register entry (`delay_events`).
+HINDRANCE_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
+    {
+        "notice",
+        "correspondence",
+        "instruction",
+        "site_record",
+        "photograph",
+        "programme_record",
+        "supporting_document",
+    }
+)
+
 INSURANCE_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
     {
         "policy",
@@ -160,6 +173,14 @@ class EntityAdapter:
     #: Row fields the display label is built from, for a server-side search
     #: prefilter. Empty when the label comes from a parent row.
     target_label_fields: tuple[str, ...] = ()
+    #: Whether the selected navbar project (``X-Proj-Id``, ``core/tenant_context``)
+    #: bounds this target on the shared relationship routes: a target outside the
+    #: selection is 403 ``context_forbidden``, a record-level request with nothing
+    #: selected is 400 ``selection_required``, and the Document reverse lookup
+    #: hides the target's rows outside the selection. Only registers that enforce
+    #: the selection on their own routes opt in (CL-3A: Variation, Hindrance);
+    #: every other target keeps its selection-blind behaviour.
+    active_scope_enforced: bool = False
     legacy_relationship_role = "manual_review"
     supports_freeze = True
     freeze_requires_lifecycle_orchestration = False
@@ -210,6 +231,25 @@ class EntityAdapter:
         session: Any = None,
     ) -> bool:
         raise NotImplementedError
+
+    def link_target_query(self) -> Dict[str, Any]:
+        """Extra row filter for "Link to Record" candidates (rows that may take a new link)."""
+        return {}
+
+    async def guard_relationship_remove(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        """May an existing link be removed from this target? Default: yes.
+
+        A register whose record can become read-only (an archived Hindrance)
+        refuses here, so read-only means its evidence can be neither added nor
+        removed. Adding is refused by ``guard_relationship_write``.
+        """
+        return True
 
 
 class ClaimEntityAdapter(EntityAdapter):
@@ -1229,6 +1269,7 @@ class VariationEntityAdapter(EntityAdapter):
     target_type = "variation"
     target_collection = "variations"
     target_label_fields = ('variation_number',)
+    active_scope_enforced = True
     supports_freeze = False
     legacy_relationship_role = "manual_review"
 
@@ -1449,6 +1490,126 @@ class ContractDocumentEntityAdapter(EntityAdapter):
         )
 
 
+class DelayEventEntityAdapter(EntityAdapter):
+    """Hindrance & Constraint Register entries (stored in `delay_events`).
+
+    Legacy `linked_document_ids` were only ever supporting documents, so the
+    read-through role is unambiguous. An archived entry is read-only: the write
+    guard refuses new evidence until it is restored. There is no delete.
+    """
+
+    target_type = "delay_event"
+    target_collection = "delay_events"
+    target_label_fields = ("hindrance_ref", "delay_ref", "title")
+    active_scope_enforced = True
+    supports_freeze = False
+    legacy_relationship_role = "supporting_document"
+
+    def link_target_query(self) -> Dict[str, Any]:
+        # An archived entry is read-only (the write guard refuses it), so it is
+        # never offered as a Link-to-Record candidate.
+        return {"archived_at": None}
+
+    async def guard_relationship_remove(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # Read-only means read-only in both directions: an archived entry's
+        # evidence cannot be removed either, until it is restored.
+        return not context.entity.get("archived_at")
+
+    async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
+        row = None
+        for candidate in document_id_candidates(target_id):
+            row = await db.delay_events.find_one({"_id": candidate})
+            if row:
+                break
+        return self.context_from_entity(row) if row else None
+
+    def context_from_entity(self, row: Dict[str, Any]) -> EntityContext:
+        item_id = str(row.get("_id") or "")
+        label = str(row.get("hindrance_ref") or row.get("delay_ref") or row.get("title") or item_id)
+        return EntityContext(
+            target_type=self.target_type,
+            target_id=item_id,
+            entity=row,
+            organization_id=str(row.get("organization_id") or ""),
+            project_id=str(row.get("project_id") or ""),
+            view_permission=Permissions.HINDRANCE_VIEW,
+            manage_permission=Permissions.HINDRANCE_EDIT,
+            delete_permission=Permissions.HINDRANCE_ARCHIVE,
+            allowed_roles=HINDRANCE_DOCUMENT_ROLES,
+            label=label,
+            route=f"/hindrances/{item_id}",
+            frozen=False,
+        )
+
+    async def legacy_targets_for_document(
+        self,
+        db: Any,
+        *,
+        document_id: str,
+        organization_id: str,
+        project_id: str,
+        session: Any = None,
+    ) -> list[str]:
+        collection = getattr(db, "delay_events", None)
+        if collection is None:
+            return []
+        cursor = collection.find(
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "linked_document_ids": document_id,
+            },
+            session=session,
+        )
+        return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+    async def freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        actor_id: Optional[str],
+        frozen_at: Any,
+        reason: str,
+        session: Any = None,
+    ) -> None:
+        raise RuntimeError("Hindrance evidence freeze is not supported")
+
+    async def guard_relationship_write(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        result = await db.delay_events.update_one(
+            {
+                "_id": context.entity.get("_id"),
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+                "archived_at": None,
+            },
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        return bool(getattr(result, "matched_count", 0))
+
+    async def delete(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        return False
+
+
 class EntityAdapterRegistry:
     def __init__(self, adapters: list[EntityAdapter] | None = None) -> None:
         registered = adapters or [
@@ -1462,6 +1623,7 @@ class EntityAdapterRegistry:
             EOTDeterminationEntityAdapter(),
             ContractDocumentEntityAdapter(),
             VariationEntityAdapter(),
+            DelayEventEntityAdapter(),
         ]
         self._adapters = {adapter.target_type: adapter for adapter in registered}
 
@@ -1474,3 +1636,8 @@ class EntityAdapterRegistry:
 
     def adapters(self) -> tuple[EntityAdapter, ...]:
         return tuple(self._adapters.values())
+
+    def active_scope_adapter(self, target_type: str) -> Optional[EntityAdapter]:
+        """The adapter when ``target_type`` is bound by the selected project, else ``None``."""
+        adapter = self._adapters.get(str(target_type or "").strip().lower())
+        return adapter if adapter is not None and adapter.active_scope_enforced else None

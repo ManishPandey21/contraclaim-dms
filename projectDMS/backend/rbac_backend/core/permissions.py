@@ -89,6 +89,10 @@ CLIENT_DMS_PERMISSIONS: List[str] = [
     "dms.evidence_graph.view",
     "dms.evidence_graph.verify",
     "dms.evidence_graph.manage",
+    "dms.hindrance.view",
+    "dms.hindrance.create",
+    "dms.hindrance.edit",
+    "dms.hindrance.archive",
     "dms.contract.timeline.view",
     "dms.chronology.view",
     "dms.chronology.create",
@@ -254,6 +258,13 @@ class Permissions:
     EVIDENCE_GRAPH_VIEW = "dms.evidence_graph.view"
     EVIDENCE_GRAPH_VERIFY = "dms.evidence_graph.verify"
     EVIDENCE_GRAPH_MANAGE = "dms.evidence_graph.manage"
+    # Hindrance & Constraint Register (backed by `delay_events`). Deliberately a
+    # separate family from the evidence graph: holding graph access does not
+    # confer register access, and no legacy alias widens these.
+    HINDRANCE_VIEW = "dms.hindrance.view"
+    HINDRANCE_CREATE = "dms.hindrance.create"
+    HINDRANCE_EDIT = "dms.hindrance.edit"
+    HINDRANCE_ARCHIVE = "dms.hindrance.archive"
     CONTRACT_TIMELINE_VIEW = "dms.contract.timeline.view"
     CHRONOLOGY_VIEW = "dms.chronology.view"
     CHRONOLOGY_CREATE = "dms.chronology.create"

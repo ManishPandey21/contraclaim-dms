@@ -20,6 +20,15 @@ import {
   type DocumentLinkTarget,
   listDocumentLinkTargets,
 } from "@/services/document-relationships-api";
+import { scopeErrorCode } from "@/services/active-scope";
+
+/** Variation and Hindrance are held to the navbar selection (CL-3A); say so plainly. */
+function scopeMessage(error: unknown): string | null {
+  const code = scopeErrorCode(error);
+  if (code === "selection_required") return "Select a project in the navbar to link this register.";
+  if (code === "context_forbidden") return "This record is not in the project selected in the navbar.";
+  return null;
+}
 
 /**
  * "Link to Record" from the Document side: pick a register type, a record and a
@@ -42,7 +51,7 @@ export default function LinkToRecordDialog({
   const [query, setQuery] = useState("");
   const [targets, setTargets] = useState<DocumentLinkTarget[]>([]);
   const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [role, setRole] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,7 +61,7 @@ export default function LinkToRecordDialog({
     if (!open) return undefined;
     const current = ++sequence.current;
     setLoading(true);
-    setLoadError(false);
+    setLoadError(null);
     const timer = window.setTimeout(() => {
       listDocumentLinkTargets(documentId, {
         target_type: targetType,
@@ -63,10 +72,10 @@ export default function LinkToRecordDialog({
           setTargets(rows);
           setSelectedId((previous) => (rows.some((row) => row.target_id === previous) ? previous : null));
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (current !== sequence.current) return;
           setTargets([]);
-          setLoadError(true);
+          setLoadError(scopeMessage(error) || "Records could not be loaded.");
         })
         .finally(() => {
           if (current === sequence.current) setLoading(false);
@@ -99,7 +108,7 @@ export default function LinkToRecordDialog({
       onLinked();
     } catch (error: unknown) {
       const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
-      toast.error(typeof detail === "string" && detail ? detail : "Failed to link this Document");
+      toast.error(scopeMessage(error) || (typeof detail === "string" && detail ? detail : "Failed to link this Document"));
     } finally {
       setBusy(false);
     }
@@ -138,7 +147,7 @@ export default function LinkToRecordDialog({
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading records…
               </p>
             ) : loadError ? (
-              <p role="alert" className="text-sm text-destructive">Records could not be loaded.</p>
+              <p role="alert" className="text-sm text-destructive">{loadError}</p>
             ) : targets.length === 0 ? (
               <p className="text-sm text-muted-foreground">No records you can link in this project.</p>
             ) : targets.map((target) => (

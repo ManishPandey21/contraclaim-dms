@@ -24,8 +24,14 @@ vi.mock("@/services/variations-api", async (importOriginal) => ({
   ...variationApi,
 }));
 vi.mock("@/hooks/useRBAC", () => ({ default: () => rbacApi }));
-vi.mock("@/services/enhanced-api", () => ({
-  enhancedApi: { getProjects: vi.fn().mockResolvedValue([{ _id: "project-1", name: "Metro" }]) },
+// CL-3A: the register follows the navbar selection (TenantContext).
+vi.mock("@/contexts/TenantContext", () => ({
+  useTenant: () => ({
+    selectedOrganizationId: "org-1",
+    selectedProjectId: "project-1",
+    selectedProject: { _id: "project-1", name: "Metro" },
+    loading: false,
+  }),
 }));
 vi.mock("@/services/contract-master-api", () => ({
   getContractMasterForProject: vi.fn().mockResolvedValue(null),

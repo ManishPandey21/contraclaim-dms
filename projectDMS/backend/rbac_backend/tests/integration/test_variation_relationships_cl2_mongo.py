@@ -228,36 +228,51 @@ def _token(persona: str) -> str:
     )
 
 
+#: The navbar selection each persona's browser sends (CL-3A binds Variation to
+#: it, ``core/tenant_context.py``): the persona's own project, or the first
+#: project of its organisation. Superadmin and the no-scope personas select A1.
+SELECTION: dict[str, str] = {
+    "foreign_org_admin": PROJ_B1,
+    "other_project_admin": PROJ_A2,
+}
+
+
 class Env:
     def __init__(self, db: Any, client: httpx.AsyncClient) -> None:
         self.db = db
         self._client = client
 
-    def headers(self, persona: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {_token(persona)}"}
+    def headers(self, persona: str, project: str | None = None) -> dict[str, str]:
+        selected = project if project is not None else SELECTION.get(persona, PROJ_A1)
+        return {"Authorization": f"Bearer {_token(persona)}", "X-Proj-Id": selected}
 
-    async def link(self, persona: str, target_id: str, document_id: str, role: str = "correspondence", target_type: str = "variation"):
+    async def link(
+        self, persona: str, target_id: str, document_id: str, role: str = "correspondence",
+        target_type: str = "variation", project: str | None = None,
+    ):
         return await self._client.post(
             f"/api/entities/{target_type}/{target_id}/document-links:batch",
             json={"links": [{"document_id": document_id, "relationship_role": role}]},
-            headers=self.headers(persona),
+            headers=self.headers(persona, project),
         )
 
-    async def forward(self, persona: str, target_id: str, target_type: str = "variation"):
-        return await self._client.get(f"/api/entities/{target_type}/{target_id}/document-links", headers=self.headers(persona))
+    async def forward(self, persona: str, target_id: str, target_type: str = "variation", project: str | None = None):
+        return await self._client.get(
+            f"/api/entities/{target_type}/{target_id}/document-links", headers=self.headers(persona, project)
+        )
 
-    async def reverse(self, persona: str, document_id: str):
-        return await self._client.get(f"/api/documents/{document_id}/entity-links", headers=self.headers(persona))
+    async def reverse(self, persona: str, document_id: str, project: str | None = None):
+        return await self._client.get(f"/api/documents/{document_id}/entity-links", headers=self.headers(persona, project))
 
-    async def remove(self, persona: str, link_id: str, expected_revision: int = 1):
+    async def remove(self, persona: str, link_id: str, expected_revision: int = 1, project: str | None = None):
         return await self._client.post(
             f"/api/document-links/{link_id}:remove",
             json={"reason": "CL-2 verification", "expected_revision": expected_revision},
-            headers=self.headers(persona),
+            headers=self.headers(persona, project),
         )
 
-    async def request(self, method: str, persona: str, path: str, **kwargs: Any):
-        return await self._client.request(method, path, headers=self.headers(persona), **kwargs)
+    async def request(self, method: str, persona: str, path: str, project: str | None = None, **kwargs: Any):
+        return await self._client.request(method, path, headers=self.headers(persona, project), **kwargs)
 
     async def links(self, **query: Any) -> list[dict[str, Any]]:
         return await self.db.entity_document_links.find(query).to_list(length=None)
@@ -557,7 +572,7 @@ def test_isolation_fails_closed_on_every_axis() -> None:
             assert await env.links() == []
 
             # a link in A2, seen from A1's admin
-            foreign = _links(await env.link("superadmin", VAR_A2, DOC_A2_ID))[0]
+            foreign = _links(await env.link("superadmin", VAR_A2, DOC_A2_ID, project=PROJ_A2))[0]
             assert (await env.remove("project_admin", foreign["_id"])).status_code == 403
             assert (await env.request("GET", "project_admin", f"/api/document-links/{foreign['_id']}")).status_code == 403
             assert (await env.remove("foreign_org_admin", foreign["_id"])).status_code == 403

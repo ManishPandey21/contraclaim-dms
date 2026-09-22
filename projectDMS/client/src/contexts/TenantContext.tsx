@@ -13,6 +13,7 @@ import {
 } from "@/services/organizations-api";
 import { listProjects, type Project } from "@/services/projects-api";
 import { getCurrentUserProfile } from "@/services/session-api";
+import { setActiveScope } from "@/services/active-scope";
 
 const ORGANIZATION_STORAGE_KEY = "org_id";
 const PROJECT_STORAGE_KEY = "proj_id";
@@ -42,6 +43,13 @@ function roleList(value: string[] | string | undefined): string[] {
 function storedValue(key: string): string {
   return typeof window === "undefined" ? "" : window.localStorage.getItem(key) || "";
 }
+
+// Until the tenant scope loads, requests carry the persisted selection; the
+// backend validates it. TenantContext is the only writer of the active scope.
+setActiveScope({
+  organizationId: storedValue(ORGANIZATION_STORAGE_KEY),
+  projectId: storedValue(PROJECT_STORAGE_KEY),
+});
 
 export function TenantProvider({ children }: React.PropsWithChildren) {
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -106,6 +114,7 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
         setRoles(nextRoles);
         setOrganizations(availableOrganizations);
         setProjects(availableProjects);
+        setActiveScope({ organizationId, projectId });
         setSelectedOrganizationId(organizationId);
         setSelectedProjectId(projectId);
       } catch {
@@ -160,6 +169,8 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       } else {
         window.localStorage.removeItem(PROJECT_STORAGE_KEY);
       }
+      // Synchronously, before the routed page remounts and fetches.
+      setActiveScope({ organizationId, projectId: firstProjectId });
       setSelectedOrganizationId(organizationId);
       setSelectedProjectId(firstProjectId);
     },
@@ -178,6 +189,8 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
       // synchronously from these storage keys.
       window.localStorage.setItem(ORGANIZATION_STORAGE_KEY, selectedOrganizationId);
       window.localStorage.setItem(PROJECT_STORAGE_KEY, projectId);
+      // Synchronously, before the routed page remounts and fetches.
+      setActiveScope({ organizationId: selectedOrganizationId, projectId });
       setSelectedProjectId(projectId);
       window.dispatchEvent(
         new CustomEvent("tenant-context-changed", {

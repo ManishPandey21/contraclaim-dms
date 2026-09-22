@@ -27,6 +27,8 @@ const MOCKED_SUITES = [
   "**/contract-master.spec.ts",
   "**/security-terms-acceptance.spec.ts",
   "**/correspondence-linking.spec.ts",
+  "**/hindrance-register.spec.ts",
+  "**/cl3a-cross-register-scope.spec.ts",
 ];
 
 export default defineConfig({
