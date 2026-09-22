@@ -9,6 +9,11 @@ razorpay==1.4.2
 # minor bump inside its own major. Recorded as exact pins because this file
 # pins everything - a floor here would let the audited set drift.
 anyio==4.15.1
+# Imported inside BulkUploadService._async_process_single_document_with_metadata
+# to retry create_document on AutoReconnect/NetworkTimeout. Nothing else in this
+# manifest requires it, so until it was pinned here the backend image and the CI
+# install carried no backoff at all and that path raised ModuleNotFoundError.
+backoff==2.2.1
 bcrypt==4.2.1
 APScheduler==3.10.4
 beanie==1.29.0
