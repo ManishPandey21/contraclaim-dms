@@ -349,6 +349,7 @@ class RetryHarness:
         min_text_chars: int,
         batch_size: int,
         fallback_ladder: Any = None,
+        escalate_pages: Optional[set] = None,
     ) -> None:
         self.db = db
         self.service = service
@@ -359,6 +360,7 @@ class RetryHarness:
         self.min_text_chars = min_text_chars
         self.batch_size = batch_size
         self.fallback_ladder = fallback_ladder
+        self.escalate_pages = set(escalate_pages or ())
         self.database_services: List[FakeDatabaseService] = []
         self.attempt = 0
         self.gate_assessed: List[List[int]] = []
@@ -374,6 +376,7 @@ class RetryHarness:
         min_text_chars: int = 10,
         batch_size: int = 1,
         fallback_ladder: Any = None,
+        escalate_pages: Optional[set] = None,
     ) -> "RetryHarness":
         source = build_page_text_map_pdf(
             tmp_path / "letter.pdf", page_lines=page_lines
@@ -401,6 +404,7 @@ class RetryHarness:
             min_text_chars=min_text_chars,
             batch_size=batch_size,
             fallback_ladder=fallback_ladder,
+            escalate_pages=escalate_pages,
         )
         harness._install(monkeypatch)
         return harness
@@ -436,7 +440,7 @@ class RetryHarness:
         processor.database_service = database_service
         processor.file_service = SimpleNamespace(save_summary=_async_none)
         processor.pydantic_ai_service = SimpleNamespace(is_enabled=False)
-        processor.quality_gate = _RecordingGate(self.gate_assessed)
+        processor.quality_gate = _RecordingGate(self.gate_assessed, self.escalate_pages)
         processor.fallback_ladder = self.fallback_ladder
         processor.fallback_max_pages_per_document = 5 if self.fallback_ladder else 0
         processor.source_kind_router = SourceKindRouter
@@ -502,16 +506,41 @@ class RetryHarness:
 
 
 class _RecordingGate(ExtractionQualityGate):
-    """The real gate; records which page numbers it was asked to assess."""
+    """The real gate; records which page numbers it was asked to assess.
 
-    def __init__(self, sink: List[List[int]]) -> None:
+    `escalate` forces a FAIL for the named pages, which is how a test reaches
+    the review path without having to hand-build a document the deterministic
+    checks happen to reject.
+    """
+
+    def __init__(self, sink: List[List[int]], escalate: Optional[set] = None) -> None:
         super().__init__()
         self._sink = sink
+        self._escalate = set(escalate or ())
 
     def assess(self, page: Any, *, tables: Any = None) -> Any:
         if self._sink:
             self._sink[-1].append(page.number)
-        return super().assess(page, tables=tables)
+        verdict = super().assess(page, tables=tables)
+        if page.number in self._escalate:
+            from rbac_backend.services.extraction.quality.models import (
+                CheckResult,
+                QualityVerdict,
+                Verdict,
+            )
+
+            return QualityVerdict(
+                verdict=Verdict.FAIL,
+                checks=[
+                    CheckResult(
+                        name="row_identity",
+                        verdict=Verdict.FAIL,
+                        detail="forced by the harness",
+                    )
+                ],
+                reasons=["forced by the harness"],
+            )
+        return verdict
 
 
 async def _async_none(*args: Any, **kwargs: Any) -> None:

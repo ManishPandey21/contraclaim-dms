@@ -67,16 +67,18 @@ class InconsistentExtractionRunError(RuntimeError):
         expected_page_numbers: Sequence[int],
         persisted_page_numbers: Sequence[int],
         missing_page_numbers: Sequence[int],
+        reason: str = "pages this retry was told were resolved are absent",
     ) -> None:
         self.extraction_run_id = extraction_run_id
         self.expected_page_numbers = list(expected_page_numbers)
         self.persisted_page_numbers = list(persisted_page_numbers)
         self.missing_page_numbers = list(missing_page_numbers)
+        self.reason = reason
         super().__init__(
-            f"Extraction run {extraction_run_id!r} is missing page(s) "
-            f"{self.missing_page_numbers} that this retry was told were already "
-            f"resolved (expected={self.expected_page_numbers}, "
-            f"persisted={self.persisted_page_numbers})"
+            f"Extraction run {extraction_run_id!r} cannot be assembled: {reason}. "
+            f"missing={self.missing_page_numbers} "
+            f"expected={self.expected_page_numbers} "
+            f"persisted={self.persisted_page_numbers}"
         )
 
 

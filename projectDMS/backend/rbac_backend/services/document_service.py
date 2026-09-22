@@ -1193,6 +1193,16 @@ class DocumentService:
             checkpoint = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
             checkpoint_state = checkpoint.get("processing_state")
             if checkpoint_state == ProcessingState.PARTIALLY_PROCESSED.value:
+                if not list(checkpoint.get("remaining_page_numbers") or []):
+                    # Partial with nothing outstanding means the quality gate,
+                    # not an unextracted page, held this document back. A
+                    # resume would re-extract every page of the run to reach
+                    # the same verdict - and a resumed attempt with no retry
+                    # set rewrites every row of the run to do it. That is the
+                    # page-loss path this pipeline must not have, so it goes to
+                    # the person the gate was asking for.
+                    await self._mark_human_review(job_id, document_id, checkpoint)
+                    return False
                 await self._schedule_page_resume(job_id, document_id, checkpoint)
                 return False
             if checkpoint_state == ProcessingState.HUMAN_REVIEW_REQUIRED.value:
@@ -1249,6 +1259,17 @@ class DocumentService:
             return True
 
         latest = await db.document_processing_jobs.find_one({"_id": job_id})
+        if (
+            latest
+            and latest.get("processing_state")
+            == ProcessingState.HUMAN_REVIEW_REQUIRED.value
+        ):
+            # The attempt failed in a way no retry can heal - an extraction run
+            # whose page evidence and checkpoint disagree. Retrying would burn
+            # the remaining attempts re-deriving the same answer, so this goes
+            # straight to the terminal state a person can act on.
+            await self._mark_human_review(job_id, document_id, latest)
+            return False
         if latest and latest.get("status") not in {"failed", "retrying", "dead_lettered"}:
             failure_message = "Document processing failed"
             latest_error = latest.get("error")
@@ -1285,8 +1306,17 @@ class DocumentService:
                 "$inc": {"resume_count": 1},
             },
         )
+        # `partially_processed` is a consumable status, so it must never be
+        # written over a block the quality gate just decided: between resume
+        # attempts the document's text would otherwise be served to retrieval
+        # and drafting while a page was still failing review.
         await db.documents.update_one(
-            {"_id": self._validate_document_id(document_id)},
+            {
+                "_id": self._validate_document_id(document_id),
+                "processing_status": {
+                    "$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                },
+            },
             {
                 "$set": {
                     "processing_status": ProcessingState.PARTIALLY_PROCESSED.value,
@@ -1504,6 +1534,35 @@ class DocumentService:
             except Exception:
                 logger.exception(
                     "Unable to persist stored-only state for job %s", job_id
+                )
+            return
+
+        # A processor-declared terminal review state, such as an extraction run
+        # whose page evidence contradicts this job's checkpoint. Recorded with
+        # the pages it could not account for, and deliberately not retried:
+        # every further attempt would reach the same contradiction.
+        if (
+            getattr(result, "processing_state", None)
+            == ProcessingState.HUMAN_REVIEW_REQUIRED.value
+        ):
+            try:
+                await db.document_processing_jobs.update_one(
+                    {"_id": job_id},
+                    {
+                        "$set": {
+                            "processing_state": (
+                                ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                            ),
+                            "remaining_page_numbers": list(
+                                getattr(result, "pages_human_review", []) or []
+                            ),
+                            "updated_at": datetime.utcnow(),
+                        }
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Unable to persist human-review state for job %s", job_id
                 )
             return
 

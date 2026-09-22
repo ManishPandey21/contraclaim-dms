@@ -26,6 +26,7 @@ from ..extraction.models import (
     PageSource,
     PageStatus,
 )
+from ..extraction.page_store import InconsistentExtractionRunError
 
 DOCUMENT_OCR_PAGES = "document_ocr_pages"
 DOCUMENT_OCR_BATCHES = "document_ocr_batches"
@@ -76,6 +77,32 @@ def to_document_page_record(
     }
 
 
+class MalformedPageRecordError(ValueError):
+    """A persisted page row cannot be rebuilt into a page.
+
+    Distinct from a missing row and deliberately not defaulted away: a row
+    whose status, source or class is absent or unrecognised carries no usable
+    claim about whether that page is resolved, and guessing one would be the
+    same silent corruption as overwriting it.
+    """
+
+    def __init__(self, *, page_number: int, field: str, value: Any) -> None:
+        self.page_number = page_number
+        self.field = field
+        super().__init__(
+            f"page {page_number} has an unusable {field} value {value!r}"
+        )
+
+
+def _coerce(enum_type: Any, value: Any, *, page_number: int, field: str) -> Any:
+    try:
+        return enum_type(value)
+    except (ValueError, TypeError) as exc:
+        raise MalformedPageRecordError(
+            page_number=page_number, field=field, value=value
+        ) from exc
+
+
 def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
     """Rebuild the page an earlier attempt recorded, with its evidence intact.
 
@@ -86,8 +113,14 @@ def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
     `original_text` is what extraction first read, and maps back to the page's
     own `raw_text`.
     """
+    number = int(record.get("page_number") or 0)
     classification = PageClassification(
-        page_class=PageClass(record.get("page_class") or PageClass.TEXT_NATIVE.value),
+        page_class=_coerce(
+            PageClass,
+            record.get("page_class"),
+            page_number=number,
+            field="page_class",
+        ),
         char_count=int(record.get("char_count") or 0),
         image_count=int(record.get("image_count") or 0),
         image_coverage=float(record.get("image_coverage") or 0.0),
@@ -97,19 +130,28 @@ def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
         rotation=int(record.get("rotation") or 0),
     )
     return ExtractedPage(
-        number=int(record.get("page_number") or 0),
+        number=number,
         text=record.get("raw_text") or "",
-        source=PageSource(record.get("source") or PageSource.EMPTY.value),
-        status=PageStatus(record.get("status") or PageStatus.OCR_PENDING.value),
+        source=_coerce(
+            PageSource, record.get("source"), page_number=number, field="source"
+        ),
+        status=_coerce(
+            PageStatus, record.get("status"), page_number=number, field="status"
+        ),
         classification=classification,
-        tables=list(record.get("tables") or []),
+        # Copied, not aliased: a carried page must not share structure with the
+        # record it was read from, or a later in-place edit would silently
+        # rewrite evidence nobody meant to touch.
+        tables=[[list(row) for row in table] for table in (record.get("tables") or [])],
         batch_id=record.get("batch_id"),
         error=record.get("error"),
         quality_verdict=record.get("quality_verdict"),
-        quality_checks=list(record.get("quality_checks") or []),
+        quality_checks=[dict(check) for check in (record.get("quality_checks") or [])],
         needs_review=bool(record.get("needs_review")),
         raw_text=record.get("original_text"),
-        applied_repairs=list(record.get("applied_repairs") or []),
+        applied_repairs=[
+            dict(repair) for repair in (record.get("applied_repairs") or [])
+        ],
     )
 
 
@@ -236,11 +278,32 @@ class DocumentPageStore:
                 "extraction_run_id": self.extraction_run_id,
             }
         )
-        records = await cursor.sort("page_number", 1).to_list(length=None)
-        return [
-            from_document_page_record(record)
-            for record in sorted(records, key=lambda item: item.get("page_number") or 0)
-        ]
+        records = sorted(
+            await cursor.sort("page_number", 1).to_list(length=None),
+            key=lambda item: item.get("page_number") or 0,
+        )
+
+        pages: List[ExtractedPage] = []
+        malformed: List[int] = []
+        for record in records:
+            try:
+                pages.append(from_document_page_record(record))
+            except MalformedPageRecordError as exc:
+                malformed.append(exc.page_number)
+        if malformed:
+            # Fail closed with the same typed error a missing row raises: a row
+            # that cannot be read is not a page that can be carried, and
+            # dropping it would silently shorten the run.
+            raise InconsistentExtractionRunError(
+                extraction_run_id=self.extraction_run_id,
+                expected_page_numbers=[
+                    int(record.get("page_number") or 0) for record in records
+                ],
+                persisted_page_numbers=[page.number for page in pages],
+                missing_page_numbers=malformed,
+                reason="page records in this run cannot be read",
+            )
+        return pages
 
     async def publish_run(
         self, *, expected_page_numbers: Sequence[int], session: Any = None

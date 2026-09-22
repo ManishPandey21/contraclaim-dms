@@ -58,6 +58,7 @@ _UNRESOLVED_STATUSES = {
     PageStatus.OCR_DEFERRED,
     PageStatus.OCR_DISABLED,
     PageStatus.OCR_EMPTY,
+    PageStatus.OCR_PENDING,
     PageStatus.UNRENDERABLE,
 }
 
@@ -114,8 +115,43 @@ class PageExtractionEngine:
         native = await asyncio.to_thread(self._read_native_pages, source)
 
         retry_set = {int(page) for page in (retry_pages or []) if int(page) > 0}
+
+        # What this run already holds decides what this attempt may change.
+        # Keying that on retry_pages alone was not enough: an attempt that
+        # crashed after writing its pages but before its checkpoint leaves the
+        # job with an empty remaining list, and the next attempt - carrying no
+        # retry pages at all - would re-extract and replace every resolved row
+        # of the same run. The run, not the retry list, is the authority.
+        stored: Dict[int, ExtractedPage] = {}
+        if _is_resumable(self.store):
+            stored = {page.number: page for page in await self.store.load_run_pages()}
+        elif retry_set:
+            logger.warning(
+                "Retrying pages %s of %s against a page store with no "
+                "run-scoped read: every page of this run will be rewritten "
+                "from this attempt",
+                sorted(retry_set),
+                source.name,
+            )
+
+        mutable = (
+            self._mutable_page_numbers(
+                native_numbers=sorted(native), stored=stored, retry_set=retry_set
+            )
+            if _is_resumable(self.store)
+            else None
+        )
+
         if retry_set:
             candidates = [number for number in sorted(native) if number in retry_set]
+        elif mutable is not None:
+            candidates = [
+                number
+                for number, (text, classification, _) in sorted(native.items())
+                if number in mutable
+                and classification.page_class is not PageClass.UNRENDERABLE
+                and len(text.strip()) < self.policy.min_text_chars_per_page
+            ]
         else:
             candidates = [
                 number
@@ -153,13 +189,16 @@ class PageExtractionEngine:
                 )
 
         pages = self._merge(native, overrides, statuses)
-        if retry_set and _is_resumable(self.store):
-            # A retry mutates only the pages it was asked to re-run. Everything
-            # else is read back from the run it belongs to, so an already
-            # resolved page is never rewritten - and never rewritten with the
-            # empty native text this attempt just re-read for it.
+        if mutable is not None:
+            # This attempt mutates only the pages it may. Everything else is
+            # read back from the run it belongs to, so an already resolved page
+            # is never rewritten - and never rewritten with the empty native
+            # text this attempt just re-read for it.
             pages = await self._assemble_cumulative_run(
-                pages, expected=sorted(native), retry_set=retry_set
+                pages,
+                native_numbers=sorted(native),
+                stored=stored,
+                mutable=mutable,
             )
         else:
             await self.store.record_pages(pages)
@@ -185,12 +224,43 @@ class PageExtractionEngine:
             engine_version=ENGINE_VERSION,
         )
 
+    def _mutable_page_numbers(
+        self,
+        *,
+        native_numbers: Sequence[int],
+        stored: Dict[int, ExtractedPage],
+        retry_set: set,
+    ) -> Optional[set]:
+        """Which pages this attempt is allowed to change.
+
+        ``None`` means "everything this attempt produced is this attempt's" -
+        a first attempt against an empty run. Callers pass ``None`` for a store
+        with no run-scoped read as well, so the contract adapter and the
+        in-memory stores keep exactly the behaviour they had.
+
+        With a retry list, only those pages. Without one, against a run that
+        already holds rows, every page the run has *not* yet resolved: a
+        resumed attempt may finish unresolved work but may not undo finished
+        work, which is what makes resolved pages monotonic across attempts.
+        """
+        if retry_set:
+            return set(retry_set)
+        if not stored:
+            return None
+        return {
+            number
+            for number in native_numbers
+            if number not in stored
+            or stored[number].status in _UNRESOLVED_STATUSES
+        }
+
     async def _assemble_cumulative_run(
         self,
         produced: Sequence[ExtractedPage],
         *,
-        expected: Sequence[int],
-        retry_set: set,
+        native_numbers: Sequence[int],
+        stored: Dict[int, ExtractedPage],
+        mutable: set,
     ) -> List[ExtractedPage]:
         """Persist this attempt's pages, then return the whole run in order.
 
@@ -199,26 +269,49 @@ class PageExtractionEngine:
         see every page the run has resolved so far, assembled by page number,
         while the store holds exactly one row per page and this attempt only
         replaced the rows it actually re-extracted.
-        """
-        fresh = {page.number: page for page in produced if page.number in retry_set}
-        await self.store.record_pages([fresh[number] for number in sorted(fresh)])
 
-        stored = {page.number: page for page in await self.store.load_run_pages()}
+        The run's page identity is the union of what this attempt read, what
+        the run already holds and what it was asked to retry - deliberately
+        not just this attempt's read. Taking the read alone would let a source
+        that now yields fewer pages silently drop the rest of the run and
+        still report a complete extraction, which is the same class of silent
+        loss as overwriting a resolved page.
+
+        Both consistency checks run before anything is written, so an attempt
+        that cannot honour the run does not mutate it first.
+        """
+        readable = set(native_numbers)
+        run_numbers = sorted(set(stored) | readable | set(mutable))
+
+        unreadable = [number for number in run_numbers if number not in readable]
+        if unreadable:
+            raise InconsistentExtractionRunError(
+                extraction_run_id=getattr(self.store, "extraction_run_id", None),
+                expected_page_numbers=run_numbers,
+                persisted_page_numbers=sorted(stored),
+                missing_page_numbers=unreadable,
+                reason="this attempt's read of the source no longer covers the run",
+            )
+
+        fresh = {page.number: page for page in produced if page.number in mutable}
         missing = [
             number
-            for number in expected
+            for number in run_numbers
             if number not in fresh and number not in stored
         ]
         if missing:
             raise InconsistentExtractionRunError(
                 extraction_run_id=getattr(self.store, "extraction_run_id", None),
-                expected_page_numbers=list(expected),
+                expected_page_numbers=run_numbers,
                 persisted_page_numbers=sorted(stored),
                 missing_page_numbers=missing,
+                reason="pages this attempt was told were resolved are absent",
             )
 
+        await self.store.record_pages([fresh[number] for number in sorted(fresh)])
+
         pages: List[ExtractedPage] = []
-        for number in expected:
+        for number in run_numbers:
             if number in fresh:
                 pages.append(fresh[number])
                 continue

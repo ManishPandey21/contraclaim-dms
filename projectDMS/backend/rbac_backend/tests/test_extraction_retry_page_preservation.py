@@ -329,3 +329,177 @@ async def test_a_retry_whose_earlier_page_row_vanished_fails_instead_of_regenera
     # document text was rewritten from an incomplete run.
     assert len(harness.saves()) == saves_before
     assert (await harness.document())["processing_status"] != "completed"
+
+
+# --- An attempt that carries no retry list is still bound by the run ------
+
+
+async def test_an_attempt_after_a_lost_checkpoint_keeps_the_resolved_pages(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The crash window: pages written, checkpoint never reached.
+
+    `_checkpoint_extraction_attempt` returns early when the processor produced
+    no extraction result, so a failure after the page write leaves the job with
+    an empty `remaining_page_numbers`. The next attempt therefore carries no
+    retry list at all - and must still not rewrite what the run resolved.
+    """
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await harness.run_attempt()
+    before = await harness.page_state()
+
+    await harness.db.document_processing_jobs.update_one(
+        {"_id": harness.job_id}, {"$set": {"remaining_page_numbers": []}}
+    )
+    # This attempt has no OCR answers scripted at all, so anything it is
+    # allowed to re-extract comes back empty.
+    await harness.run_attempt()
+    after = await harness.page_state()
+
+    assert after[1] == before[1]
+    assert after[1]["text"] == OCR_ONE
+    assert after[3] == before[3]
+    assert OCR_ONE in harness.full_text()
+
+
+async def test_an_attempt_without_a_retry_list_may_still_finish_unresolved_pages(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    harness = await RetryHarness.create(
+        tmp_path,
+        monkeypatch,
+        page_lines=_TWO_SCANS_ONE_NATIVE,
+        script={
+            1: {1: OCR_ONE, 2: RuntimeError("OCRmyPDF batch failed (exit=2)")},
+            2: {2: OCR_TWO},
+        },
+    )
+    await harness.run_attempt()
+    await harness.db.document_processing_jobs.update_one(
+        {"_id": harness.job_id}, {"$set": {"remaining_page_numbers": []}}
+    )
+
+    await harness.run_attempt()
+    pages = await harness.page_state()
+
+    # Page 2 was still unresolved, so it is re-extracted and recovered...
+    assert pages[2]["text"] == OCR_TWO
+    # ...while page 1 is not re-OCR'd at all.
+    assert harness.runner.requested_by_attempt[2] == [[2]]
+    assert pages[1]["text"] == OCR_ONE
+
+
+async def test_a_source_that_lost_pages_fails_closed_instead_of_truncating(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from rbac_backend.tests.fixtures.pdf_builders import build_page_text_map_pdf
+
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await harness.run_attempt()
+    before = await harness.page_state()
+
+    # The file now reads as two pages: page 3's evidence is no longer covered.
+    build_page_text_map_pdf(harness.source, page_lines=[None, None])
+    saves_before = len(harness.saves())
+    completed = await harness.run_attempt()
+
+    job = await harness.job()
+    assert completed is False
+    assert job["processing_state"] != "completed"
+    # Nothing was re-indexed from the truncated read...
+    assert len(harness.saves()) == saves_before
+    # ...and the run's own evidence is untouched.
+    assert await harness.page_state() == before
+
+
+async def test_an_unreadable_page_row_fails_closed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await harness.run_attempt()
+
+    rows = harness.db["document_ocr_pages"]
+    for row in rows.docs.values():
+        if row["page_number"] == 1:
+            row["status"] = "a_status_no_version_of_this_code_wrote"
+
+    saves_before = len(harness.saves())
+    completed = await harness.run_attempt()
+    job = await harness.job()
+
+    assert completed is False
+    assert job["processing_state"] == "human_review_required"
+    assert len(harness.saves()) == saves_before
+
+
+async def test_an_inconsistent_run_goes_to_review_instead_of_burning_attempts(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await harness.run_attempt()
+
+    pages = harness.db["document_ocr_pages"]
+    for key, row in list(pages.docs.items()):
+        if row["page_number"] == 1:
+            del pages.docs[key]
+
+    await harness.run_attempt()
+
+    job = await harness.job()
+    stored = await harness.document()
+
+    # Terminal, not "retrying": another attempt would re-derive the same
+    # contradiction and dead-letter the job with an opaque message.
+    assert job["status"] == "human_review_required"
+    assert job["processing_state"] == "human_review_required"
+    assert stored["processing_status"] == "human_review_required"
+    assert stored["processing_error"]["pages"] == [1]
+
+
+# --- The gate's own state across attempts --------------------------------
+
+
+async def test_a_carried_page_that_was_never_assessed_is_still_assessed(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    harness = await _partial_then_recovered(tmp_path, monkeypatch)
+    await harness.run_attempt()
+
+    # A row the engine wrote whose verdict never landed: unassessed, not clean.
+    for row in harness.db["document_ocr_pages"].docs.values():
+        if row["page_number"] == 1:
+            row["quality_verdict"] = None
+
+    await harness.run_attempt()
+
+    assert 1 in harness.gate_assessed[1]
+    pages = await harness.page_state()
+    assert pages[1]["quality_verdict"] is not None
+    assert pages[1]["text"] == OCR_ONE
+
+
+async def test_a_review_blocked_document_is_not_made_consumable_by_a_resume(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Page 2 still owes work, so the job resumes - but page 1 failed review.
+
+    `partially_processed` is a consumable status, so writing it over the block
+    would serve a gate-failed document's text to retrieval and drafting for as
+    long as the resumes continue.
+    """
+    harness = await RetryHarness.create(
+        tmp_path,
+        monkeypatch,
+        page_lines=[[NATIVE_THREE], None],
+        script={1: {2: RuntimeError("OCRmyPDF batch failed (exit=2)")}},
+        escalate_pages={1},
+    )
+
+    completed = await harness.run_attempt()
+    stored = await harness.document()
+    job = await harness.job()
+
+    assert completed is False
+    assert job["remaining_page_numbers"] == [2]
+    assert stored["processing_status"] == "human_review_required"
+    assert stored["processing_status"] != "partially_processed"
