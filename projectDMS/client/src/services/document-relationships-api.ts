@@ -27,7 +27,21 @@ export type DocumentRelationshipRole =
   | "eot_determination"
   | "engineer_determination"
   | "policy"
-  | "certificate";
+  | "certificate"
+  | "variation_submission"
+  | "variation_approval";
+
+export { CORRESPONDENCE_ROLES, isCorrespondenceRole } from "@/lib/relationship-roles";
+
+export const VARIATION_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
+  value: DocumentRelationshipRole;
+  label: string;
+}> = [
+  { value: "correspondence", label: "Correspondence" },
+  { value: "variation_submission", label: "Variation submission" },
+  { value: "variation_approval", label: "Variation approval" },
+  { value: "supporting_document", label: "Supporting document" },
+];
 
 export const INSURANCE_DOCUMENT_RELATIONSHIP_ROLES: ReadonlyArray<{
   value: DocumentRelationshipRole;
@@ -170,12 +184,21 @@ export async function removeDocumentLink(
   return data?.link as DocumentRelationship;
 }
 
+export type LinkableUploadType = "incoming" | "outgoing" | "contract" | "correspondence";
+
 export async function searchLinkableDocuments(params: {
-  q: string;
+  q?: string;
   organization_id?: string;
   project_id?: string;
   /** "correspondence" matches incoming or outgoing Documents only. */
-  uploadType?: "incoming" | "outgoing" | "contract" | "correspondence";
+  uploadType?: LinkableUploadType;
+  /** Exact letter number (case-insensitive on the server). */
+  letterNo?: string;
+  /** Subject contains (case-insensitive). */
+  subject?: string;
+  /** ISO dates (YYYY-MM-DD), inclusive, on the Document date. */
+  date_from?: string;
+  date_to?: string;
   limit?: number;
   skip?: number;
 }) {
@@ -190,4 +213,27 @@ export async function listDocumentEntityLinks(documentId: string) {
     `/documents/${encodeURIComponent(documentId)}/entity-links`,
   );
   return (data?.links ?? []) as DocumentRelationship[];
+}
+
+/** A register record the caller may link a Document to (server: link_targets_for_document). */
+export interface DocumentLinkTarget {
+  target_type: string;
+  target_id: string;
+  label: string;
+  route: string;
+  allowed_roles: string[];
+  frozen: boolean;
+  parent_type?: string | null;
+  parent_id?: string | null;
+}
+
+export async function listDocumentLinkTargets(
+  documentId: string,
+  params: { target_type: string; q?: string; limit?: number },
+) {
+  const { data } = await api.get(
+    `/documents/${encodeURIComponent(documentId)}/link-targets`,
+    { params },
+  );
+  return (data?.targets ?? []) as DocumentLinkTarget[];
 }

@@ -97,6 +97,44 @@ jobs:
       - name: Run backend test suite
         working-directory: projectDMS
         run: python -m pytest backend/rbac_backend/tests -q
+      # The canonical-relationship suites need transactions, which the `mongo`
+      # service above (a standalone mongod) cannot give, so in the step above they
+      # skip. CL-2: a disposable single-node replica set, used by these suites
+      # only, turns that skip into real evidence - and the step fails if they
+      # skip anyway, so a green run can never mean "not exercised".
+      - name: Start a disposable single-node replica set
+        shell: bash
+        run: |
+          docker run -d --name mongo-rs -p 27018:27017 mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'try { rs.status().ok } catch (e) { rs.initiate({_id: "rs0", members: [{_id: 0, host: "localhost:27017"}]}).ok }' 2>/dev/null | grep -q 1; then
+              break
+            fi
+            sleep 2
+          done
+          for attempt in $(seq 1 30); do
+            if docker exec mongo-rs mongosh --quiet --eval 'db.hello().isWritablePrimary' 2>/dev/null | grep -q true; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "the replica set never elected a writable primary" >&2
+          exit 1
+      - name: Run the real-Mongo relationship suites (must run, not skip)
+        working-directory: projectDMS
+        shell: bash
+        env:
+          RELATIONSHIP_CL1_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          RELATIONSHIP_CL2_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+        run: |
+          python -m pytest -q -rs \
+            backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py \
+            backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py \
+            | tee real-mongo-relationships.log
+          if grep -qE "[0-9]+ skipped" real-mongo-relationships.log; then
+            echo "real-Mongo relationship suites skipped: no transaction evidence" >&2
+            exit 1
+          fi
 
   frontend-checks:
     name: Frontend lint, tests, and build

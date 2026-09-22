@@ -74,4 +74,27 @@ describe("KeyDateDetailPage achievement evidence", () => {
     expect(evidence).toHaveAttribute("data-default-role", "contractor_notification");
     expect(screen.queryByText("legacy-must-not-render")).not.toBeInTheDocument();
   });
+
+  it("focuses the achievement evidence named by the achievement_id deep link", async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const { container } = render(
+      <MemoryRouter initialEntries={["/key-dates/kd-1?achievement_id=kd-1:ach"]}>
+        <Routes><Route path="/key-dates/:id" element={<KeyDateDetailPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByTestId("achievement-evidence")).toHaveAttribute("data-target-id", "kd-1:ach");
+    expect(container.querySelector("#achievement-evidence")).toHaveAttribute("data-focused", "true");
+    expect(scrollIntoView).toHaveBeenCalled();
+  });
+
+  it("does not focus anything without a matching deep link", async () => {
+    const { container } = render(
+      <MemoryRouter initialEntries={["/key-dates/kd-1?achievement_id=other:ach"]}>
+        <Routes><Route path="/key-dates/:id" element={<KeyDateDetailPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByTestId("achievement-evidence");
+    expect(container.querySelector("#achievement-evidence")).not.toHaveAttribute("data-focused");
+  });
 });

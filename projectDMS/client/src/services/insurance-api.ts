@@ -102,6 +102,11 @@ export async function getInsurance(params?: {
   return Array.isArray(data) ? data.map(norm) : [];
 }
 
+export async function getInsuranceById(id: string): Promise<InsuranceDTO> {
+  const { data } = await api.get(`/insurance/${encodeURIComponent(id)}`);
+  return norm(data);
+}
+
 export async function getInsuranceSummary(params?: {
   project_id?: string;
   organization_id?: string;

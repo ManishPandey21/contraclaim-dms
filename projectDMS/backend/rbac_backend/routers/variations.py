@@ -15,8 +15,12 @@ from ..models.variation import (
     VariationSummary,
     VariationUpdate,
 )
+from ..services.document_relationship_service import (
+    DocumentRelationshipError,
+    DocumentRelationshipService,
+)
 from ..services.policy_service import PolicyService
-from ..services.variation_service import VariationService
+from ..services.variation_service import LEGACY_WRITE_REFUSAL, VariationService
 
 router = APIRouter()
 
@@ -31,6 +35,42 @@ async def _load(variation_id: str, permission: str, db, current_user, policy) ->
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Variation not found")
     await policy.authorize_document(current_user, permission, v, resource_type="variation")
     return v
+
+
+async def _present_variation(variation: dict, db, current_user: CurrentUser) -> Variation:
+    """``linked_document_ids`` as the viewer may see it: canonical + legacy ids
+    whose Document is in the Variation's own scope and currently viewable."""
+    presented = dict(variation)
+    try:
+        presented["linked_document_ids"] = await DocumentRelationshipService(db).authorized_document_ids(
+            current_user,
+            "variation",
+            str(variation.get("_id") or ""),
+            legacy_document_ids=variation.get("linked_document_ids") or [],
+        )
+    except DocumentRelationshipError as exc:
+        # A legacy row without an explicit organisation/project can hold no
+        # canonical link (409 from the relationship service). The record itself
+        # was already authorized by the caller, so it must stay readable - with
+        # no Documents presented, never with its raw array.
+        if exc.status_code != status.HTTP_409_CONFLICT:
+            raise
+        presented["linked_document_ids"] = []
+    return Variation(**presented)
+
+
+async def _present_variations(variations: list[dict], db, current_user: CurrentUser) -> list[Variation]:
+    ids_by_variation = await DocumentRelationshipService(db).authorized_document_ids_for_targets(
+        current_user, "variation", variations
+    )
+    return [
+        Variation(**{**v, "linked_document_ids": ids_by_variation.get(str(v.get("_id") or ""), [])})
+        for v in variations
+    ]
+
+
+def _refuse_legacy_write() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=LEGACY_WRITE_REFUSAL)
 
 
 @router.get("/variations", response_model=List[Variation])
@@ -56,7 +96,7 @@ async def list_variations(
         scope, project_id=project_id, contract_id=contract_id,
         status=status_filter, variation_type=variation_type, skip=skip, limit=limit,
     )
-    return [Variation(**v) for v in items]
+    return await _present_variations(items, db, current_user)
 
 
 @router.get("/variations/summary", response_model=VariationSummary)
@@ -114,8 +154,12 @@ async def create_variation(
         current_user, Permissions.VARIATION_CREATE, resource_type="variation",
         organization_id=org, project_id=payload.project_id,
     )
+    # Raw ids carry no role and were never authorized against the Document:
+    # refused before anything is written. An empty array is a no-op.
+    if payload.linked_document_ids:
+        raise _refuse_legacy_write()
     created = await VariationService(db).create(payload, current_user)
-    return Variation(**created)
+    return await _present_variation(created, db, current_user)
 
 
 @router.get("/variations/{variation_id}", response_model=Variation)
@@ -125,7 +169,9 @@ async def get_variation(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
 ):
-    return Variation(**await _load(variation_id, Permissions.VARIATION_VIEW, db, current_user, policy))
+    return await _present_variation(
+        await _load(variation_id, Permissions.VARIATION_VIEW, db, current_user, policy), db, current_user
+    )
 
 
 @router.put("/variations/{variation_id}", response_model=Variation)
@@ -141,8 +187,20 @@ async def update_variation(
     if payload.status in {"approved", "rejected"}:
         perm = Permissions.VARIATION_APPROVE
     v = await _load(variation_id, perm, db, current_user, policy)
-    updated = await VariationService(db).update(v, payload.model_dump(exclude_unset=True), current_user)
-    return Variation(**(updated or v))
+    changes = payload.model_dump(exclude_unset=True)
+    if "linked_document_ids" in changes:
+        requested = changes.pop("linked_document_ids")
+        # Echoing back exactly what this caller was shown (a client that PUTs the
+        # whole record it read) is compatible and ignored. Anything else - adding,
+        # forging, clearing, or guessing the raw stored array - is a relationship
+        # write and goes through the canonical endpoint. Comparing with the
+        # presented ids, never the raw array, keeps this from becoming an oracle
+        # for legacy ids the caller may not see.
+        shown = set((await _present_variation(v, db, current_user)).linked_document_ids)
+        if requested is None or {str(item) for item in requested} != shown:
+            raise _refuse_legacy_write()
+    updated = await VariationService(db).update(v, changes, current_user)
+    return await _present_variation(updated or v, db, current_user)
 
 
 @router.delete("/variations/{variation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -153,5 +211,8 @@ async def delete_variation(
     policy: PolicyService = Depends(get_policy),
 ):
     v = await _load(variation_id, Permissions.VARIATION_DELETE, db, current_user, policy)
-    await VariationService(db).delete(v, current_user)
+    try:
+        await VariationService(db).delete(v, current_user, policy=policy)
+    except DocumentRelationshipError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return None

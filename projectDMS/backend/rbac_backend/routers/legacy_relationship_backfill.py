@@ -37,6 +37,10 @@ from ..services.key_date_document_link_migration import (
 from ..services.insurance_document_link_migration import (
     classify_legacy_insurance_evidence,
 )
+from ..services.variation_document_link_migration import (
+    SOURCE_KINDS as VARIATION_SOURCE_KINDS,
+    classify_legacy_variation_links,
+)
 from ..services.legacy_relationship_backfill import (
     LegacyBackfillError,
     BackfillCapability,
@@ -118,6 +122,15 @@ _MODULES: dict[str, LegacyBackfillModule] = {
         classify=classify_legacy_insurance_evidence,
         source_kinds=frozenset({"legacy_linked_document_id"}),
         classifier_kwargs=lambda: {"legacy_root": _legacy_insurance_root()},
+    ),
+    # CL-2. Both legacy fields are writable sources: every candidate is
+    # re-resolved to one exact in-scope Document, and the Variation itself is
+    # the target (it has no child events). The classifier resolves a role only
+    # where the evidence fixes it; everything else needs an operator's choice.
+    "variation": LegacyBackfillModule(
+        module="variation",
+        classify=classify_legacy_variation_links,
+        source_kinds=VARIATION_SOURCE_KINDS,
     ),
 }
 

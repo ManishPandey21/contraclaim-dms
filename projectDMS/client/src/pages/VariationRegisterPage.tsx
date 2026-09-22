@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -45,12 +46,13 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Download, Edit, GitCompareArrows, Loader2, PlusCircle, Trash2 } from "lucide-react";
+import { Download, Edit, GitCompareArrows, Link2, Loader2, PlusCircle, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   createVariation,
   deleteVariation,
   exportVariations,
+  getVariation,
   getVariations,
   getVariationSummary,
   updateVariation,
@@ -61,6 +63,9 @@ import {
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import { variationStatusColor, variationStatusLabel, fmtAmount } from "@/lib/contract-controls-helpers";
+import useRBAC from "@/hooks/useRBAC";
+import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
+import { VARIATION_DOCUMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 
 const STATUS = ["draft", "submitted", "under_review", "recommended", "approved", "rejected", "superseded"];
 const TYPES = ["positive", "negative", "neutral"];
@@ -89,6 +94,14 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
 );
 
 const VariationRegisterPage: React.FC = () => {
+  const { can } = useRBAC();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const deepLinkId = searchParams.get("variation_id");
+  const openedDeepLink = useRef<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  // The Variation whose correspondence is open. One linking UI: the shared
+  // canonical EntityDocumentLinks component.
+  const [linksFor, setLinksFor] = useState<VariationDTO | null>(null);
   const [items, setItems] = useState<VariationDTO[]>([]);
   const [summary, setSummary] = useState<VariationSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
@@ -116,10 +129,36 @@ const VariationRegisterPage: React.FC = () => {
       setSummary(await getVariationSummary(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
     } catch {
       toast.error("Failed to load variations");
+    } finally {
+      setLoaded(true);
     }
   }, [projectFilter, statusFilter, typeFilter]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // Deep link from a Document's Linked Records: /variations?variation_id=...
+  useEffect(() => {
+    if (!deepLinkId || !loaded || openedDeepLink.current === deepLinkId) return;
+    openedDeepLink.current = deepLinkId;
+    const local = items.find((item) => item.id === deepLinkId);
+    if (local) {
+      setLinksFor(local);
+      return;
+    }
+    void getVariation(deepLinkId)
+      .then(setLinksFor)
+      .catch(() => toast.error("Linked variation could not be opened"));
+  }, [deepLinkId, items, loaded]);
+
+  const closeLinks = (open: boolean) => {
+    if (open) return;
+    setLinksFor(null);
+    if (searchParams.get("variation_id")) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("variation_id");
+      setSearchParams(next, { replace: true });
+    }
+  };
   useEffect(() => {
     let active = true;
     (async () => {
@@ -336,6 +375,9 @@ const VariationRegisterPage: React.FC = () => {
                     <TableCell>{fmtDate(v.approval_date)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1">
+                        <Button variant="ghost" size="icon" className="h-8 w-8" title="Correspondence"
+                          aria-label={`Correspondence for ${v.variation_number || "variation"}`}
+                          onClick={() => setLinksFor(v)}><Link2 className="h-4 w-4" /></Button>
                         <Button variant="ghost" size="icon" className="h-8 w-8" title="Edit" onClick={() => openEdit(v)}><Edit className="h-4 w-4" /></Button>
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
@@ -361,6 +403,29 @@ const VariationRegisterPage: React.FC = () => {
           </Table>
         </CardContent>
       </Card>
+
+      <Dialog open={linksFor !== null} onOpenChange={closeLinks}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Correspondence — {linksFor?.variation_number || "Variation"}</DialogTitle>
+            <DialogDescription>
+              Link existing incoming or outgoing letters to this variation. Unlinking removes the
+              relationship only; the letter stays in the register.
+            </DialogDescription>
+          </DialogHeader>
+          {linksFor && (
+            <EntityDocumentLinks
+              targetType="variation"
+              targetId={linksFor.id}
+              organizationId={linksFor.organization_id}
+              projectId={linksFor.project_id}
+              roles={VARIATION_DOCUMENT_RELATIONSHIP_ROLES}
+              defaultRole="correspondence"
+              canManage={can("dms.variation.edit")}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-lg">

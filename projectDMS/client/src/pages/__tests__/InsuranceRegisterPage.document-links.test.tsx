@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import InsuranceRegisterPage from "@/pages/InsuranceRegisterPage";
@@ -9,7 +9,7 @@ const insuranceApi = vi.hoisted(() => ({
   getInsurance: vi.fn(), getInsuranceSummary: vi.fn(), getInsuranceAlerts: vi.fn(),
   getInsuranceTypes: vi.fn(), createInsurance: vi.fn(), updateInsurance: vi.fn(),
   deleteInsurance: vi.fn(), exportInsurance: vi.fn(),
-  uploadInsuranceDocument: vi.fn(),
+  uploadInsuranceDocument: vi.fn(), getInsuranceById: vi.fn(),
 }));
 const relationshipApi = vi.hoisted(() => ({
   listEntityDocumentLinks: vi.fn(), searchLinkableDocuments: vi.fn(),
@@ -127,5 +127,29 @@ describe("Insurance canonical Document workflow", () => {
     expect(await screen.findByText("Policy.pdf")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
     expect(document.querySelector('input[type="file"]')).toBeNull();
+  });
+
+  it("opens the policy named by the insurance_id deep link", async () => {
+    render(
+      <MemoryRouter initialEntries={["/insurance?insurance_id=insurance-1"]}>
+        <Routes><Route path="/insurance" element={<InsuranceRegisterPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("Policy.pdf")).toBeInTheDocument();
+    expect(relationshipApi.listEntityDocumentLinks).toHaveBeenCalledWith("insurance", "insurance-1");
+    expect(screen.getByDisplayValue("POL-17")).toBeInTheDocument();
+    expect(insuranceApi.getInsuranceById).not.toHaveBeenCalled();
+  });
+
+  it("fetches a deep-linked policy that the filtered list does not contain", async () => {
+    insuranceApi.getInsuranceById.mockResolvedValue({ ...policy, id: "insurance-9", policy_number: "POL-99" });
+    render(
+      <MemoryRouter initialEntries={["/insurance?insurance_id=insurance-9"]}>
+        <Routes><Route path="/insurance" element={<InsuranceRegisterPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByDisplayValue("POL-99")).toBeInTheDocument();
+    expect(insuranceApi.getInsuranceById).toHaveBeenCalledWith("insurance-9");
+    await waitFor(() => expect(relationshipApi.listEntityDocumentLinks).toHaveBeenCalledWith("insurance", "insurance-9"));
   });
 });

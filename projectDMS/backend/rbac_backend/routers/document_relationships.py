@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from ..core.database import get_db
 from ..core.security import CurrentUser, get_current_user
@@ -19,12 +20,19 @@ from ..services.document_relationship_service import (
     DocumentRelationshipService,
 )
 from ..utils.error_handler import handle_exceptions
+from ..utils.rate_limiter import RateLimiter
 
 
 router = APIRouter()
 
 #: RFC 9745 structured Deprecation value: deprecated 2026-09-21 00:00 UTC.
 HISTORY_DEPRECATED_AT = "@1789948800"
+
+
+#: Link-to-Record listing loads each candidate through its adapter (a few
+#: queries per row, up to LINK_TARGET_SCAN_LIMIT rows) and the dialog queries on
+#: every search change, so it gets its own bounded, scoped budget.
+LINK_TARGETS_RATE_LIMITER = RateLimiter(max_requests=120, window_seconds=60, scope="document_link_targets")
 
 
 async def get_document_relationship_service(db=Depends(get_db)) -> DocumentRelationshipService:
@@ -162,6 +170,30 @@ async def list_document_entity_links(
     return DocumentRelationshipListResponse(
         links=await service.list_for_document(current_user, document_id)
     )
+
+
+@router.get("/documents/{document_id}/link-targets")
+@handle_exceptions
+async def list_document_link_targets(
+    document_id: str,
+    target_type: str = Query(..., min_length=1),
+    q: Optional[str] = Query(None, max_length=200),
+    limit: int = Query(25, ge=1, le=50),
+    current_user: CurrentUser = Depends(get_current_user),
+    service: DocumentRelationshipService = Depends(get_document_relationship_service),
+) -> dict:
+    """Register records the caller may link this Document to ("Link to Record").
+
+    Offers only targets in the Document's own organisation/project on which the
+    caller holds the target's manage permission. The write itself still goes
+    through ``POST /entities/{target_type}/{target_id}/document-links:batch``,
+    which re-authorizes everything.
+    """
+    await LINK_TARGETS_RATE_LIMITER.check_user_limit(str(getattr(current_user, "id", "") or ""))
+    targets = await service.link_targets_for_document(
+        current_user, document_id, target_type, query=q or "", limit=limit
+    )
+    return {"document_id": document_id, "target_type": target_type, "targets": targets}
 
 
 @router.get("/documents/{document_id}/link-dependencies")

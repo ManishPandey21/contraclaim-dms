@@ -46,7 +46,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { AlertTriangle, Download, Edit, Eye, FileText, Loader2, PlusCircle, Search, ShieldCheck, Trash2, Upload, X } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   InsuranceDTO,
@@ -57,6 +57,7 @@ import {
   deleteInsurance,
   exportInsurance,
   getInsurance,
+  getInsuranceById,
   getInsuranceAlerts,
   getInsuranceSummary,
   getInsuranceTypes,
@@ -132,6 +133,11 @@ const Stat: React.FC<{ label: string; value: string; cls?: string }> = ({ label,
 );
 
 const InsuranceRegisterPage: React.FC = () => {
+  // Deep link from a Document's Linked Records: /insurance?insurance_id=...
+  const [searchParams] = useSearchParams();
+  const deepLinkId = searchParams.get("insurance_id");
+  const openedDeepLink = useRef<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [items, setItems] = useState<InsuranceDTO[]>([]);
   const [alerts, setAlerts] = useState<InsuranceDTO[]>([]);
   const [summary, setSummary] = useState<InsuranceSummaryDTO | null>(null);
@@ -175,6 +181,8 @@ const InsuranceRegisterPage: React.FC = () => {
       setAlerts(await getInsuranceAlerts(scoped));
     } catch {
       toast.error("Failed to load insurance policies");
+    } finally {
+      setLoaded(true);
     }
   }, [projectFilter, statusFilter, typeFilter, companyFilter, search]);
 
@@ -288,6 +296,19 @@ const InsuranceRegisterPage: React.FC = () => {
     });
     setDialogOpen(true);
   };
+
+  useEffect(() => {
+    if (!deepLinkId || !loaded || openedDeepLink.current === deepLinkId) return;
+    openedDeepLink.current = deepLinkId;
+    const local = items.find((item) => item.id === deepLinkId);
+    if (local) {
+      openEdit(local);
+      return;
+    }
+    void getInsuranceById(deepLinkId)
+      .then(openEdit)
+      .catch(() => toast.error("Linked insurance policy could not be opened"));
+  }, [deepLinkId, items, loaded]);
 
   const buildPayload = (): InsurancePayload => ({
     project_id: form.project_id,
