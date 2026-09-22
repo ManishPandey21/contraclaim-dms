@@ -34,6 +34,12 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
             return False
         if "$exists" in condition and (value is not None) != bool(condition["$exists"]):
             return False
+        if "$regex" in condition:
+            import re as _re
+
+            flags = _re.IGNORECASE if "i" in str(condition.get("$options") or "") else 0
+            if not isinstance(value, str) or not _re.search(condition["$regex"], value, flags):
+                return False
         # Range operators. Mongo never matches a field it cannot compare, so a
         # missing value fails rather than passing.
         for operator, compare in (
@@ -55,6 +61,7 @@ def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
         # unconditionally, so every test that depended on one was vacuous.
         unsupported = set(condition) - {
             "$in", "$nin", "$ne", "$exists", "$lt", "$lte", "$gt", "$gte",
+            "$regex", "$options",
         }
         if unsupported:
             raise NotImplementedError(
@@ -1030,7 +1037,15 @@ async def test_the_fake_collection_refuses_operators_it_cannot_evaluate() -> Non
     collection = _Collection("widgets", [{"_id": "w-1", "name": "abc"}])
 
     with pytest.raises(NotImplementedError):
-        await collection.find_one({"name": {"$regex": "^a"}})
+        await collection.find_one({"name": {"$elemMatch": {"$eq": "abc"}}})
+
+
+@pytest.mark.asyncio
+async def test_the_fake_collection_evaluates_regex_like_mongo() -> None:
+    collection = _Collection("widgets", [{"_id": "w-1", "name": "ABC"}, {"_id": "w-2", "name": None}])
+
+    assert (await collection.find_one({"name": {"$regex": "^a", "$options": "i"}}))["_id"] == "w-1"
+    assert await collection.find_one({"name": {"$regex": "^a"}}) is None
 
 
 @pytest.mark.asyncio

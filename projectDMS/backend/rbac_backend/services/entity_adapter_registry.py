@@ -88,6 +88,26 @@ INSURANCE_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
 )
 
 
+#: Variation evidence, derived from the current Variation model and workflow
+#: (draft -> submitted -> under_review -> recommended -> approved/rejected):
+#:
+#: * ``variation_submission`` - the submission backing ``submitted_amount``;
+#: * ``variation_approval`` - the approval backing ``approved_amount`` /
+#:   ``approval_date``;
+#: * ``correspondence`` - any letter about the variation (``letter_reference``);
+#: * ``supporting_document`` - the generic fallback.
+#:
+#: The model has no instruction or quotation concept, so neither role exists.
+VARIATION_DOCUMENT_ROLES: FrozenSet[str] = frozenset(
+    {
+        "variation_submission",
+        "variation_approval",
+        "correspondence",
+        "supporting_document",
+    }
+)
+
+
 #: Roles that assert the linked Document *is correspondence*.
 #:
 #: Other roles (supporting_document, notice, determination, ...) describe the
@@ -135,6 +155,11 @@ class EntityContext:
 
 class EntityAdapter:
     target_type: str
+    #: The register collection holding this target's rows.
+    target_collection: str = ""
+    #: Row fields the display label is built from, for a server-side search
+    #: prefilter. Empty when the label comes from a parent row.
+    target_label_fields: tuple[str, ...] = ()
     legacy_relationship_role = "manual_review"
     supports_freeze = True
     freeze_requires_lifecycle_orchestration = False
@@ -189,6 +214,8 @@ class EntityAdapter:
 
 class ClaimEntityAdapter(EntityAdapter):
     target_type = "claim"
+    target_collection = "claims"
+    target_label_fields = ('claim_ref', 'title')
     legacy_relationship_role = "supporting_document"
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
@@ -308,6 +335,8 @@ class IPCBillEntityAdapter(EntityAdapter):
     """
 
     target_type = "ipc_bill"
+    target_collection = "ipc_bills"
+    target_label_fields = ('ipc_number', 'ipc_period')
     supports_freeze = False
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
@@ -403,6 +432,8 @@ class InsuranceEntityAdapter(EntityAdapter):
     """Parent evidence owner for the current event-less Insurance model."""
 
     target_type = "insurance"
+    target_collection = "insurance_policies"
+    target_label_fields = ('policy_number', 'insurance_type')
     supports_freeze = False
     legacy_relationship_role = "manual_review"
 
@@ -510,6 +541,7 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
     """Event-level evidence owner for the Bank Guarantee lifecycle."""
 
     target_type = "bank_guarantee_event"
+    target_collection = "bank_guarantee_events"
     supports_freeze = False
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
@@ -626,6 +658,7 @@ class BankGuaranteeLegacyEntityAdapter(EntityAdapter):
     """
 
     target_type = "bank_guarantee"
+    target_collection = "bank_guarantees"
     supports_freeze = False
     legacy_relationship_role = "manual_review"
 
@@ -709,6 +742,7 @@ class KeyDateAchievementEntityAdapter(EntityAdapter):
     """Stable event-level evidence owner for a milestone achievement."""
 
     target_type = "key_date_achievement"
+    target_collection = "key_date_achievements"
     supports_freeze = False
     legacy_relationship_role = "manual_review"
 
@@ -825,6 +859,8 @@ class EOTSubmissionEntityAdapter(EntityAdapter):
     """Canonical event owner for one project-level Contractor EOT submission."""
 
     target_type = "eot_submission"
+    target_collection = "key_date_eot_submissions"
+    target_label_fields = ('revision_label',)
     legacy_relationship_role = "manual_review"
     freeze_requires_lifecycle_orchestration = True
 
@@ -982,6 +1018,8 @@ class EOTDeterminationEntityAdapter(EntityAdapter):
     """Canonical event owner for one Engineer/Employer EOT determination."""
 
     target_type = "eot_determination"
+    target_collection = "key_date_eot_determinations"
+    target_label_fields = ('determination_reference',)
     legacy_relationship_role = "manual_review"
     freeze_requires_lifecycle_orchestration = True
 
@@ -1179,6 +1217,120 @@ class EOTDeterminationEntityAdapter(EntityAdapter):
         return False
 
 
+class VariationEntityAdapter(EntityAdapter):
+    """Variation Register records as relationship targets (CL-2).
+
+    The Variation lifecycle has no evidence-freeze step, so there is no freeze
+    contract. Deleting a Variation is a register act that goes through
+    ``DocumentRelationshipService.delete_target`` so its links are removed and
+    audited in the same transaction.
+    """
+
+    target_type = "variation"
+    target_collection = "variations"
+    target_label_fields = ('variation_number',)
+    supports_freeze = False
+    legacy_relationship_role = "manual_review"
+
+    async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
+        variation = None
+        for candidate in document_id_candidates(target_id):
+            variation = await db.variations.find_one({"_id": candidate})
+            if variation:
+                break
+        return self.context_from_entity(variation) if variation else None
+
+    def context_from_entity(self, variation: Dict[str, Any]) -> EntityContext:
+        variation_id = str(variation.get("_id") or "")
+        label = str(variation.get("variation_number") or variation_id)
+        return EntityContext(
+            target_type=self.target_type,
+            target_id=variation_id,
+            entity=variation,
+            organization_id=str(variation.get("organization_id") or ""),
+            project_id=str(variation.get("project_id") or ""),
+            view_permission=Permissions.VARIATION_VIEW,
+            manage_permission=Permissions.VARIATION_EDIT,
+            delete_permission=Permissions.VARIATION_DELETE,
+            allowed_roles=VARIATION_DOCUMENT_ROLES,
+            label=label,
+            route=f"/variations?variation_id={quote(variation_id, safe='')}",
+            frozen=False,
+        )
+
+    async def legacy_targets_for_document(
+        self,
+        db: Any,
+        *,
+        document_id: str,
+        organization_id: str,
+        project_id: str,
+        session: Any = None,
+    ) -> list[str]:
+        try:
+            collection = db.variations
+        except AttributeError:
+            return []
+        cursor = collection.find(
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "linked_document_ids": document_id,
+            },
+            session=session,
+        )
+        return [str(row.get("_id")) async for row in cursor if row.get("_id")]
+
+    async def freeze(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        actor_id: Optional[str],
+        frozen_at: Any,
+        reason: str,
+        session: Any = None,
+    ) -> None:
+        raise RuntimeError("Variation evidence freeze is not supported")
+
+    async def guard_relationship_write(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # Fenced on the scope `load` read: a Variation moved to another project
+        # between load and commit refuses the write.
+        result = await db.variations.update_one(
+            {
+                "_id": context.entity.get("_id"),
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+            },
+            {"$inc": {"document_relationship_revision": 1}},
+            session=session,
+        )
+        return bool(getattr(result, "matched_count", 0))
+
+    async def delete(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        result = await db.variations.delete_one(
+            {
+                "_id": context.entity.get("_id"),
+                "organization_id": context.organization_id,
+                "project_id": context.project_id,
+            },
+            session=session,
+        )
+        return bool(getattr(result, "deleted_count", 0))
+
+
 class ContractDocumentEntityAdapter(EntityAdapter):
     """Contract instruments as relationship targets -- PROJECT-SCOPED ONLY.
 
@@ -1205,6 +1357,7 @@ class ContractDocumentEntityAdapter(EntityAdapter):
     """
 
     target_type = "contract_document"
+    target_collection = "contract_documents"
     supports_freeze = False
 
     @staticmethod
@@ -1308,6 +1461,7 @@ class EntityAdapterRegistry:
             EOTSubmissionEntityAdapter(),
             EOTDeterminationEntityAdapter(),
             ContractDocumentEntityAdapter(),
+            VariationEntityAdapter(),
         ]
         self._adapters = {adapter.target_type: adapter for adapter in registered}
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Iterable, Optional, TypeVar
@@ -26,6 +27,24 @@ from ..utils.error_handler import BaseDomainError
 
 
 _TransactionResult = TypeVar("_TransactionResult")
+
+#: Targets offered by "Link to Record" from the Document side (CL-2): only those
+#: whose adapter, deep link and register UI are verified end to end. The legacy
+#: ``bank_guarantee`` parent (no writable roles) and ``contract_document``
+#: (linked from the Contract Master side) are deliberately absent.
+LINK_TO_RECORD_TARGET_TYPES: tuple[str, ...] = (
+    "claim",
+    "ipc_bill",
+    "insurance",
+    "bank_guarantee_event",
+    "key_date_achievement",
+    "eot_submission",
+    "eot_determination",
+    "variation",
+)
+
+#: Rows read per Link-to-Record listing before label filtering.
+LINK_TARGET_SCAN_LIMIT = 200
 
 
 class DocumentRelationshipError(BaseDomainError):
@@ -792,6 +811,95 @@ class DocumentRelationshipService:
                     )
                 )
         return results
+
+    async def link_targets_for_document(
+        self,
+        actor: Any,
+        document_id: str,
+        target_type: str,
+        *,
+        query: str = "",
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        """Register records this actor may link this Document to ("Link to Record").
+
+        Only targets in :data:`LINK_TO_RECORD_TARGET_TYPES` are offered. A
+        candidate is offered only when it is in the Document's own organisation
+        and project (the only scope a link may have), resolves through its
+        adapter's ``load`` (so parent/baseline integrity checks apply), and the
+        actor holds the target's *manage* permission there. ``link_batch`` still
+        re-checks everything on write; this listing grants nothing.
+        """
+        normalized_type = str(target_type or "").strip().lower()
+        if normalized_type not in LINK_TO_RECORD_TARGET_TYPES:
+            raise DocumentRelationshipError("Unsupported relationship target", 404)
+        adapter = self.registry.get(normalized_type)
+        document = await resolve_canonical_document(self.db, document_id)
+        if not document:
+            raise DocumentRelationshipError("Document not found", 404)
+        await self.policy.authorize_document(
+            actor, Permissions.DOCUMENT_VIEW, document, resource_type="document"
+        )
+        if not is_consumable(document):
+            raise DocumentRelationshipError("Document is not currently consumable", 409)
+        organization_id = str(document.get("organization_id") or document.get("organizationId") or "")
+        project_id = str(document.get("project_id") or document.get("projectId") or "")
+        if not organization_id or not project_id:
+            return []
+
+        needle = str(query or "").strip().lower()
+        bounded = max(1, min(int(limit or 25), 50))
+        decisions: dict[str, bool] = {}
+        scope_query: dict[str, Any] = {"organization_id": organization_id, "project_id": project_id}
+        if needle and adapter.target_label_fields:
+            # Narrow in the database so a large register is searchable past the
+            # scan limit; the label check below stays the authority.
+            pattern = {"$regex": re.escape(needle), "$options": "i"}
+            scope_query["$or"] = [{field: pattern} for field in adapter.target_label_fields]
+        cursor = (
+            self.db[adapter.target_collection]
+            .find(scope_query)
+            .sort("_id", 1)
+            .limit(LINK_TARGET_SCAN_LIMIT)
+        )
+        results: list[dict[str, Any]] = []
+        async for row in cursor:
+            context = await adapter.load(self.db, str(row.get("_id") or ""))
+            if context is None:
+                continue
+            if context.organization_id != organization_id or context.project_id != project_id:
+                continue
+            if needle and needle not in context.label.lower():
+                continue
+            permission = context.manage_permission
+            if permission not in decisions:
+                try:
+                    await self.policy.authorize_document(
+                        actor,
+                        permission,
+                        {"organization_id": organization_id, "project_id": project_id},
+                        resource_type=context.target_type,
+                    )
+                    decisions[permission] = True
+                except (DocumentRelationshipError, HTTPException):
+                    decisions[permission] = False
+            if not decisions[permission]:
+                continue
+            results.append(
+                {
+                    "target_type": context.target_type,
+                    "target_id": context.target_id,
+                    "label": context.label,
+                    "route": context.route,
+                    "allowed_roles": sorted(context.allowed_roles),
+                    "frozen": context.frozen,
+                    "parent_type": context.parent_type,
+                    "parent_id": context.parent_id,
+                }
+            )
+            if len(results) >= bounded:
+                break
+        return sorted(results, key=lambda row: (row["label"].lower(), row["target_id"]))
 
     async def list_for_target(
         self,
