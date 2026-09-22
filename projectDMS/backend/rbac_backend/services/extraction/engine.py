@@ -30,9 +30,23 @@ from .models import (
     PageStatus,
 )
 from .page_classifier import PageClassifier
-from .page_store import MeterCallback, OcrRunner, PageStore
+from .page_store import (
+    InconsistentExtractionRunError,
+    MeterCallback,
+    OcrRunner,
+    PageStore,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _is_resumable(store: PageStore) -> bool:
+    """Whether this store can hand back the run's already-recorded pages.
+
+    A feature test, not an isinstance check: the capability is optional and
+    only the document adapter has a run-scoped identity to answer it with.
+    """
+    return callable(getattr(store, "load_run_pages", None))
 
 ENGINE_VERSION = "1"
 
@@ -139,7 +153,16 @@ class PageExtractionEngine:
                 )
 
         pages = self._merge(native, overrides, statuses)
-        await self.store.record_pages(pages)
+        if retry_set and _is_resumable(self.store):
+            # A retry mutates only the pages it was asked to re-run. Everything
+            # else is read back from the run it belongs to, so an already
+            # resolved page is never rewritten - and never rewritten with the
+            # empty native text this attempt just re-read for it.
+            pages = await self._assemble_cumulative_run(
+                pages, expected=sorted(native), retry_set=retry_set
+            )
+        else:
+            await self.store.record_pages(pages)
 
         failed = sorted(
             page.number for page in pages if page.status is PageStatus.OCR_FAILED
@@ -161,6 +184,48 @@ class PageExtractionEngine:
             completeness=Completeness.PARTIAL if unresolved else Completeness.COMPLETE,
             engine_version=ENGINE_VERSION,
         )
+
+    async def _assemble_cumulative_run(
+        self,
+        produced: Sequence[ExtractedPage],
+        *,
+        expected: Sequence[int],
+        retry_set: set,
+    ) -> List[ExtractedPage]:
+        """Persist this attempt's pages, then return the whole run in order.
+
+        The stable extraction run - not this attempt - is the canonical unit.
+        Downstream consumers (quality gate, full_text, embeddings) therefore
+        see every page the run has resolved so far, assembled by page number,
+        while the store holds exactly one row per page and this attempt only
+        replaced the rows it actually re-extracted.
+        """
+        fresh = {page.number: page for page in produced if page.number in retry_set}
+        await self.store.record_pages([fresh[number] for number in sorted(fresh)])
+
+        stored = {page.number: page for page in await self.store.load_run_pages()}
+        missing = [
+            number
+            for number in expected
+            if number not in fresh and number not in stored
+        ]
+        if missing:
+            raise InconsistentExtractionRunError(
+                extraction_run_id=getattr(self.store, "extraction_run_id", None),
+                expected_page_numbers=list(expected),
+                persisted_page_numbers=sorted(stored),
+                missing_page_numbers=missing,
+            )
+
+        pages: List[ExtractedPage] = []
+        for number in expected:
+            if number in fresh:
+                pages.append(fresh[number])
+                continue
+            carried = stored[number]
+            carried.carried_forward = True
+            pages.append(carried)
+        return pages
 
     def _split_at_attempt_boundary(
         self, candidates: Sequence[int]

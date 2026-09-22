@@ -305,6 +305,17 @@ class DocumentProcessor:
         spent = 0
 
         for page in getattr(extraction, "pages", []) or []:
+            if getattr(page, "carried_forward", False):
+                # Settled by an earlier attempt of the same run: its verdict,
+                # repairs and review flag are already persisted evidence.
+                # Reassessing would re-spend the paid fallback on a page this
+                # attempt did not touch and overwrite that evidence with a
+                # second, differently-derived opinion. Its review state still
+                # counts, so the publication barrier is unchanged.
+                if getattr(page, "needs_review", False):
+                    needs_review.append(page.number)
+                continue
+
             verdict = self.quality_gate.assess(page, tables=page.tables or None)
 
             # Adopt deterministic repairs, then re-run the same gate over the
@@ -362,8 +373,14 @@ class DocumentProcessor:
         # stays None and the page evidence cannot be monitored or reviewed.
         if page_store is not None and pages:
             finalize = getattr(page_store, "finalize_pages", None)
-            if finalize is not None:
-                await finalize(pages)
+            # Only the pages this attempt actually assessed. Writing the
+            # carried ones back would rewrite rows nothing in this attempt
+            # changed, which is how a retry lost an earlier page's text.
+            assessed = [
+                page for page in pages if not getattr(page, "carried_forward", False)
+            ]
+            if finalize is not None and assessed:
+                await finalize(assessed)
 
         # Rebuild the canonical text from the (possibly repaired) pages. The
         # engine froze combined_text before this gate ran, so without this the

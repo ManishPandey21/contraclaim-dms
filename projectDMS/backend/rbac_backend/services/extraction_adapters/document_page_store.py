@@ -19,7 +19,13 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from pymongo import ReplaceOne
 
-from ..extraction.models import ExtractedPage
+from ..extraction.models import (
+    ExtractedPage,
+    PageClass,
+    PageClassification,
+    PageSource,
+    PageStatus,
+)
 
 DOCUMENT_OCR_PAGES = "document_ocr_pages"
 DOCUMENT_OCR_BATCHES = "document_ocr_batches"
@@ -68,6 +74,43 @@ def to_document_page_record(
         "rotation": classification.rotation,
         "source_pdf_page_link": f"document:{document_id}#page={page.number}",
     }
+
+
+def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
+    """Rebuild the page an earlier attempt recorded, with its evidence intact.
+
+    The inverse of `to_document_page_record`, and it has to be exact: a page
+    rehydrated as native text would lose the OCR status, the batch that ran it
+    and the repairs that were adopted - which is the same corruption as
+    overwriting the row. `raw_text` on the record is the published text;
+    `original_text` is what extraction first read, and maps back to the page's
+    own `raw_text`.
+    """
+    classification = PageClassification(
+        page_class=PageClass(record.get("page_class") or PageClass.TEXT_NATIVE.value),
+        char_count=int(record.get("char_count") or 0),
+        image_count=int(record.get("image_count") or 0),
+        image_coverage=float(record.get("image_coverage") or 0.0),
+        table_count=int(record.get("table_count") or 0),
+        width=float(record.get("width") or 0.0),
+        height=float(record.get("height") or 0.0),
+        rotation=int(record.get("rotation") or 0),
+    )
+    return ExtractedPage(
+        number=int(record.get("page_number") or 0),
+        text=record.get("raw_text") or "",
+        source=PageSource(record.get("source") or PageSource.EMPTY.value),
+        status=PageStatus(record.get("status") or PageStatus.OCR_PENDING.value),
+        classification=classification,
+        tables=list(record.get("tables") or []),
+        batch_id=record.get("batch_id"),
+        error=record.get("error"),
+        quality_verdict=record.get("quality_verdict"),
+        quality_checks=list(record.get("quality_checks") or []),
+        needs_review=bool(record.get("needs_review")),
+        raw_text=record.get("original_text"),
+        applied_repairs=list(record.get("applied_repairs") or []),
+    )
 
 
 class DocumentPageStore:
@@ -178,6 +221,26 @@ class DocumentPageStore:
                 for record in records
             ]
         )
+
+    async def load_run_pages(self) -> List[ExtractedPage]:
+        """Every page this run has recorded so far, in page-number order.
+
+        Scoped to (document_id, extraction_run_id) and nothing else. It
+        deliberately does not consult `document_extraction_heads`: the head is
+        the last *published* run, while a retry is assembling the in-progress
+        one, and following the head would rebuild a different run's pages.
+        """
+        cursor = self.db[DOCUMENT_OCR_PAGES].find(
+            {
+                "document_id": self.document_id,
+                "extraction_run_id": self.extraction_run_id,
+            }
+        )
+        records = await cursor.sort("page_number", 1).to_list(length=None)
+        return [
+            from_document_page_record(record)
+            for record in sorted(records, key=lambda item: item.get("page_number") or 0)
+        ]
 
     async def publish_run(
         self, *, expected_page_numbers: Sequence[int], session: Any = None
