@@ -1,9 +1,12 @@
 # services/ocr_service.py
 
 import asyncio
+import importlib.metadata
+import importlib.util
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Optional, Sequence, Tuple
 
@@ -16,6 +19,21 @@ configure_pipeline_logger(logger)
 class DocumentProcessingError(Exception):
     """Custom exception for document processing errors"""
     pass
+
+
+def _installed_ocrmypdf_version() -> Optional[str]:
+    """Return OCRmyPDF's installed version, or None, without importing it."""
+    if "ocrmypdf" not in sys.modules:
+        try:
+            if importlib.util.find_spec("ocrmypdf") is None:
+                return None
+        except (ImportError, ValueError):
+            return None
+    try:
+        return importlib.metadata.version("ocrmypdf")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
 
 class OCRService:
     """Service for OCR operations with proper error handling"""
@@ -36,10 +54,19 @@ class OCRService:
         self._ocr_available = self._check_ocr_availability()
 
     def _check_ocr_availability(self) -> bool:
-        """Check if OCR dependencies are available"""
-        try:
-            import ocrmypdf
-        except ImportError:
+        """Check if OCR dependencies are available.
+
+        Presence only - deliberately without importing OCRmyPDF. Importing it
+        (16.10.4, ``ocrmypdf/pdfinfo/layout.py``) rewrites pdfminer's
+        ``PDFSimpleFont.__init__`` and ``PSBaseParser.BUFSIZ`` for the whole
+        process, and this check runs on every ``OCRService`` construction, so
+        an import here patched every backend process that built a document
+        controller. The pagewise path runs OCRmyPDF as a subprocess and needs
+        only the ``ocrmypdf`` executable, which ``REQUIRED_BINARIES`` checks;
+        the legacy in-process path imports it when it actually runs OCR.
+        """
+        version = _installed_ocrmypdf_version()
+        if version is None:
             logger.warning("OCRmyPDF not available - scanned PDFs may not be processed correctly")
             return False
 
@@ -54,7 +81,7 @@ class OCRService:
 
         logger.info(
             "OCR dependencies available: ocrmypdf=%s, tesseract=%s, gs=%s, qpdf=%s",
-            getattr(ocrmypdf, "__version__", "unknown"),
+            version,
             shutil.which("tesseract"),
             shutil.which("gs"),
             shutil.which("qpdf"),
