@@ -236,6 +236,21 @@ class EntityAdapter:
         """Extra row filter for "Link to Record" candidates (rows that may take a new link)."""
         return {}
 
+    async def guard_relationship_remove(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        """May an existing link be removed from this target? Default: yes.
+
+        A register whose record can become read-only (an archived Hindrance)
+        refuses here, so read-only means its evidence can be neither added nor
+        removed. Adding is refused by ``guard_relationship_write``.
+        """
+        return True
+
 
 class ClaimEntityAdapter(EntityAdapter):
     target_type = "claim"
@@ -1494,6 +1509,17 @@ class DelayEventEntityAdapter(EntityAdapter):
         # An archived entry is read-only (the write guard refuses it), so it is
         # never offered as a Link-to-Record candidate.
         return {"archived_at": None}
+
+    async def guard_relationship_remove(
+        self,
+        db: Any,
+        context: EntityContext,
+        *,
+        session: Any = None,
+    ) -> bool:
+        # Read-only means read-only in both directions: an archived entry's
+        # evidence cannot be removed either, until it is restored.
+        return not context.entity.get("archived_at")
 
     async def load(self, db: Any, target_id: str) -> Optional[EntityContext]:
         row = None

@@ -125,6 +125,9 @@ async def list_delay_events(
             await selection.require_project(project_id or selection.project_id, organization_id)
         project_id = selection.project_id
         organization_id = selection.organization_id
+    elif selection.organization_id:
+        await selection.require_organization(organization_id)
+        organization_id = selection.organization_id
     await policy.authorize(current_user, Permissions.HINDRANCE_VIEW, resource_type="delay_events", organization_id=organization_id or getattr(current_user, "organization_id", None), project_id=project_id, audit=False)
     scope = build_scope_query(current_user, organization_id=organization_id, project_id=project_id)
     rows = await EvidenceRegisterService(db).list_delay_events(scope, project_id=project_id, status=status_filter, responsibility=responsibility, location=location, skip=skip, limit=limit)

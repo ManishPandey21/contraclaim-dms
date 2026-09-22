@@ -58,6 +58,10 @@ async def _list_scope(
 ) -> tuple[Optional[str], Optional[str]]:
     """A list filter may narrow the selection, never leave it. Nothing selected: unchanged."""
     if not selection.has_project:
+        # An organisation-only selection still narrows: a filter may not leave it.
+        if selection.organization_id:
+            await selection.require_organization(organization_id)
+            return selection.organization_id, project_id
         return organization_id, project_id
     if project_id or organization_id:
         await selection.require_project(project_id or selection.project_id, organization_id)

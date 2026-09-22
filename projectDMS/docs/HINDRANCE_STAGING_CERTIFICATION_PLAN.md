@@ -218,7 +218,8 @@ This runs on the staging Mongo only (`-p contraclaim-stg`), never on production.
    The specs exist; the shell steps around them do not yet.
 4. Staging `.env.staging` still carries the R-A9E-era values; the new `E2E_HIN_*` variables
    need declaring (names only in the repo, values in the window).
-5. Staging checkout moved to the candidate SHA (today: `fe728b2`, on `fix/role-assignment-resolution`).
+5. Staging checkout moved to the candidate SHA. **Superseded by §14:** the candidate is now the
+   CL-3A integration branch `feat/cl3a-hindrance-scope-integration`, not PR #22 alone.
 6. Owner grants the window (4 h, clock time set by the owner).
 
 
@@ -283,6 +284,8 @@ Recorded, not changed:
 - **Refusal disclosure.** A record refusal echoes no ids. The audit event keeps the target.
 - **Other targets are unchanged.** On the shared routes the selection is only validated
   when the target is `delay_event`, so a stale header never refuses another register's link.
+  (CL-3A: generalised to every adapter with `active_scope_enforced` - Variation and
+  Hindrance - see §14.)
 
 **Staging consequences:**
 - The navbar project selector is live only for superadmin, orgadmin and orguser
@@ -299,8 +302,45 @@ Recorded, not changed:
 - A projectadmin assigned to several projects cannot switch between them in the navbar.
   That is existing behaviour. Under the new boundary it means such a user can only work in
   the project `TenantContext` picks for them.
-- **CROSS-MODULE ACTIVE-SCOPE CONSISTENCY DEBT.** Variation, IPC/Billing, Insurance, Bank
+- **CROSS-MODULE ACTIVE-SCOPE CONSISTENCY DEBT.** (CL-3A closed it for Variation, §14.) Variation, IPC/Billing, Insurance, Bank
   Guarantee, Key Dates, Documents, Claims and the other project-scoped modules enforce
   membership but not the selected project. The register is now stricter than they are.
   Follow-up ticket: ManishPandey21/contraclaim-dms#24. PR #22 does not change those
   modules.
+
+## 14. CL-3A integration update (2026-09-22)
+
+PR #22 is no longer the staging candidate on its own. It was merged (not rebased) into
+`feat/cl3a-hindrance-scope-integration`, stacked on CL-2 (`feat/cl2-variation-correspondence-links`
+@ `e819884`, itself on CL-1 @ `19775a2`). PR #22 @ `5bfd0dd` stays the preserved source checkpoint.
+**The final integrated candidate SHA is the CL-3A PR HEAD at the moment its CI is green**; restate it
+in the window record, never this document's text.
+
+What the certification run must now also cover:
+
+1. **CL-1/CL-2 relationship architecture.** Hindrance Document links go through
+   `entity_document_links` via `DelayEventEntityAdapter` (target type `delay_event`), with the CL-1
+   guarantees: ObjectId-keyed Documents presented as strings, orphan unlink, exactly-once
+   `document_relationship.linked` / `.unlinked` audit, and the correspondence role refusing a
+   non-incoming/outgoing Document with 422. `delay_event_links` remains for programme milestone,
+   key date and EOT submission links only. The `/api/delay-events` raw `linked_document_ids` write
+   is kept (G31-certified); record whether any staging caller still uses it.
+2. **Variation scope test.** Variation is now bound by the same selection: as `E2E_HIN_PA_AB`
+   (A+B), selected A -> Variation A 200; selected B -> Variation A 403 `context_forbidden` on
+   GET/PUT/DELETE and on `/api/entities/variation/{A}/document-links`; no selection -> 400
+   `selection_required`; the Variation list follows the selection. Seed one run-owned Variation in
+   each of A and B (`g3-<RUN_ID>` in `variation_number`); teardown deletes nothing - record them as
+   residue.
+3. **Link-to-Record integration.** From a run-owned incoming letter in A: Link to Record ->
+   "Hindrance / Constraint" -> the A entry is offered (archived entries are not) -> link as
+   correspondence -> the letter's Linked Records shows both the Variation and the Hindrance ->
+   under B neither is shown -> unlink each independently -> the letter remains.
+4. **Unselected list gate.** With no project selected, `GET /api/hindrances` and
+   `/api/delay-events` as a project-tier member must return 200 bounded to its projects (CL-3A
+   fixed a 403 "No active subscription" here that only real seeds exposed).
+5. The mocked browser workflow `client/e2e/cl3a-cross-register-scope.spec.ts` is development
+   evidence only; the staging specs must repeat its steps against the real stack.
+
+Gate D1a is unchanged: **no same-host staging until R-A9I Falkor normalization is complete and the
+owner grants the maintenance window.** Nothing in CL-3A starts, schedules or approves it.
+

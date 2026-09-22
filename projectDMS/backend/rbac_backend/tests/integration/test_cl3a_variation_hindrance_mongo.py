@@ -28,6 +28,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import (
     DOC_A2_ID,
     DOC_CONTRACT_ID,
+    DOC_OUT_ID,
     DOC_IN,
     DOC_IN_ID,
     ORG_A,
@@ -261,7 +262,9 @@ def test_foreign_project_links_are_refused() -> None:
             # an A2 letter onto an A1 record, under A1: the Document is out of scope
             for target_type, target_id in (("variation", VAR_A1), ("delay_event", hin_a1)):
                 response = await env.link("member_ab", PROJ_A1, target_type, target_id, DOC_A2_ID)
-                assert response.status_code == 403, response.text
+                # The Document is out of the target's scope - a relationship refusal,
+                # not a selection one, so it carries no tenant-context code.
+                assert response.status_code == 403 and _code(response) != "context_forbidden", response.text
             # an A1 letter onto an A2 record, under A1: the target is outside the selection
             for target_type, target_id in (("variation", VAR_A2), ("delay_event", hin_a2)):
                 response = await env.link("member_ab", PROJ_A1, target_type, target_id, DOC_IN_ID)
@@ -389,5 +392,66 @@ def test_evidence_graph_manage_cannot_mutate_the_compatibility_api() -> None:
             assert patched.status_code == 403, patched.text
             stored = await env.db.delay_events.find_one({"_id": hin_a1})
             assert stored["title"] == "Access blocked at Station S2"
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# Archived entries, legacy read-through and missing Documents, on real Mongo
+# --------------------------------------------------------------------------- #
+
+
+def test_an_archived_hindrance_is_read_only_in_both_directions() -> None:
+    async def scenario() -> None:
+        async with _env() as (env, hin_a1, _hin_a2):
+            first = await env.link("member_ab", PROJ_A1, "delay_event", hin_a1, DOC_IN_ID)
+            assert first.status_code == 201, first.text
+            link_id = first.json()["links"][0]["_id"]
+            archived = await env.call(
+                "POST", "member_ab", f"/api/hindrances/{hin_a1}/archive", PROJ_A1, json={"reason": "raised in error"}
+            )
+            assert archived.status_code == 200, archived.text
+
+            added = await env.link("member_ab", PROJ_A1, "delay_event", hin_a1, DOC_OUT_ID)
+            removed = await env.remove("member_ab", PROJ_A1, link_id)
+            offered = await env.call(
+                "GET", "member_ab", f"/api/documents/{DOC_IN_ID}/link-targets", PROJ_A1,
+                params={"target_type": "delay_event"},
+            )
+            assert added.status_code == 409, added.text
+            assert removed.status_code == 409, removed.text
+            assert hin_a1 not in {row["target_id"] for row in offered.json()["targets"]}
+            stored = await env.db.entity_document_links.find_one({"_id": link_id})
+            assert stored["removed_at"] is None
+
+            restored = await env.call(
+                "POST", "member_ab", f"/api/hindrances/{hin_a1}/restore", PROJ_A1, json={"reason": "restored"}
+            )
+            assert restored.status_code == 200, restored.text
+            assert (await env.remove("member_ab", PROJ_A1, link_id)).status_code == 200
+
+    _run(scenario())
+
+
+def test_legacy_document_ids_read_through_and_a_missing_document_can_be_unlinked() -> None:
+    async def scenario() -> None:
+        async with _env() as (env, hin_a1, _hin_a2):
+            # A legacy array written before the canonical framework existed.
+            await env.db.delay_events.update_one(
+                {"_id": hin_a1}, {"$set": {"linked_document_ids": [DOC_OUT_ID, DOC_A2_ID]}}
+            )
+            forward = await env.call("GET", "member_ab", f"/api/entities/delay_event/{hin_a1}/document-links", PROJ_A1)
+            assert forward.status_code == 200, forward.text
+            rows = {(row["document_id"], row["source"], row["relationship_role"]) for row in forward.json()["links"]}
+            # The foreign-project id never surfaces.
+            assert rows == {(DOC_OUT_ID, "legacy_read_through", "supporting_document")}
+
+            # A canonical link whose Document row is gone is still removable (CL-1).
+            created = await env.link("member_ab", PROJ_A1, "delay_event", hin_a1, DOC_IN_ID)
+            link_id = created.json()["links"][0]["_id"]
+            await env.db.documents.delete_one({"_id": DOC_IN})
+            removed = await env.remove("member_ab", PROJ_A1, link_id)
+            assert removed.status_code == 200, removed.text
+            assert (await env.db.entity_document_links.find_one({"_id": link_id}))["removed_at"] is not None
 
     _run(scenario())

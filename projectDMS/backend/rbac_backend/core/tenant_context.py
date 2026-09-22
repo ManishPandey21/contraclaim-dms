@@ -161,6 +161,19 @@ class ActiveScope:
             return
         await self.require_project(project_id, organization_id)
 
+    async def require_organization(self, organization_id: Any) -> None:
+        """Refuse a listing filter that leaves the selected organisation."""
+        target = _as_id(organization_id)
+        if target and self.organization_id and target != self.organization_id:
+            raise await _forbid(
+                self.db,
+                self.user,
+                "This organisation is not the one selected in the navbar.",
+                target,
+                "",
+                disclose=False,
+            )
+
     def narrows(self, project_id: Any) -> bool:
         """For listings: whether a row in ``project_id`` is visible under the selection."""
         return not self.project_id or _as_id(project_id) == self.project_id
@@ -185,17 +198,29 @@ async def _audit_rejection(db: Any, user: Any, reason: str, organization_id: str
 
 
 async def _forbid(
-    db: Any, user: Any, message: str, organization_id: str, project_id: str, *, disclose: bool = True
+    db: Any,
+    user: Any,
+    message: str,
+    organization_id: str,
+    project_id: str,
+    *,
+    disclose: bool = True,
+    audit_reason: Optional[str] = None,
 ) -> TenantContextError:
-    """403 ``context_forbidden``. ``disclose`` echoes the ids - only ever the ones the client sent."""
+    """403 ``context_forbidden``. ``disclose`` echoes the ids - only ever the ones the client sent.
+
+    ``audit_reason`` keeps the precise cause in the log and the audit event while the
+    response says one thing, so a principal that may not use a selection learns neither
+    whether the project exists nor which organisation owns it.
+    """
     logger.warning(
         "tenant context rejected: actor=%s org=%s project=%s reason=%s",
         _as_id(getattr(user, "id", "")),
         organization_id or "-",
         project_id or "-",
-        message,
+        audit_reason or message,
     )
-    await _audit_rejection(db, user, message, organization_id, project_id)
+    await _audit_rejection(db, user, audit_reason or message, organization_id, project_id)
     echoed = {"organization_id": organization_id or None, "project_id": project_id or None} if disclose else {}
     return TenantContextError(status_code=status.HTTP_403_FORBIDDEN, code=CONTEXT_FORBIDDEN, message=message, **echoed)
 
@@ -214,26 +239,31 @@ async def resolve_active_scope(db: Any, user: Any, *, organization_id: Any, proj
                 raise await _forbid(db, user, "This organisation is not accessible to your account.", requested_org, "")
         return ActiveScope(db, user, requested_org or None, None)
 
+    # One message for every unusable selection - absent, deactivated, owned by another
+    # organisation, or outside the principal's scope. Varying it would let any
+    # authenticated caller probe project ids and their owning organisation.
+    unusable = "This project is not available to your account."
     project = await db.projects.find_one(
         {"_id": {"$in": _object_id_candidates(requested_project)}, "is_active": _ACTIVE}
     )
     if not project:
         raise await _forbid(
-            db, user, "This project is unavailable or has been deactivated.", requested_org, requested_project
+            db, user, unusable, requested_org, requested_project,
+            audit_reason="The project is unavailable or has been deactivated.",
         )
     project_org = _as_id(project.get("organization_id") or project.get("organizationId"))
     if not project_org or (requested_org and requested_org != project_org):
         raise await _forbid(
-            db,
-            user,
-            "The selected project does not belong to the selected organisation.",
-            requested_org,
-            requested_project,
+            db, user, unusable, requested_org, requested_project,
+            audit_reason="The selected project does not belong to the selected organisation.",
         )
     if not scope.is_superadmin(user) and not await scope.is_client_scope_allowed(
         user, organization_id=project_org, project_id=requested_project
     ):
-        raise await _forbid(db, user, "This project is not accessible to your account.", requested_org, requested_project)
+        raise await _forbid(
+            db, user, unusable, requested_org, requested_project,
+            audit_reason="The project is not accessible to this account.",
+        )
     return ActiveScope(db, user, project_org, requested_project)
 
 

@@ -68,7 +68,9 @@ async def _hold_to_selection(
     selection = await requested.resolve()
     selection.require_selection()
     context = await service.active_scope_target(target_type, target_id)
-    if context is not None:
+    # A target with no project of its own can hold no canonical link: let the
+    # service answer its own 409, which says that, rather than a scope refusal.
+    if context is not None and context.project_id:
         await selection.require_project(context.project_id, context.organization_id)
 
 

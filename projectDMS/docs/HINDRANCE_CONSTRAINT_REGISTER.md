@@ -117,7 +117,7 @@ No data migration is required and none is written:
 | no `category` | served `null`, shown "Uncategorised" |
 | no `hindrance_ref` | served `null`; UI shows `delay_ref`. Not back-filled: assigning references to history is an owner decision |
 | `programme_activity` free text | kept and editable; structured links are additive |
-| `linked_document_ids` | served through the canonical relationship read-through (`source=legacy_read_through`, role `supporting_document`); new evidence is written only to `entity_document_links` |
+| `linked_document_ids` | served through the canonical relationship read-through (`source=legacy_read_through`, role `supporting_document`). The canonical API (`/api/hindrances`) writes evidence only to `entity_document_links` and rejects the field. The compatibility API (`/api/delay-events`) still accepts it (CL-3A debt): that write is gated by `dms.hindrance.edit` and the selected project, keeps only in-scope authorized Documents, refuses an archived entry, and is audited as `delay_events.updated` - but it carries no relationship role and emits no `document_relationship.linked` audit, and such a row can only be cleared through the same API |
 | `claimed/assessed/rejected` status | preserved; shown "(legacy)" |
 
 `ensure_indexes` adds the new indexes at startup. The unique reference index is

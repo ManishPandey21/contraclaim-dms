@@ -53,7 +53,7 @@ VARIATION_ALL = {
     "dms.variation.approve",
 }
 HINDRANCE_ALL = {"dms.hindrance.view", "dms.hindrance.create", "dms.hindrance.edit", "dms.hindrance.archive"}
-BASE = {"dms.document.view", "dms.claim.view", "dms.claim.edit"}
+BASE = {"dms.document.view", "dms.claim.view", "dms.claim.edit", "dms.keydate.view"}
 
 MEMBER_AB = _principal("u-member-ab", ["projectadmin"], "org-A", ["proj-A1", "proj-A2"])
 MEMBER_A2 = _principal("u-member-a2", ["projectadmin"], "org-A", ["proj-A2"])
@@ -491,3 +491,84 @@ async def test_scope_less_legacy_variation_is_held_to_the_selected_organisation_
     assert own_org.status_code == 200, own_org.text
     assert _forbidden(other_org), other_org.text
     assert _selection_required(unselected), unselected.text
+
+
+@pytest.mark.asyncio
+async def test_hindrances_affecting_a_target_needs_the_selection_too() -> None:
+    """A record-level read: the target must be in the selected project."""
+    db = _seeded()
+    db.key_date_milestones.docs.extend(
+        [
+            {"_id": "kd-A1", "organization_id": "org-A", "project_id": "proj-A1", "milestone_ref": "KD-03", "title": "Access"},
+            {"_id": "kd-A2", "organization_id": "org-A", "project_id": "proj-A2", "milestone_ref": "KD-07", "title": "Depot"},
+        ]
+    )
+    path = "/api/hindrances/affecting/key_date/kd-A1"
+    async with _as(db, MEMBER_AB, "proj-A1") as client:
+        allowed = await client.get(path)
+    async with _as(db, MEMBER_AB, "proj-A2") as client:
+        mismatched = await client.get(path)
+    async with _as(db, MEMBER_AB, None) as client:
+        unselected = await client.get(path)
+    assert allowed.status_code == 200, allowed.text
+    assert _forbidden(mismatched), mismatched.text
+    assert _selection_required(unselected), unselected.text
+
+
+@pytest.mark.asyncio
+async def test_an_archived_hindrance_refuses_a_canonical_unlink() -> None:
+    """An archived entry is read-only: its evidence cannot be added OR removed."""
+    db = _seeded()
+    async with _as(db, MEMBER_AB, "proj-A1") as client:
+        linked = await _link(client, "delay_event", "hin-A1")
+        assert linked.status_code == 201, linked.text
+        link_id = linked.json()["links"][0]["_id"]
+        db.delay_events.docs[0]["archived_at"] = datetime(2026, 9, 1)
+        removed = await client.post(
+            f"/api/document-links/{link_id}:remove", json={"reason": "after archive", "expected_revision": 1}
+        )
+        # A Variation has no archive concept, so its unlink is unaffected.
+        variation_link = await _link(client, "variation", "var-A1")
+        variation_removed = await client.post(
+            f"/api/document-links/{variation_link.json()['links'][0]['_id']}:remove",
+            json={"reason": "normal", "expected_revision": 1},
+        )
+    assert removed.status_code == 409, removed.text
+    assert db.entity_document_links.docs[0].get("removed_at") is None
+    assert variation_removed.status_code == 200, variation_removed.text
+
+
+@pytest.mark.asyncio
+async def test_an_organisation_only_selection_still_narrows_the_lists() -> None:
+    """X-Org-Id with no project: a list may not leave the selected organisation."""
+    db = _seeded()
+    transport_headers = {"X-Org-Id": "org-A"}
+    app = _app(db, SUPERADMIN)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test", headers=transport_headers
+    ) as client:
+        variations = await client.get("/api/variations")
+        hindrances = await client.get("/api/hindrances")
+        foreign_filter = await client.get("/api/variations", params={"organization_id": "org-B"})
+    assert variations.status_code == 200, variations.text
+    assert {row["_id"] for row in variations.json()} == {"var-A1", "var-A2"}
+    assert hindrances.status_code == 200, hindrances.text
+    assert {row["organization_id"] for row in hindrances.json()["items"]} == {"org-A"}
+    assert _forbidden(foreign_filter), foreign_filter.text
+
+
+@pytest.mark.asyncio
+async def test_an_unusable_selection_says_one_thing_whatever_the_reason() -> None:
+    """The refusal must not tell a caller whether a project exists or who owns it."""
+    db = _seeded()
+    db.projects.docs.append({"_id": "proj-dead", "organization_id": "org-A", "name": "Closed", "is_active": False})
+    messages = set()
+    for selection in ("proj-B1", "proj-dead", "proj-nonexistent"):
+        async with _as(db, MEMBER_AB, selection) as client:
+            response = await client.get("/api/variations/var-A1")
+        assert _forbidden(response), (selection, response.text)
+        messages.add(response.json()["detail"]["message"])
+    assert messages == {"This project is not available to your account."}
+    # The precise cause is kept for the operator, in the audit trail.
+    reasons = {row.get("reason") for row in db.audit_events.docs if row.get("action") == "tenant.context.rejected"}
+    assert len(reasons) >= 2

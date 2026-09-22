@@ -118,6 +118,10 @@ async def list_hindrances(
             await selection.require_project(project_id or selection.project_id, organization_id)
         project_id = selection.project_id
         organization_id = selection.organization_id
+    elif selection.organization_id:
+        # An organisation-only selection still narrows.
+        await selection.require_organization(organization_id)
+        organization_id = selection.organization_id
     await policy.authorize(
         current_user,
         Permissions.HINDRANCE_VIEW,
@@ -204,12 +208,14 @@ async def list_hindrances_affecting(
     selection: ActiveScope = Depends(active_scope),
 ):
     service = HindranceRegisterService(db)
+    # Record-level: the target must be in the selected project, and there must be
+    # one (400) - the same rule `_load` applies to a register entry.
+    selection.require_selection()
     try:
         target = await service.load_link_target(target_type, target_id)
     except HindranceError as exc:
         _fail(exc)
-    if selection.has_project:
-        await selection.require_record(target)
+    await selection.require_record(target)
     await policy.authorize_document(
         current_user, LINK_TARGETS[target_type].view_permission, target, resource_type=target_type
     )

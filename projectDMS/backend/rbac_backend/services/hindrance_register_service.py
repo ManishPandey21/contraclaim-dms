@@ -489,9 +489,20 @@ class HindranceRegisterService(EvidenceRegisterService):
             )
         update["updated_at"] = datetime.utcnow()
         update["updated_by"] = _actor_id(current_user)
+        # Fenced on the scope and archive state read above: an entry archived or
+        # re-scoped between the read and this write refuses instead of changing.
         updated = await db[COLLECTION].find_one_and_update(
-            {"_id": item_id}, {"$set": update}, return_document=ReturnDocument.AFTER
+            {
+                "_id": item_id,
+                "organization_id": existing.get("organization_id"),
+                "project_id": existing.get("project_id"),
+                "archived_at": None,
+            },
+            {"$set": update},
+            return_document=ReturnDocument.AFTER,
         )
+        if updated is None:
+            raise HindranceError(_ARCHIVED_READ_ONLY, 409)
         updated = await self._served(db, updated or {**existing, **update})
         await self.audit.emit(
             action=f"{COLLECTION}.updated",

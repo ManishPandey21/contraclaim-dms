@@ -45,6 +45,22 @@ LINK_TO_RECORD_TARGET_TYPES: tuple[str, ...] = (
     "delay_event",
 )
 
+def _label_matches(
+    needle: str,
+    context: EntityContext,
+    row: dict[str, Any],
+    label_fields: tuple[str, ...],
+) -> bool:
+    """Does this candidate match the search text?
+
+    The rendered label first, then the row fields the database prefilter used -
+    a Hindrance labelled by its reference is still findable by its title.
+    """
+    if needle in context.label.lower():
+        return True
+    return any(needle in str(row.get(field) or "").lower() for field in label_fields)
+
+
 #: Rows read per Link-to-Record listing before label filtering.
 LINK_TARGET_SCAN_LIMIT = 200
 
@@ -443,6 +459,10 @@ class DocumentRelationshipService:
         )
         if context.frozen:
             raise DocumentRelationshipError("Evidence relationships are frozen", 409)
+        if not await self.registry.get(context.target_type).guard_relationship_remove(self.db, context):
+            raise DocumentRelationshipError(
+                "Relationship target is read-only and its evidence cannot be changed", 409
+            )
         if stored.get("removed_at") is not None:
             raise DocumentRelationshipError("Document relationship is already removed", 409)
         if int(stored.get("_revision") or 1) != int(expected_revision):
@@ -905,7 +925,7 @@ class DocumentRelationshipService:
                 continue
             if context.organization_id != organization_id or context.project_id != project_id:
                 continue
-            if needle and needle not in context.label.lower():
+            if needle and not _label_matches(needle, context, row, adapter.target_label_fields):
                 continue
             permission = context.manage_permission
             if permission not in decisions:
