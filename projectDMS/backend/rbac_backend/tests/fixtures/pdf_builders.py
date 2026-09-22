@@ -161,3 +161,18 @@ def build_corrupt_pdf(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" + b"\x00" * 512)
     return path
+
+
+def build_page_text_map_pdf(
+    path: Path, *, page_lines: list[list[str] | None]
+) -> Path:
+    """A PDF whose per-page text layer is declared page by page.
+
+    ``None`` means a page with no text layer at all (a scan); a list of lines
+    means a native text page. Retry tests need an exact, per-page mix of the
+    two, which the fixed-shape builders above cannot express.
+    """
+    pdf = pikepdf.new()
+    for lines in page_lines:
+        _add_page(pdf, media_box=A4_PORTRAIT, lines=lines)
+    return _save(pdf, path)
