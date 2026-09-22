@@ -47,6 +47,24 @@ describe("active scope propagation", () => {
     expect(sent.map((request) => request.project)).toEqual(["proj-A1", "proj-A2", "proj-A1"]);
   });
 
+  it("a project switch moves the Variation and Hindrance registers together (CL-3A)", async () => {
+    const { client, sent } = capturingClient();
+    setActiveScope({ organizationId: "org-A", projectId: "proj-A1" });
+    await client.get("/variations/var-A1");
+    await client.get("/hindrances/hin-A1");
+    await client.get("/documents/letter-1/entity-links");
+    setActiveScope({ organizationId: "org-A", projectId: "proj-A2" });
+    await client.get("/variations");
+    await client.get("/hindrances");
+    await client.get("/entities/variation/var-A1/document-links");
+    await client.get("/entities/delay_event/hin-A1/document-links");
+
+    expect(sent.map((request) => request.project)).toEqual([
+      "proj-A1", "proj-A1", "proj-A1",
+      "proj-A2", "proj-A2", "proj-A2", "proj-A2",
+    ]);
+  });
+
   it("sends no selection header when nothing is selected", async () => {
     const { client, sent } = capturingClient();
     await client.get("/hindrances");

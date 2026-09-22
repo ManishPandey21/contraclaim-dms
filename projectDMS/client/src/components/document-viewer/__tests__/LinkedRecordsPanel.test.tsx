@@ -33,7 +33,8 @@ describe("LinkedRecordsPanel", () => {
     ]);
     render(<MemoryRouter><LinkedRecordsPanel documentId="doc-1" /></MemoryRouter>);
     expect(await screen.findByText("HIN-0001")).toBeInTheDocument();
-    expect(screen.getByText(/Hindrance \/ constraint/)).toBeInTheDocument();
+    // CL-3A: labels come from the shared lib/relationship-roles helpers.
+    expect(screen.getByText(/Hindrance \/ Constraint · Site record/)).toBeInTheDocument();
     expect(screen.getByRole("link")).toHaveAttribute("href", "/hindrances/h-1");
   });
 

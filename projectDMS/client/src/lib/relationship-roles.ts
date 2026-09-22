@@ -22,6 +22,7 @@ export function isCorrespondenceRole(role: string): boolean {
  */
 export const LINK_TO_RECORD_TARGETS: ReadonlyArray<{ value: string; label: string }> = [
   { value: "variation", label: "Variation" },
+  { value: "delay_event", label: "Hindrance / Constraint" },
   { value: "claim", label: "Claim" },
   { value: "ipc_bill", label: "IPC / Bill" },
   { value: "insurance", label: "Insurance" },
@@ -71,6 +72,10 @@ const ROLE_LABELS: Record<string, string> = {
   certificate: "Certificate",
   variation_submission: "Variation submission",
   variation_approval: "Variation approval",
+  instruction: "Instruction",
+  site_record: "Site record",
+  photograph: "Photograph",
+  programme_record: "Programme record",
   manual_review: "Legacy link (review)",
 };
 
