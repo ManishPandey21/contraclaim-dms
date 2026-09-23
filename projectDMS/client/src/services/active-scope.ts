@@ -4,9 +4,10 @@
  * `TenantContext` owns the selection and is the only writer here; the API
  * client's request interceptor is the only reader. Every API request therefore
  * carries `X-Org-Id` / `X-Proj-Id` for the CURRENT selection, and the backend
- * (`core/tenant_context.py`) holds the Hindrance register to it: a record in
- * another project is refused 403 `context_forbidden`, and a record-level request
- * with no project selected is 400 `selection_required`.
+ * (`core/tenant_context.py`) holds every scoped register to it (Hindrance,
+ * Variation, Programme, Chronology and, since CL-4A, the core DMS modules): a
+ * record in another project is refused 403 `context_forbidden`, and a
+ * record-level request with no project selected is 400 `selection_required`.
  *
  * It is a module-level value rather than React state on purpose: `selectProject`
  * updates it synchronously, before the routed page remounts, so the first
@@ -40,4 +41,12 @@ export function scopeErrorCode(error: unknown): "selection_required" | "context_
   const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
   const code = detail && typeof detail === "object" ? (detail as { code?: unknown }).code : undefined;
   return code === "selection_required" || code === "context_forbidden" ? code : null;
+}
+
+/** A user-facing sentence for a scope refusal, or `null` for any other error. */
+export function scopeRefusalMessage(error: unknown, noun = "record"): string | null {
+  const code = scopeErrorCode(error);
+  if (code === "selection_required") return `Select a project in the navbar to open or change this ${noun}.`;
+  if (code === "context_forbidden") return `This ${noun} is not in the project selected in the navbar.`;
+  return null;
 }

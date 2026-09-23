@@ -2,18 +2,22 @@
 
 Minimal port of the tenant-context design on `codex/csv-import-scope`
 (`core/tenant_context.py`). Same header names, same `selection_required` /
-`context_forbidden` semantics, same refusal audit. It is shared infrastructure, but
-by owner decision it binds only the registers that opt in:
+`context_forbidden` semantics, same refusal audit. It is shared infrastructure; it
+binds the routes that depend on it:
 
 * the Hindrance & Constraint Register and its `/api/delay-events` compatibility
   routes (PR #22, 2026-09-22);
 * the Variation Register (CL-3A, closing the CL-2 debt);
+* Programme Milestones and Chronology events (CL-3B);
+* the core DMS modules (CL-4A): Documents, Contract Documents / Contract Master,
+  Claims, IPC / Bills, Insurance, Bank Guarantees, Key Dates / achievements / EOT,
+  the dashboard totals and document search;
 * on the shared relationship routes, the target types whose adapter sets
   `active_scope_enforced` (`services/entity_adapter_registry.py`).
 
-Every other register keeps its existing semantics until it is moved deliberately
-(SYSTEM-WIDE ACTIVE-SCOPE CONSISTENCY DEBT, contraclaim-dms#24). The browser sends
-the headers on every request, but a route that does not depend on this module never
+Registers not listed (correspondence/letters, tasks, reports, arbitration) keep their
+existing semantics until they are moved deliberately (CL-4B). The browser sends the
+headers on every request, but a route that does not depend on this module never
 reads them.
 
 What it answers, and what it deliberately does not:
@@ -177,6 +181,29 @@ class ActiveScope:
     def narrows(self, project_id: Any) -> bool:
         """For listings: whether a row in ``project_id`` is visible under the selection."""
         return not self.project_id or _as_id(project_id) == self.project_id
+
+    async def list_filters(
+        self, organization_id: Any = None, project_id: Any = None
+    ) -> tuple[Optional[str], Optional[str]]:
+        """The ``(organization_id, project_id)`` filters a listing must use.
+
+        A filter may narrow the selection, never leave it: a project filter other
+        than the selected project, or an organisation filter other than the
+        selected organisation, is 403 ``context_forbidden``. With a project
+        selected the listing is pinned to it; with only an organisation selected
+        it is pinned to that organisation; with nothing selected the caller's
+        filters pass through unchanged and ``build_scope_query`` bounds the rows.
+        """
+        org = _as_id(organization_id) or None
+        project = _as_id(project_id) or None
+        if not self.has_project:
+            if self.organization_id:
+                await self.require_organization(org)
+                return self.organization_id, project
+            return org, project
+        if project or org:
+            await self.require_project(project or self.project_id, org)
+        return self.organization_id, self.project_id
 
 
 async def _audit_rejection(db: Any, user: Any, reason: str, organization_id: str, project_id: str) -> None:

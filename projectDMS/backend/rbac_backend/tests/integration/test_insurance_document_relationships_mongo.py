@@ -30,6 +30,7 @@ from rbac_backend.services.insurance_document_link_migration import (
     classify_legacy_insurance_evidence,
 )
 from rbac_backend.services.insurance_service import InsuranceService
+from rbac_backend.tests.selection_fixtures import selection
 from rbac_backend.tests.integration.test_claim_document_relationships_mongo import (
     InjectedFailure,
     _AllowPolicy,
@@ -551,6 +552,7 @@ async def test_real_mongo_insurance_deletion_preserves_documents_files_and_legac
             db=database,
             current_user=_actor(),
             policy=_AllowPolicy(),
+            selection=selection(database, "org-1", "project-1"),
         )
 
         assert await database.insurance_policies.count_documents({"_id": "insurance-1"}) == 0

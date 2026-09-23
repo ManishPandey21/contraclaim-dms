@@ -327,7 +327,14 @@ async def test_create_variation_denies_cross_tenant():
 
 @pytest.mark.asyncio
 async def test_create_bg_denies_cross_tenant():
+    """The tenant gate refuses a foreign tenant even when the selection agrees with the body
+    (CL-4A holds the create to the selection first; see test_cl4a_bg_key_dates_scope.py)."""
     payload = BankGuaranteeCreate(project_id="proj-B", organization_id="org-B", bg_number="BG-X")
+    db = _DB()
+    user = _user(org="org-A")
     with pytest.raises(HTTPException) as exc:
-        await create_bg(payload, db=_DB(), current_user=_user(org="org-A"), policy=_policy())
+        await create_bg(
+            payload, db=db, current_user=user, policy=_policy(),
+            selection=ActiveScope(db, user, "org-B", "proj-B"),
+        )
     assert exc.value.status_code == 403

@@ -1,4 +1,6 @@
 import { api } from "./api";
+import { joinApiUrl } from "@/config/api";
+import { fetchApiFileBlob } from "@/services/http";
 
 export interface ContractUploadSessionResponse {
   upload_id: string;
@@ -258,10 +260,9 @@ export async function searchContracts(payload: {
 }
 
 export async function downloadContractDocument(documentId: string): Promise<Blob> {
-  const { data } = await api.get(`/contracts/${documentId}/download`, {
-    responseType: "blob",
-  });
-  return data instanceof Blob ? data : new Blob([data]);
+  // Not through axios: a stored file answers with a redirect to storage, and the
+  // redirected request would carry the navbar selection (see fetchApiFileBlob).
+  return fetchApiFileBlob(joinApiUrl(`/contracts/${documentId}/download`));
 }
 
 /**

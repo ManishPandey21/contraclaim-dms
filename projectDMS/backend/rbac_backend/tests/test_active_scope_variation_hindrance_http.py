@@ -14,8 +14,10 @@ closes the CL-2 debt for Variation:
 
 It also pins the shared relationship routes (``/api/entities/{type}/{id}/...``,
 ``/api/document-links/{id}``, ``/api/documents/{id}/entity-links`` and
-``/api/documents/{id}/link-targets``) for both scoped target types, and that an
-unrelated target type (Claim) keeps its existing, selection-blind behaviour.
+``/api/documents/{id}/link-targets``) for the scoped target types - since CL-4A
+Claim is one of them - and that a target type whose adapter does not set
+``active_scope_enforced`` (a synthetic one: every registered type now opts in)
+keeps its selection-blind behaviour.
 
 The harness is the Hindrance HTTP suite's in-memory Mongo boundary with the real
 ``PolicyService`` / ``ScopeService`` / ``DocumentRelationshipService``.
@@ -33,11 +35,19 @@ from fastapi import FastAPI
 
 from rbac_backend.core.database import get_db
 from rbac_backend.core.security import get_current_user
+from rbac_backend.routers.document_relationships import (
+    get_document_relationship_service,
+)
 from rbac_backend.routers.document_relationships import router as relationship_router
 from rbac_backend.routers.evidence_registers import router as registers_router
 from rbac_backend.routers.hindrances import router as hindrances_router
 from rbac_backend.routers.variations import router as variations_router
+from rbac_backend.services.document_relationship_service import DocumentRelationshipService
 from rbac_backend.services.entitlement_service import EntitlementService
+from rbac_backend.services.entity_adapter_registry import (
+    ClaimEntityAdapter,
+    EntityAdapterRegistry,
+)
 from rbac_backend.services.permission_service import PermissionService
 from rbac_backend.tests.test_hindrance_register_http import (
     _Database,
@@ -77,6 +87,20 @@ def _authorization_seams(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(PermissionService, "user_has_permission", _has_permission)
     monkeypatch.setattr(EntitlementService, "check_permission_entitlement", _entitled)
+
+
+class _UnboundClaimAdapter(ClaimEntityAdapter):
+    """A target type that does NOT opt into the selection (CL-4A control).
+
+    Every registered type is selection-bound since CL-4A; this one reads the
+    same Claim rows and differs only in ``active_scope_enforced``.
+    """
+
+    target_type = "unbound_claim"
+    active_scope_enforced = False
+
+
+REGISTRY = EntityAdapterRegistry([*EntityAdapterRegistry().adapters(), _UnboundClaimAdapter()])
 
 
 def _variation(variation_id: str, org: str, project: str) -> dict[str, Any]:
@@ -161,6 +185,9 @@ def _app(db: _Database, user: Any) -> FastAPI:
         app.include_router(router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
+        db, registry=REGISTRY
+    )
     return app
 
 
@@ -316,7 +343,9 @@ async def _link(client: httpx.AsyncClient, target_type: str, target_id: str, doc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("target_type,target_id", [("variation", "var-A1"), ("delay_event", "hin-A1")])
+@pytest.mark.parametrize(
+    "target_type,target_id", [("variation", "var-A1"), ("delay_event", "hin-A1"), ("claim", "claim-A1")]
+)
 async def test_document_link_routes_are_bound_by_the_selection(target_type: str, target_id: str) -> None:
     db = _seeded()
     async with _as(db, MEMBER_AB, "proj-A2") as client:
@@ -360,7 +389,12 @@ async def test_document_link_routes_are_bound_by_the_selection(target_type: str,
 async def test_reverse_lookup_hides_scoped_rows_outside_the_selection_only() -> None:
     db = _seeded()
     async with _as(db, MEMBER_AB, "proj-A1") as client:
-        for target_type, target_id in (("variation", "var-A1"), ("delay_event", "hin-A1"), ("claim", "claim-A1")):
+        for target_type, target_id in (
+            ("variation", "var-A1"),
+            ("delay_event", "hin-A1"),
+            ("claim", "claim-A1"),
+            ("unbound_claim", "claim-A1"),
+        ):
             response = await _link(client, target_type, target_id)
             assert response.status_code == 201, response.text
         selected_a1 = await client.get("/api/documents/letter-A1/entity-links")
@@ -373,18 +407,18 @@ async def test_reverse_lookup_hides_scoped_rows_outside_the_selection_only() -> 
         assert response.status_code == 200, response.text
         return {row["target_type"] for row in response.json()["links"]}
 
-    assert _types(selected_a1) == {"variation", "delay_event", "claim"}
-    # Selected A2: Variation A1 and Hindrance A1 are not revealed; the Claim row,
-    # an unrelated target type, keeps its selection-blind behaviour.
-    assert _types(selected_a2) == {"claim"}
+    assert _types(selected_a1) == {"variation", "delay_event", "claim", "unbound_claim"}
+    # Selected A2: Variation, Hindrance and (CL-4A) Claim A1 are not revealed; the
+    # row of a type that does not opt in keeps its selection-blind behaviour.
+    assert _types(selected_a2) == {"unbound_claim"}
     assert "var-A1" not in selected_a2.text and "hin-A1" not in selected_a2.text
     # Nothing selected: the list rule - bounded by membership, not by a selection.
-    assert _types(unselected) == {"variation", "delay_event", "claim"}
+    assert _types(unselected) == {"variation", "delay_event", "claim", "unbound_claim"}
 
     # A selection the caller may not hold hides the scoped rows (fail closed).
     async with _as(db, MEMBER_AB, "proj-B1") as client:
         foreign_selection = await client.get("/api/documents/letter-A1/entity-links")
-    assert _types(foreign_selection) == {"claim"}
+    assert _types(foreign_selection) == {"unbound_claim"}
 
 
 @pytest.mark.asyncio
@@ -420,12 +454,19 @@ async def test_link_to_record_never_offers_an_archived_hindrance() -> None:
 
 @pytest.mark.asyncio
 async def test_unrelated_target_types_ignore_the_selection() -> None:
+    """CL-4A: a target type without ``active_scope_enforced`` is unchanged."""
     db = _seeded()
     async with _as(db, MEMBER_AB, "proj-A2") as client:
-        linked = await _link(client, "claim", "claim-A1")
-        listed = await client.get("/api/entities/claim/claim-A1/document-links")
+        linked = await _link(client, "unbound_claim", "claim-A1")
+        listed = await client.get("/api/entities/unbound_claim/claim-A1/document-links")
+        bound = await client.get("/api/entities/claim/claim-A1/document-links")
+    async with _as(db, MEMBER_AB, None) as client:
+        unselected = await client.get("/api/entities/unbound_claim/claim-A1/document-links")
     assert linked.status_code == 201, linked.text
     assert listed.status_code == 200 and len(listed.json()["links"]) == 1, listed.text
+    assert unselected.status_code == 200 and len(unselected.json()["links"]) == 1, unselected.text
+    # The same Claim row through its registered (bound) type is refused.
+    assert _forbidden(bound), bound.text
 
 
 # ---------------------------------------------------------------------------

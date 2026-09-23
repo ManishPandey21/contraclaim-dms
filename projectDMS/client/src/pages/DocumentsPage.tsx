@@ -90,6 +90,7 @@ import {
 import { create } from "zustand";
 import { LETTER_INITIATION_PREFILL_KEY } from "@/constants/storageKeys";
 import { string } from "zod";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
 
 interface DocumentReference {
   id: string;
@@ -270,9 +271,14 @@ const DocumentsPage = () => {
   const [directionFilter, setDirectionFilter] = useState<string>(
     initialFilters.directionFilter
   );
-  const [projectFilter, setProjectFilter] = useState<string>(
+  const [chosenProjectFilter, setProjectFilter] = useState<string>(
     initialFilters.projectFilter
   );
+  // CL-4A: with a project selected in the navbar the register is that project
+  // (the server pins the list to it and refuses any other); the page's own
+  // picker applies only when nothing is selected.
+  const { selectedProjectId, projectLocked, tenantLoading } = useRegisterProjectScope();
+  const projectFilter = selectedProjectId || chosenProjectFilter;
   const [dateFrom, setDateFrom] = useState(initialFilters.dateFrom);
   const [dateTo, setDateTo] = useState(initialFilters.dateTo);
   const [availableTags, setAvailableTags] = useState<
@@ -684,8 +690,8 @@ const DocumentsPage = () => {
   ]);
 
   useEffect(() => {
-    fetchDocuments();
-  }, [fetchDocuments]);
+    if (!tenantLoading) fetchDocuments();
+  }, [fetchDocuments, tenantLoading]);
 
   // Fetch organizations and projects for LetterInitiationForm
   const fetchOrgsAndProjects = useCallback(async () => {
@@ -1517,6 +1523,7 @@ const DocumentsPage = () => {
 
                 <Select
                   value={projectFilter}
+                  disabled={projectLocked}
                   onValueChange={(value) =>
                     updateDocumentFilters(
                       { projectFilter: value },

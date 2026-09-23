@@ -1586,7 +1586,10 @@ async def test_scope_reverse_lookups_hide_other_projects_hindrances() -> None:
             json={"links": [{"document_id": "doc-A1", "relationship_role": "site_record"}]},
         )
         await client.post(f"/api/hindrances/{a1['id']}/links", json={"target_type": "key_date", "target_id": "kd-A1"})
-    # A non-Hindrance relationship on the same document: its behaviour must not change.
+    # An EOT submission relationship on the same document. It was the selection-blind
+    # control here until CL-4A bound every core target; it is now held exactly like the
+    # Hindrance row. The selection-blind control is a synthetic adapter that does not opt
+    # in (test_active_scope_variation_hindrance_http.py, CL-3B real-Mongo suite).
     db.key_date_baselines.docs.append(
         {"_id": "bl-A1", "organization_id": "org-A", "project_id": "proj-A1", "contract_id": "primary", "status": "frozen"}
     )
@@ -1613,11 +1616,9 @@ async def test_scope_reverse_lookups_hide_other_projects_hindrances() -> None:
     assert "delay_event" in selected_a1
     assert "delay_event" not in selected_a2, "Hindrance A1 leaked through the document viewer under A2"
     assert "delay_event" in unselected
-    other = [kind for kind in selected_a1 if kind != "delay_event"]
-    assert other, f"control row missing: {selected_a1}"
-    assert other == [kind for kind in selected_a2 if kind != "delay_event"] == [
-        kind for kind in unselected if kind != "delay_event"
-    ], "a non-Hindrance relationship row changed behaviour"
+    assert "eot_submission" in selected_a1, f"EOT row missing: {selected_a1}"
+    assert "eot_submission" in unselected
+    assert "eot_submission" not in selected_a2, "EOT A1 leaked through the document viewer under A2"
     assert affecting_a1.status_code == 200 and len(affecting_a1.json()["items"]) == 1
     assert _refused(affecting_a2), affecting_a2.text
 

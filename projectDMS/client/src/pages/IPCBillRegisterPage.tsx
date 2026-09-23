@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import useRBAC from "@/hooks/useRBAC";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import {
@@ -70,7 +72,8 @@ const IPCBillRegisterPage: React.FC = () => {
   const [items, setItems] = useState<IPCBillDTO[]>([]);
   const [summary, setSummary] = useState<IPCBillSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope();
   const [statusFilter, setStatusFilter] = useState("all");
   const [payFilter, setPayFilter] = useState("all");
   const [currencyFilter, setCurrencyFilter] = useState("");
@@ -105,14 +108,14 @@ const IPCBillRegisterPage: React.FC = () => {
       if (dateTo) p.date_to = new Date(dateTo).toISOString();
       setItems(await getIPCBills(p));
       setSummary(await getIPCSummary(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
-    } catch {
-      toast.error("Failed to load IPC bills");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "IPC") || "Failed to load IPC bills");
     } finally {
       setLoading(false);
     }
   }, [projectFilter, statusFilter, payFilter, currencyFilter, dateFrom, dateTo]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!tenantLoading) void load(); }, [load, tenantLoading]);
   useEffect(() => {
     (async () => {
       try {
@@ -225,7 +228,7 @@ const IPCBillRegisterPage: React.FC = () => {
     }
     void getIPCBill(deepLinkId)
       .then(openEdit)
-      .catch(() => toast.error("Linked IPC could not be opened"));
+      .catch((error) => toast.error(scopeRefusalMessage(error, "IPC") || "Linked IPC could not be opened"));
   }, [deepLinkId, items, loading]);
 
   const setDedComp = (ck: keyof IPCDeductions, rows: IPCDeductionLine[]) =>
@@ -337,7 +340,7 @@ const IPCBillRegisterPage: React.FC = () => {
         <CardHeader>
           <CardTitle>IPC Register</CardTitle>
           <div className="flex flex-wrap gap-3 pt-3">
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-52"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>

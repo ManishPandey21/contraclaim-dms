@@ -60,6 +60,8 @@ import {
 import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
 import { BANK_GUARANTEE_EVENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 import useHasPermission from "@/hooks/useHasPermission";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 import { enhancedApi } from "@/services/enhanced-api";
 import { getContractMasterForProject } from "@/services/contract-master-api";
 import { bgStatusColor, bgStatusLabel, bgTypeLabel, bgAlertText, fmtAmount } from "@/lib/contract-controls-helpers";
@@ -104,7 +106,8 @@ const BankGuaranteeRegisterPage: React.FC = () => {
   const [alerts, setAlerts] = useState<BGDTO[]>([]);
   const [summary, setSummary] = useState<BGSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope();
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -136,12 +139,12 @@ const BankGuaranteeRegisterPage: React.FC = () => {
       setItems(await getBGs(params));
       setSummary(await getBGSummary(scoped));
       setAlerts(await getBGAlerts(scoped));
-    } catch {
-      toast.error("Failed to load bank guarantees");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "bank guarantee") || "Failed to load bank guarantees");
     }
   }, [projectFilter, statusFilter, typeFilter]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!tenantLoading) void load(); }, [load, tenantLoading]);
   useEffect(() => {
     let active = true;
     (async () => {
@@ -300,10 +303,10 @@ const BankGuaranteeRegisterPage: React.FC = () => {
     try {
       const loaded = await getBGEvents(bg.id);
       if (requestGeneration === eventRequestGeneration.current) setEvents(loaded);
-    } catch {
+    } catch (error) {
       if (requestGeneration === eventRequestGeneration.current) {
         setEventsError(true);
-        toast.error("Failed to load Bank Guarantee event evidence");
+        toast.error(scopeRefusalMessage(error, "bank guarantee") || "Failed to load Bank Guarantee event evidence");
       }
     } finally {
       if (requestGeneration === eventRequestGeneration.current) setEventsLoading(false);
@@ -400,7 +403,7 @@ const BankGuaranteeRegisterPage: React.FC = () => {
         <CardHeader>
           <CardTitle>Bank Guarantees</CardTitle>
           <div className="flex flex-wrap gap-3 pt-3">
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-56"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>

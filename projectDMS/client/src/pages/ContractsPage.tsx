@@ -9,6 +9,7 @@ import {
   StatusResponse,
   ContractSearchResponse,
 } from "@/services/contracts-api";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type UploadProgress = {
   file: File;
@@ -33,6 +34,8 @@ const ContractsPage: React.FC = () => {
   const [projId, setProjId] = useState<string>(
     () => window.localStorage.getItem("proj_id") || ""
   );
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
   const [tags, setTags] = useState<string>("");
   const [files, setFiles] = useState<File[]>([]);
   const [uploads, setUploads] = useState<UploadProgress[]>([]);

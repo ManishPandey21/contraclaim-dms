@@ -31,6 +31,7 @@ import ClaimAssessmentDialog from "@/components/claims/ClaimAssessmentDialog";
 import ClaimTaskDialog from "@/components/claims/ClaimTaskDialog";
 import ClaimDocumentLinks from "@/components/claims/ClaimDocumentLinks";
 import useHasPermission from "@/hooks/useHasPermission";
+import { scopeRefusalMessage } from "@/services/active-scope";
 
 const STATUS_COLOR: Record<ClaimStatus, string> = {
   draft: "bg-gray-500",
@@ -86,8 +87,8 @@ const ClaimDetailPage: React.FC = () => {
     try {
       setClaim(await getClaim(id));
       await loadTasks();
-    } catch {
-      toast.error("Failed to load claim");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "claim") || "Failed to load claim");
     } finally {
       setLoading(false);
     }
@@ -101,8 +102,8 @@ const ClaimDetailPage: React.FC = () => {
     try {
       await downloadEvidenceBundle(id);
       toast.success("Evidence bundle downloaded");
-    } catch {
-      toast.error("Failed to export evidence bundle");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "claim") || "Failed to export evidence bundle");
     }
   };
 

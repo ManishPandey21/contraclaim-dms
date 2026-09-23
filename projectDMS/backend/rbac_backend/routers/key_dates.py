@@ -18,6 +18,7 @@ from ..core.config import settings
 from ..services.upload_streaming import read_upload_within_limit
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.key_date import (
     AchievementRecord,
     BaselineFreezeRequest,
@@ -74,11 +75,14 @@ def _bad_request(exc: KeyDateError) -> HTTPException:
     )
 
 
-async def _load(milestone_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load(milestone_id: str, permission: str, db, current_user, policy, selection: ActiveScope) -> dict:
+    """Load a key date and hold it to the selected project (400 when none is selected)."""
+    selection.require_selection()
     svc = KeyDateService(db)
     m = await svc.get(milestone_id)
     if not m:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Milestone not found")
+    await selection.require_record(m, allow_unscoped=True)
     await policy.authorize_document(current_user, permission, m, resource_type="key_date_milestone")
     return m
 
@@ -98,20 +102,28 @@ async def _read_csv(file: UploadFile) -> bytes:
     return content
 
 
-async def _load_submission(submission_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load_submission(
+    submission_id: str, permission: str, db, current_user, policy, selection: ActiveScope
+) -> dict:
+    selection.require_selection()
     submission = await KeyDateRevisionService(db).get_submission(submission_id)
     if not submission:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EOT submission not found")
+    await selection.require_record(submission, allow_unscoped=True)
     await policy.authorize_document(
         current_user, permission, submission, resource_type="key_date_eot_submission"
     )
     return submission
 
 
-async def _load_determination(determination_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load_determination(
+    determination_id: str, permission: str, db, current_user, policy, selection: ActiveScope
+) -> dict:
+    selection.require_selection()
     determination = await KeyDateRevisionService(db).get_determination(determination_id)
     if not determination:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EOT determination not found")
+    await selection.require_record(determination, allow_unscoped=True)
     await policy.authorize_document(
         current_user, permission, determination, resource_type="key_date_eot_determination"
     )
@@ -124,8 +136,10 @@ def _organization_id(current_user: CurrentUser, supplied: Optional[str] = None) 
 
 async def _authorize_workflow_scope(
     *, permission: str, project_id: str, organization_id: Optional[str],
-    current_user: CurrentUser, policy: PolicyService,
+    current_user: CurrentUser, policy: PolicyService, selection: ActiveScope,
 ) -> Optional[str]:
+    # The project named by the query/body must BE the selection: refused, never rewritten.
+    await selection.require_project(project_id, organization_id)
     org = _organization_id(current_user, organization_id)
     await policy.authorize(
         current_user, permission, resource_type="key_date_revision",
@@ -170,7 +184,9 @@ async def list_milestones(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.KEYDATE_VIEW, resource_type="key_dates",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -191,7 +207,9 @@ async def key_date_dashboard(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.KEYDATE_VIEW, resource_type="key_dates",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -209,7 +227,9 @@ async def export_key_dates(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.KEYDATE_EXPORT, resource_type="key_dates",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -272,7 +292,9 @@ async def preview_key_dates_import(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    await selection.require_project(project_id, organization_id)
     content = await _read_csv(file)
     try:
         organization_id, project_id = await validate_csv_import_scope(
@@ -308,7 +330,9 @@ async def import_key_dates(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    await selection.require_project(project_id, organization_id)
     content = await _read_csv(file)
     try:
         organization_id, project_id = await validate_csv_import_scope(
@@ -341,7 +365,10 @@ async def create_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # The body's project must BE the selection: refused, never rewritten.
+    await selection.require_project(payload.project_id, payload.organization_id)
     org = payload.organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user, Permissions.KEYDATE_CREATE, resource_type="key_date_milestone",
@@ -373,12 +400,14 @@ async def recalculate_key_dates(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Re-derive a project's milestone key dates from the current LOA + week basis.
 
     Opt-in admin action used after correcting the contract start date / week basis.
     Baselines under an approved EOT revision are left untouched.
     """
+    await selection.require_project(project_id, organization_id)
     await policy.authorize(
         current_user, Permissions.KEYDATE_EDIT, resource_type="key_dates",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -403,10 +432,12 @@ async def key_date_workflow(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_VIEW, project_id=project_id,
         organization_id=organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     return KeyDateWorkflowSummary(**await KeyDateRevisionService(db).workflow_summary(
         org, project_id, contract_id
@@ -419,12 +450,14 @@ async def freeze_original_key_dates(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     if not payload.confirmation:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Baseline freeze was not confirmed")
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_BASELINE_FREEZE, project_id=payload.project_id,
         organization_id=payload.organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     try:
         return KeyDateBaseline(**await KeyDateRevisionService(db).freeze_baseline(
@@ -440,10 +473,12 @@ async def create_eot_submission_revision(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_EOT_SUBMIT, project_id=payload.project_id,
         organization_id=payload.organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     payload.organization_id = org
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
@@ -471,9 +506,10 @@ async def update_eot_submission_revision(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy, selection
     )
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
         try:
@@ -501,9 +537,10 @@ async def lock_eot_submission_revision(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_LOCK_SUBMISSION, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_LOCK_SUBMISSION, db, current_user, policy, selection
     )
     try:
         await DocumentRelationshipService(db, policy=policy).freeze(
@@ -532,9 +569,10 @@ async def supersede_eot_submission_revision(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_SUPERSEDE, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_SUPERSEDE, db, current_user, policy, selection
     )
     try:
         return EOTSubmission(**await KeyDateRevisionService(db).supersede_submission(
@@ -550,9 +588,10 @@ async def eot_submission_template(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy, selection
     )
     milestones = await KeyDateService(db).list(
         build_scope_query(
@@ -597,9 +636,10 @@ async def preview_eot_submission_csv(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy, selection
     )
     try:
         preview, _items = await KeyDateRevisionService(db).submission_csv_preview(
@@ -617,9 +657,10 @@ async def import_eot_submission_csv(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy, selection
     )
     try:
         return await KeyDateRevisionService(db).import_submission_csv(
@@ -635,10 +676,12 @@ async def create_eot_determination(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_EOT_DETERMINE, project_id=payload.project_id,
         organization_id=payload.organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     payload.organization_id = org
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
@@ -668,9 +711,10 @@ async def update_eot_determination(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
-        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy, selection,
     )
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
         try:
@@ -698,10 +742,11 @@ async def freeze_eot_determination(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
         determination_id, Permissions.KEYDATE_EOT_FREEZE_DETERMINATION,
-        db, current_user, policy,
+        db, current_user, policy, selection,
     )
     try:
         await DocumentRelationshipService(db, policy=policy).freeze(
@@ -729,9 +774,10 @@ async def eot_determination_template(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
-        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy, selection,
     )
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
@@ -757,7 +803,7 @@ async def eot_determination_template(
         ])
     return Response(
         content=buffer.getvalue(), media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="eot-determination-template.csv"'},
+        headers={"Content-Disposition": 'attachment; filename="eot-determination-template.csv"'},
     )
 
 
@@ -768,9 +814,10 @@ async def preview_eot_determination_csv(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
-        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy, selection,
     )
     try:
         preview, _items = await KeyDateRevisionService(db).determination_csv_preview(
@@ -788,9 +835,10 @@ async def import_eot_determination_csv(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
-        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy
+        determination_id, Permissions.KEYDATE_EOT_DETERMINE, db, current_user, policy, selection,
     )
     try:
         return await KeyDateRevisionService(db).import_determination_csv(
@@ -809,10 +857,12 @@ async def export_frozen_baseline(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_EXPORT, project_id=project_id,
         organization_id=organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     baseline = await KeyDateRevisionService(db).baseline(org, project_id, contract_id)
     if not baseline or baseline.get("status") != "frozen":
@@ -837,9 +887,10 @@ async def export_eot_submission(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     submission = await _load_submission(
-        submission_id, Permissions.KEYDATE_EXPORT, db, current_user, policy
+        submission_id, Permissions.KEYDATE_EXPORT, db, current_user, policy, selection
     )
     from ..services import key_date_revision_export as kx
     metadata = await _export_metadata(db, submission, f"{submission.get('revision_label')} Submission")
@@ -861,9 +912,10 @@ async def export_eot_determination(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     determination = await _load_determination(
-        determination_id, Permissions.KEYDATE_EXPORT, db, current_user, policy
+        determination_id, Permissions.KEYDATE_EXPORT, db, current_user, policy, selection,
     )
     from ..services import key_date_revision_export as kx
     covered = ", ".join(determination.get("covered_revision_labels") or [])
@@ -891,10 +943,12 @@ async def export_complete_key_date_history(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     org = await _authorize_workflow_scope(
         permission=Permissions.KEYDATE_EXPORT, project_id=project_id,
         organization_id=organization_id, current_user=current_user, policy=policy,
+        selection=selection,
     )
     scope = build_scope_query(current_user, organization_id=org, project_id=project_id)
     milestones = await KeyDateService(db).list(scope, project_id=project_id, limit=5000)
@@ -925,8 +979,9 @@ async def get_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    return KeyDateMilestone(**await _load(milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy))
+    return KeyDateMilestone(**await _load(milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy, selection))
 
 
 @router.put("/key-dates/{milestone_id}", response_model=KeyDateMilestone)
@@ -936,8 +991,9 @@ async def update_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    m = await _load(milestone_id, Permissions.KEYDATE_EDIT, db, current_user, policy)
+    m = await _load(milestone_id, Permissions.KEYDATE_EDIT, db, current_user, policy, selection)
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
         try:
             await DocumentRelationshipService(
@@ -963,8 +1019,9 @@ async def delete_milestone(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    m = await _load(milestone_id, Permissions.KEYDATE_DELETE, db, current_user, policy)
+    m = await _load(milestone_id, Permissions.KEYDATE_DELETE, db, current_user, policy, selection)
     try:
         await KeyDateService(db).delete(m, current_user)
     except KeyDateError as exc:
@@ -983,8 +1040,9 @@ async def submit_eot(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    m = await _load(milestone_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy)
+    m = await _load(milestone_id, Permissions.KEYDATE_EOT_SUBMIT, db, current_user, policy, selection)
     if "linked_document_ids" in payload.model_fields_set and payload.linked_document_ids:
         try:
             await DocumentRelationshipService(
@@ -1010,9 +1068,10 @@ async def list_eots(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     milestone = await _load(
-        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy
+        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy, selection
     )
     return [
         EOTApplication(**e)
@@ -1033,8 +1092,9 @@ async def review_eot(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    m = await _load(milestone_id, Permissions.KEYDATE_EOT_APPROVE, db, current_user, policy)
+    m = await _load(milestone_id, Permissions.KEYDATE_EOT_APPROVE, db, current_user, policy, selection)
     svc = KeyDateService(db)
     eot = await db.key_date_eot_applications.find_one({"_id": eot_id})
     if (
@@ -1072,9 +1132,10 @@ async def extension_history(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     milestone = await _load(
-        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy
+        milestone_id, Permissions.KEYDATE_VIEW, db, current_user, policy, selection
     )
     return [
         ExtensionHistory(**h)
@@ -1096,8 +1157,9 @@ async def record_achievement(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    m = await _load(milestone_id, Permissions.KEYDATE_ACHIEVEMENT, db, current_user, policy)
+    m = await _load(milestone_id, Permissions.KEYDATE_ACHIEVEMENT, db, current_user, policy, selection)
     if "linked_document_ids" in rec.model_fields_set and rec.linked_document_ids:
         try:
             await DocumentRelationshipService(

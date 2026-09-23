@@ -359,7 +359,9 @@ test.describe("Hindrance & Constraint Register workflow", () => {
           headers: { "Content-Type": "application/json", ...headers },
           body: JSON.stringify({ title: "Hijacked" }),
         }).then((response) => response.status);
-      return [await write({ "X-Proj-Id": "proj-A2" }), await write({})];
+      // Since CL-4A the page's fetch wrapper adds the navbar selection to every API
+      // request; an explicitly empty header is how a request states "nothing selected".
+      return [await write({ "X-Proj-Id": "proj-A2" }), await write({ "X-Proj-Id": "", "X-Org-Id": "" })];
     });
     expect(statuses).toEqual([403, 400]);
     expect(state.entries[0].title).toBe("Site access blocked at Station S2");

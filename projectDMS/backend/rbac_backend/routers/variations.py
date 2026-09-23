@@ -57,15 +57,7 @@ async def _list_scope(
     selection: ActiveScope, organization_id: Optional[str], project_id: Optional[str]
 ) -> tuple[Optional[str], Optional[str]]:
     """A list filter may narrow the selection, never leave it. Nothing selected: unchanged."""
-    if not selection.has_project:
-        # An organisation-only selection still narrows: a filter may not leave it.
-        if selection.organization_id:
-            await selection.require_organization(organization_id)
-            return selection.organization_id, project_id
-        return organization_id, project_id
-    if project_id or organization_id:
-        await selection.require_project(project_id or selection.project_id, organization_id)
-    return selection.organization_id, selection.project_id
+    return await selection.list_filters(organization_id, project_id)
 
 
 async def _present_variation(variation: dict, db, current_user: CurrentUser) -> Variation:

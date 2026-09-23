@@ -244,6 +244,11 @@ export function TenantProvider({ children }: React.PropsWithChildren) {
   return <TenantContext.Provider value={value}>{children}</TenantContext.Provider>;
 }
 
+/** The navbar selection, or `null` outside `TenantProvider` (isolated page tests). */
+export function useOptionalTenant(): TenantContextValue | null {
+  return useContext(TenantContext);
+}
+
 export function useTenant(): TenantContextValue {
   const context = useContext(TenantContext);
   if (!context) throw new Error("useTenant must be used within TenantProvider");

@@ -42,6 +42,7 @@ from rbac_backend.tests.test_claim_document_relationships import (
     _Database,
     _relationship_app,
 )
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.utils.bson_presentation import present_bson
 
 DOC_OID = ObjectId("65f000000000000000000001")
@@ -60,9 +61,11 @@ def _objectid_database() -> _Database:
 
 
 def _client(db: _Database, **kwargs: Any) -> httpx.AsyncClient:
-    transport = httpx.ASGITransport(
-        app=_relationship_app(db, **kwargs), raise_app_exceptions=False
-    )
+    # Claim and Contract Document targets are selection-bound (CL-4A); these
+    # guards run with the selection the browser sends - the target's project.
+    app = _relationship_app(db, **kwargs)
+    pin_selection(app, db, "org-1", "project-1")
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 

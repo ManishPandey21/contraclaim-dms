@@ -295,6 +295,7 @@ async def test_the_contract_upload_surface_answers_413_for_an_oversize_file(
     from fastapi import HTTPException
 
     from rbac_backend.routers import contracts as contracts_router
+    from rbac_backend.tests.selection_fixtures import selection
 
     monkeypatch.setattr(settings, "CONTRACT_UPLOAD_MAX_FILE_SIZE_MB", 1, raising=False)
 
@@ -320,6 +321,7 @@ async def test_the_contract_upload_surface_answers_413_for_an_oversize_file(
             file_service=None,
             current_user=SimpleNamespace(id="u-gate5", organization_id="org-gate5"),
             policy=_AllowEverything(),
+            selection=selection(None, "org-gate5", "proj-gate5"),
         )
 
     assert refused.value.status_code == 413, (
