@@ -87,10 +87,12 @@ class ExtractedPage:
     quality_verdict: Optional[str] = None
     quality_checks: List[Dict[str, Any]] = field(default_factory=list)
     needs_review: bool = False
-    #: What extraction actually read, before any deterministic repair. Set the
-    #: first time a repair rewrites `text`, so the document's own wording stays
-    #: auditable: `text` is the published representation, `raw_text` is
-    #: evidence. Never overwritten once set.
+    #: What extraction actually read, when that differs from the published
+    #: `text`: set the first time a deterministic repair rewrites `text`, or by
+    #: the engine when the text was unusable ``(cid:N)`` placeholders and was
+    #: withheld (`text` is then empty - see text_quality.withhold_unusable).
+    #: `text` is the published representation, `raw_text` is evidence and is
+    #: never indexed. Never overwritten once set.
     raw_text: Optional[str] = None
     #: Applied repairs, as provenance records. Distinct from the gate's
     #: proposals: these are the ones that were re-verified and adopted.
@@ -118,5 +120,9 @@ class PageExtractionResult:
     ocr_failed_pages: List[int] = field(default_factory=list)
     ocr_deferred_pages: List[int] = field(default_factory=list)
     unrenderable_pages: List[int] = field(default_factory=list)
+    #: Pages whose text was unusable (cid:N) placeholders and was withheld
+    #: from `text`/`combined_text` (kept as `raw_text` evidence). Consumers use
+    #: it to avoid re-reading the same unusable text layer by another route.
+    withheld_pages: List[int] = field(default_factory=list)
     completeness: Completeness = Completeness.COMPLETE
     engine_version: str = "1"

@@ -65,13 +65,19 @@ def derive_processing_state(
     Ordering matters:
 
     1. An unrenderable page needs a person regardless of retries left - another
-       attempt cannot make an unparseable page parse.
+       attempt cannot make an unparseable page parse. The same holds for an
+       OCR_DISABLED page: OCR is switched off or its binaries are missing, a
+       capability condition no retry changes. Re-claiming it only spent the
+       remaining attempts (measured: three extraction runs) to reach the same
+       terminal state; after a configuration fix, the document is reprocessed.
     2. Anything else unresolved is resumable while attempts remain, and needs a
        person once they are gone.
     3. `COMPLETED` requires COMPLETE completeness *and* empty problem lists, so
        a bug in either one cannot produce a false success on its own.
     """
-    if result.unrenderable_pages:
+    if result.unrenderable_pages or any(
+        page.status is PageStatus.OCR_DISABLED for page in result.pages
+    ):
         return ProcessingState.HUMAN_REVIEW_REQUIRED
 
     unresolved = bool(

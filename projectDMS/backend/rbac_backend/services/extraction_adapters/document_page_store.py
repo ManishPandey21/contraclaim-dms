@@ -52,7 +52,9 @@ def to_document_page_record(
         "raw_text": text,
         "raw_text_length": len(text),
         # What extraction originally read, when a deterministic repair changed
-        # the published text. None means text and original are the same.
+        # the published text or unusable (cid:N) text was withheld from it.
+        # None means text and original are the same. Evidence only: nothing
+        # indexes this field.
         # Kept separate so a repaired page stays auditable: `raw_text` above is
         # the published representation, this is the document's own wording.
         "original_text": page.raw_text,
