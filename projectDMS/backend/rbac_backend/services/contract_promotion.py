@@ -159,6 +159,9 @@ class ContractPromotionService:
             effective_from=effective_from,
             actor_id=actor_id,
         )
+        # The marker write inside the transaction is scoped by the organisation
+        # the route authorised - not one read back off the candidate.
+        plan["authorized_organization_id"] = str(organization_id)
 
         if self._client is not None:
             async with await self._client.start_session() as session:
@@ -210,7 +213,8 @@ class ContractPromotionService:
         if document is None:
             raise NotPromotable(f"canonical document {document_id} does not exist")
 
-        if str(document.get("organization_id") or "") != str(candidate.get("organization_id") or ""):
+        document_org = document.get("organization_id") or document.get("organizationId")
+        if str(document_org or "") != str(candidate.get("organization_id") or ""):
             # Candidate org == document org == instrument org, or nothing. The
             # inventory reads documents inside one organisation, so this fires
             # only on corrupt or hand-edited rows - and then an instrument owned
@@ -358,8 +362,16 @@ class ContractPromotionService:
         await self._db[PROMOTION_RECEIPTS_COLLECTION].insert_one(
             plan["receipt"], session=session
         )
-        await self._db[RECONCILIATION_COLLECTION].update_one(
-            scoped_candidate_filter(plan["candidate_id"], plan["instrument"]["organization_id"]),
+        marked = await self._db[RECONCILIATION_COLLECTION].update_one(
+            scoped_candidate_filter(plan["candidate_id"], plan["authorized_organization_id"]),
             {"$set": {"promoted": True, "promoted_at": plan["receipt"]["promoted_at"]}},
             session=session,
         )
+        if getattr(marked, "matched_count", 1) != 1:
+            # The candidate left the authorised scope between the read and the
+            # commit. Raising aborts the transaction, so no instrument or receipt
+            # survives for a candidate that was never marked.
+            raise RevalidationRequired(
+                f"candidate {plan['candidate_id']} changed during promotion; nothing "
+                "was written"
+            )

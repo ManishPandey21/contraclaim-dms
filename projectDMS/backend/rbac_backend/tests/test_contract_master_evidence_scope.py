@@ -23,6 +23,7 @@ Real-Mongo, real-RBAC coverage of the same contract is in
 from __future__ import annotations
 
 import ast
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 import pytest
@@ -66,25 +67,58 @@ def refusing_policy(monkeypatch):
     return asked
 
 
-def test_evidence_search_never_calls_the_test_only_constructor(
-    monkeypatch, refusing_policy
-):
+def test_evidence_search_never_calls_the_test_only_constructor(monkeypatch):
+    """Authorisation succeeds here, so the old code would have reached for_tests.
+
+    The two evidence methods are stubbed to capture the scope they are handed;
+    it must be a real token for the caller's organisation, minted without the
+    test-only constructor.
+    """
+    from rbac_backend.services.contract_service import ContractService
+
     def _forbidden(*args, **kwargs):  # pragma: no cover - must never run
         raise AssertionError("runtime code called AuthorizedContractScope.for_tests")
+
+    asked: List[Dict[str, Any]] = []
+    handed: List[Any] = []
+
+    async def authorize(self, current_user, permission, **kwargs):
+        asked.append({"permission": str(permission), **kwargs})
+
+    async def search(self, request, *, scope, mode, resolver):
+        handed.append(scope)
+        return SimpleNamespace(results=[], total_count=0)
+
+    async def report(self, request, *, scope, mode, resolver):
+        handed.append(scope)
+        return {}
 
     monkeypatch.setattr(
         contract_scope_resolver.AuthorizedContractScope,
         "for_tests",
         classmethod(_forbidden),
     )
+    monkeypatch.setattr(PolicyService, "authorize", authorize)
+    monkeypatch.setattr(ContractService, "search_contract_evidence", search)
+    monkeypatch.setattr(ContractService, "evidence_source_report", report)
+
     response = _app(_FakeDb(), _user()).post(
         "/api/contract-master/evidence/search", json=EVIDENCE_BODY
     )
-    assert response.status_code == 403, response.text
-    # The refusal came from the real authorisation seam, at the caller's scope.
-    (call,) = refusing_policy
-    assert call["organization_id"] == ORG
-    assert call["project_id"] == PROJECT
+
+    assert response.status_code == 200, response.text
+    assert response.json()["outcome"] == "valid_empty"
+    (call,) = asked
+    assert (call["organization_id"], call["project_id"]) == (ORG, PROJECT)
+    assert len(handed) == 2
+    for scope in handed:
+        assert isinstance(scope, contract_scope_resolver.AuthorizedContractScope)
+        assert (scope.organization_id, scope.project_id, scope.contract_id) == (
+            ORG,
+            PROJECT,
+            CONTRACT,
+        )
+        assert scope.actor_id == "actor-wiring"
 
 
 def test_evidence_search_authorizes_through_authorize_contract_scope(monkeypatch):

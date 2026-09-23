@@ -62,6 +62,7 @@ CAND_B_OPEN = f"{PREFIX}:doc-b-open"
 CAND_A_READY = f"{PREFIX}:doc-a-ready"
 CAND_B_READY = f"{PREFIX}:doc-b-ready"
 CAND_A_FOREIGN_DOC = f"{PREFIX}:doc-b-stray"
+CAND_A_ORPHAN_DOC = f"{PREFIX}:doc-no-org"
 CAND_MISSING = f"{PREFIX}:doc-nowhere"
 
 NOT_FOUND = {"detail": "reconciliation candidate not found"}
@@ -199,6 +200,7 @@ async def _seed(db: Any) -> None:
             _document("doc-a-ready", ORG_A, PROJ_A1),
             _document("doc-b-ready", ORG_B, PROJ_B1),
             _document("doc-b-stray", ORG_B, PROJ_B1),
+            {**_document("doc-no-org", ORG_A, PROJ_A1), "organization_id": None},
         ]
     )
     await db[RECONCILIATION_COLLECTION].insert_many(
@@ -209,6 +211,8 @@ async def _seed(db: Any) -> None:
             _candidate(CAND_B_READY, ORG_B, "doc-b-ready", ready=True),
             # Corrupt: an org-A candidate pointing at an org-B document.
             _candidate(CAND_A_FOREIGN_DOC, ORG_A, "doc-b-stray", ready=True),
+            # Corrupt: an org-A candidate pointing at a document with no org.
+            _candidate(CAND_A_ORPHAN_DOC, ORG_A, "doc-no-org", ready=True),
         ]
     )
 
@@ -314,6 +318,21 @@ class Env:
             await self.db[ADJUDICATION_CLAIMS_COLLECTION].find({}).to_list(length=None)
         )
 
+    async def snapshot(self) -> Dict[str, list]:
+        """Every document in every collection, except the refusal-side audit.
+
+        Counts cannot see an in-place rewrite; this can. ``audit_events`` is
+        left out because the policy audits the refusal itself.
+        """
+        names = sorted(set(await self.db.list_collection_names()) - {"audit_events"})
+        return {
+            name: sorted(
+                (await self.db[name].find({}).to_list(length=None)),
+                key=lambda row: str(row.get("_id")),
+            )
+            for name in names
+        }
+
     async def legal_counts(self) -> Dict[str, int]:
         from rbac_backend.services.contract_document_store import LEGAL_COLLECTIONS
         from rbac_backend.services.contract_promotion import (
@@ -408,10 +427,15 @@ def test_a_contract_master_route_boots_through_the_real_policy_dependency() -> N
 def test_cross_org_claim_is_not_found_and_creates_no_claim_row() -> None:
     async def scenario() -> None:
         async with _env() as env:
+            before = await env.snapshot()
             response = await env.claim("org_admin", CAND_B_OPEN, ORG_A)
             assert response.status_code == 404, response.text
             assert response.json() == NOT_FOUND
             assert await env.claims() == []
+            # Nothing anywhere: the claim index may exist, no row may.
+            after = await env.snapshot()
+            after.pop("contract_migration_adjudication_claims", None)
+            assert after == before
 
     _run(scenario)
 
@@ -483,6 +507,7 @@ def test_cross_org_adjudication_is_not_found_even_with_a_live_owner_token() -> N
                 }
             )
             before = await env.candidate(CAND_B_OPEN)
+            everything = await env.snapshot()
 
             response = await env.adjudicate(
                 "org_admin", CAND_B_OPEN, ORG_A, "stolen-token"
@@ -492,6 +517,8 @@ def test_cross_org_adjudication_is_not_found_even_with_a_live_owner_token() -> N
             assert response.json() == NOT_FOUND
             assert await env.candidate(CAND_B_OPEN) == before
             assert "adjudicated_by" not in before
+            # Including the planted claim row, untouched.
+            assert await env.snapshot() == everything
 
     _run(scenario)
 
@@ -553,11 +580,13 @@ def test_cross_org_promotion_is_not_found_and_writes_nothing() -> None:
         async with _env() as env:
             counts = await env.legal_counts()
             before = await env.candidate(CAND_B_READY)
+            everything = await env.snapshot()
 
             response = await env.promote("org_admin", CAND_B_READY, ORG_A)
 
             assert response.status_code == 404, response.text
             assert response.json() == NOT_FOUND
+            assert await env.snapshot() == everything
             # No instrument, classification fact, applicability, applicability
             # event or receipt - and no promoted marker on the candidate.
             assert await env.legal_counts() == counts
@@ -589,20 +618,23 @@ def test_same_org_promotion_still_works() -> None:
     _run(scenario)
 
 
-def test_a_candidate_pointing_at_another_orgs_document_fails_closed() -> None:
-    """Candidate org == document org == instrument org, or nothing is written."""
+@pytest.mark.parametrize("candidate_id", [CAND_A_FOREIGN_DOC, CAND_A_ORPHAN_DOC])
+def test_a_candidate_whose_document_is_not_its_orgs_fails_closed(candidate_id) -> None:
+    """Candidate org == document org == instrument org, or nothing is written.
+
+    Covers a document owned by another organisation and one owned by none.
+    """
 
     async def scenario() -> None:
         async with _env() as env:
-            counts = await env.legal_counts()
-            before = await env.candidate(CAND_A_FOREIGN_DOC)
+            everything = await env.snapshot()
 
-            response = await env.promote("org_admin", CAND_A_FOREIGN_DOC, ORG_A)
+            response = await env.promote("org_admin", candidate_id, ORG_A)
 
             assert response.status_code == 422, response.text
+            assert "tenancy boundary" in response.text
             assert ORG_B not in response.text
-            assert await env.legal_counts() == counts
-            assert await env.candidate(CAND_A_FOREIGN_DOC) == before
+            assert await env.snapshot() == everything
 
     _run(scenario)
 

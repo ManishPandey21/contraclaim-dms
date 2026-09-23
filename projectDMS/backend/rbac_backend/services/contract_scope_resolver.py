@@ -150,9 +150,17 @@ async def authorize_contract_scope(
     (``ScopeService.is_client_scope_allowed``) but returns early for superadmin
     without asking where the project lives; checking it once more, against the
     same database the policy reads, makes a token for org X naming a project of
-    Y impossible whoever the caller is. The refusal is the policy's own
-    ``scope_denied`` 403 and names neither organisation.
+    Y impossible whoever the caller is. The refusal has the policy's own
+    ``scope_denied`` 403 shape and names neither organisation.
     """
+    # Proven first: were it after an audited authorize, a refused pair would sit
+    # in the audit trail as "allow".
+    if not await policy.scope_service.project_belongs_to_organization(
+        project_id=str(project_id), organization_id=str(organization_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized: scope_denied"
+        )
     await policy.authorize(
         current_user,
         permission,
@@ -161,12 +169,6 @@ async def authorize_contract_scope(
         project_id=project_id,
         audit=audit,
     )
-    if not await policy.scope_service.project_belongs_to_organization(
-        project_id=str(project_id), organization_id=str(organization_id)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized: scope_denied"
-        )
     return AuthorizedContractScope(
         organization_id=organization_id,
         project_id=project_id,
