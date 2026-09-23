@@ -350,16 +350,32 @@ class DocumentProcessor:
                 )
                 outcome = resolved.outcome
                 if outcome is FallbackOutcome.RESOLVED:
-                    # Adopt the reconstruction the ladder already re-verified.
-                    # Including the status: a page left OCR_FAILED while
-                    # carrying reconstructed text reads as unresolved to both
-                    # the checkpoint and the run, so the next attempt would
-                    # re-extract it and overwrite the reconstruction that was
-                    # just paid for - and the document could never complete.
-                    page.text = resolved.page.text
-                    page.source = resolved.page.source
-                    page.status = PageStatus.OCR_COMPLETED
-                    continue
+                    # A reconstruction is text like any other, so it passes the
+                    # same publication policy. RESOLVED is the ladder's verdict
+                    # on its own work, and OCR_COMPLETED is a status - neither
+                    # is evidence that a human can read the result.
+                    published, unusable = withhold_unusable(
+                        resolved.page.text or ""
+                    )
+                    if unusable is not None:
+                        logger.warning(
+                            "[document_pipeline] Fallback reconstruction for "
+                            "page %s of %s is unusable text; not adopted",
+                            page.number,
+                            document_id,
+                        )
+                    else:
+                        # Adopt the reconstruction the ladder already
+                        # re-verified. Including the status: a page left
+                        # OCR_FAILED while carrying reconstructed text reads as
+                        # unresolved to both the checkpoint and the run, so the
+                        # next attempt would re-extract it and overwrite the
+                        # reconstruction that was just paid for - and the
+                        # document could never complete.
+                        page.text = published
+                        page.source = resolved.page.source
+                        page.status = PageStatus.OCR_COMPLETED
+                        continue
             elif ladder is not None:
                 logger.warning(
                     "[document_pipeline] Fallback budget of %s page(s) exhausted "

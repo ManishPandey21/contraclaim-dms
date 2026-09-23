@@ -172,7 +172,15 @@ class PageExtractionEngine:
                 for number, (text, classification, _) in sorted(native.items())
                 if number in mutable
                 and classification.page_class is not PageClass.UNRENDERABLE
-                and len(text.strip()) < self.policy.min_text_chars_per_page
+                # The same two reasons as the branch below. A cumulative run
+                # narrows *which* pages an attempt may touch; it does not
+                # change what makes a page need OCR, and dropping the unusable
+                # rule here meant a CID page nobody had listed for retry was
+                # simply never OCR'd.
+                and (
+                    len(text.strip()) < self.policy.min_text_chars_per_page
+                    or number in unusable_native
+                )
             ]
         else:
             candidates = [
@@ -276,7 +284,20 @@ class PageExtractionEngine:
         work, which is what makes resolved pages monotonic across attempts.
         """
         if retry_set:
-            return set(retry_set)
+            if not stored:
+                return set(retry_set)
+            # A checkpoint can be stale: an attempt that wrote its pages and
+            # then crashed before recording them leaves the job still asking
+            # for pages the run has since resolved. Re-extracting those would
+            # replace recovered OCR text with whatever the native layer says
+            # now - usually nothing. The durable row wins unless it is itself
+            # unresolved or unusable, which is the only evidence that the
+            # retry still has work to do.
+            return {
+                number
+                for number in retry_set
+                if number not in stored or self._page_is_unresolved(stored[number])
+            }
         if not stored:
             return None
         return {
@@ -285,6 +306,18 @@ class PageExtractionEngine:
             if number not in stored
             or stored[number].status in _UNRESOLVED_STATUSES
         }
+
+    @staticmethod
+    def _page_is_unresolved(page: ExtractedPage) -> bool:
+        """Whether the run still owes work on a page it has already recorded.
+
+        Status alone is not enough: a row written before the text-quality
+        policy existed can be a settled TEXT_LAYER page whose text is nothing
+        but ``(cid:N)`` placeholders, and that page does still need OCR.
+        """
+        if page.status in _UNRESOLVED_STATUSES:
+            return True
+        return assess_native_text_quality(page.text or "").unusable
 
     async def _assemble_cumulative_run(
         self,
@@ -349,8 +382,28 @@ class PageExtractionEngine:
                 continue
             carried = stored[number]
             carried.carried_forward = True
-            pages.append(carried)
+            pages.append(self._withhold_carried_text(carried))
         return pages
+
+    @staticmethod
+    def _withhold_carried_text(page: ExtractedPage) -> ExtractedPage:
+        """Apply the publication policy to a page read back from the store.
+
+        Rows written before that policy existed hold their unusable text as
+        published text, and a cumulative run would put it straight back into
+        combined_text - and so into full_text, chunking and embeddings - with
+        no attempt having looked at it. Carrying a page forward is not a
+        reason to trust what it carries.
+        """
+        published, withheld = withhold_unusable(page.text or "")
+        if withheld is None:
+            return page
+        page.text = published
+        page.tables = []
+        if page.raw_text is None:
+            page.raw_text = withheld
+        page.text_withheld = True
+        return page
 
     @staticmethod
     def _withheld_page_numbers(pages: Sequence[ExtractedPage]) -> List[int]:
