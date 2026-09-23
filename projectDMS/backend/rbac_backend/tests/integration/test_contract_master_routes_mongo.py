@@ -13,6 +13,15 @@ path is worse than no route at all.
 Real Mongo because every one of these routes is a translation layer over
 persistence; a fake collection would prove the router calls something, not that
 the something did the right thing.
+
+**What this suite cannot see.** It overrides ``contract_master_api.get_policy``
+with ``FakePolicy`` to control grants cheaply, so the real dependency is never
+resolved here. That is how a ``get_policy`` importing the nonexistent
+``rbac_backend.core.policy`` shipped with this whole suite green while every
+production route failed with ``ModuleNotFoundError``. The override stays for the
+functional coverage below; the real dependency is exercised without any override
+by ``test_contract_master_policy_wiring.py`` (every route, no Mongo) and by
+``test_contract_master_policy_mongo.py`` (real JWT, seeds and PolicyService).
 """
 
 from __future__ import annotations
@@ -83,10 +92,20 @@ class FakePolicy:
     fails here exactly as it would in production.
     """
 
-    def __init__(self, granted, organization_id=ORG) -> None:
+    def __init__(self, granted, organization_id=ORG, db_name=None) -> None:
         self.granted = {str(p) for p in granted}
         self.organization_id = organization_id
         self.calls: list = []
+        self._db_name = db_name
+
+    @property
+    def scope_service(self):
+        """The real ScopeService, which ``authorize_contract_scope`` asks to
+        prove the (organisation, project) pair. Bound per call, like every
+        other handle here, to the loop that is running."""
+        from rbac_backend.services.scope_service import ScopeService
+
+        return ScopeService(_fresh_db(self._db_name))
 
     async def authorize(self, current_user, permission, **kwargs):
         from fastapi import HTTPException, status
@@ -119,7 +138,7 @@ def _client(db_name, *, granted=ORG_TIER, organization_id=ORG, project_ids=(PROJ
         organization_id=organization_id,
         projects=list(project_ids),
     )
-    policy = FakePolicy(granted, organization_id=organization_id)
+    policy = FakePolicy(granted, organization_id=organization_id, db_name=db_name)
 
     app.dependency_overrides[get_current_user] = lambda: user
     app.dependency_overrides[contract_master_api.get_db] = lambda: _fresh_db(db_name)
@@ -169,6 +188,7 @@ class _Fixture:
 
     async def _seed(self) -> None:
         db = _fresh_db(self.name)
+        await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
         await db["documents"].insert_one(
             {
                 "_id": "doc-1",
