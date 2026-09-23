@@ -24,6 +24,7 @@ from .extraction.models import Completeness, PageStatus, SourceKind
 from .extraction.page_store import InconsistentExtractionRunError
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
+from .extraction.text_quality import withhold_unusable
 from .pipeline_routing import LEGACY_PIPELINE, UNIFIED_PIPELINE
 
 from ..core.config import settings
@@ -897,6 +898,26 @@ class DocumentProcessor:
                         filename=input_path.name,
                     )
                     metadata_source = "ocr_fallback_regex"
+            elif extraction is not None and getattr(extraction, "withheld_pages", None):
+                # Nothing publishable, because the text layer itself was judged
+                # unusable. Uploading the whole PDF would only have it read the
+                # same unmapped layer by another route, with nothing checking
+                # the reply. The pages stay fail-visible for review instead.
+                withheld_pages = list(extraction.withheld_pages)
+                logger.warning(
+                    "[document_pipeline] %s: %s page(s) had an unusable text layer; "
+                    "not sent for whole-file extraction",
+                    input_path.name,
+                    len(withheld_pages),
+                )
+                partial_failures["ai_extraction"] = {
+                    "stage": "withheld_text_layer",
+                    "message": (
+                        f"{len(withheld_pages)} page(s) had an unusable text layer "
+                        "and were withheld; no text was extracted"
+                    ),
+                    "pages": withheld_pages,
+                }
             else:
                 logger.info("[document_pipeline] Uploading %s to OpenAI", processed_path.name if processed_path else input_path.name)
                 file_id = await self.openai_service.upload_file(str(processed_path))
@@ -905,6 +926,21 @@ class DocumentProcessor:
                 # Step 3: Extract content using OpenAI
                 logger.info("[document_pipeline] Requesting content extraction for %s", input_path.name)
                 extracted_content = await self.openai_service.process_document(file_id)
+                # The reply is judged by the same canonical policy as every
+                # other text surface before it can become the document's text.
+                extracted_content, unusable_reply = withhold_unusable(
+                    extracted_content or ""
+                )
+                if unusable_reply is not None:
+                    logger.warning(
+                        "[document_pipeline] %s: whole-file extraction returned "
+                        "unusable (cid:N) text; discarded",
+                        input_path.name,
+                    )
+                    partial_failures["ai_extraction"] = {
+                        "stage": "whole_file_extraction",
+                        "message": "whole-file extraction returned unusable (cid:N) text",
+                    }
             extracted_length = len(extracted_content or "")
             logger.info("[document_pipeline] Content extraction complete for %s (chars=%s)", input_path.name, extracted_length)
 

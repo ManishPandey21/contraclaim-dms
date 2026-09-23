@@ -59,10 +59,15 @@ def to_document_page_record(
         "raw_text": text,
         "raw_text_length": len(text),
         # What extraction originally read, when a deterministic repair changed
-        # the published text. None means text and original are the same.
+        # the published text or unusable (cid:N) text was withheld from it.
+        # None means text and original are the same. Evidence only: nothing
+        # indexes this field.
         # Kept separate so a repaired page stays auditable: `raw_text` above is
         # the published representation, this is the document's own wording.
         "original_text": page.raw_text,
+        # Which of original_text's two writers wrote it: the engine withholding
+        # unusable text, or a repair keeping the pre-repair wording.
+        "text_withheld": page.text_withheld,
         "applied_repairs": list(page.applied_repairs),
         "page_class": classification.page_class.value,
         "char_count": classification.char_count,
@@ -149,6 +154,7 @@ def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
         quality_checks=[dict(check) for check in (record.get("quality_checks") or [])],
         needs_review=bool(record.get("needs_review")),
         raw_text=record.get("original_text"),
+        text_withheld=bool(record.get("text_withheld")),
         applied_repairs=[
             dict(repair) for repair in (record.get("applied_repairs") or [])
         ],

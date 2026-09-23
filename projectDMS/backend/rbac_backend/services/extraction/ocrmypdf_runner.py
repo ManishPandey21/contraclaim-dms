@@ -95,6 +95,13 @@ class OcrMyPdfRunner:
             *prefix,
             "--pages",
             self._format_page_range(page_numbers),
+            # Every page the engine sends either has no text layer or has one
+            # it judged unusable (too thin, or dominated by (cid:N)
+            # placeholders). Without this, one such page with any text makes
+            # OCRmyPDF abort the whole batch with PriorOcrFoundError (exit 6),
+            # taking its scanned neighbours down with it. --skip-text and
+            # --redo-ocr would keep the unusable text instead of reading it.
+            "--force-ocr",
             "--language",
             language,
             "--rotate-pages",

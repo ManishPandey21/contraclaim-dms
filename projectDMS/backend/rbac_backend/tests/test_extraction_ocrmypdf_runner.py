@@ -63,6 +63,31 @@ def test_command_carries_the_requested_language(tmp_path: Path) -> None:
     assert command[command.index("--language") + 1] == "deu"
 
 
+def test_command_forces_ocr_on_pages_that_already_carry_text(tmp_path: Path) -> None:
+    """Every page the engine sends has a text layer it judged unusable, or none.
+
+    Measured against OCRmyPDF 16.10.4 with tesseract 5.5.0: without
+    ``--force-ocr`` a batch containing any page that already has text exits 6
+    (``PriorOcrFoundError: page already has text!``) - the whole batch, so a
+    scanned page sharing a batch with a thin or ``(cid:N)`` page failed with it.
+    ``--skip-text`` and ``--redo-ocr`` leave that text in place, which for a
+    page of placeholders means the placeholders come back.
+    """
+    runner = OcrMyPdfRunner(work_dir=tmp_path)
+
+    command = runner._build_command(
+        source=Path("in.pdf"),
+        output=Path("out.pdf"),
+        sidecar=Path("out.txt"),
+        page_numbers=[1, 2],
+        language="eng",
+    )
+
+    assert "--force-ocr" in command
+    assert "--skip-text" not in command
+    assert "--redo-ocr" not in command
+
+
 def test_input_page_count_is_read_from_the_source(tmp_path: Path) -> None:
     source = build_mixed_pdf(tmp_path / "mixed.pdf")
     runner = OcrMyPdfRunner(work_dir=tmp_path)

@@ -202,6 +202,8 @@ def test_outcome_is_serialisable_for_the_durable_checkpoint_() -> None:
 # The unit tests above pin the decision. These pin the consequence: a job whose
 # extraction left pages unresolved must not reach `completed`.
 
+from datetime import datetime  # noqa: E402
+
 import pytest  # noqa: E402
 from bson import ObjectId  # noqa: E402
 
@@ -348,3 +350,70 @@ async def test_archive_job_is_stored_only_never_completed(monkeypatch) -> None:
     assert job["status"] == "stored_only"
     assert stored["processing_status"] == "stored_only"
     assert stored["processing_status"] != "completed"
+
+
+def test_ocr_disabled_goes_straight_to_human_review_with_attempts_left() -> None:
+    # A permanent capability condition - OCR switched off or its binaries
+    # missing - is not cured by retrying. Re-claiming it only spends attempts
+    # (and time) before reaching the same terminal state.
+    pages = [_page(1, PageStatus.TEXT_LAYER), _page(2, PageStatus.OCR_DISABLED)]
+    result = _result(pages, completeness=Completeness.PARTIAL)
+
+    outcome = build_attempt_outcome(
+        result, prior_page_attempts={}, attempts_exhausted=False
+    )
+
+    assert outcome.state is ProcessingState.HUMAN_REVIEW_REQUIRED
+    # Preserved for the reviewer, never counted as resolved or completed.
+    assert outcome.remaining_page_numbers == [2]
+    assert outcome.resolved_page_numbers == [1]
+
+
+@pytest.mark.asyncio
+async def test_ocr_disabled_is_not_reclaimed_by_repeated_worker_passes(
+    monkeypatch,
+) -> None:
+    """The worker loop must reach a terminal state once and then stop.
+
+    Drives the real claim loop (`process_next_processing_jobs`) far more times
+    than `max_attempts`; the extraction outcome is the real checkpoint
+    derivation over a page the engine left OCR_DISABLED.
+    """
+    db = FakeDB()
+    service, job_id, document_id = await _queued_job(db)
+    extraction_runs = 0
+
+    async def fake_process(*args, **kwargs):
+        nonlocal extraction_runs
+        extraction_runs += 1
+        job = await db.document_processing_jobs.find_one({"_id": job_id})
+        outcome = build_attempt_outcome(
+            _result(
+                [_page(1, PageStatus.OCR_DISABLED)],
+                completeness=Completeness.PARTIAL,
+            ),
+            prior_page_attempts=job.get("page_attempts") or {},
+            attempts_exhausted=int(job.get("attempts") or 0)
+            >= int(job.get("max_attempts") or 3),
+        )
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id}, {"$set": outcome.to_checkpoint()}
+        )
+        return True
+
+    monkeypatch.setattr(service, "process_document_async", fake_process)
+
+    for _ in range(10):
+        # Ignore run_after back-off so a requeue would be claimable at once.
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id}, {"$set": {"run_after": datetime(2000, 1, 1)}}
+        )
+        await service.process_next_processing_jobs(limit=1)
+
+    job = await db.document_processing_jobs.find_one({"_id": job_id})
+    stored = await db.documents.find_one({"_id": document_id})
+
+    assert extraction_runs == 1
+    assert job["status"] == "human_review_required"
+    assert stored["processing_status"] == "human_review_required"
+    assert stored["processing_error"]["pages"] == [1]
