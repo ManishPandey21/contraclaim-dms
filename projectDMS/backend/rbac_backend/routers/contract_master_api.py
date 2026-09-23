@@ -64,6 +64,7 @@ from ..services.contract_document_store import (
     record_applicability_event,
 )
 from ..services.contract_migration_adjudication import (
+    CandidateNotFound,
     ClaimUnavailable,
     ConflictingAdjudication,
     ContractMigrationAdjudication,
@@ -772,9 +773,15 @@ async def claim_candidate(
     service = ContractMigrationAdjudication(db)
     await service.ensure_indexes()
     try:
+        # Bound to the organisation just authorised: a candidate of any other
+        # organisation is a 404, indistinguishable from one that does not exist.
         claim = await service.claim(
-            candidate_id, operator_id=str(getattr(current_user, "id", ""))
+            candidate_id,
+            organization_id=organization_id,
+            operator_id=str(getattr(current_user, "id", "")),
         )
+    except CandidateNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ClaimUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     return {"candidate_id": claim.candidate_id, "owner_token": claim.owner_token}
@@ -805,18 +812,22 @@ async def adjudicate_candidate(
         operator_id=str(getattr(current_user, "id", "")),
         owner_token=owner_token,
     )
-    document_type = (
-        ContractDocumentType(command.contract_document_type)
-        if command.contract_document_type
-        else None
-    )
     try:
+        # Parsed inside the try so an unknown type is the 422 below, not a 500.
+        document_type = (
+            ContractDocumentType(command.contract_document_type)
+            if command.contract_document_type
+            else None
+        )
         await ContractMigrationAdjudication(db).adjudicate(
             claim,
+            organization_id=organization_id,
             scope_state=ScopeClassificationState(command.scope_state),
             contract_document_type=document_type,
             reason=command.reason,
         )
+    except CandidateNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ClaimUnavailable as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ConflictingAdjudication as exc:
@@ -863,10 +874,13 @@ async def promote_candidate(
     try:
         receipt = await ContractPromotionService(db, client).promote(
             candidate_id,
+            organization_id=organization_id,
             actor_id=str(getattr(current_user, "id", "")),
             contract_id=command.contract_id,
             effective_from=command.effective_from,
         )
+    except CandidateNotFound as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevalidationRequired as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except NotPromotable as exc:

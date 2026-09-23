@@ -49,14 +49,17 @@ from .contract_document_store import (
 )
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
+    CandidateNotFound,
     ScopeClassificationState,
     TypeClassificationState,
+    scoped_candidate_filter,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "PROMOTION_RECEIPTS_COLLECTION",
+    "CandidateNotFound",
     "ContractPromotionService",
     "NotPromotable",
     "PromotionReceipt",
@@ -118,14 +121,22 @@ class ContractPromotionService:
         self,
         candidate_id: str,
         *,
+        organization_id: str,
         actor_id: str,
         contract_id: Optional[str] = None,
         effective_from: Optional[str] = None,
     ) -> PromotionReceipt:
-        """Make an adjudicated candidate authoritative, in one transaction."""
-        candidate = await self._db[RECONCILIATION_COLLECTION].find_one({"_id": candidate_id})
+        """Make an adjudicated candidate authoritative, in one transaction.
+
+        ``organization_id`` is the organisation the caller was authorised for.
+        The candidate is loaded inside it, so a candidate of another
+        organisation is indistinguishable from one that does not exist.
+        """
+        candidate = await self._db[RECONCILIATION_COLLECTION].find_one(
+            scoped_candidate_filter(candidate_id, organization_id)
+        )
         if candidate is None:
-            raise NotPromotable(f"no reconciliation candidate {candidate_id}")
+            raise CandidateNotFound()
 
         self._require_adjudicated(candidate)
         document = await self._require_promotable_document(candidate)
@@ -198,6 +209,18 @@ class ContractPromotionService:
         document = await self._db["documents"].find_one({"_id": document_id})
         if document is None:
             raise NotPromotable(f"canonical document {document_id} does not exist")
+
+        if str(document.get("organization_id") or "") != str(candidate.get("organization_id") or ""):
+            # Candidate org == document org == instrument org, or nothing. The
+            # inventory reads documents inside one organisation, so this fires
+            # only on corrupt or hand-edited rows - and then an instrument owned
+            # by the candidate's organisation would govern a document it does
+            # not own. Refused, never repaired; the message names neither
+            # organisation.
+            raise NotPromotable(
+                f"canonical document {document_id} is not owned by the candidate's "
+                "organisation; refusing to promote across a tenancy boundary"
+            )
 
         lifecycle = str(document.get("lifecycle_state") or "")
         duplicate = str(document.get("duplicate_status") or "")
@@ -336,7 +359,7 @@ class ContractPromotionService:
             plan["receipt"], session=session
         )
         await self._db[RECONCILIATION_COLLECTION].update_one(
-            {"_id": plan["candidate_id"]},
+            scoped_candidate_filter(plan["candidate_id"], plan["instrument"]["organization_id"]),
             {"$set": {"promoted": True, "promoted_at": plan["receipt"]["promoted_at"]}},
             session=session,
         )

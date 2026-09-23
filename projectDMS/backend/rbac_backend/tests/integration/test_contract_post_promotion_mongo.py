@@ -110,7 +110,7 @@ async def _promote(db, client) -> str:
         }
     )
     receipt = await ContractPromotionService(db, client).promote(
-        CANDIDATE, actor_id="alice", contract_id=CONTRACT, effective_from="2021-01-01"
+        CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT, effective_from="2021-01-01"
     )
     return receipt.contract_document_id
 
