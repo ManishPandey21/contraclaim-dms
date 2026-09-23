@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from fastapi import HTTPException, status
+
 from ..models.contract_document import (
     ApplicabilityLifecycleKind,
     ApplicabilityQueryMode,
@@ -135,12 +137,21 @@ async def authorize_contract_scope(
     organization_id: str,
     project_id: str,
     contract_id: str,
+    audit: bool = True,
 ) -> AuthorizedContractScope:
     """Run the generic authorisation check, then mint the scope token.
 
     Denial propagates untouched — a generic refusal keeps its own status rather
     than being translated into an empty catalogue or a not-found, which would
     tell the caller the wrong thing about why they saw nothing.
+
+    The token claims an authorised (organisation, project) *pair*, so the pair is
+    proven here as well. ``PolicyService`` proves it for a tenant-bound caller
+    (``ScopeService.is_client_scope_allowed``) but returns early for superadmin
+    without asking where the project lives; checking it once more, against the
+    same database the policy reads, makes a token for org X naming a project of
+    Y impossible whoever the caller is. The refusal is the policy's own
+    ``scope_denied`` 403 and names neither organisation.
     """
     await policy.authorize(
         current_user,
@@ -148,7 +159,14 @@ async def authorize_contract_scope(
         resource_type="contract",
         organization_id=organization_id,
         project_id=project_id,
+        audit=audit,
     )
+    if not await policy.scope_service.project_belongs_to_organization(
+        project_id=str(project_id), organization_id=str(organization_id)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized: scope_denied"
+        )
     return AuthorizedContractScope(
         organization_id=organization_id,
         project_id=project_id,

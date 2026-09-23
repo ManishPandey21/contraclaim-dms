@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 from ..core.database import get_database
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
+from ..core.tenant_context import SELECTION_REQUIRED, TenantContextError
 from datetime import date
 
 from ..models.contract_document import (
@@ -79,7 +80,6 @@ from ..services.contract_promotion import (
     RevalidationRequired,
 )
 from ..services.contract_scope_resolver import (
-    AuthorizedContractScope,
     ContractScopeResolutionError,
     ContractScopeResolver,
     authorize_contract_scope,
@@ -564,23 +564,34 @@ async def search_contract_evidence_route(
         ContractService,
     )
 
-    organization_id = getattr(current_user, "organization_id", None)
-    await policy.authorize(
+    # Contract Master is outside active-scope enforcement on this branch
+    # (core/tenant_context.py binds only the registers that opt in), so the
+    # organisation is the validated CurrentUser one: the home organisation for a
+    # tenant-bound role, and for a global role its selection - which
+    # get_current_user clears rather than defaulting. No organisation is a
+    # missing selection, refused as one; `str(None)` would mint a scope for the
+    # literal organisation "None".
+    organization_id = str(getattr(current_user, "organization_id", None) or "").strip()
+    if not organization_id:
+        raise TenantContextError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=SELECTION_REQUIRED,
+            message="Select an organisation to search contract evidence.",
+        )
+    # The one place a scope token is minted: PolicyService first, then the
+    # (organisation, project) pair is proven. Never the test-only constructor.
+    scope = await authorize_contract_scope(
+        policy,
         current_user,
-        Permissions.CONTRACT_MASTER_VIEW,
-        resource_type="contract_document",
+        permission=Permissions.CONTRACT_MASTER_VIEW,
         organization_id=organization_id,
         project_id=command.project_id,
+        contract_id=command.contract_id,
+        # A read, audited as the route always was: not per search.
         audit=False,
     )
 
     query_mode = _build_query_mode(command)
-    scope = AuthorizedContractScope.for_tests(
-        organization_id=str(organization_id),
-        project_id=command.project_id,
-        contract_id=command.contract_id,
-        actor_id=str(getattr(current_user, "id", "")),
-    )
 
     service = ContractService()
     service._db = db

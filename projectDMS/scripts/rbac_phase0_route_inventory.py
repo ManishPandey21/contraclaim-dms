@@ -146,6 +146,9 @@ def _classify_source(source: str, route: Any) -> tuple[str, list[str], str]:
             "PolicyService(db).authorize",
             "policy_service.authorize",
             "authorize_document",
+            # services/contract_scope_resolver.py: PolicyService.authorize, then
+            # mints the AuthorizedContractScope token.
+            "await authorize_contract_scope(",
         ],
     )
     if policy_markers:
