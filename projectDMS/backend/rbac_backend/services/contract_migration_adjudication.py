@@ -35,8 +35,10 @@ from typing import Any, Optional
 from ..models.contract_document import ContractDocumentType
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
+    CandidateNotFound,
     ScopeClassificationState,
     TypeClassificationState,
+    scoped_candidate_filter,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,7 @@ __all__ = [
     "ADJUDICATION_CLAIMS_COLLECTION",
     "ADJUDICATION_CLAIM_LEASE",
     "CandidateClaim",
+    "CandidateNotFound",
     "ClaimUnavailable",
     "ConflictingAdjudication",
     "ContractMigrationAdjudication",
@@ -95,12 +98,26 @@ class ContractMigrationAdjudication:
 
     # -- claim --------------------------------------------------------------- #
 
-    async def claim(self, candidate_id: str, *, operator_id: str) -> CandidateClaim:
+    async def claim(
+        self, candidate_id: str, *, organization_id: str, operator_id: str
+    ) -> CandidateClaim:
         """Take the candidate, or raise.
 
         The insert is the primitive. Whoever's insert lands owns the candidate;
         everybody else is told immediately rather than proceeding on a stale read.
+
+        The candidate must exist inside ``organization_id`` - the organisation
+        the caller was authorised for - *before* the claim row is written, so a
+        candidate of another organisation, or none at all, never acquires one.
+        This read is not the race the unique insert decides: a candidate's
+        organisation is written once at materialisation and never updated.
         """
+        candidate = await self._db[RECONCILIATION_COLLECTION].find_one(
+            scoped_candidate_filter(candidate_id, organization_id), {"_id": 1}
+        )
+        if candidate is None:
+            raise CandidateNotFound()
+
         owner_token = uuid.uuid4().hex
         now = _now()
         try:
@@ -145,11 +162,24 @@ class ContractMigrationAdjudication:
         self,
         claim: CandidateClaim,
         *,
+        organization_id: str,
         scope_state: ScopeClassificationState,
         contract_document_type: Optional[ContractDocumentType],
         reason: str,
     ) -> None:
-        """Record one operator's decision about one candidate."""
+        """Record one operator's decision about one candidate.
+
+        Two independent proofs, and the order is deliberate. The candidate must
+        exist inside the authorised organisation first: checking the lease first
+        would answer a foreign candidate with "no longer live", which tells the
+        caller it exists. Only then must the claim be live and owned. A valid
+        owner token proves the lease and nothing about tenancy.
+        """
+        candidate_filter = scoped_candidate_filter(claim.candidate_id, organization_id)
+        row = await self._db[RECONCILIATION_COLLECTION].find_one(candidate_filter)
+        if row is None:
+            raise CandidateNotFound()
+
         live = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one(
             {"candidate_id": claim.candidate_id, "owner_token": claim.owner_token}
         )
@@ -158,10 +188,6 @@ class ContractMigrationAdjudication:
                 f"claim on {claim.candidate_id} is no longer live; re-claim before "
                 "adjudicating so two operators cannot both believe they hold it"
             )
-
-        row = await self._db[RECONCILIATION_COLLECTION].find_one({"_id": claim.candidate_id})
-        if row is None:
-            raise ClaimUnavailable(f"no reconciliation candidate {claim.candidate_id}")
 
         if row.get("scope_state") == ScopeClassificationState.INVALID.value:
             # INVALID is terminal. Downgrading it to AMBIGUOUS would put a
@@ -198,5 +224,5 @@ class ContractMigrationAdjudication:
             update["contract_document_type"] = contract_document_type.value
 
         await self._db[RECONCILIATION_COLLECTION].update_one(
-            {"_id": claim.candidate_id}, {"$set": update}
+            candidate_filter, {"$set": update}
         )
