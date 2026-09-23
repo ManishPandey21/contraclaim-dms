@@ -63,6 +63,10 @@ class _Collection:
     async def find_one(self, query: Dict[str, Any], *args: Any, **kwargs: Any):
         if self._name == "contract_documents":
             return {"_id": query.get("_id"), "organization_id": ORG, "project_id": None}
+        if self._name == "projects":
+            # The one project, in the one organisation: lets
+            # authorize_contract_scope's pair check pass, so the policy is asked.
+            return {"_id": PROJECT, "organization_id": ORG}
         return None
 
     def find(self, *args: Any, **kwargs: Any) -> _Cursor:

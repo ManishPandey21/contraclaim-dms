@@ -283,7 +283,7 @@ async def _decorate(db, record: Dict[str, Any]) -> Dict[str, Any]:
 
 @router.get("/contract-master/catalogue", response_model=CatalogueResponse)
 async def browse_catalogue(
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -567,17 +567,21 @@ async def search_contract_evidence_route(
 
     # Contract Master is outside active-scope enforcement on this branch
     # (core/tenant_context.py binds only the registers that opt in), so the
-    # organisation is the validated CurrentUser one: the home organisation for a
-    # tenant-bound role, and for a global role its selection - which
-    # get_current_user clears rather than defaulting. No organisation is a
-    # missing selection, refused as one; `str(None)` would mint a scope for the
-    # literal organisation "None".
+    # organisation is the validated CurrentUser one. For a tenant-bound role
+    # that is the home organisation. For a global role, get_current_user clears
+    # it and nothing on this branch re-populates it from X-Org-Id, so a global
+    # role has no organisation here and is refused - fail closed, where `str(None)`
+    # minted a scope for the literal organisation "None" and answered every
+    # search with a false "valid_empty".
     organization_id = str(getattr(current_user, "organization_id", None) or "").strip()
     if not organization_id:
         raise TenantContextError(
             status_code=status.HTTP_400_BAD_REQUEST,
             code=SELECTION_REQUIRED,
-            message="Select an organisation to search contract evidence.",
+            message=(
+                "Contract evidence search needs an organisation, and this account "
+                "carries none on this route."
+            ),
         )
     # The one place a scope token is minted: PolicyService first, then the
     # (organisation, project) pair is proven. Never the test-only constructor.
@@ -646,7 +650,7 @@ async def search_contract_evidence_route(
 
 @router.get("/contract-master/reconciliation/inventory")
 async def reconciliation_inventory(
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -700,7 +704,7 @@ async def reconciliation_materialise(
 
 @router.get("/contract-master/reconciliation/candidates")
 async def reconciliation_review(
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -758,7 +762,7 @@ def _promotion_blockers(row: Dict[str, Any]) -> List[str]:
 @router.post("/contract-master/reconciliation/candidates/{candidate_id}/claim")
 async def claim_candidate(
     candidate_id: str,
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -792,7 +796,7 @@ async def adjudicate_candidate(
     candidate_id: str,
     command: AdjudicationCommand,
     owner_token: str = Query(...),
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -848,7 +852,7 @@ async def adjudicate_candidate(
 async def promote_candidate(
     candidate_id: str,
     command: PromotionCommand,
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
@@ -903,7 +907,7 @@ async def promote_candidate(
 
 @router.get("/contract-master/capabilities", response_model=CapabilityResponse)
 async def get_capabilities(
-    organization_id: str = Query(...),
+    organization_id: str = Query(..., min_length=1),
     project_id: Optional[str] = Query(None),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
