@@ -154,7 +154,18 @@ def from_document_page_record(record: Dict[str, Any]) -> ExtractedPage:
         quality_checks=[dict(check) for check in (record.get("quality_checks") or [])],
         needs_review=bool(record.get("needs_review")),
         raw_text=record.get("original_text"),
-        text_withheld=bool(record.get("text_withheld")),
+        # Rows written before this field existed still carry the evidence
+        # that distinguishes its two writers: a withheld page kept its
+        # unusable text in original_text and published nothing, while a
+        # repaired page published its repaired text and recorded the repairs.
+        text_withheld=bool(
+            record.get(
+                "text_withheld",
+                bool(record.get("original_text"))
+                and not (record.get("raw_text") or "").strip()
+                and not record.get("applied_repairs"),
+            )
+        ),
         applied_repairs=[
             dict(repair) for repair in (record.get("applied_repairs") or [])
         ],

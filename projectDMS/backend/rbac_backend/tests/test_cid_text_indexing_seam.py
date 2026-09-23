@@ -91,10 +91,20 @@ class _Collection:
 
     async def bulk_write(self, operations: Any) -> None:
         for operation in operations or []:
-            document = getattr(operation, "_doc", None) or {}
-            update = document.get("$set") if isinstance(document, dict) else None
-            if isinstance(update, dict) and "page_number" in update:
-                self.records.append(dict(update))
+            # ReplaceOne carries the replacement document itself; an update
+            # operation carries a $set. Both shapes are accepted so this fake
+            # cannot silently record nothing.
+            document = getattr(operation, "_doc", None)
+            if not isinstance(document, dict):
+                continue
+            record = document.get("$set") if "$set" in document else document
+            if isinstance(record, dict) and "page_number" in record:
+                self.records = [
+                    existing
+                    for existing in self.records
+                    if existing.get("page_number") != record["page_number"]
+                ]
+                self.records.append(dict(record))
         return None
 
     async def update_one(self, *args: Any, **kwargs: Any) -> None:

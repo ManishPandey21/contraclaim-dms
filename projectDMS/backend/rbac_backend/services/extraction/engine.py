@@ -165,7 +165,15 @@ class PageExtractionEngine:
         )
 
         if retry_set:
-            candidates = [number for number in sorted(native) if number in retry_set]
+            # Narrowed by what this attempt may actually change: OCR'ing a page
+            # the durable row outranks would meter a call, open a batch, and
+            # then throw the result away - and with a per-attempt cap it would
+            # defer the one page the run really owes.
+            candidates = [
+                number
+                for number in sorted(native)
+                if number in retry_set and (mutable is None or number in mutable)
+            ]
         elif mutable is not None:
             candidates = [
                 number
@@ -297,14 +305,28 @@ class PageExtractionEngine:
                 number
                 for number in retry_set
                 if number not in stored or self._page_is_unresolved(stored[number])
-            }
+            } | self._unusable_stored_pages(stored)
         if not stored:
             return None
         return {
             number
             for number in native_numbers
-            if number not in stored
-            or stored[number].status in _UNRESOLVED_STATUSES
+            if number not in stored or self._page_is_unresolved(stored[number])
+        }
+
+    @staticmethod
+    def _unusable_stored_pages(stored: Dict[int, ExtractedPage]) -> set:
+        """Stored pages whose published text cannot be read, whatever their status.
+
+        A row written before the text-quality policy is settled by status and
+        unusable by content. Left out of the retry list it would be carried,
+        emptied, and the run would report itself complete with that page's
+        content gone - so it is always this attempt's to rework.
+        """
+        return {
+            number
+            for number, page in stored.items()
+            if assess_native_text_quality(page.text or "").unusable
         }
 
     @staticmethod
@@ -407,6 +429,10 @@ class PageExtractionEngine:
         if page.raw_text is None:
             page.raw_text = withheld
         page.text_withheld = True
+        # This attempt could not replace the text, so the page is not settled:
+        # an unresolved status keeps the run PARTIAL and the page in the
+        # checkpoint, instead of completing a document a page short.
+        page.status = PageStatus.OCR_PENDING
         return page
 
     @staticmethod
@@ -533,6 +559,11 @@ class PageExtractionEngine:
             text, withheld = withhold_unusable(text)
             if withheld is not None:
                 tables = []
+                if status is PageStatus.TEXT_LAYER:
+                    # Nothing replaced this page's text and none of it can be
+                    # published, so the page is not settled. Left TEXT_LAYER
+                    # it would complete a run a page short of the document.
+                    status = PageStatus.OCR_PENDING
             if number not in overrides:
                 page_source = (
                     PageSource.TEXT_LAYER if text.strip() else PageSource.EMPTY

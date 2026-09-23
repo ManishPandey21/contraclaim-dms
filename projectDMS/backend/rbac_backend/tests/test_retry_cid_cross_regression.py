@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from rbac_backend.services.extraction.models import (
+    Completeness,
     ExtractedPage,
     PageClass,
     PageClassification,
@@ -60,7 +61,9 @@ def _stored_page(number: int, text: str, status: PageStatus) -> ExtractedPage:
     return ExtractedPage(
         number=number,
         text=text,
-        source=PageSource.OCR if status is PageStatus.OCR_COMPLETED else PageSource.TEXT_LAYER,
+        source=PageSource.OCR
+        if status is PageStatus.OCR_COMPLETED
+        else PageSource.TEXT_LAYER,
         status=status,
         classification=_classification(len(text)),
     )
@@ -98,7 +101,9 @@ class _Runner:
         self.requested: List[List[int]] = []
         self.text_by_page = text_by_page or {}
 
-    async def run(self, source: Path, page_numbers: Any, language: str) -> Dict[int, str]:
+    async def run(
+        self, source: Path, page_numbers: Any, language: str
+    ) -> Dict[int, str]:
         self.requested.append(sorted(int(page) for page in page_numbers))
         return {
             int(page): self.text_by_page.get(int(page), f"OCR PAGE {int(page)}")
@@ -245,7 +250,9 @@ async def test_a_fallback_reconstruction_of_placeholders_is_not_accepted(
     )
 
     class _Ladder:
-        async def resolve(self, source: Any, page: Any, verdict: Any, *, document_id: str) -> Any:
+        async def resolve(
+            self, source: Any, page: Any, verdict: Any, *, document_id: str
+        ) -> Any:
             return SimpleNamespace(
                 outcome=FallbackOutcome.RESOLVED,
                 page=SimpleNamespace(text=CID_LINE, source=PageSource.OCR),
@@ -282,3 +289,156 @@ async def test_a_fallback_reconstruction_of_placeholders_is_not_accepted(
 
 async def _record_nothing(*args: Any, **kwargs: Any) -> None:
     return None
+
+
+# --- review: a run is not COMPLETE while a page's content is missing ---------
+
+
+async def test_a_stored_unusable_page_is_reworked_without_a_retry_list(
+    tmp_path: Path,
+) -> None:
+    """Found in review. The no-retry branch asked only about status.
+
+    A row written before the text-quality policy is settled by status and
+    unusable by content. It was therefore never mutable, never an OCR
+    candidate, and was carried - blanked - into a run that reported COMPLETE
+    with that page's content simply gone.
+    """
+    source = build_page_text_map_pdf(
+        tmp_path / "letter.pdf", page_lines=[[READABLE], [CID_LINE]]
+    )
+    store = _ResumableStore(
+        [
+            _stored_page(1, READABLE, PageStatus.TEXT_LAYER),
+            _stored_page(2, CID_LINE, PageStatus.TEXT_LAYER),
+        ]
+    )
+    runner = _Runner({2: "OCR PAGE TWO"})
+
+    result = await _engine(store, runner).extract(source)
+
+    assert runner.requested == [[2]], "the unusable stored page was not re-OCR'd"
+    page_two = next(page for page in result.pages if page.number == 2)
+    assert page_two.text == "OCR PAGE TWO"
+    assert result.completeness is Completeness.COMPLETE
+
+
+async def test_a_carried_unusable_page_keeps_the_run_partial_when_ocr_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """With OCR off the page cannot be replaced, so the run must say so."""
+    source = build_page_text_map_pdf(
+        tmp_path / "letter.pdf", page_lines=[[CID_LINE], [READABLE]]
+    )
+    store = _ResumableStore(
+        [
+            _stored_page(1, CID_LINE, PageStatus.TEXT_LAYER),
+            _stored_page(2, READABLE, PageStatus.TEXT_LAYER),
+        ]
+    )
+    engine = PageExtractionEngine(
+        policy=PageExtractionPolicy(
+            ocr_enabled=False,
+            min_text_chars_per_page=10,
+            batch_size=5,
+            max_ocr_pages_per_attempt=0,
+            ocr_language="eng",
+        ),
+        ocr_runner=_Runner(),
+        store=store,
+    )
+
+    result = await engine.extract(source, retry_pages=[2])
+
+    page_one = next(page for page in result.pages if page.number == 1)
+    assert page_one.text == ""
+    assert page_one.status in {PageStatus.OCR_PENDING, PageStatus.OCR_DISABLED}
+    assert result.completeness is Completeness.PARTIAL
+
+
+async def test_a_stale_retry_list_spends_no_ocr(tmp_path: Path) -> None:
+    """The discarded batch: OCR ran, was metered, and its output thrown away."""
+    source = build_page_text_map_pdf(
+        tmp_path / "letter.pdf", page_lines=[None, [READABLE]]
+    )
+    store = _ResumableStore(
+        [
+            _stored_page(1, "OCR PAGE ONE", PageStatus.OCR_COMPLETED),
+            _stored_page(2, READABLE, PageStatus.TEXT_LAYER),
+        ]
+    )
+    runner = _Runner()
+
+    result = await _engine(store, runner).extract(source, retry_pages=[1])
+
+    assert runner.requested == []
+    assert result.ocr_pages_total == 0
+
+
+async def test_a_rescued_page_lets_the_document_complete(tmp_path: Path) -> None:
+    """Found in review: the ladder resolved a page the result still called failed.
+
+    The engine freezes ocr_failed_pages and completeness before the gate runs,
+    so a page the ladder rescued stayed in ocr_failed_pages. The job then read
+    PARTIAL with nothing outstanding and sent a finished document to a human.
+    """
+    from rbac_backend.models.processing_state import (
+        ProcessingState,
+        derive_processing_state,
+    )
+    from rbac_backend.services.document_processor import DocumentProcessor
+    from rbac_backend.services.extraction.fallback.models import FallbackOutcome
+    from rbac_backend.services.extraction.models import (
+        Completeness as _Completeness,
+        PageExtractionResult,
+    )
+
+    page = _stored_page(1, "", PageStatus.OCR_FAILED)
+    extraction = PageExtractionResult(
+        pages=[page],
+        combined_text="",
+        ocr_pages_total=1,
+        ocr_failed_pages=[1],
+        completeness=_Completeness.PARTIAL,
+    )
+
+    class _Ladder:
+        async def resolve(self, source, page, verdict, *, document_id):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                outcome=FallbackOutcome.RESOLVED,
+                page=SimpleNamespace(
+                    text="RECONSTRUCTED PAGE ONE", source=PageSource.OCR
+                ),
+            )
+
+    class _Gate:
+        def assess(self, page, tables=None):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                verdict=SimpleNamespace(value="fail"),
+                escalates=True,
+                repairs=[],
+                checks=[],
+            )
+
+    processor = DocumentProcessor.__new__(DocumentProcessor)
+    processor.quality_gate = _Gate()
+    processor.fallback_ladder = _Ladder()
+    processor.fallback_max_pages_per_document = 5
+    processor.intervention_ledger = SimpleNamespace(record=_record_nothing)
+
+    needs_review = await processor._apply_quality_gate(
+        tmp_path / "letter.pdf",
+        extraction,
+        document_id="doc-1",
+        fallback_ladder=_Ladder(),
+        page_store=None,
+    )
+
+    assert needs_review == []
+    assert page.text == "RECONSTRUCTED PAGE ONE"
+    assert page.text_withheld is False
+    assert extraction.ocr_failed_pages == []
+    assert extraction.completeness is _Completeness.COMPLETE
+    assert derive_processing_state(extraction, attempts_exhausted=False) is (
+        ProcessingState.COMPLETED
+    )

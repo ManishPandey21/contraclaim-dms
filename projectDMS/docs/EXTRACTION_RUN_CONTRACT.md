@@ -56,3 +56,31 @@ Deliberately out of scope for this change; tracked separately.
 (369 files, ~1.4M words) was not run for this change. This document is the
 scoped, honest substitute: the runtime contract that changed, written where the
 next reader of the extraction code will find it.
+
+## What an attempt may change (as reconciled with the text-quality policy)
+
+The retry list is a request, not the authority. An attempt may change a page
+only when the run still owes work on it:
+
+* a page the run has no row for;
+* a row whose status is unresolved; or
+* a row whose published text cannot be read - pdfminer `(cid:N)` placeholders,
+  judged by the same `assess_native_text_quality` the pagewise engine and the
+  legacy path share. A row written before that policy existed can be settled
+  by status and unusable by content, and it is always the attempt's to rework.
+
+So a stale checkpoint - written by an attempt that recorded its pages and then
+died before its checkpoint - cannot make a later attempt re-extract a page the
+run has already resolved, and cannot spend a metered OCR call on one either.
+
+A page whose text is withheld and which this attempt could not replace is left
+`ocr_pending`, so the run stays `PARTIAL` and the page stays in
+`remaining_page_numbers` rather than completing a document a page short.
+
+### Known gap: no write fence
+
+`record_pages` is an unconditional upsert. Resolved pages are monotonic for a
+single writer, which is what the job claim provides in normal operation, but a
+zombie worker that outlives its heartbeat while a recovered job is reclaimed
+can still write an older attempt's row over a newer one. Closing it needs an
+attempt sequence on the row and a guarded write; it is not closed here.

@@ -22,6 +22,9 @@ from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
 from .extraction.models import Completeness, PageStatus, SourceKind
 from .extraction.page_store import InconsistentExtractionRunError
+# The same set derive_processing_state judges a run by, so the result this
+# rebuilds and the state derived from it cannot disagree about a page.
+from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 from .extraction.text_quality import withhold_unusable
@@ -375,6 +378,10 @@ class DocumentProcessor:
                         page.text = published
                         page.source = resolved.page.source
                         page.status = PageStatus.OCR_COMPLETED
+                        # The page's own text is published now, so the marks
+                        # left by whatever failed before it are no longer true.
+                        page.text_withheld = False
+                        page.error = None
                         continue
             elif ladder is not None:
                 logger.warning(
@@ -398,6 +405,26 @@ class DocumentProcessor:
 
         pages = getattr(extraction, "pages", []) or []
 
+        # The engine froze these before the gate ran. A page the ladder
+        # rescued is still listed as failed unless they are recomputed, and
+        # the job then reads PARTIAL with nothing outstanding and sends a
+        # finished document to a human.
+        if pages:
+            extraction.ocr_failed_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.OCR_FAILED
+            )
+            extraction.unrenderable_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.UNRENDERABLE
+            )
+            extraction.withheld_pages = sorted(
+                page.number for page in pages if page.text_withheld
+            )
+            extraction.completeness = (
+                Completeness.PARTIAL
+                if any(page.status in _UNRESOLVED_PAGE_STATUSES for page in pages)
+                else Completeness.COMPLETE
+            )
+
         if needs_review:
             extraction.completeness = Completeness.PARTIAL
 
@@ -407,10 +434,21 @@ class DocumentProcessor:
         # Only the pages this attempt actually assessed. Writing the settled
         # ones back would rewrite rows nothing in this attempt changed, which
         # is how a retry lost an earlier page's text.
-        if page_store is not None and assessed:
+        # A carried page this attempt corrected - its unusable text withheld
+        # and its status reopened - is written back too. Reporting the
+        # correction while the row keeps the unusable text as published text
+        # leaves the evidence contradicting the result for ever.
+        corrected = [
+            page
+            for page in pages
+            if page.carried_forward
+            and page.text_withheld
+            and page not in assessed
+        ]
+        if page_store is not None and (assessed or corrected):
             finalize = getattr(page_store, "finalize_pages", None)
             if finalize is not None:
-                await finalize(assessed)
+                await finalize(assessed + corrected)
 
         # Rebuild the canonical text from the (possibly repaired or
         # reconstructed) pages. The engine froze combined_text before this gate
