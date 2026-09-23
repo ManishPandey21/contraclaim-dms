@@ -335,16 +335,47 @@ class _ResumableStore(NullPageStore):
 async def test_a_retry_writes_only_the_pages_it_re_extracted(tmp_path: Path) -> None:
     source = build_mixed_pdf(tmp_path / "mixed.pdf")
     store = _ResumableStore()
+    # Page 2 is the page this run still owes: the first attempt's OCR failed
+    # on it. A retry of a page the run had already resolved is a different
+    # case - see test_a_stale_retry_list_leaves_a_resolved_page_alone.
     engine = PageExtractionEngine(
-        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+        policy=_policy(batch_size=1),
+        ocr_runner=_RecordingOcrRunner(fail_pages={2}),
+        store=store,
     )
 
     await engine.extract(source)
     first_write = list(store.write_batches)
+    engine.ocr_runner = _RecordingOcrRunner()
     await engine.extract(source, retry_pages=[2])
 
     assert first_write == [_ALL_PAGES]
     assert store.write_batches[-1] == [2]
+
+
+async def test_a_stale_retry_list_leaves_a_resolved_page_alone(
+    tmp_path: Path,
+) -> None:
+    """An attempt can write its pages and die before recording the checkpoint.
+
+    The job then still asks for a page the run has resolved. Re-extracting it
+    would put the native read back over recovered OCR text, so the durable row
+    wins and nothing is written.
+    """
+    source = build_mixed_pdf(tmp_path / "mixed.pdf")
+    store = _ResumableStore()
+    engine = PageExtractionEngine(
+        policy=_policy(), ocr_runner=_RecordingOcrRunner(), store=store
+    )
+
+    first = await engine.extract(source)
+    resolved = {page.number: page.text for page in first.pages}
+
+    second = await engine.extract(source, retry_pages=[2])
+
+    assert store.write_batches == [_ALL_PAGES]
+    assert {page.number: page.text for page in second.pages} == resolved
+    assert all(page.carried_forward for page in second.pages)
 
 
 async def test_a_retry_returns_the_whole_run_in_page_order(tmp_path: Path) -> None:

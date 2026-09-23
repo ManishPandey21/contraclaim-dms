@@ -373,7 +373,11 @@ class PageExtractionEngine:
                 reason="pages this attempt was told were resolved are absent",
             )
 
-        await self.store.record_pages([fresh[number] for number in sorted(fresh)])
+        if fresh:
+            # A stale checkpoint can leave an attempt with nothing of its own
+            # to write. Recording an empty batch would only add a write that
+            # changes nothing.
+            await self.store.record_pages([fresh[number] for number in sorted(fresh)])
 
         pages: List[ExtractedPage] = []
         for number in run_numbers:
