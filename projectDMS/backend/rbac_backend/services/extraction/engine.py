@@ -164,32 +164,29 @@ class PageExtractionEngine:
             else None
         )
 
-        if retry_set:
-            # Narrowed by what this attempt may actually change: OCR'ing a page
-            # the durable row outranks would meter a call, open a batch, and
-            # then throw the result away - and with a per-attempt cap it would
-            # defer the one page the run really owes.
-            candidates = [
-                number
-                for number in sorted(native)
-                if number in retry_set and (mutable is None or number in mutable)
-            ]
-        elif mutable is not None:
+        if mutable is not None:
+            # `mutable` decides which pages this attempt may touch at all, so
+            # it decides the candidates too. Within it the caller's retry list
+            # is honoured as asked, and every other page is judged by the same
+            # two rules as the branch below: a cumulative run narrows *which*
+            # pages an attempt may rework, not what makes a page need OCR.
+            # Selecting by the retry list alone let a page the run must rework
+            # - a row whose text cannot be published - go unOCR'd because
+            # nobody had listed it; selecting it outside `mutable` metered a
+            # call whose result was then discarded.
             candidates = [
                 number
                 for number, (text, classification, _) in sorted(native.items())
                 if number in mutable
                 and classification.page_class is not PageClass.UNRENDERABLE
-                # The same two reasons as the branch below. A cumulative run
-                # narrows *which* pages an attempt may touch; it does not
-                # change what makes a page need OCR, and dropping the unusable
-                # rule here meant a CID page nobody had listed for retry was
-                # simply never OCR'd.
                 and (
-                    len(text.strip()) < self.policy.min_text_chars_per_page
+                    number in retry_set
+                    or len(text.strip()) < self.policy.min_text_chars_per_page
                     or number in unusable_native
                 )
             ]
+        elif retry_set:
+            candidates = [number for number in sorted(native) if number in retry_set]
         else:
             candidates = [
                 number
@@ -314,8 +311,8 @@ class PageExtractionEngine:
             if number not in stored or self._page_is_unresolved(stored[number])
         }
 
-    @staticmethod
-    def _unusable_stored_pages(stored: Dict[int, ExtractedPage]) -> set:
+    @classmethod
+    def _unusable_stored_pages(cls, stored: Dict[int, ExtractedPage]) -> set:
         """Stored pages whose published text cannot be read, whatever their status.
 
         A row written before the text-quality policy is settled by status and
@@ -326,11 +323,11 @@ class PageExtractionEngine:
         return {
             number
             for number, page in stored.items()
-            if assess_native_text_quality(page.text or "").unusable
+            if cls._page_text_is_unpublishable(page)
         }
 
-    @staticmethod
-    def _page_is_unresolved(page: ExtractedPage) -> bool:
+    @classmethod
+    def _page_is_unresolved(cls, page: ExtractedPage) -> bool:
         """Whether the run still owes work on a page it has already recorded.
 
         Status alone is not enough: a row written before the text-quality
@@ -338,6 +335,18 @@ class PageExtractionEngine:
         but ``(cid:N)`` placeholders, and that page does still need OCR.
         """
         if page.status in _UNRESOLVED_STATUSES:
+            return True
+        return cls._page_text_is_unpublishable(page)
+
+    @staticmethod
+    def _page_text_is_unpublishable(page: ExtractedPage) -> bool:
+        """Whether a stored page's text cannot stand as the page's content.
+
+        Two shapes, both written by builds this one succeeds: the text is
+        still the unusable ``(cid:N)`` layer, or it was already blanked and
+        the evidence kept beside it. Either way the page owes its content.
+        """
+        if page.text_withheld and not (page.text or "").strip():
             return True
         return assess_native_text_quality(page.text or "").unusable
 

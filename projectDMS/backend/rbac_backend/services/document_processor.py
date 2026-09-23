@@ -22,9 +22,6 @@ from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
 from .extraction.models import Completeness, PageStatus, SourceKind
 from .extraction.page_store import InconsistentExtractionRunError
-# The same set derive_processing_state judges a run by, so the result this
-# rebuilds and the state derived from it cannot disagree about a page.
-from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 from .extraction.text_quality import withhold_unusable
@@ -33,7 +30,10 @@ from .pipeline_routing import LEGACY_PIPELINE, UNIFIED_PIPELINE
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import ParsedDocumentMetadata, ProcessingResult
-from ..models.processing_state import ProcessingState
+# _UNRESOLVED_PAGE_STATUSES is the set derive_processing_state judges a run
+# by, so the result rebuilt after the quality gate and the state derived
+# from it cannot disagree about a page.
+from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES, ProcessingState
 
 from ..utils.exceptions import DocumentProcessingError
 from ..utils.pipeline_logging import configure_pipeline_logger
@@ -360,7 +360,7 @@ class DocumentProcessor:
                     published, unusable = withhold_unusable(
                         resolved.page.text or ""
                     )
-                    if unusable is not None:
+                    if unusable is not None or not published.strip():
                         logger.warning(
                             "[document_pipeline] Fallback reconstruction for "
                             "page %s of %s is unusable text; not adopted",
@@ -413,6 +413,9 @@ class DocumentProcessor:
             extraction.ocr_failed_pages = sorted(
                 page.number for page in pages if page.status is PageStatus.OCR_FAILED
             )
+            extraction.ocr_deferred_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.OCR_DEFERRED
+            )
             extraction.unrenderable_pages = sorted(
                 page.number for page in pages if page.status is PageStatus.UNRENDERABLE
             )
@@ -438,12 +441,14 @@ class DocumentProcessor:
         # and its status reopened - is written back too. Reporting the
         # correction while the row keeps the unusable text as published text
         # leaves the evidence contradicting the result for ever.
+        assessed_numbers = {page.number for page in assessed}
         corrected = [
             page
             for page in pages
             if page.carried_forward
             and page.text_withheld
-            and page not in assessed
+            and page.status is PageStatus.OCR_PENDING
+            and page.number not in assessed_numbers
         ]
         if page_store is not None and (assessed or corrected):
             finalize = getattr(page_store, "finalize_pages", None)

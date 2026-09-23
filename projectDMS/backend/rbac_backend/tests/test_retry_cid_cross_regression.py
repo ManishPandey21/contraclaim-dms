@@ -223,11 +223,14 @@ async def test_a_carried_row_of_placeholders_is_not_published(
     result = await _engine(store, runner).extract(source, retry_pages=[2])
 
     assert "(cid:" not in result.combined_text
+    # Better than withholding it: the run owes this page its content, so the
+    # attempt reworks it rather than carrying a blank. Withholding is what
+    # happens when OCR cannot run - see the OCR-disabled test below.
+    assert runner.requested == [[1]]
     page_one = next(page for page in result.pages if page.number == 1)
-    assert page_one.text == ""
-    assert page_one.text_withheld is True
-    assert page_one.raw_text is not None and "(cid:" in page_one.raw_text
-    assert result.withheld_pages == [1]
+    assert page_one.text == "OCR PAGE 1"
+    assert result.withheld_pages == []
+    assert result.completeness is Completeness.COMPLETE
 
 
 # --- E: a reconstruction is resolved only if it is usable ---------------------
@@ -442,3 +445,145 @@ async def test_a_rescued_page_lets_the_document_complete(tmp_path: Path) -> None
     assert derive_processing_state(extraction, attempts_exhausted=False) is (
         ProcessingState.COMPLETED
     )
+
+
+# --- review residuals: the same class, found by verifying the fixes ----------
+
+
+async def test_a_rescued_deferred_page_lets_the_document_complete(
+    tmp_path: Path,
+) -> None:
+    """ocr_deferred_pages is the sibling list derive_processing_state reads."""
+    from rbac_backend.models.processing_state import (
+        ProcessingState,
+        derive_processing_state,
+    )
+    from rbac_backend.services.document_processor import DocumentProcessor
+    from rbac_backend.services.extraction.fallback.models import FallbackOutcome
+    from rbac_backend.services.extraction.models import (
+        Completeness as _Completeness,
+        PageExtractionResult,
+    )
+
+    page = _stored_page(1, "", PageStatus.OCR_DEFERRED)
+    extraction = PageExtractionResult(
+        pages=[page],
+        combined_text="",
+        ocr_pages_total=0,
+        ocr_deferred_pages=[1],
+        completeness=_Completeness.PARTIAL,
+    )
+
+    class _Ladder:
+        async def resolve(self, source, page, verdict, *, document_id):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                outcome=FallbackOutcome.RESOLVED,
+                page=SimpleNamespace(
+                    text="RECONSTRUCTED PAGE ONE", source=PageSource.OCR
+                ),
+            )
+
+    class _Gate:
+        def assess(self, page, tables=None):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                verdict=SimpleNamespace(value="fail"),
+                escalates=True,
+                repairs=[],
+                checks=[],
+            )
+
+    processor = DocumentProcessor.__new__(DocumentProcessor)
+    processor.quality_gate = _Gate()
+    processor.fallback_ladder = _Ladder()
+    processor.fallback_max_pages_per_document = 5
+    processor.intervention_ledger = SimpleNamespace(record=_record_nothing)
+
+    await processor._apply_quality_gate(
+        tmp_path / "letter.pdf",
+        extraction,
+        document_id="doc-1",
+        fallback_ladder=_Ladder(),
+        page_store=None,
+    )
+
+    assert extraction.ocr_deferred_pages == []
+    assert derive_processing_state(extraction, attempts_exhausted=False) is (
+        ProcessingState.COMPLETED
+    )
+
+
+async def test_an_empty_reconstruction_is_not_adopted(tmp_path: Path) -> None:
+    """Empty is not usable text either; the ladder's own verdict is not proof."""
+    from rbac_backend.services.document_processor import DocumentProcessor
+    from rbac_backend.services.extraction.fallback.models import FallbackOutcome
+    from rbac_backend.services.extraction.models import (
+        Completeness as _Completeness,
+        PageExtractionResult,
+    )
+
+    page = _stored_page(1, "", PageStatus.OCR_FAILED)
+    extraction = PageExtractionResult(
+        pages=[page],
+        combined_text="",
+        ocr_pages_total=1,
+        ocr_failed_pages=[1],
+        completeness=_Completeness.PARTIAL,
+    )
+
+    class _Ladder:
+        async def resolve(self, source, page, verdict, *, document_id):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                outcome=FallbackOutcome.RESOLVED,
+                page=SimpleNamespace(text="   ", source=PageSource.OCR),
+            )
+
+    class _Gate:
+        def assess(self, page, tables=None):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(
+                verdict=SimpleNamespace(value="fail"),
+                escalates=True,
+                repairs=[],
+                checks=[],
+            )
+
+    processor = DocumentProcessor.__new__(DocumentProcessor)
+    processor.quality_gate = _Gate()
+    processor.fallback_ladder = _Ladder()
+    processor.fallback_max_pages_per_document = 5
+    processor.intervention_ledger = SimpleNamespace(record=_record_nothing)
+
+    needs_review = await processor._apply_quality_gate(
+        tmp_path / "letter.pdf",
+        extraction,
+        document_id="doc-1",
+        fallback_ladder=_Ladder(),
+        page_store=None,
+    )
+
+    assert needs_review == [1]
+    assert page.status is PageStatus.OCR_FAILED
+
+
+async def test_a_row_blanked_by_an_earlier_build_is_reworked(
+    tmp_path: Path,
+) -> None:
+    """A build between the withholding change and its fix wrote blank + evidence.
+
+    Its published text is empty rather than unusable, so neither the status
+    test nor the text test reopened it, and the run completed without it.
+    """
+    source = build_page_text_map_pdf(
+        tmp_path / "letter.pdf", page_lines=[[CID_LINE], [READABLE]]
+    )
+    blanked = _stored_page(1, "", PageStatus.TEXT_LAYER)
+    blanked.raw_text = CID_LINE
+    blanked.text_withheld = True
+    store = _ResumableStore([blanked, _stored_page(2, READABLE, PageStatus.TEXT_LAYER)])
+    runner = _Runner({1: "OCR PAGE ONE"})
+
+    result = await _engine(store, runner).extract(source, retry_pages=[2])
+
+    assert runner.requested == [[1]]
+    page_one = next(page for page in result.pages if page.number == 1)
+    assert page_one.text == "OCR PAGE ONE"
+    assert result.completeness is Completeness.COMPLETE
