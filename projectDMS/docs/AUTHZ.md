@@ -231,6 +231,31 @@ name before calling `user_has_permission` - that re-creates the second hop
 (R-A9B: it let `billing.plan.manage` reach `dms.admin`).
 `test_permission_alias_contract.py` holds the matrix over every shared alias.
 
+## The authorised scope must bind the record you then load (Contract Master v1)
+
+Authorising against a scope *the caller names* and then loading a record *by id
+alone* is an IDOR: the gate answers "may this user act in X?" and the load acts on
+whatever the id points at. The Contract Master reconciliation routes
+(`/contract-master/reconciliation/candidates/{id}/claim|adjudicate|promote`) did
+exactly this until the policy-scope fix; a manager of X could claim, adjudicate and
+promote a candidate of Y.
+
+- The organisation passed to the service is the one the route authorised, and the
+  service loads - and updates - with it:
+  `scoped_candidate_filter(candidate_id, organization_id)` in
+  `services/contract_migration_reconciliation.py`. Never load by id and compare the
+  organisation afterwards, and never take the organisation from the body or the row.
+- A record in another organisation is **404, identical to a missing one**
+  (`CandidateNotFound`, "reconciliation candidate not found"), not a 403 that
+  confirms it exists.
+- Derived authority tokens are minted only by their helper:
+  `AuthorizedContractScope` comes from `authorize_contract_scope(...)`, which runs
+  `PolicyService.authorize` and then proves the (organisation, project) pair.
+  `AuthorizedContractScope.for_tests` is test-only and a static guard
+  (`tests/test_contract_master_evidence_scope.py`) fails on any production use.
+- A tenant-scoped route with no usable organisation fails closed (400
+  `selection_required`); never `str(None)`.
+
 ## Removed / forbidden
 
 These were removed in the Week-1 consolidation and are blocked by a pre-commit hook

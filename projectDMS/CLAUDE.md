@@ -193,6 +193,11 @@ Production is `contraclaim.com` (SSH alias `contraclaim`), checkout
   `get_*_controller` factories, so a broken factory ships past 1000+ passing tests.
   `git add -A` once swept an unreviewed orphaned-`return` factory into production and took
   `GET /api/organizations` down. Diff files you did not personally edit before staging.
+  Same class, 2026-09-23: `contract_master_api.get_policy` imported the nonexistent
+  `core.policy` inside the function, so every `/api/contract-master/*` route raised `ModuleNotFoundError` while its
+  only route suite (which overrides `get_policy`) stayed green. Every router needs one test
+  that resolves its real dependencies; `test_every_package_import_names_a_module_that_exists`
+  now guards deferred imports.
 - **Backend async tests each get their own `asyncio.run` loop** (`backend/conftest.py`, no
   pytest-asyncio). Module-level Motor globals must be cleared between tests or a test passes
   alone and fails in the suite with "Event loop is closed". Async *fixtures* are unsupported —
