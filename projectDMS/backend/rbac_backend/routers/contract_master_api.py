@@ -95,6 +95,7 @@ from ..services.contract_upload_scope_service import (
     ScopeAuthorisationDenied,
     UnknownProjectAnchor,
 )
+from ..services.policy_service import PolicyService
 from ..services.publication_policy import is_consumable
 from ..utils.error_handler import ContractError
 
@@ -112,10 +113,8 @@ async def get_db():
     return await get_database()
 
 
-def get_policy():
-    from ..core.policy import PolicyService
-
-    return PolicyService()
+async def get_policy(db=Depends(get_db)) -> PolicyService:
+    return PolicyService(db=db)
 
 
 # --------------------------------------------------------------------------- #
