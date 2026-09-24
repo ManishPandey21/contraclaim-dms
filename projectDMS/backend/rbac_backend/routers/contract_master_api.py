@@ -1225,23 +1225,25 @@ async def get_capabilities(
     # project named in this query, which list_filters passes through unchecked
     # when only an organisation is selected. With no organisation selected they
     # all answer 400, so nothing record-acting is claimed.
-    selected_org = bool(selection.organization_id)
-    selected_project = selection.project_id if selected_org else None
+    # (Not the list_filters result above, which is a string filter.)
+    has_selected_org = bool(selection.organization_id)
+    selected_project = selection.project_id if has_selected_org else None
 
     # The reconciliation routes gate membership with MANAGE at the organisation,
     # then act per record: a project's record at its (selected) project, an
     # organisation-level one with organisation-wide scope. Classification asks
     # only per record. The flags ask exactly those questions.
     can_manage = await may(Permissions.CONTRACT_MASTER_MANAGE)
-    manage_selected_project = bool(selected_project) and await may(
-        Permissions.CONTRACT_MASTER_MANAGE, scope_project_id=selected_project
+    manage_selected_project = bool(selected_project) and bool(
+        await may(Permissions.CONTRACT_MASTER_MANAGE, scope_project_id=selected_project)
     )
-    manage_organisation_level = selected_org and can_manage and organization_wide
+    manage_organisation_level = bool(has_selected_org and can_manage and organization_wide)
     return CapabilityResponse(
         can_browse_catalogue=await may(Permissions.CONTRACT_CATALOGUE_BROWSE),
         # Instrument detail is a record route: it needs an organisation selected.
-        can_view_instruments=selected_org and await may(Permissions.CONTRACT_MASTER_VIEW),
-        can_manage_classification=manage_selected_project or manage_organisation_level,
+        can_view_instruments=has_selected_org
+        and bool(await may(Permissions.CONTRACT_MASTER_VIEW)),
+        can_manage_classification=bool(manage_selected_project or manage_organisation_level),
         # The applicability body names a project, which must be the selected one.
         can_manage_applicability=bool(selected_project)
         and await may(
@@ -1252,6 +1254,8 @@ async def get_capabilities(
         # The queue is a read: 200 bounded to the caller's projects for any
         # MANAGE holder, selection or not.
         can_review_migration=can_manage,
-        can_promote=can_manage and (manage_selected_project or manage_organisation_level),
+        can_promote=bool(
+            can_manage and (manage_selected_project or manage_organisation_level)
+        ),
         can_manage_organization_migration=manage_organisation_level,
     )
