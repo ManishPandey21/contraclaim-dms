@@ -62,11 +62,13 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
     Union,
 )
 
 from fastapi import HTTPException, status
 
+from ..core.tenant_context import SELECTION_REQUIRED, TenantContextError
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
     CandidateNotFound,
@@ -82,6 +84,7 @@ __all__ = [
     "candidate_project_anchor",
     "load_canonical_document",
     "require_organization_wide_scope",
+    "require_selected_organization",
     "resolve_candidate_anchor",
     "visible_candidates",
 ]
@@ -205,7 +208,17 @@ async def require_organization_wide_scope(
     organization_id: str,
     audit: bool = True,
 ) -> None:
-    """``permission`` over the whole organisation, not only assigned projects."""
+    """``permission`` over the whole organisation, not only assigned projects.
+
+    Scope first: were it after an audited authorize, a refusal here would sit in
+    the audit trail as "allow".
+    """
+    if not await policy.scope_service.has_organization_wide_scope(
+        current_user, organization_id=organization_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ORGANIZATION_SCOPE_REQUIRED
+        )
     await policy.authorize(
         current_user,
         permission,
@@ -214,11 +227,20 @@ async def require_organization_wide_scope(
         project_id=None,
         audit=audit,
     )
-    if not await policy.scope_service.has_organization_wide_scope(
-        current_user, organization_id=organization_id
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail=ORGANIZATION_SCOPE_REQUIRED
+
+
+def require_selected_organization(selection: Any, organization_id: Any) -> None:
+    """An organisation-level write states its scope: a selected organisation (CL-4A).
+
+    Reads may run with nothing selected and are bounded by the policy; a write
+    with nothing selected is 400 ``selection_required``. (That the selection is
+    THIS organisation is ``require_organization``.)
+    """
+    if selection is not None and not getattr(selection, "organization_id", None):
+        raise TenantContextError(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            code=SELECTION_REQUIRED,
+            message="Select an organisation in the navbar to continue.",
         )
 
 
@@ -258,6 +280,7 @@ async def authorize_candidate(
                 anchor.project_id, candidate.get("organization_id")
             )
         else:
+            require_selected_organization(selection, candidate.get("organization_id"))
             await selection.require_organization(candidate.get("organization_id"))
 
     wide = (
@@ -292,8 +315,12 @@ async def visible_candidates(
     rows: Sequence[Dict[str, Any]],
     organization_wide: bool,
     selected_project: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+) -> List[Tuple[Dict[str, Any], CandidateAnchor]]:
     """Row visibility for the review queue, in three queries rather than 2N.
+
+    Each visible row comes back with its anchor, so the queue can say what acting
+    on it needs (its project selected, or organisation scope) and why a conflicted
+    one will never promote.
 
     Organisation-wide scope sees every row; anyone else sees the rows anchored to a
     project they are assigned to. With a project selected, a row anchored elsewhere
@@ -332,7 +359,7 @@ async def visible_candidates(
         else await policy.scope_service.client_project_ids(current_user)
     )
 
-    visible: List[Dict[str, Any]] = []
+    visible: List[Tuple[Dict[str, Any], CandidateAnchor]] = []
     for row, document in by_row:
         anchor = _anchor_from(row, document, projects)
         if (
@@ -342,5 +369,5 @@ async def visible_candidates(
         ):
             continue
         if organization_wide or (anchor.project_id and anchor.project_id in assigned):
-            visible.append(row)
+            visible.append((row, anchor))
     return visible

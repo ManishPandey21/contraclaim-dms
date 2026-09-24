@@ -146,6 +146,7 @@ class ContractPromotionService:
         contract_id: Optional[str] = None,
         effective_from: Optional[str] = None,
         expected_scope_state: Optional[str] = None,
+        expected_project_id: Optional[str] = None,
     ) -> PromotionReceipt:
         """Make an adjudicated candidate authoritative, in one transaction.
 
@@ -175,6 +176,15 @@ class ContractPromotionService:
         await self._revalidate_fingerprint(candidate, document)
         anchor = await resolve_candidate_anchor(self._db, candidate, document)
 
+        # "" = authorised as organisation-level; None = the caller pinned nothing.
+        if (
+            expected_project_id is not None
+            and (anchor.project_id or "") != expected_project_id
+        ):
+            raise RevalidationRequired(
+                f"candidate {candidate_id} is no longer anchored to the project it was "
+                "authorised at; nothing is written"
+            )
         scope_level, project_id = self._resolve_scope(candidate, anchor)
         if scope_level == "project" and not contract_id:
             raise NotPromotable(
@@ -201,6 +211,7 @@ class ContractPromotionService:
             "scope_state": candidate.get("scope_state"),
             "type_state": candidate.get("type_state"),
             "contract_document_type": candidate.get("contract_document_type"),
+            "project_id": candidate.get("project_id"),
             "promoted": {"$ne": True},
         }
 
@@ -210,12 +221,36 @@ class ContractPromotionService:
                     async with session.start_transaction():
                         await self._apply(plan, session=session)
             except DuplicateKeyError as exc:
-                # The deterministic instrument or receipt already exists.
-                raise AlreadyPromoted(f"candidate {candidate_id} is already promoted") from exc
+                key = (getattr(exc, "details", None) or {}).get("keyPattern") or {}
+                if "document_id" in key:
+                    # Another instrument already governs this canonical Document
+                    # (one instrument per document). This candidate is not promoted.
+                    raise NotPromotable(
+                        f"canonical document {candidate.get('canonical_document_id')} "
+                        "already has an instrument; nothing is written"
+                    ) from exc
+                if key == {"_id": 1} or "contract_document_id" in key:
+                    # The deterministic instrument, receipt or applicability exists.
+                    raise AlreadyPromoted(
+                        f"candidate {candidate_id} is already promoted"
+                    ) from exc
+                raise
             except OperationFailure as exc:
                 if getattr(exc, "code", None) == _WRITE_CONFLICT:
-                    raise AlreadyPromoted(
-                        f"candidate {candidate_id} is being promoted concurrently"
+                    # Something else wrote these documents first. Only an existing
+                    # receipt means that something was this promotion; otherwise
+                    # (a re-adjudication, a promotion that then aborted) the
+                    # operator must look again.
+                    receipt = await self._db[PROMOTION_RECEIPTS_COLLECTION].find_one(
+                        {"_id": f"promotion:{candidate_id}"}
+                    )
+                    if receipt is not None:
+                        raise AlreadyPromoted(
+                            f"candidate {candidate_id} is already promoted"
+                        ) from exc
+                    raise RevalidationRequired(
+                        f"candidate {candidate_id} changed while it was being promoted; "
+                        "nothing is written"
                     ) from exc
                 raise
         else:
@@ -294,9 +329,16 @@ class ContractPromotionService:
         self, candidate: Dict[str, Any], document: Dict[str, Any]
     ) -> None:
         recorded = candidate.get("source_fingerprint")
-        if recorded is None:
-            return
         current = document.get("checksum") or document.get("sha256")
+        if recorded is None:
+            if current is not None:
+                # The document can be fingerprinted and the review never was: the
+                # adjudication cannot be tied to this content.
+                raise RevalidationRequired(
+                    f"candidate {candidate.get('_id')} records no fingerprint of the "
+                    "content its operator reviewed; re-adjudicate before promoting"
+                )
+            return
         if current is not None and str(current) != str(recorded):
             raise RevalidationRequired(
                 f"candidate {candidate.get('_id')} was adjudicated against "
@@ -400,8 +442,13 @@ class ContractPromotionService:
                 "contract_id": contract_id,
                 "contract_document_id": instrument_id,
             }
+            event_id = uuid.uuid4().hex
             plan["applicability_event"] = {
-                "_id": uuid.uuid4().hex,
+                "_id": event_id,
+                # The store's unique index is on event_id, as record_applicability_event
+                # writes it. Without it every promotion after the first collided on
+                # event_id: null.
+                "event_id": event_id,
                 "applicability_id": applicability_id,
                 "kind": "APPLIED",
                 # Unknown stays unknown. Substituting today's date, or the

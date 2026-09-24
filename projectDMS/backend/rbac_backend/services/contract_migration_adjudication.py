@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from pymongo.errors import DuplicateKeyError
+
 from ..models.contract_document import ContractDocumentType
+from .publication_policy import resolve_canonical_document
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
     CandidateNotFound,
@@ -123,21 +126,29 @@ class ContractMigrationAdjudication:
 
         owner_token = uuid.uuid4().hex
         now = _now()
+        claim_id = f"contract-migration-claim:{candidate_id}"
+        row = {
+            "_id": claim_id,
+            "candidate_id": candidate_id,
+            "operator_id": operator_id,
+            "owner_token": owner_token,
+            "claimed_at": now,
+            "lease_expires_at": now + ADJUDICATION_CLAIM_LEASE,
+        }
         try:
-            await self._db[ADJUDICATION_CLAIMS_COLLECTION].insert_one(
-                {
-                    "_id": f"contract-migration-claim:{candidate_id}",
-                    "candidate_id": candidate_id,
-                    "operator_id": operator_id,
-                    "owner_token": owner_token,
-                    "claimed_at": now,
-                    "lease_expires_at": now + ADJUDICATION_CLAIM_LEASE,
-                }
+            await self._db[ADJUDICATION_CLAIMS_COLLECTION].insert_one(row)
+        except DuplicateKeyError as exc:
+            # Held - unless the lease has run out. Taking over an expired lease is
+            # one conditional replace, so two operators racing for it still get one
+            # winner. Only the collision means "held": any other failure is an
+            # outage and propagates as one, never as somebody else's claim.
+            taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_replace(
+                {"_id": claim_id, "lease_expires_at": {"$lte": now}}, row
             )
-        except Exception as exc:
-            raise ClaimUnavailable(
-                f"candidate {candidate_id} is already claimed by another operator"
-            ) from exc
+            if taken is None:
+                raise ClaimUnavailable(
+                    f"candidate {candidate_id} is already claimed by another operator"
+                ) from exc
         return CandidateClaim(
             candidate_id=candidate_id, operator_id=operator_id, owner_token=owner_token
         )
@@ -184,7 +195,12 @@ class ContractMigrationAdjudication:
             raise CandidateNotFound()
 
         live = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one(
-            {"candidate_id": claim.candidate_id, "owner_token": claim.owner_token}
+            {
+                "candidate_id": claim.candidate_id,
+                "owner_token": claim.owner_token,
+                # An expired lease is not a lease: another operator may hold it now.
+                "lease_expires_at": {"$gt": _now()},
+            }
         )
         if live is None:
             raise ClaimUnavailable(
@@ -215,8 +231,11 @@ class ContractMigrationAdjudication:
         )
         if (
             row.get("type_state") == TypeClassificationState.TYPE_RESOLVED.value
+            and proposed_type is not None
             and recorded_type != proposed_type
         ):
+            # An omitted type is "unchanged" - the update below does not touch it -
+            # so only a different type is a disagreement.
             raise ConflictingAdjudication(
                 f"candidate {claim.candidate_id} was already adjudicated as "
                 f"{recorded_type} by {row.get('adjudicated_by')}; recording "
@@ -230,13 +249,26 @@ class ContractMigrationAdjudication:
             "adjudication_reason": reason,
             "adjudicated_at": _now(),
         }
+        # What the operator reviewed. Promotion revalidates against it; recorded
+        # here because this is the moment of review, and inventory never did.
+        document = await resolve_canonical_document(
+            self._db, str(row.get("canonical_document_id") or "")
+        )
+        fingerprint = (document or {}).get("checksum") or (document or {}).get("sha256")
+        if fingerprint is not None:
+            update["source_fingerprint"] = str(fingerprint)
         if contract_document_type is not None:
             update["type_state"] = TypeClassificationState.TYPE_RESOLVED.value
             update["contract_document_type"] = contract_document_type.value
 
         written = await self._db[RECONCILIATION_COLLECTION].update_one(
-            candidate_filter, {"$set": update}
+            {**candidate_filter, "promoted": {"$ne": True}}, {"$set": update}
         )
         if getattr(written, "matched_count", 0) != 1:
-            # Never report an adjudication that was not recorded.
-            raise CandidateNotFound()
+            # Promoted between the read and the write (the filter refuses it), or
+            # gone. Never report an adjudication that was not recorded.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} changed while it was being adjudicated"
+            )
+        # The decision is recorded; the lease has done its job.
+        await self.release(claim)

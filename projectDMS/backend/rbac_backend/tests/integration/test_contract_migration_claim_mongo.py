@@ -247,8 +247,11 @@ def test_an_identical_re_adjudication_is_not_a_conflict():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             for _ in range(2):
+                # A recorded decision releases its lease, so each decision is
+                # made under its own claim; the second, identical one is still
+                # not a disagreement.
+                alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
                 await service.adjudicate(
                     alice,
                     organization_id=ORG,

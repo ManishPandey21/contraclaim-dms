@@ -54,6 +54,7 @@ from ..models.contract_document import (
 from ..services.contract_candidate_authority import (
     authorize_candidate,
     require_organization_wide_scope,
+    require_selected_organization,
     visible_candidates,
 )
 from ..services.contract_classification_service import (
@@ -346,19 +347,22 @@ def _catalogue_visible(
 
 
 async def _load_instrument(db, contract_document_id: str, selection: ActiveScope) -> Dict[str, Any]:
-    """CL-4A record route: a selection first, the instrument loaded INSIDE it.
+    """CL-4A record route: the instrument loaded INSIDE the selected organisation.
 
     Loaded with the selected organisation, so another organisation's instrument is
-    the same 404 as a missing one - never a 403 that confirms it exists - then held
-    to the selected project (organisation-level instruments to the organisation).
+    the same 404 as a missing one - never a 403 that confirms it exists. A
+    project's instrument then needs that project selected (400 / 403); an
+    organisation-level one needs only its organisation - the same rule as a
+    reconciliation candidate with no project.
     """
-    selection.require_selection()
+    require_selected_organization(selection, None)
     record = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one(
         {"_id": contract_document_id, "organization_id": str(selection.organization_id or "")}
     )
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown instrument")
-    await selection.require_record(record, allow_unscoped=True)
+    if record.get("project_id"):
+        await selection.require_project(record.get("project_id"), record.get("organization_id"))
     return record
 
 
@@ -748,6 +752,7 @@ async def reconciliation_materialise(
     selection: ActiveScope = Depends(active_scope),
 ):
     """The separate, explicitly named write. Never a side effect of inventory."""
+    require_selected_organization(selection, command.organization_id)
     await selection.require_organization(command.organization_id)
     await require_organization_wide_scope(
         policy,
@@ -789,7 +794,7 @@ async def reconciliation_review(
     organization_wide = await policy.scope_service.has_organization_wide_scope(
         current_user, organization_id=organization_id
     )
-    rows = await visible_candidates(
+    visible = await visible_candidates(
         policy,
         current_user,
         db=db,
@@ -810,14 +815,18 @@ async def reconciliation_review(
                 "contract_document_type": row.get("contract_document_type"),
                 "adjudicated_by": row.get("adjudicated_by"),
                 "promoted": bool(row.get("promoted")),
-                "promotion_blocked_reasons": _promotion_blockers(row),
+                # Acting on an anchored row needs its project selected; an
+                # unanchored or conflicted one is organisation business.
+                "project_anchor": anchor.project_id,
+                "anchor_conflict": anchor.conflict,
+                "promotion_blocked_reasons": _promotion_blockers(row, anchor),
             }
-            for row in rows
+            for row, anchor in visible
         ]
     }
 
 
-def _promotion_blockers(row: Dict[str, Any]) -> List[str]:
+def _promotion_blockers(row: Dict[str, Any], anchor: Any = None) -> List[str]:
     """Why this candidate cannot be promoted, per axis.
 
     Per axis rather than one chip: "needs review" tells an operator nothing about
@@ -834,6 +843,13 @@ def _promotion_blockers(row: Dict[str, Any]) -> List[str]:
         blockers.append(f"scope: {scope_state} - operator adjudication required")
     if row.get("type_state") != TypeClassificationState.TYPE_RESOLVED.value:
         blockers.append(f"type: {row.get('type_state')} - operator confirmation required")
+    if anchor is not None and anchor.conflict:
+        blockers.append(
+            "anchor: conflicted - the project fields disagree, or name a project that "
+            "is not an active project of this organisation; it can only be set aside"
+        )
+    if row.get("promoted"):
+        blockers.append("promoted: already an instrument")
     return blockers
 
 
@@ -870,6 +886,15 @@ async def claim_candidate(
             candidate_id=candidate_id,
             organization_id=organization_id,
             permission=Permissions.CONTRACT_MASTER_MANAGE,
+            # A candidate already decided at organisation scope, set aside, or
+            # promoted is organisation business: a project-tier lease on it would
+            # lock the organisation out of its own decision.
+            organization_wide=lambda candidate: bool(candidate.get("promoted"))
+            or candidate.get("scope_state")
+            in (
+                ScopeClassificationState.ORG_SCOPE_CONFIRMED.value,
+                ScopeClassificationState.INVALID.value,
+            ),
             selection=selection,
         )
         claim = await service.claim(
@@ -931,12 +956,27 @@ async def adjudicate_candidate(
             organization_id=organization_id,
             permission=Permissions.CONTRACT_MASTER_MANAGE,
             organization_wide=lambda candidate: (
-                scope_state is ScopeClassificationState.ORG_SCOPE_CONFIRMED
+                scope_state
+                in (
+                    ScopeClassificationState.ORG_SCOPE_CONFIRMED,
+                    # INVALID is terminal for the organisation's whole migration.
+                    ScopeClassificationState.INVALID,
+                )
                 or candidate.get("scope_state")
                 == ScopeClassificationState.ORG_SCOPE_CONFIRMED.value
             ),
             selection=selection,
         )
+        if authority.anchor.conflict and scope_state not in (
+            ScopeClassificationState.INVALID,
+            ScopeClassificationState.AMBIGUOUS,
+        ):
+            # A conflicted candidate never promotes; recording a promotable scope
+            # on it would be a decision that leads nowhere.
+            raise ValueError(
+                "this candidate's project anchor is conflicted; it can only be set "
+                "aside (INVALID) or left AMBIGUOUS"
+            )
         if (
             scope_state is ScopeClassificationState.PROJECT_SCOPE_CONFIRMED
             and not authority.project_id
@@ -1031,6 +1071,7 @@ async def promote_candidate(
             contract_id=command.contract_id,
             effective_from=command.effective_from,
             expected_scope_state=authority.candidate.get("scope_state"),
+            expected_project_id=authority.project_id or "",
         )
     except CandidateNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
