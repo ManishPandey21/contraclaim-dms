@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, cast
 
 import pytest
 from bson import ObjectId
@@ -368,7 +368,7 @@ def _contract_ingestor(
     )
     ingestor.processing_config = config
     ingestor.db_service = db_service
-    ingestor.usage_metering_service = SimpleNamespace(check_and_record=_noop)
+    ingestor.usage_metering_service = cast(Any, SimpleNamespace(check_and_record=_noop))
     return ingestor
 
 
