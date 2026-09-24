@@ -57,6 +57,8 @@ PROJ_A1 = "proj-cm-a1"
 PROJ_A2 = "proj-cm-a2"
 PROJ_B1 = "proj-cm-b1"
 PROJ_C1 = "proj-cm-c1"
+#: Deactivated: cannot be selected, so it can never anchor a candidate.
+PROJ_A3_INACTIVE = "proj-cm-a3-inactive"
 CONTRACT = "contract-cm-1"
 
 PREFIX = "contract-master-migration:contracts"
@@ -75,6 +77,9 @@ CAND_P2_READY = f"{PREFIX}:doc-p2-ready"
 #: No trustworthy project anchor: an organisation-level Document, and only a
 #: session hint / scope hint pointing at a project.
 CAND_UNANCHORED = f"{PREFIX}:doc-org-level"
+#: Conflicted anchors: the two trusted fields disagree / the project is inactive.
+CAND_CONFLICT = f"{PREFIX}:doc-conflict"
+CAND_INACTIVE = f"{PREFIX}:doc-inactive"
 
 NOT_FOUND = {"detail": "reconciliation candidate not found"}
 
@@ -148,7 +153,9 @@ def _candidate(
     return row
 
 
-def _project_ready(candidate_id: str, document_id: str, project_id: str) -> Dict[str, Any]:
+def _project_ready(
+    candidate_id: str, document_id: str, project_id: str
+) -> Dict[str, Any]:
     """Adjudicated project scope, anchored to the same project its Document names."""
     return {
         **_candidate(candidate_id, ORG_A, document_id, ready=True),
@@ -198,6 +205,12 @@ async def _seed(db: Any) -> None:
             {"_id": PROJ_A2, "name": "A2", "organization_id": ORG_A},
             {"_id": PROJ_B1, "name": "B1", "organization_id": ORG_B},
             {"_id": PROJ_C1, "name": "C1", "organization_id": ORG_C},
+            {
+                "_id": PROJ_A3_INACTIVE,
+                "name": "A3",
+                "organization_id": ORG_A,
+                "is_active": False,
+            },
         ]
     )
     now = datetime.utcnow()
@@ -242,6 +255,8 @@ async def _seed(db: Any) -> None:
             _document("doc-p1-ready", ORG_A, PROJ_A1),
             _document("doc-p2-ready", ORG_A, PROJ_A2),
             _document("doc-org-level", ORG_A, None),
+            _document("doc-conflict", ORG_A, PROJ_A2),
+            _document("doc-inactive", ORG_A, PROJ_A3_INACTIVE),
         ]
     )
     await db[RECONCILIATION_COLLECTION].insert_many(
@@ -264,6 +279,9 @@ async def _seed(db: Any) -> None:
                 "session_evidence": {"project_id": PROJ_A1},
                 "scope_hint": PROJ_A1,
             },
+            # candidate.project_id says A1, its Document says A2.
+            _project_ready(CAND_CONFLICT, "doc-conflict", PROJ_A1),
+            _candidate(CAND_INACTIVE, ORG_A, "doc-inactive", ready=True),
         ]
     )
 
@@ -752,7 +770,9 @@ def test_evidence_search_is_bound_to_the_selected_project() -> None:
                 ("project_user", PROJ_A1),
                 ("member_a1_a2", PROJ_A1),
             ):
-                response = await env.evidence(persona, PROJ_A1, selected_project=selected)
+                response = await env.evidence(
+                    persona, PROJ_A1, selected_project=selected
+                )
                 assert response.status_code == 200, (persona, response.text)
                 assert response.json()["outcome"] == "valid_empty"
             # The organisation header may accompany the project; it must agree.
@@ -768,7 +788,9 @@ def test_superadmin_cannot_search_outside_the_selected_project() -> None:
     async def scenario() -> None:
         async with _env() as env:
             for searched in (PROJ_B1, PROJ_A2):
-                response = await env.evidence("superadmin", searched, selected_project=PROJ_A1)
+                response = await env.evidence(
+                    "superadmin", searched, selected_project=PROJ_A1
+                )
                 assert response.status_code == 403, (searched, response.text)
                 assert response.json()["detail"]["code"] == "context_forbidden"
 
@@ -778,7 +800,9 @@ def test_superadmin_cannot_search_outside_the_selected_project() -> None:
 def test_a_member_of_two_projects_is_held_to_the_selected_one() -> None:
     async def scenario() -> None:
         async with _env() as env:
-            response = await env.evidence("member_a1_a2", PROJ_A1, selected_project=PROJ_A2)
+            response = await env.evidence(
+                "member_a1_a2", PROJ_A1, selected_project=PROJ_A2
+            )
             assert response.status_code == 403, response.text
             assert response.json()["detail"]["code"] == "context_forbidden"
 
@@ -812,7 +836,9 @@ def test_a_selection_the_caller_may_not_use_is_refused() -> None:
                 ("foreign_org_admin", PROJ_A1),
                 ("org_admin", PROJ_B1),
             ):
-                response = await env.evidence(persona, selected, selected_project=selected)
+                response = await env.evidence(
+                    persona, selected, selected_project=selected
+                )
                 assert response.status_code == 403, (persona, selected, response.text)
                 assert response.json()["detail"]["code"] == "context_forbidden"
 
@@ -936,6 +962,10 @@ def test_a_project_admin_cannot_act_on_another_projects_candidate(action) -> Non
                 )
 
             assert response.status_code == 403, response.text
+            # A1 selected, candidate anchored to A2: the selection refuses first.
+            # The policy layer beneath it is proven separately
+            # (test_the_anchor_check_holds_without_the_selection).
+            assert response.json()["detail"]["code"] == "context_forbidden"
             after = await env.snapshot()
             after.pop("contract_migration_adjudication_claims", None)
             everything.pop("contract_migration_adjudication_claims", None)
@@ -1027,10 +1057,14 @@ def test_a_project_admin_cannot_promote_to_organisation_scope() -> None:
     "candidate_id,selected",
     [(CAND_P1_OPEN, PROJ_A1), (CAND_P2_OPEN, PROJ_A2), (CAND_UNANCHORED, PROJ_A1)],
 )
-def test_an_org_admin_acts_on_every_candidate_of_the_organisation(candidate_id, selected) -> None:
+def test_an_org_admin_acts_on_every_candidate_of_the_organisation(
+    candidate_id, selected
+) -> None:
     async def scenario() -> None:
         async with _env() as env:
-            claimed = await env.claim("org_admin", candidate_id, ORG_A, selected=selected)
+            claimed = await env.claim(
+                "org_admin", candidate_id, ORG_A, selected=selected
+            )
             assert claimed.status_code == 200, claimed.text
             response = await env.adjudicate(
                 "org_admin",
@@ -1070,7 +1104,11 @@ def test_the_review_queue_is_bounded_to_the_callers_projects() -> None:
         async with _env() as env:
             path = "/api/contract-master/reconciliation/candidates"
             mine = await env.call(
-                "project_admin_a1", "GET", path, selected=PROJ_A1, params={"organization_id": ORG_A}
+                "project_admin_a1",
+                "GET",
+                path,
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
             )
             assert mine.status_code == 200, mine.text
             seen = {row["candidate_id"] for row in mine.json()["candidates"]}
@@ -1078,11 +1116,28 @@ def test_the_review_queue_is_bounded_to_the_callers_projects() -> None:
             assert not seen & {CAND_P2_OPEN, CAND_P2_READY, CAND_UNANCHORED}
 
             everything = await env.call(
-                "org_admin", "GET", path, selected_org=ORG_A, params={"organization_id": ORG_A}
+                "org_admin",
+                "GET",
+                path,
+                selected_org=ORG_A,
+                params={"organization_id": ORG_A},
             )
             assert everything.status_code == 200, everything.text
             all_rows = {row["candidate_id"] for row in everything.json()["candidates"]}
             assert {CAND_P1_OPEN, CAND_P2_OPEN, CAND_UNANCHORED} <= all_rows
+
+            narrowed = await env.call(
+                "org_admin",
+                "GET",
+                path,
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
+            )
+            narrowed_rows = {
+                row["candidate_id"] for row in narrowed.json()["candidates"]
+            }
+            assert CAND_P1_OPEN in narrowed_rows and CAND_UNANCHORED in narrowed_rows
+            assert not narrowed_rows & {CAND_P2_OPEN, CAND_P2_READY}
 
     _run(scenario)
 
@@ -1137,7 +1192,9 @@ def test_materialising_again_converges_instead_of_failing() -> None:
                 )
                 assert response.status_code == 200, response.text
                 assert response.json() == {"materialised": 0}
-            after = await env.db[RECONCILIATION_COLLECTION].find({}).to_list(length=None)
+            after = (
+                await env.db[RECONCILIATION_COLLECTION].find({}).to_list(length=None)
+            )
             assert after == rows
 
     _run(scenario)
@@ -1174,7 +1231,9 @@ def test_an_objectid_keyed_legacy_document_promotes_through_the_normal_path() ->
             # The representation materialise actually stores.
             assert row["canonical_document_id"] == str(oid)
 
-            claimed = await env.claim("org_c_admin", candidate_id, ORG_C, selected=PROJ_C1)
+            claimed = await env.claim(
+                "org_c_admin", candidate_id, ORG_C, selected=PROJ_C1
+            )
             assert claimed.status_code == 200, claimed.text
             adjudicated = await env.adjudicate(
                 "org_c_admin",
@@ -1185,7 +1244,9 @@ def test_an_objectid_keyed_legacy_document_promotes_through_the_normal_path() ->
             )
             assert adjudicated.status_code == 200, adjudicated.text
 
-            promoted = await env.promote("org_c_admin", candidate_id, ORG_C, selected=PROJ_C1)
+            promoted = await env.promote(
+                "org_c_admin", candidate_id, ORG_C, selected=PROJ_C1
+            )
             assert promoted.status_code == 200, promoted.text
             instrument = await env.db[CONTRACT_DOCUMENTS_COLLECTION].find_one(
                 {"_id": promoted.json()["contract_document_id"]}
@@ -1222,7 +1283,9 @@ def test_the_anchor_check_holds_without_the_selection() -> None:
 
         from rbac_backend.core.permissions import Permissions
         from rbac_backend.core.security import CurrentUser
-        from rbac_backend.services.contract_candidate_authority import authorize_candidate
+        from rbac_backend.services.contract_candidate_authority import (
+            authorize_candidate,
+        )
         from rbac_backend.services.policy_service import PolicyService
 
         async with _env() as env:
@@ -1282,7 +1345,9 @@ def test_with_a_project_selected_even_an_org_admin_is_held_to_it() -> None:
         async with _env() as env:
             before = await env.snapshot()
             for persona in ("org_admin", "superadmin"):
-                response = await env.claim(persona, CAND_P2_OPEN, ORG_A, selected=PROJ_A1)
+                response = await env.claim(
+                    persona, CAND_P2_OPEN, ORG_A, selected=PROJ_A1
+                )
                 assert response.status_code == 403, (persona, response.text)
                 assert response.json()["detail"]["code"] == "context_forbidden"
             assert await env.claims() == []
@@ -1294,7 +1359,8 @@ def test_with_a_project_selected_even_an_org_admin_is_held_to_it() -> None:
     _run(scenario)
 
 
-#: Every route, and what it answers per selection. "org" = only X-Org-Id sent.
+#: Every route, and what it answers per selection. "org" = only X-Org-Id sent;
+#: None = no selection header at all.
 #: The instrument is organisation-level (project None), seeded per test.
 INSTRUMENT = "cd-matrix"
 
@@ -1310,7 +1376,11 @@ def _requests():
     return {
         "catalogue": ("GET", "/api/contract-master/catalogue", {"params": q}),
         "instrument": ("GET", f"/api/contract-master/instruments/{INSTRUMENT}", {}),
-        "projection": ("GET", f"/api/contract-master/instruments/{INSTRUMENT}/projection", {}),
+        "projection": (
+            "GET",
+            f"/api/contract-master/instruments/{INSTRUMENT}/projection",
+            {},
+        ),
         "classification": (
             "POST",
             f"/api/contract-master/instruments/{INSTRUMENT}/classification",
@@ -1319,19 +1389,42 @@ def _requests():
         "applicability": (
             "POST",
             f"/api/contract-master/instruments/{INSTRUMENT}/applicability",
-            {"json": {"project_id": PROJ_A1, "contract_id": CONTRACT, "kind": "APPLIED"}},
+            {
+                "json": {
+                    "project_id": PROJ_A1,
+                    "contract_id": CONTRACT,
+                    "kind": "APPLIED",
+                }
+            },
         ),
-        "evidence": ("POST", "/api/contract-master/evidence/search", {"json": body_evidence}),
-        "inventory": ("GET", "/api/contract-master/reconciliation/inventory", {"params": q}),
+        "evidence": (
+            "POST",
+            "/api/contract-master/evidence/search",
+            {"json": body_evidence},
+        ),
+        "inventory": (
+            "GET",
+            "/api/contract-master/reconciliation/inventory",
+            {"params": q},
+        ),
         "materialise": (
             "POST",
             "/api/contract-master/reconciliation/materialise",
             {"json": {"organization_id": ORG_A}},
         ),
-        "review": ("GET", "/api/contract-master/reconciliation/candidates", {"params": q}),
+        "review": (
+            "GET",
+            "/api/contract-master/reconciliation/candidates",
+            {"params": q},
+        ),
         "claim": (
             "POST",
             f"/api/contract-master/reconciliation/candidates/{CAND_P1_OPEN}/claim",
+            {"params": q},
+        ),
+        "claim_unanchored": (
+            "POST",
+            f"/api/contract-master/reconciliation/candidates/{CAND_UNANCHORED}/claim",
             {"params": q},
         ),
         "adjudicate": (
@@ -1355,39 +1448,145 @@ def _requests():
 #: "org" = organisation only, None = nothing selected.
 MATRIX = {
     ("org_admin", PROJ_A1): {
-        "catalogue": 200, "instrument": 200, "projection": 200, "classification": 200,
-        "applicability": 201, "evidence": 200, "inventory": 200, "materialise": 200,
-        "review": 200, "claim": 200, "adjudicate": 409, "promote": 200, "capabilities": 200,
+        "catalogue": 200,
+        "instrument": 200,
+        "projection": 200,
+        "classification": 200,
+        "applicability": 201,
+        "evidence": 200,
+        "inventory": 200,
+        "materialise": 200,
+        "review": 200,
+        "claim": 200,
+        "claim_unanchored": 200,
+        "adjudicate": 409,
+        "promote": 200,
+        "capabilities": 200,
+    },
+    ("org_admin", "org"): {
+        # Organisation only: organisation-level work proceeds, anything that
+        # belongs to a project (records, evidence, an anchored candidate) holds.
+        "catalogue": 200,
+        "instrument": 400,
+        "projection": 400,
+        "classification": 400,
+        "applicability": 400,
+        "evidence": 400,
+        "inventory": 200,
+        "materialise": 200,
+        "review": 200,
+        "claim": 400,
+        "claim_unanchored": 200,
+        "adjudicate": 400,
+        "promote": 400,
+        "capabilities": 200,
     },
     ("org_admin", PROJ_A2): {
         # A2 is selected: the A1 candidates and the A1 search leave it.
-        "catalogue": 200, "instrument": 200, "applicability": 403, "evidence": 403,
-        "claim": 403, "adjudicate": 403, "promote": 403, "review": 200,
+        "catalogue": 200,
+        "instrument": 200,
+        "applicability": 403,
+        "evidence": 403,
+        "claim": 403,
+        "adjudicate": 403,
+        "promote": 403,
+        "review": 200,
     },
     ("org_admin", None): {
         # Nothing selected: record routes hold (400); organisation tools work.
-        "catalogue": 200, "instrument": 400, "projection": 400, "classification": 400,
-        "applicability": 400, "evidence": 400, "inventory": 200, "review": 200,
-        "claim": 400, "adjudicate": 400, "promote": 400, "capabilities": 200,
+        "catalogue": 200,
+        "instrument": 400,
+        "projection": 400,
+        "classification": 400,
+        "applicability": 400,
+        "evidence": 400,
+        "inventory": 200,
+        "materialise": 200,
+        "review": 200,
+        "claim": 400,
+        "claim_unanchored": 200,
+        "adjudicate": 400,
+        "promote": 400,
+        "capabilities": 200,
     },
     ("superadmin", PROJ_A1): {
-        "catalogue": 200, "instrument": 200, "evidence": 200, "claim": 200,
-        "promote": 200, "capabilities": 200,
+        "catalogue": 200,
+        "instrument": 200,
+        "projection": 200,
+        "classification": 200,
+        "applicability": 201,
+        "evidence": 200,
+        "inventory": 200,
+        "materialise": 200,
+        "review": 200,
+        "claim": 200,
+        "claim_unanchored": 200,
+        "adjudicate": 409,
+        "promote": 200,
+        "capabilities": 200,
+    },
+    ("superadmin", "org"): {
+        "catalogue": 200,
+        "instrument": 400,
+        "evidence": 400,
+        "inventory": 200,
+        "review": 200,
+        "claim": 400,
+        "claim_unanchored": 200,
+        "promote": 400,
+        "capabilities": 200,
     },
     ("superadmin", PROJ_B1): {
-        # Selected org B: every org-A request leaves the selection.
-        "catalogue": 403, "instrument": 403, "evidence": 403, "claim": 403,
-        "inventory": 403, "review": 403, "capabilities": 403,
+        # Selected org B: every org-A request leaves the selection. The org-A
+        # instrument is looked up inside org B, so it is not found at all.
+        "catalogue": 403,
+        "instrument": 404,
+        "projection": 404,
+        "classification": 404,
+        "applicability": 404,
+        "evidence": 403,
+        "inventory": 403,
+        "materialise": 403,
+        "review": 403,
+        "claim": 403,
+        "claim_unanchored": 403,
+        "adjudicate": 403,
+        "promote": 403,
+        "capabilities": 403,
     },
     ("project_admin_a1", PROJ_A1): {
-        "catalogue": 200, "instrument": 200, "evidence": 200, "claim": 200,
-        "promote": 200, "review": 200, "inventory": 403, "materialise": 403,
+        # The organisation-level instrument is organisation business to retype.
+        "catalogue": 200,
+        "instrument": 200,
+        "projection": 200,
+        "classification": 403,
+        "applicability": 201,
+        "evidence": 200,
+        "inventory": 403,
+        "materialise": 403,
+        "review": 200,
+        "claim": 200,
+        "claim_unanchored": 403,
+        "adjudicate": 409,
+        "promote": 200,
         "capabilities": 200,
     },
     ("project_admin_a1", PROJ_A2): {
         # Not a member of A2: the selection itself is refused, on every route.
-        "catalogue": 403, "instrument": 403, "evidence": 403, "claim": 403,
-        "review": 403, "inventory": 403, "capabilities": 403,
+        "catalogue": 403,
+        "instrument": 403,
+        "projection": 403,
+        "classification": 403,
+        "applicability": 403,
+        "evidence": 403,
+        "inventory": 403,
+        "materialise": 403,
+        "review": 403,
+        "claim": 403,
+        "claim_unanchored": 403,
+        "adjudicate": 403,
+        "promote": 403,
+        "capabilities": 403,
     },
 }
 
@@ -1405,25 +1604,418 @@ def test_every_contract_master_route_under_every_selection(persona, selected) ->
 
         requests = _requests()
         seen = {}
-        for route, expected in MATRIX[(persona, selected)].items():
-            async with _env() as env:
-                await env.db[CONTRACT_DOCUMENTS_COLLECTION].insert_one(
-                    {
-                        "_id": INSTRUMENT,
-                        "organization_id": ORG_A,
-                        "document_id": "doc-a-open",
-                        "contract_document_type": "general_conditions",
-                        "scope_level": "organization",
-                        "project_id": None,
-                        "classification_revision": 1,
-                        "projection_status": "PENDING",
-                    }
-                )
+        # One database per row: within a row no answer depends on another route's
+        # write (the adjudication uses a token nobody holds, and claim, promote and
+        # classification touch different records), so a fresh seed per route bought
+        # nothing but minutes.
+        async with _env() as env:
+            await env.db[CONTRACT_DOCUMENTS_COLLECTION].insert_one(
+                {
+                    "_id": INSTRUMENT,
+                    "organization_id": ORG_A,
+                    "document_id": "doc-a-open",
+                    "contract_document_type": "general_conditions",
+                    "scope_level": "organization",
+                    "project_id": None,
+                    "classification_revision": 1,
+                    "projection_status": "PENDING",
+                }
+            )
+            if selected == "org":
+                selection = {"selected_org": ORG_A}
+            else:
+                selection = {"selected": selected}
+            for route, expected in MATRIX[(persona, selected)].items():
                 method, path, kwargs = requests[route]
-                response = await env.call(persona, method, path, selected=selected, **kwargs)
+                response = await env.call(persona, method, path, **selection, **kwargs)
                 seen[route] = response.status_code
                 assert response.status_code != 500, (route, response.text)
                 assert response.status_code == expected, (route, response.text)
-        assert set(seen) == set(MATRIX[(persona, selected)])
+        # Every row that claims a route really called it and got its answer.
+        assert seen == MATRIX[(persona, selected)]
+
+    _run(scenario)
+
+
+# --------------------------------------------------------------------------- #
+# review round: anchors that fail, promotion that repeats, instruments
+# --------------------------------------------------------------------------- #
+
+
+def test_project_scope_promotion_works_from_the_inventory_with_no_hand_set_field() -> (
+    None
+):
+    """Materialise -> claim -> adjudicate PROJECT -> promote, on a real ObjectId Document.
+
+    Inventory never writes candidate.project_id; the project comes from the
+    Document's own project, the trustworthy anchor.
+    """
+
+    async def scenario() -> None:
+        from bson import ObjectId
+
+        async with _env() as env:
+            oid = ObjectId()
+            await env.db.documents.insert_one(_document(oid, ORG_C, PROJ_C1))
+            materialised = await env.call(
+                "org_c_admin",
+                "POST",
+                "/api/contract-master/reconciliation/materialise",
+                json={"organization_id": ORG_C},
+            )
+            assert materialised.status_code == 200, materialised.text
+            candidate_id = f"{PREFIX}:{oid}"
+            assert "project_id" not in await env.candidate(candidate_id)
+
+            claimed = await env.claim(
+                "org_c_admin", candidate_id, ORG_C, selected=PROJ_C1
+            )
+            assert claimed.status_code == 200, claimed.text
+            adjudicated = await env.adjudicate(
+                "org_c_admin",
+                candidate_id,
+                ORG_C,
+                claimed.json()["owner_token"],
+                scope_state="PROJECT_SCOPE_CONFIRMED",
+                selected=PROJ_C1,
+            )
+            assert adjudicated.status_code == 200, adjudicated.text
+            promoted = await env.promote(
+                "org_c_admin",
+                candidate_id,
+                ORG_C,
+                contract_id=CONTRACT,
+                selected=PROJ_C1,
+            )
+            assert promoted.status_code == 200, promoted.text
+            assert promoted.json()["scope_level"] == "project"
+            applicability = await env.db["contract_document_applicability"].find_one(
+                {"contract_document_id": promoted.json()["contract_document_id"]}
+            )
+            assert applicability["project_id"] == PROJ_C1
+
+    _run(scenario)
+
+
+@pytest.mark.parametrize("candidate_id", [CAND_CONFLICT, CAND_INACTIVE])
+def test_a_conflicted_anchor_is_organisation_business_and_never_promotes(
+    candidate_id,
+) -> None:
+    """Disagreeing project fields, or an inactive project: not treated as org-owned."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            before = await env.snapshot()
+            refused = await env.claim(
+                "project_admin_a1", candidate_id, ORG_A, selected=PROJ_A1
+            )
+            assert refused.status_code == 403, refused.text
+            assert (
+                refused.json()["detail"]
+                == "Not authorized: organization_scope_required"
+            )
+
+            # Not stuck: organisation scope may act on it with only the org selected.
+            claimed = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{candidate_id}/claim",
+                selected_org=ORG_A,
+                params={"organization_id": ORG_A},
+            )
+            assert claimed.status_code == 200, claimed.text
+
+            after_claim = await env.snapshot()
+            promoted = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{candidate_id}/promote",
+                selected_org=ORG_A,
+                params={"organization_id": ORG_A},
+                json={"contract_id": CONTRACT},
+            )
+            assert promoted.status_code == 422, promoted.text
+            assert "no trustworthy project anchor" in promoted.text
+            assert await env.snapshot() == after_claim
+            before.pop("contract_migration_adjudication_claims", None)
+            after_claim.pop("contract_migration_adjudication_claims", None)
+            assert after_claim == before
+
+    _run(scenario)
+
+
+def test_project_scope_needs_an_anchor_to_be_recorded() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            claimed = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_UNANCHORED}/claim",
+                selected_org=ORG_A,
+                params={"organization_id": ORG_A},
+            )
+            assert claimed.status_code == 200, claimed.text
+            before = await env.candidate(CAND_UNANCHORED)
+            response = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_UNANCHORED}/adjudicate",
+                selected_org=ORG_A,
+                params={
+                    "organization_id": ORG_A,
+                    "owner_token": claimed.json()["owner_token"],
+                },
+                json={"scope_state": "PROJECT_SCOPE_CONFIRMED", "reason": "no anchor"},
+            )
+            assert response.status_code == 422, response.text
+            assert await env.candidate(CAND_UNANCHORED) == before
+
+    _run(scenario)
+
+
+def test_a_project_admin_cannot_override_an_organisation_scope_decision() -> None:
+    """CAND_A_READY is anchored to A1 but already adjudicated ORG_SCOPE_CONFIRMED."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            claimed = await env.claim("project_admin_a1", CAND_A_READY, ORG_A)
+            assert claimed.status_code == 200, claimed.text
+            before = await env.candidate(CAND_A_READY)
+            for scope_state in ("PROJECT_SCOPE_CONFIRMED", "INVALID", "AMBIGUOUS"):
+                response = await env.adjudicate(
+                    "project_admin_a1",
+                    CAND_A_READY,
+                    ORG_A,
+                    claimed.json()["owner_token"],
+                    scope_state=scope_state,
+                )
+                assert response.status_code == 403, (scope_state, response.text)
+            assert await env.candidate(CAND_A_READY) == before
+
+    _run(scenario)
+
+
+def test_a_second_promotion_is_a_409_and_changes_nothing() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            first = await env.promote("org_admin", CAND_A_READY, ORG_A)
+            assert first.status_code == 200, first.text
+            after_first = await env.snapshot()
+            second = await env.promote("org_admin", CAND_A_READY, ORG_A)
+            assert second.status_code == 409, second.text
+            assert await env.snapshot() == after_first
+
+    _run(scenario)
+
+
+def test_a_promoted_candidate_cannot_be_re_adjudicated() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            assert (
+                await env.promote("org_admin", CAND_A_READY, ORG_A)
+            ).status_code == 200
+            claimed = await env.claim("org_admin", CAND_A_READY, ORG_A)
+            assert claimed.status_code == 200, claimed.text
+            before = await env.candidate(CAND_A_READY)
+            response = await env.adjudicate(
+                "org_admin", CAND_A_READY, ORG_A, claimed.json()["owner_token"]
+            )
+            assert response.status_code == 409, response.text
+            assert "already promoted" in response.text
+            assert await env.candidate(CAND_A_READY) == before
+
+    _run(scenario)
+
+
+def test_a_decision_that_changes_inside_the_transaction_writes_nothing() -> None:
+    """The promoted marker is a compare-and-set over the decision that was read."""
+
+    async def scenario() -> None:
+        from rbac_backend.services.contract_migration_reconciliation import (
+            RECONCILIATION_COLLECTION,
+        )
+        from rbac_backend.services.contract_promotion import (
+            ContractPromotionService,
+            RevalidationRequired,
+        )
+
+        class ChangedUnderfoot(ContractPromotionService):
+            async def _apply(self, plan, *, session):
+                # A re-adjudication lands after the read, before the marker.
+                await self._db[RECONCILIATION_COLLECTION].update_one(
+                    {"_id": plan["candidate_id"]},
+                    {"$set": {"type_state": "TYPE_SUGGESTED"}},
+                    session=session,
+                )
+                await super()._apply(plan, session=session)
+
+        async with _env() as env:
+            everything = await env.snapshot()
+            with pytest.raises(RevalidationRequired):
+                await ChangedUnderfoot(env.db, env.mongo).promote(
+                    CAND_A_READY, organization_id=ORG_A, actor_id="alice"
+                )
+            # The instrument, fact and receipt rolled back with the marker - and so
+            # did the in-transaction change itself.
+            assert await env.snapshot() == everything
+
+    _run(scenario)
+
+
+def test_the_promotion_project_must_be_the_anchor() -> None:
+    """candidate.project_id A1 against a Document of A2: refused at the service."""
+
+    async def scenario() -> None:
+        from rbac_backend.services.contract_promotion import (
+            ContractPromotionService,
+            NotPromotable,
+        )
+
+        async with _env() as env:
+            everything = await env.snapshot()
+            with pytest.raises(NotPromotable, match="no trustworthy project anchor"):
+                await ContractPromotionService(env.db, env.mongo).promote(
+                    CAND_CONFLICT,
+                    organization_id=ORG_A,
+                    actor_id="alice",
+                    contract_id=CONTRACT,
+                )
+            assert await env.snapshot() == everything
+
+    _run(scenario)
+
+
+async def _seed_instruments(env) -> None:
+    from rbac_backend.services.contract_document_store import (
+        CONTRACT_DOCUMENTS_COLLECTION,
+    )
+
+    base = {
+        "document_id": "doc-a-open",
+        "contract_document_type": "general_conditions",
+        "classification_revision": 1,
+        "projection_status": "PENDING",
+    }
+    await env.db[CONTRACT_DOCUMENTS_COLLECTION].insert_many(
+        [
+            {
+                **base,
+                "_id": "cd-org",
+                "organization_id": ORG_A,
+                "scope_level": "organization",
+                "project_id": None,
+            },
+            {
+                **base,
+                "_id": "cd-a1",
+                "organization_id": ORG_A,
+                "scope_level": "project",
+                "project_id": PROJ_A1,
+            },
+            {
+                **base,
+                "_id": "cd-a2",
+                "organization_id": ORG_A,
+                "scope_level": "project",
+                "project_id": PROJ_A2,
+            },
+            {
+                **base,
+                "_id": "cd-b",
+                "organization_id": ORG_B,
+                "scope_level": "organization",
+                "project_id": None,
+            },
+        ]
+    )
+
+
+def test_the_catalogue_is_bounded_to_what_the_caller_may_see() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            await _seed_instruments(env)
+
+            async def listed(persona, **selection):
+                response = await env.call(
+                    persona,
+                    "GET",
+                    "/api/contract-master/catalogue",
+                    params={"organization_id": ORG_A},
+                    **selection,
+                )
+                assert response.status_code == 200, response.text
+                return {
+                    item["contract_document_id"] for item in response.json()["items"]
+                }
+
+            assert await listed("project_admin_a1", selected=PROJ_A1) == {
+                "cd-org",
+                "cd-a1",
+            }
+            assert await listed("org_admin", selected=PROJ_A1) == {"cd-org", "cd-a1"}
+            assert await listed("org_admin", selected_org=ORG_A) == {
+                "cd-org",
+                "cd-a1",
+                "cd-a2",
+            }
+
+    _run(scenario)
+
+
+def test_a_project_admin_classifies_their_projects_instrument_not_the_organisations() -> (
+    None
+):
+    async def scenario() -> None:
+        async with _env() as env:
+            await _seed_instruments(env)
+            body = {"contract_document_type": "amendment", "expected_revision": 1}
+            path = "/api/contract-master/instruments/{}/classification"
+            own = await env.call(
+                "project_admin_a1",
+                "POST",
+                path.format("cd-a1"),
+                selected=PROJ_A1,
+                json=body,
+            )
+            assert own.status_code == 200, own.text
+            org_level = await env.call(
+                "project_admin_a1",
+                "POST",
+                path.format("cd-org"),
+                selected=PROJ_A1,
+                json=body,
+            )
+            assert org_level.status_code == 403, org_level.text
+            by_org_admin = await env.call(
+                "org_admin", "POST", path.format("cd-org"), selected=PROJ_A1, json=body
+            )
+            assert by_org_admin.status_code == 200, by_org_admin.text
+
+    _run(scenario)
+
+
+def test_another_organisations_instrument_is_indistinguishable_from_a_missing_one() -> (
+    None
+):
+    async def scenario() -> None:
+        async with _env() as env:
+            await _seed_instruments(env)
+            foreign = await env.call(
+                "org_admin",
+                "GET",
+                "/api/contract-master/instruments/cd-b",
+                selected=PROJ_A1,
+            )
+            missing = await env.call(
+                "org_admin",
+                "GET",
+                "/api/contract-master/instruments/cd-none",
+                selected=PROJ_A1,
+            )
+            assert (foreign.status_code, foreign.json()) == (
+                missing.status_code,
+                missing.json(),
+            )
+            assert foreign.status_code == 404
 
     _run(scenario)

@@ -235,7 +235,10 @@ class ContractMigrationReconciliation:
                         "materialised_at": datetime.now(timezone.utc),
                     }
                 )
-            except DuplicateKeyError:
+            except DuplicateKeyError as exc:
+                if (getattr(exc, "details", None) or {}).get("keyPattern") not in (None, {"_id": 1}):
+                    # Some other unique constraint: not "already materialised".
+                    raise
                 # Already materialised: the identity is the candidate, so the row
                 # that exists IS this candidate. Left exactly as it is - never
                 # overwritten, so an adjudication or promotion on it survives.

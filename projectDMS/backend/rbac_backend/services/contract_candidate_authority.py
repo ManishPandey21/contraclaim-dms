@@ -12,37 +12,58 @@ fields, both written by trusted code and both re-checked here:
   (``ContractUploadScopeService.create_candidate``, which proves the project is in
   the organisation first). ``materialise_inventory`` never writes it.
 * the canonical Document's own ``project_id`` - the field the Documents register
-  authorises that very record by.
+  authorises that very record by (``DocumentUpdate`` cannot change it).
 
 Everything else is evidence, never authority: ``session_evidence.project_id`` (a copy
 of a TTL'd upload session, captured precisely because it is unverifiable later),
-``scope_hint``, and any adjudicated ``scope_state``. The two fields must agree when
-both are present, and the anchor must be a project of the candidate's organisation;
-otherwise there is no anchor, which never means "any project" - it means the
-candidate is organisation-owned for authorisation purposes.
+``scope_hint``, and any adjudicated ``scope_state``.
+
+Three outcomes, kept apart on purpose:
+
+* **anchored** - a named project that exists, is active, and belongs to the
+  candidate's organisation, with the two fields agreeing where both are present;
+* **unanchored** - neither field names a project (an organisation-level Document);
+* **conflicted** - a project is named but fails validation: the fields disagree, the
+  project is missing, inactive or another organisation's, or the Document itself is
+  not the candidate organisation's. ``classify_scope`` calls the cross-organisation
+  case INVALID; a conflict is never quietly treated as organisation-owned, so it
+  can be adjudicated (to INVALID, say) only with organisation-wide scope, and it
+  never promotes.
 
 **The decision.**
 
-* An anchored candidate is authorised at ``(organization_id, anchor)`` through the
-  ordinary ``PolicyService.authorize`` - so the Project Admin of A is refused B by the
-  same scope rule that refuses them B's documents.
-* An unanchored candidate, and any act that creates organisation-wide authority
-  (adjudicating ``ORG_SCOPE_CONFIRMED``, promoting an organisation-scope candidate,
-  materialising the organisation's inventory), additionally needs organisation-wide
-  scope (``ScopeService.has_organization_wide_scope``). A permission cannot answer
-  this: Project Admin's seeded role carries ``dms.admin``, which satisfies every
-  ``dms.*`` check, and legacy aliases hand ``dms.contract.catalogue.browse`` to
-  Project User - so ``ORG_TIER_ONLY_PERMISSIONS`` does not survive to the policy.
+* An anchored candidate is held to the navbar selection as a record of that project
+  and authorised at ``(organization_id, anchor)`` through ``PolicyService.authorize``
+  - so the Project Admin of A is refused B by the same scope rule that refuses them
+  B's documents.
+* An unanchored or conflicted candidate, and any act that creates or overrides
+  organisation-wide authority, is held to the selected organisation only (it belongs
+  to no project, so no project selection is demanded - as CL-4A's organisation-level
+  contract uploads) and needs organisation-wide scope
+  (``ScopeService.has_organization_wide_scope``). A permission cannot answer this:
+  Project Admin's seeded role carries ``dms.admin``, which satisfies every ``dms.*``
+  check, and a legacy alias hands ``dms.contract.catalogue.browse`` to Project User,
+  so ``ORG_TIER_ONLY_PERMISSIONS`` does not survive to the policy.
 
 A refusal here is a 403: the candidate is inside the caller's organisation, so its
-existence is no secret from them. Foreign and missing candidates were already a 404
-before this module is reached.
+existence is no secret from them. Foreign and missing candidates are the 404 before
+any of this runs.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Union,
+)
 
 from fastapi import HTTPException, status
 
@@ -51,73 +72,138 @@ from .contract_migration_reconciliation import (
     CandidateNotFound,
     scoped_candidate_filter,
 )
+from .publication_policy import resolve_canonical_document
 from .scope_service import ScopeService
 
 __all__ = [
+    "CandidateAnchor",
     "CandidateAuthority",
     "authorize_candidate",
-    "caller_may_see_candidate",
     "candidate_project_anchor",
     "load_canonical_document",
     "require_organization_wide_scope",
+    "resolve_candidate_anchor",
+    "visible_candidates",
 ]
 
 ORGANIZATION_SCOPE_REQUIRED = "Not authorized: organization_scope_required"
 
 
 @dataclass(frozen=True)
+class CandidateAnchor:
+    """``project_id`` when anchored; ``conflict`` when a named project failed."""
+
+    project_id: Optional[str] = None
+    conflict: bool = False
+
+
+@dataclass(frozen=True)
 class CandidateAuthority:
-    """A candidate the caller was authorised for, and the project that anchored it."""
+    """A candidate the caller was authorised for, and what anchored it."""
 
     candidate: Dict[str, Any]
-    project_id: Optional[str]
+    anchor: CandidateAnchor
+
+    @property
+    def project_id(self) -> Optional[str]:
+        return self.anchor.project_id
 
 
 def _as_id(value: Any) -> str:
     return str(value).strip() if value not in (None, "") else ""
 
 
-async def load_canonical_document(db: Any, candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The candidate's canonical Document, however its ``_id`` is stored.
+def _organization_of(row: Mapping[str, Any]) -> str:
+    return _as_id(row.get("organization_id") or row.get("organizationId"))
 
-    Inventory records ``str(document["_id"])``, and production Documents are
-    ObjectId-keyed, so an exact string match finds nothing for a real upload. The
-    lookup accepts both spellings of this ONE id and nothing wider.
+
+def _project_of(row: Optional[Mapping[str, Any]]) -> str:
+    if not row:
+        return ""
+    return _as_id(row.get("project_id") or row.get("projectId"))
+
+
+async def load_canonical_document(
+    db: Any, candidate: Mapping[str, Any], *, session: Any = None
+):
+    """The candidate's canonical Document, through the one identity resolver.
+
+    Inventory records ``str(document["_id"])`` and production Documents are
+    ObjectId-keyed; ``resolve_canonical_document`` tries each spelling of this one
+    id, in a fixed order, and nothing wider.
     """
-    document_id = _as_id(candidate.get("canonical_document_id"))
-    if not document_id:
-        return None
-    return await db["documents"].find_one({"_id": ScopeService.object_id_query(document_id)})
+    return await resolve_canonical_document(
+        db, _as_id(candidate.get("canonical_document_id")), session=session
+    )
 
 
-def _document_organization(document: Dict[str, Any]) -> str:
-    return _as_id(document.get("organization_id") or document.get("organizationId"))
-
-
-async def candidate_project_anchor(
-    db: Any, candidate: Dict[str, Any], document: Optional[Dict[str, Any]]
-) -> Optional[str]:
-    """The trustworthy project of this candidate, or ``None``. See the module doc."""
+def _anchor_from(
+    candidate: Mapping[str, Any],
+    document: Optional[Mapping[str, Any]],
+    projects: Mapping[str, Mapping[str, Any]],
+) -> CandidateAnchor:
+    """Pure: the anchor from the candidate, its Document and the named project rows."""
     organization_id = _as_id(candidate.get("organization_id"))
     stored = _as_id(candidate.get("project_id"))
     documented = ""
-    if document is not None and _document_organization(document) == organization_id:
-        documented = _as_id(document.get("project_id") or document.get("projectId"))
+    if document is not None:
+        if _organization_of(document) != organization_id:
+            # The pointer leaves the organisation. Nothing it says is believed.
+            return CandidateAnchor(conflict=True)
+        documented = _project_of(document)
     if stored and documented and stored != documented:
-        # Two trusted writers disagree: neither is believed.
-        return None
-    anchor = stored or documented
-    if not anchor or not organization_id:
-        return None
-    if not await ScopeService(db).project_belongs_to_organization(
-        project_id=anchor, organization_id=organization_id
+        return CandidateAnchor(conflict=True)
+    named = stored or documented
+    if not named:
+        return CandidateAnchor()
+    project = projects.get(named)
+    if (
+        not organization_id
+        or project is None
+        or project.get("is_active") is False
+        or _organization_of(project) != organization_id
     ):
-        return None
-    return anchor
+        return CandidateAnchor(conflict=True)
+    return CandidateAnchor(project_id=named)
+
+
+async def _projects_by_id(
+    db: Any, project_ids: Iterable[str]
+) -> Dict[str, Dict[str, Any]]:
+    wanted = sorted({pid for pid in project_ids if pid})
+    if not wanted:
+        return {}
+    keys: List[Any] = []
+    for pid in wanted:
+        keys.extend(ScopeService.object_id_query(pid)["$in"])
+    rows = await db["projects"].find({"_id": {"$in": keys}}).to_list(length=None)
+    return {str(row["_id"]): row for row in rows}
+
+
+async def resolve_candidate_anchor(
+    db: Any, candidate: Mapping[str, Any], document: Optional[Mapping[str, Any]]
+) -> CandidateAnchor:
+    """The anchor of one candidate. See the module doc for the three outcomes."""
+    projects = await _projects_by_id(
+        db, [_as_id(candidate.get("project_id")), _project_of(document)]
+    )
+    return _anchor_from(candidate, document, projects)
+
+
+async def candidate_project_anchor(
+    db: Any, candidate: Mapping[str, Any], document: Optional[Mapping[str, Any]]
+) -> Optional[str]:
+    """The trustworthy project, or ``None`` (unanchored or conflicted)."""
+    return (await resolve_candidate_anchor(db, candidate, document)).project_id
 
 
 async def require_organization_wide_scope(
-    policy: Any, current_user: Any, *, permission: str, organization_id: str, audit: bool = True
+    policy: Any,
+    current_user: Any,
+    *,
+    permission: str,
+    organization_id: str,
+    audit: bool = True,
 ) -> None:
     """``permission`` over the whole organisation, not only assigned projects."""
     await policy.authorize(
@@ -131,7 +217,9 @@ async def require_organization_wide_scope(
     if not await policy.scope_service.has_organization_wide_scope(
         current_user, organization_id=organization_id
     ):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=ORGANIZATION_SCOPE_REQUIRED)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=ORGANIZATION_SCOPE_REQUIRED
+        )
 
 
 async def authorize_candidate(
@@ -145,17 +233,16 @@ async def authorize_candidate(
     organization_wide: Union[bool, Callable[[Dict[str, Any]], bool]] = False,
     selection: Any = None,
 ) -> CandidateAuthority:
-    """Load the candidate inside ``organization_id``, then authorise at its anchor.
+    """Load the candidate inside ``organization_id``, hold it, then authorise it.
 
-    ``organization_wide`` is for acts that create organisation-wide authority, which
-    need organisation scope whatever the anchor. It may be a predicate over the
-    loaded candidate (promotion: only an organisation-scope candidate).
+    ``organization_wide`` is for acts that create or override organisation-wide
+    authority; it may be a predicate over the loaded candidate.
 
-    ``selection`` is the request's validated navbar selection (CL-4A). The
-    candidate is held to it exactly as a record is: an anchored candidate must be
-    in the selected project, an unanchored one in the selected organisation
-    (403 ``context_forbidden``, superadmin included) - after the scoped load, so a
-    foreign or missing id is still the 404, and before the policy is asked.
+    ``selection`` is the request's validated navbar selection (CL-4A). After the
+    scoped load - so a foreign or missing id is still the 404 - an anchored
+    candidate is held as a record of its project (400 ``selection_required`` with
+    nothing selected, 403 ``context_forbidden`` for another project, superadmin
+    included) and an organisation-level one to the selected organisation.
     """
     candidate = await db[RECONCILIATION_COLLECTION].find_one(
         scoped_candidate_filter(candidate_id, organization_id)
@@ -163,17 +250,27 @@ async def authorize_candidate(
     if candidate is None:
         raise CandidateNotFound()
     document = await load_canonical_document(db, candidate)
-    anchor = await candidate_project_anchor(db, candidate, document)
-    if selection is not None:
-        await selection.require_record(
-            {"project_id": anchor, "organization_id": candidate.get("organization_id")},
-            allow_unscoped=True,
-        )
+    anchor = await resolve_candidate_anchor(db, candidate, document)
 
-    wide = organization_wide(candidate) if callable(organization_wide) else organization_wide
-    if anchor is None or wide:
+    if selection is not None:
+        if anchor.project_id:
+            await selection.require_project(
+                anchor.project_id, candidate.get("organization_id")
+            )
+        else:
+            await selection.require_organization(candidate.get("organization_id"))
+
+    wide = (
+        organization_wide(candidate)
+        if callable(organization_wide)
+        else organization_wide
+    )
+    if anchor.project_id is None or wide:
         await require_organization_wide_scope(
-            policy, current_user, permission=permission, organization_id=str(organization_id)
+            policy,
+            current_user,
+            permission=permission,
+            organization_id=str(organization_id),
         )
     else:
         await policy.authorize(
@@ -182,35 +279,68 @@ async def authorize_candidate(
             resource_type="contract_reconciliation_candidate",
             resource_id=candidate_id,
             organization_id=str(organization_id),
-            project_id=anchor,
+            project_id=anchor.project_id,
         )
-    return CandidateAuthority(candidate=candidate, project_id=anchor)
+    return CandidateAuthority(candidate=candidate, anchor=anchor)
 
 
-async def caller_may_see_candidate(
+async def visible_candidates(
     policy: Any,
     current_user: Any,
     *,
     db: Any,
-    candidate: Dict[str, Any],
+    rows: Sequence[Dict[str, Any]],
     organization_wide: bool,
     selected_project: Optional[str] = None,
-) -> bool:
-    """Row visibility for the review queue: bounded to the caller's projects.
+) -> List[Dict[str, Any]]:
+    """Row visibility for the review queue, in three queries rather than 2N.
 
-    With a project selected, a row anchored elsewhere is not listed, whoever asks;
-    an unanchored row stays visible to organisation-wide scope only.
+    Organisation-wide scope sees every row; anyone else sees the rows anchored to a
+    project they are assigned to. With a project selected, a row anchored elsewhere
+    is not listed whoever asks. Unanchored and conflicted rows are organisation
+    business: visible to organisation-wide scope only.
     """
-    document = await load_canonical_document(db, candidate)
-    anchor = await candidate_project_anchor(db, candidate, document)
-    if selected_project and anchor is not None and anchor != selected_project:
-        return False
-    if organization_wide:
-        return True
-    if anchor is None:
-        return False
-    return await policy.scope_service.is_client_scope_allowed(
-        current_user,
-        organization_id=_as_id(candidate.get("organization_id")),
-        project_id=anchor,
+    if not rows:
+        return []
+    document_keys: List[Any] = []
+    for row in rows:
+        document_keys.extend(
+            ScopeService.object_id_query(_as_id(row.get("canonical_document_id")))[
+                "$in"
+            ]
+        )
+    documents = {
+        str(doc["_id"]): doc
+        for doc in await db["documents"]
+        .find({"_id": {"$in": document_keys}})
+        .to_list(length=None)
+    }
+    by_row = [
+        (row, documents.get(_as_id(row.get("canonical_document_id")))) for row in rows
+    ]
+    projects = await _projects_by_id(
+        db,
+        [
+            pid
+            for row, doc in by_row
+            for pid in (_as_id(row.get("project_id")), _project_of(doc))
+        ],
     )
+    assigned = (
+        set()
+        if organization_wide
+        else await policy.scope_service.client_project_ids(current_user)
+    )
+
+    visible: List[Dict[str, Any]] = []
+    for row, document in by_row:
+        anchor = _anchor_from(row, document, projects)
+        if (
+            selected_project
+            and anchor.project_id
+            and anchor.project_id != selected_project
+        ):
+            continue
+        if organization_wide or (anchor.project_id and anchor.project_id in assigned):
+            visible.append(row)
+    return visible

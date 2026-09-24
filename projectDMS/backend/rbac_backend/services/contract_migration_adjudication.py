@@ -192,6 +192,14 @@ class ContractMigrationAdjudication:
                 "adjudicating so two operators cannot both believe they hold it"
             )
 
+        if row.get("promoted"):
+            # The instrument exists. Re-deciding the candidate would leave the
+            # review queue disagreeing with the authority it produced.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id} is already promoted; its "
+                "adjudication is final"
+            )
+
         if row.get("scope_state") == ScopeClassificationState.INVALID.value:
             # INVALID is terminal. Downgrading it to AMBIGUOUS would put a
             # tenancy violation back into the adjudication queue as an open
@@ -229,6 +237,6 @@ class ContractMigrationAdjudication:
         written = await self._db[RECONCILIATION_COLLECTION].update_one(
             candidate_filter, {"$set": update}
         )
-        if getattr(written, "matched_count", 1) != 1:
+        if getattr(written, "matched_count", 0) != 1:
             # Never report an adjudication that was not recorded.
             raise CandidateNotFound()
