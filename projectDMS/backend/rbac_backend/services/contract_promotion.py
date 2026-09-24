@@ -40,7 +40,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from pymongo.errors import DuplicateKeyError, OperationFailure
+
 from ..models.contract_document import ContractDocumentType, ProjectionStatus
+from .contract_candidate_authority import (
+    CandidateAnchor,
+    load_canonical_document,
+    resolve_candidate_anchor,
+)
 from .contract_document_store import (
     APPLICABILITY_COLLECTION,
     APPLICABILITY_EVENTS_COLLECTION,
@@ -49,14 +56,18 @@ from .contract_document_store import (
 )
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
+    CandidateNotFound,
     ScopeClassificationState,
     TypeClassificationState,
+    scoped_candidate_filter,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "PROMOTION_RECEIPTS_COLLECTION",
+    "AlreadyPromoted",
+    "CandidateNotFound",
     "ContractPromotionService",
     "NotPromotable",
     "PromotionReceipt",
@@ -72,6 +83,18 @@ QUARANTINE_LIFECYCLE_STATES = frozenset({"duplicate", "deleted"})
 
 class NotPromotable(Exception):
     """This candidate cannot become an authoritative instrument."""
+
+
+class AlreadyPromoted(Exception):
+    """This candidate is already an instrument. A second promotion is a conflict.
+
+    Deterministic instrument and receipt ids make a retry collide rather than fork;
+    the collision is the answer, reported as such instead of as a server error.
+    """
+
+
+#: MongoDB's WriteConflict: a concurrent transaction on the same documents won.
+_WRITE_CONFLICT = 112
 
 
 class RevalidationRequired(Exception):
@@ -118,20 +141,58 @@ class ContractPromotionService:
         self,
         candidate_id: str,
         *,
+        organization_id: str,
         actor_id: str,
         contract_id: Optional[str] = None,
         effective_from: Optional[str] = None,
+        expected_scope_state: Optional[str] = None,
+        expected_project_id: Optional[str] = None,
     ) -> PromotionReceipt:
-        """Make an adjudicated candidate authoritative, in one transaction."""
-        candidate = await self._db[RECONCILIATION_COLLECTION].find_one({"_id": candidate_id})
+        """Make an adjudicated candidate authoritative, in one transaction.
+
+        ``organization_id`` is the organisation the caller was authorised for.
+        The candidate is loaded inside it, so a candidate of another
+        organisation is indistinguishable from one that does not exist.
+
+        ``expected_scope_state`` is the scope the caller was authorised against.
+        The route decides whether organisation-wide scope is needed from it, so a
+        re-adjudication landing in between must not change what gets written.
+        """
+        candidate = await self._db[RECONCILIATION_COLLECTION].find_one(
+            scoped_candidate_filter(candidate_id, organization_id)
+        )
         if candidate is None:
-            raise NotPromotable(f"no reconciliation candidate {candidate_id}")
+            raise CandidateNotFound()
+        if candidate.get("promoted"):
+            raise AlreadyPromoted(f"candidate {candidate_id} is already promoted")
+        if expected_scope_state is not None and candidate.get("scope_state") != expected_scope_state:
+            raise RevalidationRequired(
+                f"candidate {candidate_id} was re-adjudicated after it was authorised; "
+                "nothing is written"
+            )
 
         self._require_adjudicated(candidate)
         document = await self._require_promotable_document(candidate)
         await self._revalidate_fingerprint(candidate, document)
+        anchor = await resolve_candidate_anchor(self._db, candidate, document)
 
-        scope_level, project_id = self._resolve_scope(candidate)
+        # "" = authorised as organisation-level; None = the caller pinned nothing.
+        if (
+            expected_project_id is not None
+            and (anchor.project_id or "") != expected_project_id
+        ):
+            raise RevalidationRequired(
+                f"candidate {candidate_id} is no longer anchored to the project it was "
+                "authorised at; nothing is written"
+            )
+        scope_level, project_id = self._resolve_scope(candidate, anchor)
+        if scope_level == "organization" and contract_id:
+            # An organisation-scope instrument gets no applicability at promotion;
+            # a contract named here would be silently dropped.
+            raise NotPromotable(
+                f"candidate {candidate_id} is organisation-scoped; it is applied to a "
+                "contract afterwards, not at promotion"
+            )
         if scope_level == "project" and not contract_id:
             raise NotPromotable(
                 f"candidate {candidate_id} is project-scoped, so promotion must "
@@ -148,11 +209,64 @@ class ContractPromotionService:
             effective_from=effective_from,
             actor_id=actor_id,
         )
+        # The marker write inside the transaction is a compare-and-set: scoped by
+        # the organisation the route authorised, and by the decision that was read
+        # here. A re-adjudication, or a concurrent promotion, between this read
+        # and the commit matches nothing and aborts the whole transaction.
+        plan["marker_filter"] = {
+            **scoped_candidate_filter(candidate_id, organization_id),
+            "scope_state": candidate.get("scope_state"),
+            "type_state": candidate.get("type_state"),
+            "contract_document_type": candidate.get("contract_document_type"),
+            "project_id": candidate.get("project_id"),
+            "promoted": {"$ne": True},
+        }
 
         if self._client is not None:
-            async with await self._client.start_session() as session:
-                async with session.start_transaction():
-                    await self._apply(plan, session=session)
+            try:
+                async with await self._client.start_session() as session:
+                    async with session.start_transaction():
+                        await self._apply(plan, session=session)
+            except DuplicateKeyError as exc:
+                key = (getattr(exc, "details", None) or {}).get("keyPattern") or {}
+                if "document_id" in key and await self._db[
+                    CONTRACT_DOCUMENTS_COLLECTION
+                ].find_one({"_id": plan["instrument"]["_id"]}):
+                    # This candidate's own instrument: a genuine repeat.
+                    raise AlreadyPromoted(
+                        f"candidate {candidate_id} is already promoted"
+                    ) from exc
+                if "document_id" in key:
+                    # Another instrument already governs this canonical Document
+                    # (one instrument per document). This candidate is not promoted.
+                    raise NotPromotable(
+                        f"canonical document {candidate.get('canonical_document_id')} "
+                        "already has an instrument; nothing is written"
+                    ) from exc
+                if key == {"_id": 1} or "contract_document_id" in key:
+                    # The deterministic instrument, receipt or applicability exists.
+                    raise AlreadyPromoted(
+                        f"candidate {candidate_id} is already promoted"
+                    ) from exc
+                raise
+            except OperationFailure as exc:
+                if getattr(exc, "code", None) == _WRITE_CONFLICT:
+                    # Something else wrote these documents first. Only an existing
+                    # receipt means that something was this promotion; otherwise
+                    # (a re-adjudication, a promotion that then aborted) the
+                    # operator must look again.
+                    receipt = await self._db[PROMOTION_RECEIPTS_COLLECTION].find_one(
+                        {"_id": f"promotion:{candidate_id}"}
+                    )
+                    if receipt is not None:
+                        raise AlreadyPromoted(
+                            f"candidate {candidate_id} is already promoted"
+                        ) from exc
+                    raise RevalidationRequired(
+                        f"candidate {candidate_id} changed while it was being promoted; "
+                        "nothing is written"
+                    ) from exc
+                raise
         else:
             # No client means no transaction is available. Refuse rather than
             # write half of it: a partially promoted instrument is the exact
@@ -195,9 +309,24 @@ class ContractPromotionService:
 
     async def _require_promotable_document(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         document_id = candidate.get("canonical_document_id")
-        document = await self._db["documents"].find_one({"_id": document_id})
+        # Both spellings of this one id: inventory stores str(_id), and production
+        # Documents are ObjectId-keyed.
+        document = await load_canonical_document(self._db, candidate)
         if document is None:
             raise NotPromotable(f"canonical document {document_id} does not exist")
+
+        document_org = document.get("organization_id") or document.get("organizationId")
+        if str(document_org or "") != str(candidate.get("organization_id") or ""):
+            # Candidate org == document org == instrument org, or nothing. The
+            # inventory reads documents inside one organisation, so this fires
+            # only on corrupt or hand-edited rows - and then an instrument owned
+            # by the candidate's organisation would govern a document it does
+            # not own. Refused, never repaired; the message names neither
+            # organisation.
+            raise NotPromotable(
+                f"canonical document {document_id} is not owned by the candidate's "
+                "organisation; refusing to promote across a tenancy boundary"
+            )
 
         lifecycle = str(document.get("lifecycle_state") or "")
         duplicate = str(document.get("duplicate_status") or "")
@@ -214,9 +343,21 @@ class ContractPromotionService:
         self, candidate: Dict[str, Any], document: Dict[str, Any]
     ) -> None:
         recorded = candidate.get("source_fingerprint")
-        if recorded is None:
-            return
         current = document.get("checksum") or document.get("sha256")
+        if recorded is not None and current is None:
+            raise RevalidationRequired(
+                f"candidate {candidate.get('_id')} was reviewed against a fingerprint "
+                "its document no longer carries; nothing is written"
+            )
+        if recorded is None:
+            if current is not None:
+                # The document can be fingerprinted and the review never was: the
+                # adjudication cannot be tied to this content.
+                raise RevalidationRequired(
+                    f"candidate {candidate.get('_id')} records no fingerprint of the "
+                    "content its operator reviewed; re-adjudicate before promoting"
+                )
+            return
         if current is not None and str(current) != str(recorded):
             raise RevalidationRequired(
                 f"candidate {candidate.get('_id')} was adjudicated against "
@@ -224,15 +365,31 @@ class ContractPromotionService:
                 "nothing is written - the operator reviewed different content"
             )
 
-    def _resolve_scope(self, candidate: Dict[str, Any]):
+    def _resolve_scope(self, candidate: Dict[str, Any], anchor: CandidateAnchor):
+        """The instrument's scope, and for project scope its project.
+
+        Project scope takes the candidate's trustworthy anchor
+        (``contract_candidate_authority``): ``candidate.project_id`` when an
+        authorised scope decision wrote it, else the canonical Document's own
+        project - the path every materialised legacy candidate takes, since
+        inventory never writes ``candidate.project_id``. Never a session or scope
+        hint. A conflicted anchor never promotes, at either scope: the candidate
+        points outside its organisation, at a missing or inactive project, or two
+        trusted fields disagree.
+        """
+        if anchor.conflict:
+            raise NotPromotable(
+                f"candidate {candidate.get('_id')} has no trustworthy project anchor "
+                "(its project fields disagree, or name a project that is not an "
+                "active project of this organisation); nothing is written"
+            )
         if candidate.get("scope_state") == ScopeClassificationState.PROJECT_SCOPE_CONFIRMED.value:
-            project_id = candidate.get("project_id")
-            if not project_id:
+            if not anchor.project_id:
                 raise NotPromotable(
                     f"candidate {candidate.get('_id')} claims project scope with no "
                     "project anchor"
                 )
-            return "project", str(project_id)
+            return "project", anchor.project_id
         return "organization", None
 
     # -- the writes ---------------------------------------------------------- #
@@ -304,8 +461,13 @@ class ContractPromotionService:
                 "contract_id": contract_id,
                 "contract_document_id": instrument_id,
             }
+            event_id = uuid.uuid4().hex
             plan["applicability_event"] = {
-                "_id": uuid.uuid4().hex,
+                "_id": event_id,
+                # The store's unique index is on event_id, as record_applicability_event
+                # writes it. Without it every promotion after the first collided on
+                # event_id: null.
+                "event_id": event_id,
                 "applicability_id": applicability_id,
                 "kind": "APPLIED",
                 # Unknown stays unknown. Substituting today's date, or the
@@ -335,8 +497,16 @@ class ContractPromotionService:
         await self._db[PROMOTION_RECEIPTS_COLLECTION].insert_one(
             plan["receipt"], session=session
         )
-        await self._db[RECONCILIATION_COLLECTION].update_one(
-            {"_id": plan["candidate_id"]},
+        marked = await self._db[RECONCILIATION_COLLECTION].update_one(
+            plan["marker_filter"],
             {"$set": {"promoted": True, "promoted_at": plan["receipt"]["promoted_at"]}},
             session=session,
         )
+        if getattr(marked, "matched_count", 0) != 1:
+            # The candidate changed, left the authorised scope, or was promoted
+            # between the read and the commit. Raising aborts the transaction, so
+            # no instrument or receipt survives for a candidate never marked.
+            raise RevalidationRequired(
+                f"candidate {plan['candidate_id']} changed during promotion; nothing "
+                "was written"
+            )
