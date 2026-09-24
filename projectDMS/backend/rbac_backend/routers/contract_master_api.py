@@ -36,7 +36,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..core.database import get_database
 from ..core.permissions import Permissions
@@ -70,6 +70,7 @@ from ..services.contract_document_store import (
     record_applicability_event,
 )
 from ..services.contract_migration_adjudication import (
+    NOT_ECHOED,
     CandidateNotFound,
     ClaimUnavailable,
     ConflictingAdjudication,
@@ -210,6 +211,16 @@ class PromotionCommand(BaseModel):
     #: An ISO date or nothing. Unknown stays unknown; a typo is a 422, never an
     #: "unknown" legal start.
     effective_from: Optional[date] = None
+
+    @field_validator("effective_from", mode="before")
+    @classmethod
+    def _iso_date_only(cls, value: Any) -> Any:
+        # Lax parsing would read 20260301 as a unix timestamp (1970-08-23).
+        if value is None or isinstance(value, date):
+            return value
+        if not isinstance(value, str):
+            raise ValueError("effective_from must be an ISO date string (YYYY-MM-DD)")
+        return date.fromisoformat(value)
 
 
 class CapabilityResponse(BaseModel):
@@ -1028,7 +1039,12 @@ async def adjudicate_candidate(
             scope_state=scope_state,
             contract_document_type=document_type,
             reason=command.reason,
-            expected_fingerprint=command.expected_fingerprint,
+            # Omitted skips the check; an explicit null means "I saw none".
+            expected_fingerprint=(
+                command.expected_fingerprint
+                if "expected_fingerprint" in command.model_fields_set
+                else NOT_ECHOED
+            ),
         )
     except CandidateNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

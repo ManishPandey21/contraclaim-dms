@@ -56,6 +56,9 @@ __all__ = [
     "ContractMigrationAdjudication",
 ]
 
+#: ``adjudicate(expected_fingerprint=...)`` when the caller echoed nothing.
+NOT_ECHOED: Any = object()
+
 #: Operational only. Deliberately not in LEGAL_COLLECTIONS.
 ADJUDICATION_CLAIMS_COLLECTION = "contract_migration_adjudication_claims"
 
@@ -152,15 +155,20 @@ class ContractMigrationAdjudication:
             # holder does not. One conditional replace, so racing operators still
             # get one winner. Only the collision means "held": any other failure is
             # an outage and propagates as one, never as somebody else's claim.
-            takeover: list = [
-                {"lease_expires_at": {"$lte": now}},
-                {"operator_id": operator_id},
-            ]
+            takeover: list = [{"lease_expires_at": {"$lte": now}}]
             if organization_wide:
                 takeover.append({"organization_wide": {"$ne": True}})
             taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_replace(
                 {"_id": claim_id, "$or": takeover}, row
             )
+            if taken is None:
+                # The caller's own live lease: a new token, the SAME expiry - a
+                # refused attempt must not strand its operator, and re-claiming
+                # must not become a way to hold a candidate indefinitely.
+                taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_update(
+                    {"_id": claim_id, "operator_id": operator_id},
+                    {"$set": {"owner_token": owner_token}},
+                )
             if taken is None:
                 raise ClaimUnavailable(
                     f"candidate {candidate_id} is already claimed by another operator"
@@ -196,7 +204,7 @@ class ContractMigrationAdjudication:
         scope_state: ScopeClassificationState,
         contract_document_type: Optional[ContractDocumentType],
         reason: str,
-        expected_fingerprint: Optional[str] = None,
+        expected_fingerprint: Any = NOT_ECHOED,
     ) -> None:
         """Record one operator's decision about one candidate.
 
@@ -274,7 +282,11 @@ class ContractMigrationAdjudication:
             self._db, str(row.get("canonical_document_id") or "")
         )
         fingerprint = (document or {}).get("checksum") or (document or {}).get("sha256")
-        if expected_fingerprint is not None and str(fingerprint) != str(expected_fingerprint):
+        # An explicit None echoes "the review showed no fingerprint"; only an
+        # omitted field skips the check.
+        if expected_fingerprint is not NOT_ECHOED and (
+            None if fingerprint is None else str(fingerprint)
+        ) != (None if expected_fingerprint is None else str(expected_fingerprint)):
             # The operator reviewed other content than the document now holds.
             raise ConflictingAdjudication(
                 f"candidate {claim.candidate_id}'s document changed since it was "
@@ -293,8 +305,18 @@ class ContractMigrationAdjudication:
         change: Dict[str, Any] = {"$set": update}
         if unset:
             change["$unset"] = unset
+        # Compare-and-set on the decision this call read (and was authorised
+        # against): a lease taken over, and a decision recorded, between the read
+        # and this write must not be overwritten by the replaced holder.
         written = await self._db[RECONCILIATION_COLLECTION].update_one(
-            {**candidate_filter, "promoted": {"$ne": True}}, change
+            {
+                **candidate_filter,
+                "promoted": {"$ne": True},
+                "scope_state": row.get("scope_state"),
+                "type_state": row.get("type_state"),
+                "adjudicated_at": row.get("adjudicated_at"),
+            },
+            change,
         )
         if getattr(written, "matched_count", 0) != 1:
             # Promoted between the read and the write (the filter refuses it), or

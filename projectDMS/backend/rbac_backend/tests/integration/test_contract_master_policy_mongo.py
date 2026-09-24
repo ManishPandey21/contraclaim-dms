@@ -2638,3 +2638,128 @@ def test_a_genuine_repeat_is_already_promoted_even_without_the_marker() -> None:
             assert await env.snapshot() == everything
 
     _run(scenario)
+
+
+# --------------------------------------------------------------------------- #
+# final delta: the write is a compare-and-set; echoes and dates are exact
+# --------------------------------------------------------------------------- #
+
+
+def test_a_decision_recorded_mid_adjudication_is_not_overwritten(monkeypatch) -> None:
+    """A replaced holder's in-flight write matches nothing once another decision lands."""
+
+    async def scenario() -> None:
+        from rbac_backend.services import contract_migration_adjudication as module
+        from rbac_backend.services.contract_migration_adjudication import (
+            CandidateClaim,
+            ConflictingAdjudication,
+            ContractMigrationAdjudication,
+        )
+        from rbac_backend.services.contract_migration_reconciliation import (
+            ScopeClassificationState,
+        )
+
+        async with _env() as env:
+            service = ContractMigrationAdjudication(env.db)
+            await service.ensure_indexes()
+            held = await service.claim(
+                CAND_P1_OPEN, organization_id=ORG_A, operator_id="user-project_admin_a1"
+            )
+            real = module.resolve_canonical_document
+
+            async def meanwhile(db, document_id, **kwargs):
+                # Between this call's read and its write, the organisation decides.
+                await env.db[RECONCILIATION_COLLECTION_NAME].update_one(
+                    {"_id": CAND_P1_OPEN},
+                    {
+                        "$set": {
+                            "scope_state": "ORG_SCOPE_CONFIRMED",
+                            "adjudicated_by": "user-org_admin",
+                            "adjudicated_at": datetime.utcnow(),
+                        }
+                    },
+                )
+                return await real(db, document_id, **kwargs)
+
+            monkeypatch.setattr(module, "resolve_canonical_document", meanwhile)
+            with pytest.raises(ConflictingAdjudication):
+                await service.adjudicate(
+                    CandidateClaim(
+                        candidate_id=CAND_P1_OPEN,
+                        operator_id="user-project_admin_a1",
+                        owner_token=held.owner_token,
+                    ),
+                    organization_id=ORG_A,
+                    scope_state=ScopeClassificationState.PROJECT_SCOPE_CONFIRMED,
+                    contract_document_type=None,
+                    reason="in flight",
+                )
+            row = await env.candidate(CAND_P1_OPEN)
+            assert row["scope_state"] == "ORG_SCOPE_CONFIRMED"
+            assert row["adjudicated_by"] == "user-org_admin"
+
+    _run(scenario)
+
+
+def test_an_explicit_null_fingerprint_echo_is_checked() -> None:
+    """The review showed no fingerprint; the document has since gained one."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            await env.db.documents.update_one(
+                {"_id": "doc-p1-open"}, {"$set": {"checksum": "sha-arrived-later"}}
+            )
+            claimed = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            before = await env.candidate(CAND_P1_OPEN)
+            response = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_P1_OPEN}/adjudicate",
+                selected=PROJ_A1,
+                params={
+                    "organization_id": ORG_A,
+                    "owner_token": claimed.json()["owner_token"],
+                },
+                json={
+                    "scope_state": "PROJECT_SCOPE_CONFIRMED",
+                    "reason": "reviewed",
+                    "expected_fingerprint": None,
+                },
+            )
+            assert response.status_code == 409, response.text
+            assert await env.candidate(CAND_P1_OPEN) == before
+
+    _run(scenario)
+
+
+def test_a_numeric_effective_date_is_refused_not_read_as_a_timestamp() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            everything = await env.snapshot()
+            response = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_P1_READY}/promote",
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
+                json={"contract_id": CONTRACT, "effective_from": 20260301},
+            )
+            assert response.status_code == 422, response.text
+            assert await env.snapshot() == everything
+
+    _run(scenario)
+
+
+def test_reclaiming_your_own_lease_does_not_extend_it() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            first = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            (before,) = await env.claims()
+            second = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            assert second.status_code == 200, second.text
+            (after,) = await env.claims()
+            assert after["lease_expires_at"] == before["lease_expires_at"]
+            assert after["owner_token"] == second.json()["owner_token"]
+            assert after["owner_token"] != first.json()["owner_token"]
+
+    _run(scenario)
