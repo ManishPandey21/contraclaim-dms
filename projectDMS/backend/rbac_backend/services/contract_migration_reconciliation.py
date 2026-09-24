@@ -41,6 +41,7 @@ from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from fastapi import status
+from pymongo.errors import DuplicateKeyError
 
 from ..utils.error_handler import ContractError
 
@@ -217,22 +218,28 @@ class ContractMigrationReconciliation:
         """
         written = 0
         for candidate in candidates:
-            await self._db[RECONCILIATION_COLLECTION].insert_one(
-                {
-                    "_id": candidate.candidate_id,
-                    "candidate_id": candidate.candidate_id,
-                    "canonical_document_id": candidate.canonical_document_id,
-                    "organization_id": candidate.organization_id,
-                    "module": candidate.module,
-                    "scope_state": candidate.scope_state.value,
-                    "type_state": candidate.type_state.value,
-                    "scope_hint": candidate.scope_hint,
-                    # Captured, not referenced: the session it came from will be
-                    # gone by the time anyone adjudicates this row.
-                    "session_evidence": dict(candidate.session_evidence),
-                    "materialised_at": datetime.now(timezone.utc),
-                }
-            )
+            try:
+                await self._db[RECONCILIATION_COLLECTION].insert_one(
+                    {
+                        "_id": candidate.candidate_id,
+                        "candidate_id": candidate.candidate_id,
+                        "canonical_document_id": candidate.canonical_document_id,
+                        "organization_id": candidate.organization_id,
+                        "module": candidate.module,
+                        "scope_state": candidate.scope_state.value,
+                        "type_state": candidate.type_state.value,
+                        "scope_hint": candidate.scope_hint,
+                        # Captured, not referenced: the session it came from will be
+                        # gone by the time anyone adjudicates this row.
+                        "session_evidence": dict(candidate.session_evidence),
+                        "materialised_at": datetime.now(timezone.utc),
+                    }
+                )
+            except DuplicateKeyError:
+                # Already materialised: the identity is the candidate, so the row
+                # that exists IS this candidate. Left exactly as it is - never
+                # overwritten, so an adjudication or promotion on it survives.
+                continue
             written += 1
         return written
 

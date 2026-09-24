@@ -253,8 +253,25 @@ promote a candidate of Y.
   `PolicyService.authorize` and then proves the (organisation, project) pair.
   `AuthorizedContractScope.for_tests` is test-only and a static guard
   (`tests/test_contract_master_evidence_scope.py`) fails on any production use.
-- A tenant-scoped route with no usable organisation fails closed (400
-  `selection_required`); never `str(None)`.
+- Contract evidence search is project-specific: it needs the CL-4A selection
+  (`Depends(active_scope)`), the body's project must BE the selected one, and nothing
+  is inferred from the body or the account (400 `selection_required` / 403
+  `context_forbidden`, superadmin included); never `str(None)`.
+- **Organisation membership is not authority over another project's record.**
+  `PolicyService.authorize(..., project_id=None)` is true for any member of the
+  organisation, a Project Admin included, so a record with a project must be
+  authorised at that project. For reconciliation candidates the trustworthy anchor is
+  `candidate.project_id` or the canonical Document's own `project_id` (they must
+  agree, and the project must be in the organisation);
+  `session_evidence` and `scope_hint` are evidence, never authority
+  (`services/contract_candidate_authority.py`). No anchor, or an act that creates
+  organisation-wide authority, needs `ScopeService.has_organization_wide_scope` -
+  the same rule `is_client_scope_allowed` uses for unassigned project reach.
+- **A permission cannot express organisation tier here.** Project Admin's seeded role
+  carries `dms.admin`, which `PolicyService.has_permission` accepts for every
+  `dms.*` check, and legacy aliases give `dms.contract.catalogue.browse` to Project
+  User - so `ORG_TIER_ONLY_PERMISSIONS` does not survive to the policy. Measured
+  against the real seeds on 2026-09-24.
 
 ## Removed / forbidden
 

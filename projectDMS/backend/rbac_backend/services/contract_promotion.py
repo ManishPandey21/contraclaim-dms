@@ -41,6 +41,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ..models.contract_document import ContractDocumentType, ProjectionStatus
+from .contract_candidate_authority import candidate_project_anchor, load_canonical_document
 from .contract_document_store import (
     APPLICABILITY_COLLECTION,
     APPLICABILITY_EVENTS_COLLECTION,
@@ -149,6 +150,15 @@ class ContractPromotionService:
                 "name the contract its first applicability attaches to; an "
                 "instrument that governs nothing must not exist"
             )
+        if scope_level == "project" and project_id != await candidate_project_anchor(
+            self._db, candidate, document
+        ):
+            # The project the instrument will govern must be the one its Document
+            # belongs to (when it names one) and a project of this organisation.
+            raise NotPromotable(
+                f"candidate {candidate_id} claims project scope, but its project is "
+                "not the trustworthy project anchor of its canonical document"
+            )
 
         plan = self._build_writes(
             candidate,
@@ -209,7 +219,9 @@ class ContractPromotionService:
 
     async def _require_promotable_document(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         document_id = candidate.get("canonical_document_id")
-        document = await self._db["documents"].find_one({"_id": document_id})
+        # Both spellings of this one id: inventory stores str(_id), and production
+        # Documents are ObjectId-keyed.
+        document = await load_canonical_document(self._db, candidate)
         if document is None:
             raise NotPromotable(f"canonical document {document_id} does not exist")
 

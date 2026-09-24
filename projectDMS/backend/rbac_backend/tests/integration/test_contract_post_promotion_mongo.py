@@ -85,6 +85,8 @@ async def _database():
 
 
 async def _promote(db, client) -> str:
+    # A project-scope candidate is anchored to a real project of its organisation.
+    await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
     await db["documents"].insert_one(
         {
             "_id": "doc-1",

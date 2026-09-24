@@ -555,14 +555,12 @@ def test_rerunning_inventory_and_materialise_converges():
             second = await reconciliation.inventory(organization_id=ORG)
             assert [c.candidate_id for c in second] == [c.candidate_id for c in first]
 
-            # A duplicate insert on the same identity is refused, not forked.
-            for candidate in second:
-                try:
-                    await reconciliation.materialise_inventory([candidate])
-                except Exception:
-                    pass
+            # Re-materialising converges: nothing forked, nothing raised, nothing new.
+            rows_before = await db[RECONCILIATION_COLLECTION].find({}).to_list(length=None)
+            assert await reconciliation.materialise_inventory(second) == 0
 
             assert await db[RECONCILIATION_COLLECTION].count_documents({}) == count_after_first
+            assert await db[RECONCILIATION_COLLECTION].find({}).to_list(length=None) == rows_before
 
     asyncio.run(scenario())
 

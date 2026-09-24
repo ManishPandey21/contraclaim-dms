@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 from rbac_backend.core.security import CurrentUser, get_current_user
 from rbac_backend.routers import contract_master_api
 from rbac_backend.services.policy_service import PolicyService
+from rbac_backend.tests.selection_fixtures import pin_selection
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[1]
 
@@ -110,11 +111,19 @@ def _user(organization_id: Optional[str] = ORG) -> CurrentUser:
     )
 
 
-def _app(db: _FakeDb, user: CurrentUser) -> TestClient:
+def _app(
+    db: _FakeDb,
+    user: CurrentUser,
+    *,
+    selected: tuple = (ORG, PROJECT),
+) -> TestClient:
+    """``selected`` is the validated navbar selection (``pin_selection``); the real
+    resolver is exercised over real Mongo in the integration suite."""
     app = FastAPI()
     app.include_router(contract_master_api.router, prefix="/api")
     app.dependency_overrides[contract_master_api.get_db] = lambda: db
     app.dependency_overrides[get_current_user] = lambda: user
+    pin_selection(app, db, *selected)
     # Deliberately NOT overriding contract_master_api.get_policy.
     assert contract_master_api.get_policy not in app.dependency_overrides
     return TestClient(app, raise_server_exceptions=False)

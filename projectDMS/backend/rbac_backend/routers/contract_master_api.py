@@ -41,7 +41,7 @@ from pydantic import BaseModel, Field
 from ..core.database import get_database
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
-from ..core.tenant_context import SELECTION_REQUIRED, TenantContextError
+from ..core.tenant_context import ActiveScope, active_scope
 from datetime import date
 
 from ..models.contract_document import (
@@ -50,6 +50,11 @@ from ..models.contract_document import (
     ContractDocumentType,
     CurrentState,
     Historical,
+)
+from ..services.contract_candidate_authority import (
+    authorize_candidate,
+    caller_may_see_candidate,
+    require_organization_wide_scope,
 )
 from ..services.contract_classification_service import (
     ClassificationRevisionConflict,
@@ -98,6 +103,7 @@ from ..services.contract_upload_scope_service import (
 )
 from ..services.policy_service import PolicyService
 from ..services.publication_policy import is_consumable
+from ..services.scope_service import ScopeService
 from ..utils.error_handler import ContractError
 
 logger = logging.getLogger(__name__)
@@ -253,7 +259,10 @@ async def _decorate(db, record: Dict[str, Any]) -> Dict[str, Any]:
     applicability_count = await db[APPLICABILITY_COLLECTION].count_documents(
         {"contract_document_id": record["_id"]}
     )
-    document = await db["documents"].find_one({"_id": record.get("document_id")})
+    # Production Documents are ObjectId-keyed; instruments carry str(_id).
+    document = await db["documents"].find_one(
+        {"_id": ScopeService.object_id_query(str(record.get("document_id") or ""))}
+    )
     consumable = is_consumable(document) if document else False
     return {
         "contract_document_id": str(record["_id"]),
@@ -287,6 +296,7 @@ async def browse_catalogue(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Organisation-owned instruments, including those applicable to nothing.
 
@@ -294,6 +304,7 @@ async def browse_catalogue(
     listed as CATALOGUED / UNASSIGNED and carries no applicability basis, so it
     cannot be mistaken for something a consumer may cite.
     """
+    await selection.require_organization(organization_id)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_CATALOGUE_BROWSE,
@@ -321,11 +332,15 @@ async def get_instrument(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Seven orthogonal dimensions, each derived server-side."""
+    # CL-4A record route: a selection first, then the record held to it.
+    selection.require_selection()
     record = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": contract_document_id})
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown instrument")
+    await selection.require_record(record, allow_unscoped=True)
 
     await policy.authorize(
         current_user,
@@ -344,10 +359,14 @@ async def get_projection_status(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # CL-4A record route: a selection first, then the record held to it.
+    selection.require_selection()
     record = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": contract_document_id})
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown instrument")
+    await selection.require_record(record, allow_unscoped=True)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_MASTER_MANAGE,
@@ -380,6 +399,7 @@ async def confirm_classification(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Confirm or correct a classification through the T07 lifecycle.
 
@@ -387,9 +407,12 @@ async def confirm_classification(
     live in the service; this hands over the operator's intent and translates the
     two refusals it can produce into 409 and 422.
     """
+    # CL-4A record route: a selection first, then the record held to it.
+    selection.require_selection()
     record = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": contract_document_id})
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown instrument")
+    await selection.require_record(record, allow_unscoped=True)
 
     await policy.authorize(
         current_user,
@@ -449,6 +472,7 @@ async def record_applicability(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Apply, withdraw or supersede - always as an explicit, confirmed act.
 
@@ -456,10 +480,15 @@ async def record_applicability(
     instrument's scope, or the caller's navbar. The caller states the project and
     contract, and the event stream records what they said.
     """
+    # CL-4A record route: a selection first, then the record held to it.
+    selection.require_selection()
     record = await db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": contract_document_id})
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown instrument")
+    await selection.require_record(record, allow_unscoped=True)
 
+    # The project it applies to must BE the selected one: refused, never rewritten.
+    await selection.require_project(command.project_id, record.get("organization_id"))
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_APPLICABILITY_MANAGE,
@@ -553,6 +582,7 @@ async def search_contract_evidence_route(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Contract evidence. Distinct from `/api/contracts/search` on purpose.
 
@@ -565,32 +595,23 @@ async def search_contract_evidence_route(
         ContractService,
     )
 
-    # Contract Master is outside active-scope enforcement on this branch
-    # (core/tenant_context.py binds only the registers that opt in), so the
-    # organisation is the validated CurrentUser one. For a tenant-bound role
-    # that is the home organisation. For a global role, get_current_user clears
-    # it and nothing on this branch re-populates it from X-Org-Id, so a global
-    # role has no organisation here and is refused - fail closed, where `str(None)`
-    # minted a scope for the literal organisation "None" and answered every
-    # search with a false "valid_empty".
-    organization_id = str(getattr(current_user, "organization_id", None) or "").strip()
-    if not organization_id:
-        raise TenantContextError(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            code=SELECTION_REQUIRED,
-            message=(
-                "Contract evidence search needs an organisation, and this account "
-                "carries none on this route."
-            ),
-        )
-    # The one place a scope token is minted: PolicyService first, then the
-    # (organisation, project) pair is proven. Never the test-only constructor.
+    # Contract evidence is project-specific, so it needs the navbar selection
+    # (CL-4A, core/tenant_context.py): a selected project, validated against the
+    # principal - global roles included - before anything else. Nothing is inferred:
+    # not from the body's project, not from contract_id, not from the account's
+    # home organisation. The body names the project it searches, and it must be the
+    # selected one (403 context_forbidden, even for a member of both).
+    selected_project = selection.require_selection()
+    await selection.require_project(command.project_id)
+    organization_id = str(selection.organization_id or "")
+    # The one place a scope token is minted: the (organisation, project) pair is
+    # proven, then PolicyService. Never the test-only constructor.
     scope = await authorize_contract_scope(
         policy,
         current_user,
         permission=Permissions.CONTRACT_MASTER_VIEW,
         organization_id=organization_id,
-        project_id=command.project_id,
+        project_id=selected_project,
         contract_id=command.contract_id,
         # A read, audited as the route always was: not per search.
         audit=False,
@@ -606,7 +627,7 @@ async def search_contract_evidence_route(
     request = ContractSearchRequest(
         query=command.query,
         organization_id=organization_id,
-        project_id=command.project_id,
+        project_id=selected_project,
         limit=command.limit,
         skip=command.skip,
     )
@@ -654,14 +675,19 @@ async def reconciliation_inventory(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """Read-only preview. Writes nothing, including no reconciliation row."""
-    await policy.authorize(
+    """Read-only preview. Writes nothing, including no reconciliation row.
+
+    Every contract Document of the organisation, so organisation-wide scope: a
+    member holding the permission for one project does not preview the rest.
+    """
+    await selection.require_organization(organization_id)
+    await require_organization_wide_scope(
+        policy,
         current_user,
-        Permissions.CONTRACT_MASTER_MANAGE,
-        resource_type="contract_document",
+        permission=Permissions.CONTRACT_MASTER_MANAGE,
         organization_id=organization_id,
-        project_id=None,
         audit=False,
     )
     candidates = await ContractMigrationReconciliation(db).inventory(
@@ -687,14 +713,15 @@ async def reconciliation_materialise(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """The separate, explicitly named write. Never a side effect of inventory."""
-    await policy.authorize(
+    await selection.require_organization(command.organization_id)
+    await require_organization_wide_scope(
+        policy,
         current_user,
-        Permissions.CONTRACT_MASTER_MANAGE,
-        resource_type="contract_document",
+        permission=Permissions.CONTRACT_MASTER_MANAGE,
         organization_id=command.organization_id,
-        project_id=None,
     )
     service = ContractMigrationReconciliation(db)
     candidates = await service.inventory(organization_id=command.organization_id)
@@ -708,8 +735,17 @@ async def reconciliation_review(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """The review queue, with both axes reported independently."""
+    """The review queue, with both axes reported independently.
+
+    The gate answers membership; row visibility is bounded to the caller's
+    projects. Organisation-wide scope sees every candidate; anyone else sees the
+    candidates anchored to a project they may act in, and no unanchored one.
+    With a project selected, only that project's candidates (and the selected
+    organisation's unanchored ones) are listed.
+    """
+    await selection.require_organization(organization_id)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_MASTER_MANAGE,
@@ -718,9 +754,23 @@ async def reconciliation_review(
         project_id=None,
         audit=False,
     )
-    rows = await db[RECONCILIATION_COLLECTION].find(
-        {"organization_id": organization_id}
-    ).to_list(length=None)
+    organization_wide = await policy.scope_service.has_organization_wide_scope(
+        current_user, organization_id=organization_id
+    )
+    rows = [
+        row
+        for row in await db[RECONCILIATION_COLLECTION].find(
+            {"organization_id": organization_id}
+        ).to_list(length=None)
+        if await caller_may_see_candidate(
+            policy,
+            current_user,
+            db=db,
+            candidate=row,
+            organization_wide=organization_wide,
+            selected_project=selection.project_id,
+        )
+    ]
     return {
         "candidates": [
             {
@@ -766,7 +816,11 @@ async def claim_candidate(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # CL-4A record route: a selection first, in the named organisation.
+    selection.require_selection()
+    await selection.require_organization(organization_id)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_MASTER_MANAGE,
@@ -779,6 +833,17 @@ async def claim_candidate(
     try:
         # Bound to the organisation just authorised: a candidate of any other
         # organisation is a 404, indistinguishable from one that does not exist.
+        # Then authorised at the candidate's own project anchor, so membership of
+        # the organisation is not authority over another project's candidate.
+        await authorize_candidate(
+            policy,
+            current_user,
+            db=db,
+            candidate_id=candidate_id,
+            organization_id=organization_id,
+            permission=Permissions.CONTRACT_MASTER_MANAGE,
+            selection=selection,
+        )
         claim = await service.claim(
             candidate_id,
             organization_id=organization_id,
@@ -800,8 +865,11 @@ async def adjudicate_candidate(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Record one operator's decision. Ownership is proven, not assumed."""
+    selection.require_selection()
+    await selection.require_organization(organization_id)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_MASTER_MANAGE,
@@ -817,16 +885,30 @@ async def adjudicate_candidate(
         owner_token=owner_token,
     )
     try:
-        # Parsed inside the try so an unknown type is the 422 below, not a 500.
+        # Parsed inside the try so an unknown value is the 422 below, not a 500.
         document_type = (
             ContractDocumentType(command.contract_document_type)
             if command.contract_document_type
             else None
         )
+        scope_state = ScopeClassificationState(command.scope_state)
+        # Declaring organisation scope creates organisation-wide authority, so it
+        # needs organisation scope whatever the candidate's anchor. Checked before
+        # the lease, so a refusal reveals nothing about who holds the claim.
+        await authorize_candidate(
+            policy,
+            current_user,
+            db=db,
+            candidate_id=candidate_id,
+            organization_id=organization_id,
+            permission=Permissions.CONTRACT_MASTER_MANAGE,
+            organization_wide=scope_state is ScopeClassificationState.ORG_SCOPE_CONFIRMED,
+            selection=selection,
+        )
         await ContractMigrationAdjudication(db).adjudicate(
             claim,
             organization_id=organization_id,
-            scope_state=ScopeClassificationState(command.scope_state),
+            scope_state=scope_state,
             contract_document_type=document_type,
             reason=command.reason,
         )
@@ -856,8 +938,11 @@ async def promote_candidate(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """One candidate, by explicit selection, through the atomic primitive."""
+    selection.require_selection()
+    await selection.require_organization(organization_id)
     await policy.authorize(
         current_user,
         Permissions.CONTRACT_MASTER_MANAGE,
@@ -865,17 +950,39 @@ async def promote_candidate(
         organization_id=organization_id,
         project_id=None,
     )
-    if command.contract_id:
-        await policy.authorize(
-            current_user,
-            Permissions.CONTRACT_APPLICABILITY_MANAGE,
-            resource_type="contract_document",
-            organization_id=organization_id,
-            project_id=None,
-        )
 
     client = getattr(db, "client", None)
     try:
+        # At the candidate's project anchor; an organisation-scope candidate
+        # becomes an organisation-wide instrument, so it needs organisation scope.
+        authority = await authorize_candidate(
+            policy,
+            current_user,
+            db=db,
+            candidate_id=candidate_id,
+            organization_id=organization_id,
+            permission=Permissions.CONTRACT_MASTER_MANAGE,
+            organization_wide=lambda candidate: candidate.get("scope_state")
+            == ScopeClassificationState.ORG_SCOPE_CONFIRMED.value,
+            selection=selection,
+        )
+        if command.contract_id:
+            # The first applicability is written at the anchored project.
+            if authority.project_id:
+                await policy.authorize(
+                    current_user,
+                    Permissions.CONTRACT_APPLICABILITY_MANAGE,
+                    resource_type="contract_document",
+                    organization_id=organization_id,
+                    project_id=authority.project_id,
+                )
+            else:
+                await require_organization_wide_scope(
+                    policy,
+                    current_user,
+                    permission=Permissions.CONTRACT_APPLICABILITY_MANAGE,
+                    organization_id=organization_id,
+                )
         receipt = await ContractPromotionService(db, client).promote(
             candidate_id,
             organization_id=organization_id,
@@ -911,6 +1018,7 @@ async def get_capabilities(
     project_id: Optional[str] = Query(None),
     current_user: CurrentUser = Depends(get_current_user),
     policy=Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """What this actor may do, as the server sees it.
 
@@ -921,7 +1029,12 @@ async def get_capabilities(
     test a role against - a client-side role check is a second copy of the
     permission model that can only ever hide a control the server would refuse
     anyway.
+
+    Answered inside the navbar selection: an organisation or project filter may
+    narrow it, never leave it.
     """
+    selected_org, project_id = await selection.list_filters(organization_id, project_id)
+    organization_id = selected_org or organization_id
 
     async def may(permission, *, scope_project_id=None) -> bool:
         try:

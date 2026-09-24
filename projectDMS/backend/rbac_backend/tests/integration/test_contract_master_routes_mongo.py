@@ -50,6 +50,7 @@ from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
 from rbac_backend.core.permissions import Permissions  # noqa: E402
 from rbac_backend.core.security import CurrentUser, get_current_user  # noqa: E402
 from rbac_backend.routers import contract_master_api  # noqa: E402
+from rbac_backend.tests.selection_fixtures import pin_selection  # noqa: E402
 from rbac_backend.services.contract_document_store import (  # noqa: E402
     APPLICABILITY_COLLECTION,
     APPLICABILITY_EVENTS_COLLECTION,
@@ -143,6 +144,9 @@ def _client(db_name, *, granted=ORG_TIER, organization_id=ORG, project_ids=(PROJ
     app.dependency_overrides[get_current_user] = lambda: user
     app.dependency_overrides[contract_master_api.get_db] = lambda: _fresh_db(db_name)
     app.dependency_overrides[contract_master_api.get_policy] = lambda: policy
+    # The navbar selection the browser sends (CL-4A). Its semantics are pinned
+    # against the real resolver in test_contract_master_policy_mongo.py.
+    pin_selection(app, None, organization_id, PROJECT)
     return TestClient(app), policy
 
 

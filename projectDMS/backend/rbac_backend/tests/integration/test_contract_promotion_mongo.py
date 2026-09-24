@@ -97,6 +97,8 @@ async def _seed(
     }
     document.update(document_overrides or {})
     await db["documents"].insert_one(document)
+    # A project-scope candidate is anchored to a real project of its organisation.
+    await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
 
     candidate = {
         "_id": CANDIDATE,

@@ -151,18 +151,36 @@ def test_evidence_search_authorizes_through_authorize_contract_scope(monkeypatch
     ]
 
 
-@pytest.mark.parametrize("organization_id", [None, ""])
-def test_evidence_search_without_an_organisation_fails_closed(
-    organization_id, refusing_policy
-):
-    """Global roles with nothing selected, or a malformed principal: never "None"."""
-    response = _app(_FakeDb(), _user(organization_id)).post(
+def test_evidence_search_with_no_selected_project_is_400(refusing_policy):
+    """Nothing selected: refused before any scope is minted or policy question asked.
+
+    The body names a project and the account has a home organisation; neither is
+    read as a selection.
+    """
+    response = _app(_FakeDb(), _user(), selected=(ORG, None)).post(
         "/api/contract-master/evidence/search", json=EVIDENCE_BODY
     )
     assert response.status_code == 400, response.text
     assert response.json()["detail"]["code"] == "selection_required"
-    # Refused before any scope is minted or any policy question is asked.
     assert refusing_policy == []
+
+
+def test_evidence_search_outside_the_selected_project_is_403(refusing_policy):
+    response = _app(_FakeDb(), _user(), selected=(ORG, "project-elsewhere")).post(
+        "/api/contract-master/evidence/search", json=EVIDENCE_BODY
+    )
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "context_forbidden"
+    assert refusing_policy == []
+
+
+def test_evidence_search_uses_the_selection_not_the_home_organisation(refusing_policy):
+    response = _app(_FakeDb(), _user("org-home-elsewhere")).post(
+        "/api/contract-master/evidence/search", json=EVIDENCE_BODY
+    )
+    assert response.status_code == 403, response.text
+    (call,) = refusing_policy
+    assert (call["organization_id"], call["project_id"]) == (ORG, PROJECT)
 
 
 def test_production_code_never_uses_the_test_only_scope_constructor():
