@@ -83,7 +83,10 @@ async def _database():
     try:
         await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
         await db["documents"].insert_many(
-            [{"_id": doc, "organization_id": ORG} for doc in SEEDED_DOCUMENTS]
+            [
+                {"_id": doc, "organization_id": ORG, "uploadType": "contract"}
+                for doc in SEEDED_DOCUMENTS
+            ]
         )
         yield db
     finally:
@@ -728,7 +731,9 @@ def test_the_organisation_id_is_stored_and_matched_as_a_string():
         async with _database() as db:
             org_oid, project_oid = ObjectId(), ObjectId()
             await db["projects"].insert_one({"_id": project_oid, "organization_id": org_oid})
-            await db["documents"].insert_one({"_id": "doc-oid", "organization_id": org_oid})
+            await db["documents"].insert_one(
+                {"_id": "doc-oid", "organization_id": org_oid, "uploadType": "contract"}
+            )
             has_capability, _ = _project_tier()
             service = ContractUploadScopeService(db, has_capability=has_capability)
             created = await service.create_candidate(
@@ -811,7 +816,12 @@ def test_a_document_of_another_project_cannot_be_anchored_elsewhere():
         async with _database() as db:
             await db["projects"].insert_one({"_id": PROJECT_OTHER, "organization_id": ORG})
             await db["documents"].insert_one(
-                {"_id": "doc-in-other", "organization_id": ORG, "project_id": PROJECT_OTHER}
+                {
+                    "_id": "doc-in-other",
+                    "organization_id": ORG,
+                    "project_id": PROJECT_OTHER,
+                    "uploadType": "contract",
+                }
             )
             has_capability, _ = _project_tier()
             service = ContractUploadScopeService(db, has_capability=has_capability)
@@ -873,5 +883,99 @@ def test_identical_concurrent_creates_both_succeed():
             assert [r for r in results if isinstance(r, BaseException)] == []
             assert len({(r.scope_level, r.project_id) for r in results}) == 1
             assert await db[RECONCILIATION_COLLECTION].count_documents({}) == 1
+
+    asyncio.run(scenario())
+
+
+
+def test_a_case_variant_document_id_cannot_mint_a_second_candidate():
+    async def scenario():
+        from bson import ObjectId
+
+        async with _database() as db:
+            oid = ObjectId()
+            await db["documents"].insert_one(
+                {"_id": oid, "organization_id": ORG, "uploadType": "contract"}
+            )
+            has_capability, _ = _project_tier()
+            service = ContractUploadScopeService(db, has_capability=has_capability)
+            lower = await service.create_candidate(
+                _project_scope(),
+                canonical_document_id=str(oid),
+                organization_id=ORG,
+                actor_id="bob",
+            )
+            upper = await service.create_candidate(
+                _project_scope(),
+                canonical_document_id=str(oid).upper(),
+                organization_id=ORG,
+                actor_id="bob",
+            )
+            assert upper.candidate_id == lower.candidate_id == _candidate_id(str(oid))
+            assert await db[RECONCILIATION_COLLECTION].count_documents({}) == 1
+
+    asyncio.run(scenario())
+
+
+def test_a_projects_document_is_not_made_organisation_wide_by_an_upload():
+    async def scenario():
+        from rbac_backend.services.contract_upload_scope_service import (
+            CandidateScopeConflict,
+        )
+
+        async with _database() as db:
+            await db["documents"].insert_one(
+                {
+                    "_id": "doc-project-owned",
+                    "organization_id": ORG,
+                    "project_id": PROJECT,
+                    "uploadType": "contract",
+                }
+            )
+            has_capability, _ = _org_admin()
+            service = ContractUploadScopeService(db, has_capability=has_capability)
+            with pytest.raises(CandidateScopeConflict):
+                await service.create_candidate(
+                    _organization_scope(),
+                    canonical_document_id="doc-project-owned",
+                    organization_id=ORG,
+                    actor_id="bob",
+                )
+            assert await _row(db, "doc-project-owned") is None
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"uploadType": "incoming"},
+        {"uploadType": "contract", "lifecycle_state": "deleted"},
+        {"uploadType": "contract", "lifecycle_state": "duplicate"},
+        {"uploadType": "contract", "duplicate_status": "pending"},
+        {"uploadType": "contract", "duplicate_status": "duplicate"},
+    ],
+    ids=["letter", "deleted", "quarantined", "pending-duplicate", "duplicate"],
+)
+def test_only_a_live_contract_upload_becomes_a_candidate(document):
+    async def scenario():
+        from rbac_backend.services.contract_upload_scope_service import (
+            CandidateScopeConflict,
+        )
+
+        async with _database() as db:
+            await db["documents"].insert_one(
+                {"_id": "doc-not-live", "organization_id": ORG, **document}
+            )
+            has_capability, _ = _project_tier()
+            service = ContractUploadScopeService(db, has_capability=has_capability)
+            with pytest.raises(CandidateScopeConflict):
+                await service.create_candidate(
+                    _project_scope(),
+                    canonical_document_id="doc-not-live",
+                    organization_id=ORG,
+                    actor_id="bob",
+                )
+            assert await _row(db, "doc-not-live") is None
 
     asyncio.run(scenario())

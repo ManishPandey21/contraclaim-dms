@@ -200,6 +200,23 @@ class ContractUploadScopeService:
         )
         if document is None or document_org != organization_id:
             raise CandidateScopeConflict(candidate_id)
+        # The identity is derived from the Document's own id spelling - the one
+        # inventory writes - so a case-variant of an ObjectId hex cannot mint a
+        # second candidate for the same Document.
+        canonical_document_id = str(document["_id"])
+        candidate_id = candidate_identity(
+            module=module, canonical_document_id=canonical_document_id
+        )
+        # Only a live contract upload becomes a candidate: not a letter, not a
+        # deleted or duplicate Document, and not one held pending duplicate
+        # classification (no downstream artifact while duplicate_status is
+        # pending).
+        if (
+            str(document.get("uploadType") or "").lower() != "contract"
+            or str(document.get("lifecycle_state") or "") in {"deleted", "duplicate"}
+            or str(document.get("duplicate_status") or "") in {"pending", "duplicate"}
+        ):
+            raise CandidateScopeConflict(candidate_id)
         document_project = str(
             document.get("project_id") or document.get("projectId") or ""
         )
@@ -213,6 +230,11 @@ class ContractUploadScopeService:
             scope_state = ScopeClassificationState.PROJECT_SCOPE_CONFIRMED
             project_id: Optional[str] = str(scope.project_id)
         else:
+            if document_project:
+                # A project's Document is not made organisation-wide by an upload
+                # scope: that would put project-restricted content in every
+                # project's catalogue. Re-scoping it is an adjudication, not this.
+                raise CandidateScopeConflict(candidate_id)
             # An affirmative organisation decision by an authorised actor IS
             # confirmation - unlike the legacy corpus, where the same state was
             # an absence nobody chose.

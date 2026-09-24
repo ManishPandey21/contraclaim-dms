@@ -73,7 +73,9 @@ async def _database():
         await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
         # The canonical Document every upload here records a candidate for, owned
         # by ORG as the upload path creates it.
-        await db["documents"].insert_one({"_id": "doc-1", "organization_id": ORG})
+        await db["documents"].insert_one(
+            {"_id": "doc-1", "organization_id": ORG, "uploadType": "contract"}
+        )
         yield db
     finally:
         await client.drop_database(name)
@@ -355,7 +357,8 @@ def test_uploaded_classified_and_projection_pending_is_not_evidence_capable():
             instrument_id = await _promoted_instrument(db)
             # The fixture seeds doc-1; this test needs it in PROJECT.
             await db["documents"].replace_one(
-                {"_id": "doc-1"}, {"organization_id": ORG, "project_id": PROJECT}
+                {"_id": "doc-1"},
+                {"organization_id": ORG, "project_id": PROJECT, "uploadType": "contract"},
             )
             applicability_id = f"applicability:{instrument_id}"
             await db[APPLICABILITY_COLLECTION].insert_one(

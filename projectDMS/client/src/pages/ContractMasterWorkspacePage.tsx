@@ -68,6 +68,9 @@ export default function ContractMasterWorkspacePage({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // A new organisation starts clean: no stale error, no stale capabilities.
+    setError(null);
+    setCapabilities(null);
     contractMasterApi
       .capabilities(organizationId)
       .then(setCapabilities)
