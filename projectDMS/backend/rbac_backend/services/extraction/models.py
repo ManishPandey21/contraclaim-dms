@@ -94,9 +94,22 @@ class ExtractedPage:
     #: `text` is the published representation, `raw_text` is evidence and is
     #: never indexed. Never overwritten once set.
     raw_text: Optional[str] = None
+    #: True when `raw_text` holds text this page's own layer produced and the
+    #: engine refused to publish (unusable ``(cid:N)`` placeholders), as
+    #: opposed to the pre-repair wording a deterministic repair preserved.
+    #: `raw_text` has both writers, so the withholding decision is recorded
+    #: rather than inferred from it: a carried repaired page would otherwise
+    #: read as withheld and cost its document the whole-file extraction.
+    text_withheld: bool = False
     #: Applied repairs, as provenance records. Distinct from the gate's
     #: proposals: these are the ones that were re-verified and adopted.
     applied_repairs: List[Dict[str, Any]] = field(default_factory=list)
+    #: True when this page was carried forward from an earlier attempt of the
+    #: same extraction run rather than produced by this one. Attempt-scoped
+    #: provenance, never persisted: it tells the quality gate not to reassess
+    #: (and re-spend on) a page that is already settled, and the checkpoint not
+    #: to charge it a retry allowance for work this attempt did not do.
+    carried_forward: bool = False
 
     @property
     def char_count(self) -> int:

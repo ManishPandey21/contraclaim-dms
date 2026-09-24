@@ -63,8 +63,48 @@ class _PagewiseOcr:
         return await self.service.process_pdf_pagewise(path, **kwargs)
 
 
+class _Cursor:
+    """Just enough of a Motor cursor for the store's run-scoped read."""
+
+    def __init__(self, records: List[Dict[str, Any]]) -> None:
+        self._records = records
+
+    def sort(self, field: str, direction: int) -> "_Cursor":
+        return _Cursor(
+            sorted(self._records, key=lambda record: record.get(field) or 0)
+        )
+
+    async def to_list(self, length: Any = None) -> List[Dict[str, Any]]:
+        return list(self._records)
+
+
 class _Collection:
+    """Records what the store writes, so a run-scoped read can find it.
+
+    The engine assembles a cumulative run: it reads back the pages this run
+    already holds before deciding what an attempt may change. A fake that
+    cannot answer that read makes every attempt look like a first attempt.
+    """
+
+    def __init__(self) -> None:
+        self.records: List[Dict[str, Any]] = []
+
     async def bulk_write(self, operations: Any) -> None:
+        for operation in operations or []:
+            # ReplaceOne carries the replacement document itself; an update
+            # operation carries a $set. Both shapes are accepted so this fake
+            # cannot silently record nothing.
+            document = getattr(operation, "_doc", None)
+            if not isinstance(document, dict):
+                continue
+            record = document.get("$set") if "$set" in document else document
+            if isinstance(record, dict) and "page_number" in record:
+                self.records = [
+                    existing
+                    for existing in self.records
+                    if existing.get("page_number") != record["page_number"]
+                ]
+                self.records.append(dict(record))
         return None
 
     async def update_one(self, *args: Any, **kwargs: Any) -> None:
@@ -73,21 +113,41 @@ class _Collection:
     async def insert_one(self, *args: Any, **kwargs: Any) -> SimpleNamespace:
         return SimpleNamespace(inserted_id="batch-1")
 
+    def find(self, query: Dict[str, Any]) -> _Cursor:
+        return _Cursor(
+            [
+                record
+                for record in self.records
+                if all(record.get(key) == value for key, value in (query or {}).items())
+            ]
+        )
+
 
 class _Db:
+    def __init__(self) -> None:
+        self._collections: Dict[str, _Collection] = {}
+
+    def _collection(self, name: str) -> _Collection:
+        return self._collections.setdefault(name, _Collection())
+
     def __getattr__(self, name: str) -> _Collection:
-        return _Collection()
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self._collection(name)
 
     def __getitem__(self, name: str) -> _Collection:
-        return _Collection()
+        return self._collection(name)
 
 
 class _Database:
     def __init__(self) -> None:
         self.saved: List[Dict[str, Any]] = []
+        self._db: Any = None
 
     async def get_database(self) -> _Db:
-        return _Db()
+        if self._db is None:
+            self._db = _Db()
+        return self._db
 
     async def save_document_data(self, **kwargs: Any) -> int:
         self.saved.append(kwargs)

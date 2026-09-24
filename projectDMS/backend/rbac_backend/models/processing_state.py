@@ -170,6 +170,11 @@ def build_attempt_outcome(
 
     page_attempts = {str(key): int(value) for key, value in prior_page_attempts.items()}
     for page in result.pages:
+        # A page carried forward from an earlier attempt of the same run was
+        # not tried again, so it must not be charged again: doing so would
+        # exhaust the retry budget of pages this attempt never touched.
+        if getattr(page, "carried_forward", False):
+            continue
         if page.status in _ATTEMPT_CONSUMING_STATUSES:
             key = str(page.number)
             page_attempts[key] = page_attempts.get(key, 0) + 1

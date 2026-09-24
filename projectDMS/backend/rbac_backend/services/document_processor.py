@@ -20,7 +20,8 @@ from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
 from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
 from .extraction.image_ocr_runner import TesseractImageOcrRunner
-from .extraction.models import Completeness, SourceKind
+from .extraction.models import Completeness, PageStatus, SourceKind
+from .extraction.page_store import InconsistentExtractionRunError
 from .extraction.quality.gate import ExtractionQualityGate
 from .extraction.source_kind import SourceKindRouter
 from .extraction.text_quality import withhold_unusable
@@ -29,7 +30,10 @@ from .pipeline_routing import LEGACY_PIPELINE, UNIFIED_PIPELINE
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import ParsedDocumentMetadata, ProcessingResult
-from ..models.processing_state import ProcessingState
+# _UNRESOLVED_PAGE_STATUSES is the set derive_processing_state judges a run
+# by, so the result rebuilt after the quality gate and the state derived
+# from it cannot disagree about a page.
+from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES, ProcessingState
 
 from ..utils.exceptions import DocumentProcessingError
 from ..utils.pipeline_logging import configure_pipeline_logger
@@ -297,6 +301,8 @@ class DocumentProcessor:
         such is what produced 12 paid calls on a correct document.
         """
         needs_review: list = []
+        #: Pages this attempt assessed, and therefore may write back.
+        assessed: list = []
         # A ladder resolved from configuration wins; self.fallback_ladder is the
         # injected/test path and the default when nothing was resolved.
         ladder = fallback_ladder if fallback_ladder is not None else self.fallback_ladder
@@ -306,6 +312,24 @@ class DocumentProcessor:
         spent = 0
 
         for page in getattr(extraction, "pages", []) or []:
+            if (
+                getattr(page, "carried_forward", False)
+                # A row with no verdict is an unassessed row, not a clean one:
+                # the engine writes pages before any verdict exists. Carrying
+                # one past the gate would publish a page nothing ever checked.
+                and getattr(page, "quality_verdict", None) is not None
+            ):
+                # Settled by an earlier attempt of the same run: its verdict,
+                # repairs and review flag are already persisted evidence.
+                # Reassessing would re-spend the paid fallback on a page this
+                # attempt did not touch and overwrite that evidence with a
+                # second, differently-derived opinion. Its review state still
+                # counts, so the publication barrier is unchanged.
+                if getattr(page, "needs_review", False):
+                    needs_review.append(page.number)
+                continue
+
+            assessed.append(page)
             verdict = self.quality_gate.assess(page, tables=page.tables or None)
 
             # Adopt deterministic repairs, then re-run the same gate over the
@@ -329,10 +353,36 @@ class DocumentProcessor:
                 )
                 outcome = resolved.outcome
                 if outcome is FallbackOutcome.RESOLVED:
-                    # Adopt the reconstruction the ladder already re-verified.
-                    page.text = resolved.page.text
-                    page.source = resolved.page.source
-                    continue
+                    # A reconstruction is text like any other, so it passes the
+                    # same publication policy. RESOLVED is the ladder's verdict
+                    # on its own work, and OCR_COMPLETED is a status - neither
+                    # is evidence that a human can read the result.
+                    published, unusable = withhold_unusable(
+                        resolved.page.text or ""
+                    )
+                    if unusable is not None or not published.strip():
+                        logger.warning(
+                            "[document_pipeline] Fallback reconstruction for "
+                            "page %s of %s is unusable text; not adopted",
+                            page.number,
+                            document_id,
+                        )
+                    else:
+                        # Adopt the reconstruction the ladder already
+                        # re-verified. Including the status: a page left
+                        # OCR_FAILED while carrying reconstructed text reads as
+                        # unresolved to both the checkpoint and the run, so the
+                        # next attempt would re-extract it and overwrite the
+                        # reconstruction that was just paid for - and the
+                        # document could never complete.
+                        page.text = published
+                        page.source = resolved.page.source
+                        page.status = PageStatus.OCR_COMPLETED
+                        # The page's own text is published now, so the marks
+                        # left by whatever failed before it are no longer true.
+                        page.text_withheld = False
+                        page.error = None
+                        continue
             elif ladder is not None:
                 logger.warning(
                     "[document_pipeline] Fallback budget of %s page(s) exhausted "
@@ -355,22 +405,63 @@ class DocumentProcessor:
 
         pages = getattr(extraction, "pages", []) or []
 
+        # The engine froze these before the gate ran. A page the ladder
+        # rescued is still listed as failed unless they are recomputed, and
+        # the job then reads PARTIAL with nothing outstanding and sends a
+        # finished document to a human.
+        if pages:
+            extraction.ocr_failed_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.OCR_FAILED
+            )
+            extraction.ocr_deferred_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.OCR_DEFERRED
+            )
+            extraction.unrenderable_pages = sorted(
+                page.number for page in pages if page.status is PageStatus.UNRENDERABLE
+            )
+            extraction.withheld_pages = sorted(
+                page.number for page in pages if page.text_withheld
+            )
+            extraction.completeness = (
+                Completeness.PARTIAL
+                if any(page.status in _UNRESOLVED_PAGE_STATUSES for page in pages)
+                else Completeness.COMPLETE
+            )
+
         if needs_review:
             extraction.completeness = Completeness.PARTIAL
 
         # Persist the assessed evidence. The engine wrote the raw pages before
         # any verdict existed, so without this every persisted quality_verdict
         # stays None and the page evidence cannot be monitored or reviewed.
-        if page_store is not None and pages:
+        # Only the pages this attempt actually assessed. Writing the settled
+        # ones back would rewrite rows nothing in this attempt changed, which
+        # is how a retry lost an earlier page's text.
+        # A carried page this attempt corrected - its unusable text withheld
+        # and its status reopened - is written back too. Reporting the
+        # correction while the row keeps the unusable text as published text
+        # leaves the evidence contradicting the result for ever.
+        assessed_numbers = {page.number for page in assessed}
+        corrected = [
+            page
+            for page in pages
+            if page.carried_forward
+            and page.text_withheld
+            and page.status is PageStatus.OCR_PENDING
+            and page.number not in assessed_numbers
+        ]
+        if page_store is not None and (assessed or corrected):
             finalize = getattr(page_store, "finalize_pages", None)
             if finalize is not None:
-                await finalize(pages)
+                await finalize(assessed + corrected)
 
-        # Rebuild the canonical text from the (possibly repaired) pages. The
-        # engine froze combined_text before this gate ran, so without this the
-        # corrected values could never reach persistence, embeddings or
-        # retrieval - the repair would exist only in a log line.
-        if pages and any(page.applied_repairs for page in pages):
+        # Rebuild the canonical text from the (possibly repaired or
+        # reconstructed) pages. The engine froze combined_text before this gate
+        # ran, so without this a corrected or ladder-recovered value could
+        # never reach persistence, embeddings or retrieval - it would exist
+        # only in a log line and a page row. Unconditional: a reconstruction
+        # adopted from the ladder leaves no applied_repairs to key on.
+        if pages:
             extraction.combined_text = "\n\n".join(page.text or "" for page in pages)
 
         return needs_review
@@ -619,6 +710,25 @@ class DocumentProcessor:
                 document_id=document_id,
                 skip_embeddings=skip_embeddings,
                 start_time=start_time,
+            )
+        except InconsistentExtractionRunError as e:
+            # Retrying cannot heal this: the run's page evidence and the
+            # checkpoint disagree, and every further attempt would re-derive
+            # the same disagreement while burning the retry budget. Report it
+            # as terminal so a person sees it, with page numbers only.
+            processing_time = time.time() - start_time
+            logger.error(
+                "[document_pipeline] Extraction run inconsistent for %s: %s",
+                pdf_path,
+                e,
+            )
+            return ProcessingResult(
+                success=False,
+                error=str(e),
+                processing_time=processing_time,
+                processing_state=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                pages_human_review=list(e.missing_page_numbers),
+                publishable=False,
             )
         except Exception as e:
             processing_time = time.time() - start_time
