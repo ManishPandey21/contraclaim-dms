@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import sys
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -330,11 +331,52 @@ def test_every_package_import_names_a_module_that_exists():
             target = _resolve(path, node)
             if target is None:
                 continue
-            if not (
-                target.with_suffix(".py").exists() or (target / "__init__.py").exists()
-            ):
-                missing.append(
-                    f"{path.relative_to(PACKAGE)}:{node.lineno} "
-                    f"{'.' * node.level}{node.module or ''}"
+            if target.with_suffix(".py").exists() or (target / "__init__.py").exists():
+                continue
+            label = (
+                f"{path.relative_to(PACKAGE)}:{node.lineno} "
+                f"{'.' * node.level}{node.module or ''}"
+            )
+            if not target.is_dir():
+                missing.append(label)
+                continue
+            # A directory with no ``__init__.py`` is an implicit namespace package
+            # (``utils/`` is one). It has no body to define names in, so each
+            # imported name must itself be a submodule on disk.
+            missing.extend(
+                f"{label} -> {alias.name}"
+                for alias in node.names
+                if not (
+                    (target / f"{alias.name}.py").exists()
+                    or (target / alias.name).is_dir()
                 )
+            )
     assert missing == [], missing
+
+
+def test_the_import_guard_resolves_namespace_packages_by_submodule(tmp_path, monkeypatch):
+    """Both directions of the namespace-package rule the guard above applies.
+
+    ``from ..utils import exceptions`` is valid (``utils/exceptions.py``), while a
+    name that is not a submodule of a namespace package cannot exist anywhere.
+    """
+    package = tmp_path / "rbac_backend"
+    (package / "services").mkdir(parents=True)
+    (package / "utils").mkdir()
+    (package / "services" / "__init__.py").write_text("")
+    (package / "utils" / "exceptions.py").write_text("")
+    (package / "services" / "good.py").write_text("from ..utils import exceptions\n")
+    monkeypatch.setattr(sys.modules[__name__], "PACKAGE", package)
+
+    test_every_package_import_names_a_module_that_exists()
+
+    (package / "services" / "bad.py").write_text("from ..utils import no_such_module\n")
+    with pytest.raises(AssertionError) as caught:
+        test_every_package_import_names_a_module_that_exists()
+    assert "no_such_module" in str(caught.value)
+
+    # The original get_policy defect: a module path that does not exist at all.
+    (package / "services" / "bad.py").write_text("from ..core.policy import PolicyService\n")
+    with pytest.raises(AssertionError) as caught:
+        test_every_package_import_names_a_module_that_exists()
+    assert "..core.policy" in str(caught.value)
