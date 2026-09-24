@@ -87,14 +87,29 @@ class ExtractedPage:
     quality_verdict: Optional[str] = None
     quality_checks: List[Dict[str, Any]] = field(default_factory=list)
     needs_review: bool = False
-    #: What extraction actually read, before any deterministic repair. Set the
-    #: first time a repair rewrites `text`, so the document's own wording stays
-    #: auditable: `text` is the published representation, `raw_text` is
-    #: evidence. Never overwritten once set.
+    #: What extraction actually read, when that differs from the published
+    #: `text`: set the first time a deterministic repair rewrites `text`, or by
+    #: the engine when the text was unusable ``(cid:N)`` placeholders and was
+    #: withheld (`text` is then empty - see text_quality.withhold_unusable).
+    #: `text` is the published representation, `raw_text` is evidence and is
+    #: never indexed. Never overwritten once set.
     raw_text: Optional[str] = None
+    #: True when `raw_text` holds text this page's own layer produced and the
+    #: engine refused to publish (unusable ``(cid:N)`` placeholders), as
+    #: opposed to the pre-repair wording a deterministic repair preserved.
+    #: `raw_text` has both writers, so the withholding decision is recorded
+    #: rather than inferred from it: a carried repaired page would otherwise
+    #: read as withheld and cost its document the whole-file extraction.
+    text_withheld: bool = False
     #: Applied repairs, as provenance records. Distinct from the gate's
     #: proposals: these are the ones that were re-verified and adopted.
     applied_repairs: List[Dict[str, Any]] = field(default_factory=list)
+    #: True when this page was carried forward from an earlier attempt of the
+    #: same extraction run rather than produced by this one. Attempt-scoped
+    #: provenance, never persisted: it tells the quality gate not to reassess
+    #: (and re-spend on) a page that is already settled, and the checkpoint not
+    #: to charge it a retry allowance for work this attempt did not do.
+    carried_forward: bool = False
 
     @property
     def char_count(self) -> int:
@@ -118,5 +133,9 @@ class PageExtractionResult:
     ocr_failed_pages: List[int] = field(default_factory=list)
     ocr_deferred_pages: List[int] = field(default_factory=list)
     unrenderable_pages: List[int] = field(default_factory=list)
+    #: Pages whose text was unusable (cid:N) placeholders and was withheld
+    #: from `text`/`combined_text` (kept as `raw_text` evidence). Consumers use
+    #: it to avoid re-reading the same unusable text layer by another route.
+    withheld_pages: List[int] = field(default_factory=list)
     completeness: Completeness = Completeness.COMPLETE
     engine_version: str = "1"

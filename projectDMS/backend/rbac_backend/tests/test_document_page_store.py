@@ -215,3 +215,163 @@ async def test_published_head_points_at_this_run() -> None:
     assert query["document_id"] == "doc-1"
     assert update["$set"]["extraction_run_id"] == "run-new"
     assert update["$set"]["expected_page_numbers"] == [1, 2]
+
+
+# --- Reading a run back, for a retry that must not rewrite settled rows ---
+
+
+class _ReadableCollection(_FakeCollection):
+    """A collection that can also answer a find/sort/to_list read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[dict[str, Any]] = []
+        self.queries: list[dict[str, Any]] = []
+
+    def find(self, query: dict[str, Any]) -> "_ReadableCollection":
+        self.queries.append(query)
+        self._matched = [
+            record
+            for record in self.records
+            if all(record.get(key) == value for key, value in query.items())
+        ]
+        return self
+
+    def sort(self, key: str, direction: int = 1) -> "_ReadableCollection":
+        self._matched.sort(key=lambda item: item.get(key), reverse=direction < 0)
+        return self
+
+    async def to_list(self, length: Any = None) -> list[dict[str, Any]]:
+        return list(self._matched)
+
+
+def _readable_db() -> _FakeDb:
+    db = _FakeDb()
+    db.collections[DOCUMENT_OCR_PAGES] = _ReadableCollection()
+    return db
+
+
+def _ocr_page(number: int) -> ExtractedPage:
+    page = _page(number, PageClass.SCANNED_IMAGE)
+    page.text = "REPAIRED 1,200"
+    page.source = PageSource.OCR
+    page.status = PageStatus.OCR_COMPLETED
+    page.batch_id = "batch-9"
+    page.error = None
+    page.quality_verdict = "pass"
+    page.quality_checks = [{"name": "row_identity", "verdict": "pass"}]
+    page.needs_review = True
+    page.raw_text = "ORIGINAL 1,2OO"
+    page.applied_repairs = [{"before": "1,2OO", "after": "1,200", "applied": True}]
+    page.tables = [[["S/N", "Amount"], ["1", "1,200"]]]
+    return page
+
+
+def test_a_recorded_page_rehydrates_with_every_field_it_carried() -> None:
+    from rbac_backend.services.extraction_adapters.document_page_store import (
+        from_document_page_record,
+    )
+
+    original = _ocr_page(3)
+    record = to_document_page_record(
+        original,
+        document_id="doc-1",
+        organization_id="org-1",
+        project_id="proj-1",
+        extraction_run_id="run-1",
+    )
+
+    restored = from_document_page_record(record)
+
+    assert restored.number == original.number
+    assert restored.text == original.text
+    # An OCR page must never come back as a native text-layer page.
+    assert restored.source is PageSource.OCR
+    assert restored.status is PageStatus.OCR_COMPLETED
+    assert restored.classification == original.classification
+    assert restored.tables == original.tables
+    assert restored.batch_id == original.batch_id
+    assert restored.quality_verdict == original.quality_verdict
+    assert restored.quality_checks == original.quality_checks
+    assert restored.needs_review is True
+    assert restored.raw_text == original.raw_text
+    assert restored.applied_repairs == original.applied_repairs
+
+
+def test_a_failed_page_rehydrates_with_its_error_evidence() -> None:
+    from rbac_backend.services.extraction_adapters.document_page_store import (
+        from_document_page_record,
+    )
+
+    page = _page(2)
+    page.text = ""
+    page.source = PageSource.EMPTY
+    page.status = PageStatus.OCR_FAILED
+    page.error = "OCRmyPDF batch failed (exit=2)"
+    record = to_document_page_record(
+        page,
+        document_id="doc-1",
+        organization_id="org-1",
+        project_id=None,
+        extraction_run_id="run-1",
+    )
+
+    restored = from_document_page_record(record)
+
+    assert restored.status is PageStatus.OCR_FAILED
+    assert restored.error == "OCRmyPDF batch failed (exit=2)"
+
+
+async def test_load_run_pages_is_scoped_to_this_document_and_run() -> None:
+    db = _readable_db()
+    store = _store(db, run_id="run-2")
+    pages = db[DOCUMENT_OCR_PAGES]
+    pages.records = [
+        to_document_page_record(
+            _page(2),
+            document_id="doc-1",
+            organization_id="org-1",
+            project_id=None,
+            extraction_run_id="run-2",
+        ),
+        to_document_page_record(
+            _page(1),
+            document_id="doc-1",
+            organization_id="org-1",
+            project_id=None,
+            extraction_run_id="run-2",
+        ),
+        to_document_page_record(
+            _page(5),
+            document_id="doc-1",
+            organization_id="org-1",
+            project_id=None,
+            extraction_run_id="run-other",
+        ),
+        to_document_page_record(
+            _page(6),
+            document_id="doc-2",
+            organization_id="org-1",
+            project_id=None,
+            extraction_run_id="run-2",
+        ),
+    ]
+
+    loaded = await store.load_run_pages()
+
+    assert [page.number for page in loaded] == [1, 2]
+    assert pages.queries[-1] == {
+        "document_id": "doc-1",
+        "extraction_run_id": "run-2",
+    }
+
+
+async def test_load_run_pages_never_consults_the_publication_head() -> None:
+    # A retry assembles the in-progress run; the head is the last *published*
+    # one and following it would rebuild a different run's pages.
+    db = _readable_db()
+    store = _store(db, run_id="run-2")
+
+    await store.load_run_pages()
+
+    assert DOCUMENT_EXTRACTION_HEADS not in db.collections
