@@ -68,29 +68,59 @@ export default function ContractMasterWorkspacePage({
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // A new organisation starts clean: no stale error, no stale capabilities.
+    // A new organisation starts clean: nothing from the previous one - error,
+    // capabilities, lists or open instrument - survives the switch, and a late
+    // answer for the previous organisation is dropped rather than shown here.
+    let current = true;
     setError(null);
     setCapabilities(null);
+    setCatalogue([]);
+    setCandidates([]);
+    setOpenInstrumentId(null);
+    setOpenInstrument(null);
     contractMasterApi
       .capabilities(organizationId)
-      .then(setCapabilities)
-      .catch((cause) => setError(String(cause)));
+      .then((answer) => {
+        if (current) setCapabilities(answer);
+      })
+      .catch((cause) => {
+        if (current) setError(String(cause));
+      });
+    return () => {
+      current = false;
+    };
   }, [organizationId]);
 
   useEffect(() => {
     if (!capabilities?.can_browse_catalogue) return;
+    let current = true;
     contractMasterApi
       .catalogue(organizationId)
-      .then((body) => setCatalogue(body.items))
-      .catch((cause) => setError(String(cause)));
+      .then((body) => {
+        if (current) setCatalogue(body.items);
+      })
+      .catch((cause) => {
+        if (current) setError(String(cause));
+      });
+    return () => {
+      current = false;
+    };
   }, [capabilities, organizationId]);
 
   useEffect(() => {
     if (!capabilities?.can_review_migration) return;
+    let current = true;
     contractMasterApi
       .reconciliationCandidates(organizationId)
-      .then((body) => setCandidates(body.candidates))
-      .catch(() => setCandidates([]));
+      .then((body) => {
+        if (current) setCandidates(body.candidates);
+      })
+      .catch(() => {
+        if (current) setCandidates([]);
+      });
+    return () => {
+      current = false;
+    };
   }, [capabilities, organizationId]);
 
   /**
