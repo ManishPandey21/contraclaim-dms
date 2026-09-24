@@ -18,6 +18,7 @@ from rbac_backend.routers.document_relationships import get_document_relationshi
 from rbac_backend.routers.claims import router as claims_router
 from rbac_backend.core.permissions import Permissions
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
+from rbac_backend.tests.selection_fixtures import pin_selection
 
 
 def _matches(document: dict[str, Any], query: dict[str, Any]) -> bool:
@@ -369,6 +370,8 @@ def _relationship_app(db: _Database, *, policy: Any = None, user: Any = None) ->
     app.include_router(relationship_router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = user or _user
+    # The selection the browser sends: the claim's own project (CL-4A).
+    pin_selection(app, db, "org-1", "project-1")
     if policy is not None:
         app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
             db, policy=policy

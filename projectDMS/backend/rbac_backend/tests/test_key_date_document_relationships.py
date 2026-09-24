@@ -28,6 +28,7 @@ from rbac_backend.models.key_date import (
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
 from rbac_backend.services.key_date_service import KeyDateError, KeyDateService
 from rbac_backend.services.key_date_revision_service import KeyDateRevisionService
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.tests.test_claim_document_relationships import _Collection, _Database, _user
 
 
@@ -203,6 +204,8 @@ def _app(db: _KeyDateDatabase) -> FastAPI:
     app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
         db, policy=policy
     )
+    # The selection the browser sends for the fixture key date: its own project.
+    pin_selection(app, db, "org-1", "project-1")
     return app
 
 
@@ -214,6 +217,8 @@ def _relationship_app(db: _KeyDateDatabase, policy: Any) -> FastAPI:
     app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
         db, policy=policy
     )
+    # The selection the browser sends for the fixture key date: its own project.
+    pin_selection(app, db, "org-1", "project-1")
     return app
 
 

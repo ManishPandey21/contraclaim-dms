@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from rbac_backend.models.contract_models import ContractSearchRequest, StatusResponse
+from rbac_backend.tests.selection_fixtures import selection
 from rbac_backend.routers.contracts import (
     get_contract_status,
     list_contract_uploads,
@@ -90,6 +91,7 @@ async def test_multipart_without_session_requires_policy_before_reading_file():
             file_service=SimpleNamespace(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -115,6 +117,7 @@ async def test_multipart_existing_session_authorizes_saved_scope_before_reading_
             file_service=SimpleNamespace(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -143,6 +146,7 @@ async def test_chunk_upload_authorizes_session_scope_before_reading_chunk():
             file_service=SimpleNamespace(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -162,6 +166,7 @@ async def test_contract_status_requires_policy_on_resolved_job_scope():
             contract_service=_FakeStatusService(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -183,6 +188,7 @@ async def test_contract_list_requires_policy_before_service_query():
             contract_service=_FakeContractService(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -201,6 +207,7 @@ async def test_contract_search_requires_policy_before_service_query():
             contract_service=_FakeContractService(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403
@@ -240,6 +247,7 @@ async def test_reindex_requires_policy_on_resolved_document_scope():
             contract_service=_FakeReindexService(),
             current_user=_user(),
             policy=policy,
+            selection=selection(None, "org-A", "proj-A"),
         )
 
     assert exc.value.status_code == 403

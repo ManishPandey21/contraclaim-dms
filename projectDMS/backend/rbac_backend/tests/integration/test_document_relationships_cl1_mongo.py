@@ -11,7 +11,14 @@ authorization decision is the thing under test - so neither shortcut is taken he
 * roles and permissions are the real seeds (``initialize_permissions`` /
   ``initialize_roles``), never a hand-written permission map;
 * no dependency override is installed - the app gets its database the way
-  production does, through the module globals in ``core.database``.
+  production does, through the module globals in ``core.database``;
+* every request carries the navbar selection the browser sends (``X-Proj-Id``,
+  resolved by the real ``resolve_active_scope``): the target's project, or the
+  Document's for a reverse lookup. Claim and Contract Document targets are
+  selection-bound since CL-4A; the selection semantics themselves are pinned in
+  ``test_cl4a_core_active_scope_mongo.py``. A principal outside that project is
+  therefore refused by the selection (403 ``context_forbidden``) before the
+  policy is asked - still 403, still nothing written.
 
 Opt-in: set ``RELATIONSHIP_CL1_MONGODB_URI`` to a disposable replica set. The
 suite never falls back to the application's configured database, and every test
@@ -268,37 +275,67 @@ class Env:
         self.db = db
         self._client = client
 
-    def _headers(self, persona: str) -> dict[str, str]:
-        return {"Authorization": f"Bearer {_token(persona)}"}
+    def _headers(self, persona: str, project: str | None = None) -> dict[str, str]:
+        headers = {"Authorization": f"Bearer {_token(persona)}"}
+        if project:
+            headers["X-Proj-Id"] = project
+        return headers
+
+    async def target_project(self, target_type: str, target_id: str) -> str | None:
+        """The selection the browser sends for a target: its own project.
+
+        A target with no project of its own (an organisation-scoped Contract
+        Document) is opened from the project the user is working in - A1 here.
+        An unknown target sends none; the route answers its own 404.
+        """
+        from rbac_backend.services.entity_adapter_registry import EntityAdapterRegistry
+
+        context = await EntityAdapterRegistry().get(target_type).load(self.db, target_id)
+        if context is None:
+            return None
+        return context.project_id or PROJ_A1
+
+    async def link_project(self, link_id: str) -> str | None:
+        stored = await self.db.entity_document_links.find_one({"_id": link_id})
+        if stored is None:
+            return None
+        return await self.target_project(stored["target_type"], stored["target_id"])
+
+    async def document_project(self, document_id: str) -> str | None:
+        candidates: list[Any] = [document_id]
+        if ObjectId.is_valid(document_id):
+            candidates.append(ObjectId(document_id))
+        row = await self.db.documents.find_one({"_id": {"$in": candidates}})
+        return str(row["project_id"]) if row and row.get("project_id") else None
 
     async def link(self, persona: str, target_id: str, document_id: str, role: str = "correspondence", target_type: str = "claim"):
         return await self._client.post(
             f"/api/entities/{target_type}/{target_id}/document-links:batch",
             json={"links": [{"document_id": document_id, "relationship_role": role}]},
-            headers=self._headers(persona),
+            headers=self._headers(persona, await self.target_project(target_type, target_id)),
         )
 
     async def forward(self, persona: str, target_id: str, target_type: str = "claim"):
         return await self._client.get(
             f"/api/entities/{target_type}/{target_id}/document-links",
-            headers=self._headers(persona),
+            headers=self._headers(persona, await self.target_project(target_type, target_id)),
         )
 
     async def reverse(self, persona: str, document_id: str):
         return await self._client.get(
             f"/api/documents/{document_id}/entity-links",
-            headers=self._headers(persona),
+            headers=self._headers(persona, await self.document_project(document_id)),
         )
 
     async def remove(self, persona: str, link_id: str, expected_revision: int = 1):
         return await self._client.post(
             f"/api/document-links/{link_id}:remove",
             json={"reason": "CL-1 verification", "expected_revision": expected_revision},
-            headers=self._headers(persona),
+            headers=self._headers(persona, await self.link_project(link_id)),
         )
 
-    async def get(self, persona: str, path: str, **params: Any):
-        return await self._client.get(path, params=params or None, headers=self._headers(persona))
+    async def get(self, persona: str, path: str, project: str | None = None, **params: Any):
+        return await self._client.get(path, params=params or None, headers=self._headers(persona, project))
 
     async def links(self, **query: Any) -> list[dict[str, Any]]:
         return await self.db.entity_document_links.find(query).to_list(length=None)
@@ -373,7 +410,9 @@ def test_objectid_document_link_list_reverse_unlink_relink_and_history() -> None
             assert reverse.status_code == 200, reverse.text
             assert _only(reverse)["target_id"] == CLAIM_A1
 
-            history = await env.get("project_admin", f"/api/document-links/{link['_id']}/history")
+            history = await env.get(
+                "project_admin", f"/api/document-links/{link['_id']}/history", project=PROJ_A1
+            )
             assert history.status_code == 200, history.text
 
             removed = await env.remove("project_admin", link["_id"])
@@ -631,7 +670,8 @@ def test_foreign_link_id_cross_project_unlink_and_reverse_lookup_are_refused() -
             link = _only(await env.link("project_admin", CLAIM_A1, DOC_OID_ID))
             for persona in ("foreign_org_admin", "other_project_admin"):
                 assert (await env.remove(persona, link["_id"])).status_code == 403
-                assert (await env.get(persona, f"/api/document-links/{link['_id']}/history")).status_code == 403
+                history = await env.get(persona, f"/api/document-links/{link['_id']}/history", project=PROJ_A1)
+                assert history.status_code == 403, (persona, history.text)
                 reverse = await env.reverse(persona, DOC_OID_ID)
                 assert reverse.status_code == 403, (persona, reverse.text)
                 assert CLAIM_A1 not in reverse.text

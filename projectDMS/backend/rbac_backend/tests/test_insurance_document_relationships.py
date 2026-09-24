@@ -18,6 +18,7 @@ from rbac_backend.routers.documents import DocumentController, get_document_cont
 from rbac_backend.routers.insurance import router as insurance_router
 from rbac_backend.routers.document_relationships import router as relationship_router
 from rbac_backend.services.insurance_service import InsuranceService
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.tests.test_claim_document_relationships import (
     _Collection,
     _Database,
@@ -156,6 +157,8 @@ def _insurance_app(db: _Database) -> FastAPI:
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = _user
     app.dependency_overrides[get_document_controller] = lambda: _CanonicalDocumentController(db)
+    # The selection the browser sends: the policy's own project (CL-4A).
+    pin_selection(app, db, "org-1", "project-1")
     return app
 
 

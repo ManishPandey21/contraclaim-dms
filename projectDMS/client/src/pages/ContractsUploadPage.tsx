@@ -42,6 +42,7 @@ import {
   RotateCcw,
   Upload as UploadIcon,
 } from "lucide-react";
+import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
 type UploadProgress = {
   file: File;
@@ -112,6 +113,8 @@ const ContractsUploadPage: React.FC = () => {
 const [projId, setProjId] = useState<string>(
   () => window.localStorage.getItem("proj_id") || ""
 );
+  // CL-4A: while the navbar selects a project, this page's picker follows it.
+  usePinnedPageScope(orgId, setOrgId, projId, setProjId);
 
   const parseOrganizationsResponse = useCallback((payload: any): Organization[] => {
     const collection = Array.isArray(payload)

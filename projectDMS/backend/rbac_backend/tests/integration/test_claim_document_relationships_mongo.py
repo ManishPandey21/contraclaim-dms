@@ -23,6 +23,7 @@ from rbac_backend.core.permissions import Permissions
 from rbac_backend.core.security import get_current_user
 from rbac_backend.migrations.v20260820_0001_entity_document_links import upgrade
 from rbac_backend.models.document_relationship import DocumentRelationshipInput
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.routers.document_relationships import (
     get_document_relationship_service,
     router as document_relationship_router,
@@ -240,6 +241,8 @@ async def test_real_mongo_concurrent_identical_links_are_idempotent_and_audited_
         app.include_router(document_relationship_router, prefix="/api")
         app.dependency_overrides[get_current_user] = _actor
         app.dependency_overrides[get_document_relationship_service] = lambda: service
+        # The selection the browser sends: the claim's own project (CL-4A).
+        pin_selection(app, database, "org-1", "project-1")
         payload = {
             "links": [{"document_id": "doc-1", "relationship_role": "notice"}],
             "idempotency_key": "same-request",

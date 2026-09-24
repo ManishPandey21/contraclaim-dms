@@ -40,9 +40,15 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from fastapi import status
+from pymongo.errors import DuplicateKeyError
+
+from ..utils.error_handler import ContractError
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CandidateNotFound",
     "ContractMigrationReconciliation",
     "MIGRATION_IDENTITY_PREFIX",
     "RECONCILIATION_COLLECTION",
@@ -50,12 +56,41 @@ __all__ = [
     "ScopeClassificationState",
     "TypeClassificationState",
     "candidate_identity",
+    "scoped_candidate_filter",
 ]
 
 #: Deliberately outside LEGAL_COLLECTIONS. Nothing here is authoritative.
 RECONCILIATION_COLLECTION = "contract_document_reconciliation"
 
 MIGRATION_IDENTITY_PREFIX = "contract-master-migration"
+
+
+class CandidateNotFound(ContractError):
+    """No reconciliation candidate with this id in the authorised organisation.
+
+    One answer, deliberately, for "does not exist" and "exists in another
+    organisation": a caller authorised for X who names a candidate of Y learns
+    neither that Y's candidate exists nor which organisation owns it. The message
+    therefore names nothing - not the candidate's organisation, not its scope.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("reconciliation candidate not found", status.HTTP_404_NOT_FOUND)
+
+
+def scoped_candidate_filter(candidate_id: str, organization_id: str) -> Dict[str, Any]:
+    """The only filter a mutating operation may load a candidate with.
+
+    ``organization_id`` must be the organisation the route *authorised*, never
+    one read from the candidate or the request body. Candidate ids are strings
+    (``contract-master-migration:<module>:<document_id>``) and so is the stored
+    ``organization_id`` (``inventory`` writes ``str(...)``), so this is an exact
+    match with no ObjectId variants. No organisation means no candidate, rather
+    than an unscoped read.
+    """
+    if not organization_id:
+        raise CandidateNotFound()
+    return {"_id": candidate_id, "organization_id": str(organization_id)}
 
 
 class ScopeClassificationState(str, Enum):
@@ -183,22 +218,45 @@ class ContractMigrationReconciliation:
         """
         written = 0
         for candidate in candidates:
-            await self._db[RECONCILIATION_COLLECTION].insert_one(
-                {
-                    "_id": candidate.candidate_id,
-                    "candidate_id": candidate.candidate_id,
-                    "canonical_document_id": candidate.canonical_document_id,
-                    "organization_id": candidate.organization_id,
-                    "module": candidate.module,
-                    "scope_state": candidate.scope_state.value,
-                    "type_state": candidate.type_state.value,
-                    "scope_hint": candidate.scope_hint,
-                    # Captured, not referenced: the session it came from will be
-                    # gone by the time anyone adjudicates this row.
-                    "session_evidence": dict(candidate.session_evidence),
-                    "materialised_at": datetime.now(timezone.utc),
-                }
-            )
+            try:
+                await self._db[RECONCILIATION_COLLECTION].insert_one(
+                    {
+                        "_id": candidate.candidate_id,
+                        "candidate_id": candidate.candidate_id,
+                        "canonical_document_id": candidate.canonical_document_id,
+                        "organization_id": candidate.organization_id,
+                        "module": candidate.module,
+                        "scope_state": candidate.scope_state.value,
+                        "type_state": candidate.type_state.value,
+                        "scope_hint": candidate.scope_hint,
+                        # Captured, not referenced: the session it came from will be
+                        # gone by the time anyone adjudicates this row.
+                        "session_evidence": dict(candidate.session_evidence),
+                        "materialised_at": datetime.now(timezone.utc),
+                    }
+                )
+            except DuplicateKeyError as exc:
+                if (getattr(exc, "details", None) or {}).get("keyPattern") not in (None, {"_id": 1}):
+                    # Some other unique constraint: not "already materialised".
+                    raise
+                # Already materialised: the identity is the candidate, so the row
+                # that exists IS this candidate. Left exactly as it is - never
+                # overwritten, so an adjudication or promotion on it survives.
+                existing = await self._db[RECONCILIATION_COLLECTION].find_one(
+                    {"_id": candidate.candidate_id}, {"organization_id": 1}
+                )
+                if existing is not None and str(existing.get("organization_id")) != str(
+                    candidate.organization_id
+                ):
+                    # Held under another organisation: never "done", never
+                    # silent. Nothing is rewritten; an operator must look.
+                    logger.warning(
+                        "reconciliation candidate %s is held by another organisation; "
+                        "not materialised for %s",
+                        candidate.candidate_id,
+                        candidate.organization_id,
+                    )
+                continue
             written += 1
         return written
 

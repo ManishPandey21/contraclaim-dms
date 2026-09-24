@@ -17,6 +17,7 @@ from rbac_backend.routers.ipc_bills import get_policy, router as ipc_router
 from rbac_backend.services.document_relationship_service import DocumentRelationshipService
 from rbac_backend.services.ipc_bill_service import IPCBillService
 from rbac_backend.services.policy_service import PolicyService
+from rbac_backend.tests.selection_fixtures import pin_selection
 from rbac_backend.tests.test_claim_document_relationships import (
     _Client,
     _Collection,
@@ -67,6 +68,8 @@ def _app(db: _IPCDatabase, *, policy: Any = None, user: Any = None) -> FastAPI:
     app.include_router(ipc_router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = user or _user
+    # The selection the browser sends: the IPC's own project (CL-4A).
+    pin_selection(app, db, "org-1", "project-1")
     if policy is not None:
         app.dependency_overrides[get_policy] = lambda: policy
         app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(

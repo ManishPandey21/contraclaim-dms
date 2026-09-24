@@ -13,11 +13,15 @@ const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
   getDocument: vi.fn(),
   authenticatedFetch: vi.fn(),
+  fetchApiFileBlob: vi.fn(),
 }));
 
 vi.mock("@/services/api", () => ({ api: { get: mocks.apiGet, post: vi.fn() } }));
 vi.mock("@/services/enhanced-api", () => ({ enhancedApi: { getDocument: mocks.getDocument } }));
-vi.mock("@/services/http", () => ({ authenticatedFetch: mocks.authenticatedFetch }));
+vi.mock("@/services/http", () => ({
+  authenticatedFetch: mocks.authenticatedFetch,
+  fetchApiFileBlob: mocks.fetchApiFileBlob,
+}));
 vi.mock("@/services/contracts-api", () => ({ reindexContract: vi.fn() }));
 vi.mock("@/components/contracts/ClauseIndexTab", () => ({ default: () => null }));
 
@@ -34,6 +38,7 @@ describe("ContractViewerPage deep link", () => {
       ok: true, status: 200, blob: async () => new Blob(["%PDF-1.7"], { type: "application/pdf" }),
       text: async () => "",
     });
+    mocks.fetchApiFileBlob.mockResolvedValue(new Blob(["%PDF-1.7"], { type: "application/pdf" }));
     if (!URL.createObjectURL) {
       (URL as unknown as { createObjectURL: () => string }).createObjectURL = () => "blob:contract";
     }
@@ -49,7 +54,8 @@ describe("ContractViewerPage deep link", () => {
       </MemoryRouter>,
     );
     await waitFor(() => expect(mocks.getDocument).toHaveBeenCalledWith(DOCUMENT_ID));
-    await waitFor(() => expect(mocks.authenticatedFetch).toHaveBeenCalledWith(
+    // CL-4A: the file comes through fetchApiFileBlob (no selection header on the storage leg).
+    await waitFor(() => expect(mocks.fetchApiFileBlob).toHaveBeenCalledWith(
       expect.stringContaining(`/contracts/${DOCUMENT_ID}/download`),
     ));
   });

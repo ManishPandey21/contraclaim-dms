@@ -254,8 +254,9 @@ class EntityAdapter:
     #: selection is 403 ``context_forbidden``, a record-level request with nothing
     #: selected is 400 ``selection_required``, and the Document reverse lookup
     #: hides the target's rows outside the selection. Only registers that enforce
-    #: the selection on their own routes opt in (CL-3A: Variation, Hindrance);
-    #: every other target keeps its selection-blind behaviour.
+    #: the selection on their own routes opt in (CL-3A: Variation, Hindrance; CL-3B:
+    #: Programme Milestone, Chronology event; CL-4A: every core register and the
+    #: Contract Document); a target that does not keeps its selection-blind behaviour.
     active_scope_enforced: bool = False
     #: Offered by "Link to Record" from the Document side. Only targets whose
     #: adapter, deep link and register UI are verified end to end opt in; the
@@ -404,6 +405,8 @@ class EntityAdapter:
 
 class ClaimEntityAdapter(EntityAdapter):
     target_type = "claim"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.CLAIM_EDIT,)
     target_collection = "claims"
@@ -527,6 +530,8 @@ class IPCBillEntityAdapter(EntityAdapter):
     """
 
     target_type = "ipc_bill"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.IPC_EDIT,)
     target_collection = "ipc_bills"
@@ -626,6 +631,8 @@ class InsuranceEntityAdapter(EntityAdapter):
     """Parent evidence owner for the current event-less Insurance model."""
 
     target_type = "insurance"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.INSURANCE_EDIT,)
     target_collection = "insurance_policies"
@@ -737,6 +744,8 @@ class BankGuaranteeEventEntityAdapter(EntityAdapter):
     """Event-level evidence owner for the Bank Guarantee lifecycle."""
 
     target_type = "bank_guarantee_event"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.BG_EDIT, Permissions.BG_EXTEND, Permissions.BG_RELEASE)
     target_collection = "bank_guarantee_events"
@@ -883,6 +892,8 @@ class BankGuaranteeLegacyEntityAdapter(EntityAdapter):
     """
 
     target_type = "bank_guarantee"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     target_collection = "bank_guarantees"
     supports_freeze = False
     legacy_relationship_role = "manual_review"
@@ -967,6 +978,8 @@ class KeyDateAchievementEntityAdapter(EntityAdapter):
     """Stable event-level evidence owner for a milestone achievement."""
 
     target_type = "key_date_achievement"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.KEYDATE_ACHIEVEMENT,)
     target_label_suffix = " · Achievement"
@@ -1110,6 +1123,8 @@ class EOTSubmissionEntityAdapter(EntityAdapter):
     """Canonical event owner for one project-level Contractor EOT submission."""
 
     target_type = "eot_submission"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.KEYDATE_EOT_SUBMIT,)
     target_label_suffix = " · Contractor Submission"
@@ -1272,6 +1287,8 @@ class EOTDeterminationEntityAdapter(EntityAdapter):
     """Canonical event owner for one Engineer/Employer EOT determination."""
 
     target_type = "eot_determination"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     link_to_record = True
     link_manage_permissions = (Permissions.KEYDATE_EOT_DETERMINE,)
     target_label_suffix = " · Determination"
@@ -1617,6 +1634,8 @@ class ContractDocumentEntityAdapter(EntityAdapter):
     """
 
     target_type = "contract_document"
+    #: CL-4A: bound by the selected navbar project on the shared relationship routes.
+    active_scope_enforced = True
     target_collection = "contract_documents"
     supports_freeze = False
 

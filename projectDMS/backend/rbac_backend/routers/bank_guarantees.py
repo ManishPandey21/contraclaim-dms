@@ -11,6 +11,7 @@ from ..core.config import settings
 from ..services.upload_streaming import read_upload_within_limit
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.bank_guarantee import (
     BankGuarantee,
     BankGuaranteeCreate,
@@ -49,10 +50,13 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-async def _load(bg_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load(bg_id: str, permission: str, db, current_user, policy, selection: ActiveScope) -> dict:
+    """Load a BG and hold it to the selected project (400 when none is selected)."""
+    selection.require_selection()
     bg = await BankGuaranteeService(db).get(bg_id)
     if not bg:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Bank guarantee not found")
+    await selection.require_record(bg, allow_unscoped=True)
     await policy.authorize_document(current_user, permission, bg, resource_type="bank_guarantee")
     return bg
 
@@ -107,7 +111,9 @@ async def list_bgs(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.BG_VIEW, resource_type="bank_guarantees",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -127,7 +133,9 @@ async def bg_summary(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.BG_VIEW, resource_type="bank_guarantees",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -144,7 +152,9 @@ async def bg_alerts(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.BG_VIEW, resource_type="bank_guarantees",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -164,7 +174,9 @@ async def export_bgs(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.BG_EXPORT, resource_type="bank_guarantees",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -211,7 +223,9 @@ async def preview_bank_guarantees_import(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    await selection.require_project(project_id, organization_id)
     content = await _read_csv(file)
     try:
         organization_id, project_id = await validate_csv_import_scope(
@@ -249,7 +263,9 @@ async def import_bank_guarantees(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    await selection.require_project(project_id, organization_id)
     content = await _read_csv(file)
     try:
         organization_id, project_id = await validate_csv_import_scope(
@@ -283,7 +299,10 @@ async def create_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # The body's project must BE the selection: refused, never rewritten.
+    await selection.require_project(payload.project_id, payload.organization_id)
     org = payload.organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user, Permissions.BG_CREATE, resource_type="bank_guarantee",
@@ -312,9 +331,10 @@ async def get_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     return await _present_bg(
-        await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy),
+        await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy, selection),
         db,
         current_user,
         policy,
@@ -328,8 +348,9 @@ async def update_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy, selection)
     changes = payload.model_dump(exclude_unset=True)
     legacy_ids = changes.pop("linked_document_ids", None)
     if "linked_document_ids" in payload.model_fields_set and legacy_ids:
@@ -355,8 +376,9 @@ async def delete_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_DELETE, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_DELETE, db, current_user, policy, selection)
     try:
         await BankGuaranteeService(db).delete(bg, current_user)
     except BankGuaranteeLifecycleError as exc:
@@ -371,8 +393,9 @@ async def transition_bg_status(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_EDIT, db, current_user, policy, selection)
     try:
         transitioned = await BankGuaranteeService(db).transition_status(
             bg, req, current_user
@@ -389,8 +412,9 @@ async def extend_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_EXTEND, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_EXTEND, db, current_user, policy, selection)
     if "linked_document_ids" in req.model_fields_set and req.linked_document_ids:
         try:
             await DocumentRelationshipService(db, policy=policy).reject_ambiguous_legacy_write(
@@ -415,8 +439,9 @@ async def release_bg(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_RELEASE, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_RELEASE, db, current_user, policy, selection)
     try:
         released = await BankGuaranteeService(db).release(bg, current_user, req)
     except BankGuaranteeLifecycleError as exc:
@@ -430,8 +455,9 @@ async def bg_history(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy, selection)
     return [BGExtensionHistory(**h) for h in await BankGuaranteeService(db).list_history(bg)]
 
 
@@ -441,8 +467,9 @@ async def bg_events(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy)
+    bg = await _load(bg_id, Permissions.BG_VIEW, db, current_user, policy, selection)
     return [
         BankGuaranteeEvent(**event)
         for event in await BankGuaranteeService(db).list_events(bg)

@@ -41,6 +41,11 @@ import { formatDate } from "@/utils/dateFormat";
 import EntityDocumentLinks from "@/components/document-links/EntityDocumentLinks";
 import { KEY_DATE_ACHIEVEMENT_RELATIONSHIP_ROLES } from "@/services/document-relationships-api";
 import useHasPermission from "@/hooks/useHasPermission";
+import { scopeRefusalMessage } from "@/services/active-scope";
+
+/** A string `detail` from the API; a structured one (scope refusal) is handled above. */
+const apiDetail = (e: any): string | null =>
+  typeof e?.response?.data?.detail === "string" ? e.response.data.detail : null;
 
 const fmt = (d?: string | null) => (d ? formatDate(d) : "—");
 const toISO = (d: string) => (d ? new Date(d).toISOString() : undefined);
@@ -88,8 +93,8 @@ const KeyDateDetailPage: React.FC = () => {
       setEots(es);
       setHistory(hs);
       setWorkflow(wf);
-    } catch {
-      toast.error("Failed to load milestone");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "key date") || "Failed to load milestone");
     } finally {
       setLoading(false);
     }
@@ -121,7 +126,7 @@ const KeyDateDetailPage: React.FC = () => {
       setEotForm({ requested_extension_days: "", eot_letter_reference: "", requested_revised_key_date: "", reason: "" });
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to submit EOT");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to submit EOT");
     } finally {
       setBusy(false);
     }
@@ -146,7 +151,7 @@ const KeyDateDetailPage: React.FC = () => {
       setReviewEot(null);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to review EOT");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to review EOT");
     } finally {
       setBusy(false);
     }
@@ -174,7 +179,7 @@ const KeyDateDetailPage: React.FC = () => {
       setAchOpen(false);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || "Failed to record achievement");
+      toast.error(scopeRefusalMessage(e, "key date") || apiDetail(e) || "Failed to record achievement");
     } finally {
       setBusy(false);
     }

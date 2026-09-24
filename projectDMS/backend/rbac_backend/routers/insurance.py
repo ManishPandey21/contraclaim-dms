@@ -31,6 +31,7 @@ from ..core.config import settings
 from ..core.database import get_db
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, build_scope_query, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.insurance import (
     Insurance,
     InsuranceCreate,
@@ -86,10 +87,14 @@ async def get_policy(db=Depends(get_db)) -> PolicyService:
     return PolicyService(db=db)
 
 
-async def _load(insurance_id: str, permission: str, db, current_user, policy) -> dict:
+async def _load(
+    insurance_id: str, permission: str, db, current_user, policy, selection: ActiveScope
+) -> dict:
+    selection.require_selection()
     ins = await InsuranceService(db).get(insurance_id)
     if not ins:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Insurance policy not found")
+    await selection.require_record(ins, allow_unscoped=True)
     await policy.authorize_document(current_user, permission, ins, resource_type="insurance")
     return (await _project_canonical_links(db, current_user, policy, [ins]))[0]
 
@@ -132,7 +137,9 @@ async def list_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.INSURANCE_VIEW, resource_type="insurance",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -155,7 +162,9 @@ async def insurance_summary(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.INSURANCE_VIEW, resource_type="insurance",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -172,7 +181,9 @@ async def insurance_alerts(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.INSURANCE_VIEW, resource_type="insurance",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -192,7 +203,9 @@ async def export_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await policy.authorize(
         current_user, Permissions.INSURANCE_EXPORT, resource_type="insurance",
         organization_id=organization_id or getattr(current_user, "organization_id", None),
@@ -288,7 +301,10 @@ async def create_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    # The body's project must BE the selection: refused, never rewritten.
+    await selection.require_project(payload.project_id, payload.organization_id)
     org = payload.organization_id or getattr(current_user, "organization_id", None)
     await policy.authorize(
         current_user, Permissions.INSURANCE_CREATE, resource_type="insurance",
@@ -370,6 +386,7 @@ async def upload_canonical_insurance_document(
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
     controller: DocumentController = Depends(get_document_controller),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Upload through the canonical DMS pipeline, then link to the policy."""
     ins = await _load(
@@ -378,6 +395,7 @@ async def upload_canonical_insurance_document(
         db,
         current_user,
         policy,
+        selection,
     )
     if relationship_role not in INSURANCE_DOCUMENT_ROLES:
         raise HTTPException(
@@ -474,8 +492,9 @@ async def get_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    return Insurance(**await _load(insurance_id, Permissions.INSURANCE_VIEW, db, current_user, policy))
+    return Insurance(**await _load(insurance_id, Permissions.INSURANCE_VIEW, db, current_user, policy, selection))
 
 
 @router.get("/insurance/{insurance_id}/file")
@@ -485,9 +504,10 @@ async def get_insurance_file(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Serve preserved legacy bytes only through current canonical authority."""
-    ins = await _load(insurance_id, Permissions.INSURANCE_VIEW, db, current_user, policy)
+    ins = await _load(insurance_id, Permissions.INSURANCE_VIEW, db, current_user, policy, selection)
     token = ins.get("document_id")
     path = _insurance_file_path(token)
     if not path.is_file():
@@ -537,8 +557,9 @@ async def update_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    ins = await _load(insurance_id, Permissions.INSURANCE_EDIT, db, current_user, policy)
+    ins = await _load(insurance_id, Permissions.INSURANCE_EDIT, db, current_user, policy, selection)
     updated = await InsuranceService(db).update(ins, payload.model_dump(exclude_unset=True), current_user)
     return Insurance(
         **(
@@ -561,8 +582,9 @@ async def replace_insurance_file(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    await _load(insurance_id, Permissions.INSURANCE_EDIT, db, current_user, policy)
+    await _load(insurance_id, Permissions.INSURANCE_EDIT, db, current_user, policy, selection)
     raise HTTPException(
         status_code=status.HTTP_410_GONE,
         detail=(
@@ -578,8 +600,9 @@ async def delete_insurance(
     db=Depends(get_db),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    await _load(insurance_id, Permissions.INSURANCE_DELETE, db, current_user, policy)
+    await _load(insurance_id, Permissions.INSURANCE_DELETE, db, current_user, policy, selection)
     # delete_target emits the `insurance.deleted` audit inside its own transaction;
     # emitting a second one here would duplicate the record and lose the reason.
     await DocumentRelationshipService(db, policy=policy).delete_target(

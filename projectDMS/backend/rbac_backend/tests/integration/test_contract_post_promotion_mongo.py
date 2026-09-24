@@ -85,6 +85,8 @@ async def _database():
 
 
 async def _promote(db, client) -> str:
+    # A project-scope candidate is anchored to a real project of its organisation.
+    await db["projects"].insert_one({"_id": PROJECT, "organization_id": ORG})
     await db["documents"].insert_one(
         {
             "_id": "doc-1",
@@ -110,7 +112,7 @@ async def _promote(db, client) -> str:
         }
     )
     receipt = await ContractPromotionService(db, client).promote(
-        CANDIDATE, actor_id="alice", contract_id=CONTRACT, effective_from="2021-01-01"
+        CANDIDATE, organization_id=ORG, actor_id="alice", contract_id=CONTRACT, effective_from="2021-01-01"
     )
     return receipt.contract_document_id
 

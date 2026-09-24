@@ -91,6 +91,7 @@ from rbac_backend.routers.documents import (
 )
 from rbac_backend.services.document_service import DocumentService
 from rbac_backend.services.reference_sync_service import ReferenceSyncError
+from rbac_backend.tests.selection_fixtures import pin_selection  # noqa: E402
 
 
 def _make_document_dict(**overrides: Any) -> Dict[str, Any]:
@@ -814,6 +815,8 @@ async def test_link_documents_endpoint_creates_bidirectional_relationship(monkey
 
     app.dependency_overrides[get_document_controller] = override_controller
     app.dependency_overrides[get_current_user] = _make_user
+    # CL-4A: both Documents are held to the selection; pin their own project.
+    pin_selection(app, fake_db, "org-1", "proj-1")
 
     async def _fake_get_database() -> FakeDatabase:
         return fake_db

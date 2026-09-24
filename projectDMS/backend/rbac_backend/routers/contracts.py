@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..core.config import settings
 from ..core.permissions import Permissions
 from ..core.security import CurrentUser, get_current_user
+from ..core.tenant_context import ActiveScope, active_scope
 from ..models.contract_models import (
     ChunkUploadResponse,
     ContractListResponse,
@@ -273,6 +274,31 @@ async def _authorize_contract_scope(
     )
 
 
+def _named(value: Any) -> str:
+    return str(value).strip() if value not in (None, "") else ""
+
+
+async def _hold_contract_upload(selection: ActiveScope, organization_id: Any, project_id: Any) -> None:
+    """CL-4A: an upload's (body or session) scope against the navbar selection.
+
+    With a project selected the upload's project must BE it (403 otherwise, never
+    rewritten). With nothing selected an organisation-level upload (no project) keeps
+    working, held to the selected organisation if one is set; an upload naming a
+    project needs that project selected (400 ``selection_required``).
+    """
+    if selection.has_project:
+        await selection.require_project(project_id, organization_id)
+        return
+    if _named(project_id):
+        selection.require_selection()
+    await selection.require_organization(organization_id)
+
+
+async def _hold_contract_record(selection: ActiveScope, record: Dict[str, Any]) -> None:
+    """Hold a contract Document to the selection; organisation-level ones to its organisation."""
+    await selection.require_record(record, allow_unscoped=True)
+
+
 @router.post("/contracts/upload-session", response_model=ContractUploadSessionResponse)
 @handle_exceptions
 async def create_contract_upload_session(
@@ -280,7 +306,9 @@ async def create_contract_upload_session(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    await _hold_contract_upload(selection, payload.organization_id, payload.project_id)
     await _authorize_contract_scope(
         policy,
         current_user,
@@ -309,7 +337,11 @@ async def upload_contracts_multipart(
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    if not upload_ids or _named(project_id):
+        # With upload sessions and no form project, each session's own scope is held below.
+        await _hold_contract_upload(selection, organization_id, project_id)
     if not files:
         raise ContractError("At least one contract file is required", status.HTTP_422_UNPROCESSABLE_ENTITY)
     if upload_ids and len(upload_ids) not in (0, len(files)):
@@ -334,6 +366,7 @@ async def upload_contracts_multipart(
                 project_id,
                 file.filename,
             )
+            await _hold_contract_upload(selection, session_doc.get("organization_id"), session_doc.get("project_id"))
             await _authorize_contract_scope(
                 policy,
                 current_user,
@@ -390,6 +423,7 @@ async def upload_contracts_multipart(
                 )
                 effective_org = str(session_doc.get("organization_id") or organization_id or "")
                 effective_project = str(session_doc.get("project_id") or "") or None
+                await _hold_contract_upload(selection, effective_org, effective_project)
                 await _authorize_contract_scope(
                     policy,
                     current_user,
@@ -494,7 +528,11 @@ async def upload_contract_chunk(
     file_service: SecureFileService = Depends(get_file_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    if _named(project_id):
+        # A form project is an override of the session's; the session scope is held below.
+        await _hold_contract_upload(selection, organization_id, project_id)
     max_file_size_bytes, max_chunk_size_bytes = _contract_limits()
     session_doc = await contract_service.validate_upload_session(
         upload_id,
@@ -506,6 +544,7 @@ async def upload_contract_chunk(
     )
     effective_org = str(session_doc.get("organization_id") or "")
     effective_project = str(session_doc.get("project_id") or "") or None
+    await _hold_contract_upload(selection, effective_org, effective_project)
     await _authorize_contract_scope(
         policy,
         current_user,
@@ -735,8 +774,16 @@ async def get_contract_status(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     status_response = await contract_service.get_job_status(upload_id, current_user)
+    job_scope = {"organization_id": status_response.organization_id, "project_id": status_response.project_id}
+    if selection.has_project or _named(status_response.project_id):
+        await _hold_contract_record(selection, job_scope)
+    else:
+        # Polling an organisation-level upload made with nothing selected must keep
+        # working, exactly like the upload itself (see _hold_contract_upload).
+        await selection.require_organization(status_response.organization_id)
     await _authorize_contract_scope(
         policy,
         current_user,
@@ -757,8 +804,11 @@ async def retry_contract_ocr_pages(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    selection.require_selection()
     document = await contract_service.get_contract_document(document_id, current_user)
+    await _hold_contract_record(selection, document)
     organization_id = str(document.get("organization_id") or "")
     project_id = str(document.get("project_id") or "") or None
     await _authorize_contract_scope(
@@ -828,6 +878,7 @@ async def reindex_contract(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Re-run ingestion for an existing contract to rebuild its vector index
     without re-uploading. Intended for documents whose vectors were never
@@ -835,7 +886,9 @@ async def reindex_contract(
     "completed" but unsearchable). The stored source file is re-processed
     through the normal ingest queue, so it runs on the backend's own OpenAI
     connection and produces production-identical chunks."""
+    selection.require_selection()
     document = await contract_service.get_contract_document(document_id, current_user)
+    await _hold_contract_record(selection, document)
     organization_id = str(document.get("organization_id") or "")
     project_id = str(document.get("project_id") or "") or None
     await _authorize_contract_scope(
@@ -908,7 +961,9 @@ async def list_contract_uploads(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     await _authorize_contract_scope(
         policy,
         current_user,
@@ -928,7 +983,10 @@ async def search_contracts(
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
+    organization_id, project_id = await selection.list_filters(request.organization_id, request.project_id)
+    request = request.model_copy(update={"organization_id": organization_id, "project_id": project_id})
     await _authorize_contract_scope(
         policy,
         current_user,
@@ -947,8 +1005,19 @@ async def download_contract(
     document_id: str,
     contract_service: ContractService = Depends(get_contract_service),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
+    redirect: bool = Query(
+        True,
+        description=(
+            "False: answer an S3-stored file with {\"url\": presigned} instead of a 307. The "
+            "browser follows a 307 with the request's own headers - the navbar selection "
+            "included - which turns a presigned GET into a CORS preflight against storage."
+        ),
+    ),
 ):
+    selection.require_selection()
     document = await contract_service.get_contract_document(document_id, current_user)
+    await _hold_contract_record(selection, document)
     await PolicyService().authorize_document(
         current_user,
         "dms.document.download",
@@ -988,5 +1057,7 @@ async def download_contract(
             project_id=document.get("project_id"),
             metadata={"provider": "s3"},
         )
+        if not redirect and presigned.get("url"):
+            return JSONResponse({"url": presigned.get("url")})
         return Response(status_code=307, headers={"Location": presigned.get("url")})
     raise ContractError("File not available for download", status.HTTP_404_NOT_FOUND)

@@ -25,7 +25,9 @@ import pytest
 from fastapi import FastAPI
 from motor.motor_asyncio import AsyncIOMotorClient
 
+from rbac_backend.services.entity_adapter_registry import ClaimEntityAdapter, EntityAdapterRegistry
 from rbac_backend.tests.integration.test_variation_relationships_cl2_mongo import (
+    CLAIM_A1,
     DOC_A2_ID,
     DOC_B_ID,
     DOC_CONTRACT_ID,
@@ -248,7 +250,9 @@ class Env:
 
 
 @asynccontextmanager
-async def _env() -> AsyncIterator[Env]:
+async def _env(registry: Optional[EntityAdapterRegistry] = None) -> AsyncIterator[Env]:
+    """``registry`` swaps the relationship service's adapter registry - the one
+    override, used only by the CL-4A control for a type that does not opt in."""
     from rbac_backend.core import database as database_module
     from rbac_backend.core.config import settings
 
@@ -274,7 +278,15 @@ async def _env() -> AsyncIterator[Env]:
                  "disabled": False, "account_type": "client_user", "organizations": [], **spec}
             )
         await _seed_cl3b(db)
-        transport = httpx.ASGITransport(app=_app(), raise_app_exceptions=False)
+        app = _app()
+        if registry is not None:
+            from rbac_backend.routers.document_relationships import get_document_relationship_service
+            from rbac_backend.services.document_relationship_service import DocumentRelationshipService
+
+            app.dependency_overrides[get_document_relationship_service] = lambda: DocumentRelationshipService(
+                db, registry=registry
+            )
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield Env(db, client)
     finally:
@@ -804,10 +816,11 @@ def test_link_target_types_follow_permissions_and_selection() -> None:
             assert admin.status_code == 200, admin.text
             types = set(admin.json()["target_types"])
             assert {"programme_milestone", "chronology_event", "variation", "delay_event", "claim"} <= types
-            # No selection: the selection-bound types are left out, the others stay.
+            # No selection: the selection-bound types are left out - since CL-4A that
+            # includes Claim, bound exactly like Variation. A type that does not opt
+            # in stays: test_a_target_type_that_does_not_opt_in_still_ignores_the_selection.
             unselected = set((await env.target_types("project_admin", None)).json()["target_types"])
-            assert not unselected & {"programme_milestone", "chronology_event", "variation", "delay_event"}
-            assert "claim" in unselected
+            assert not unselected & {"programme_milestone", "chronology_event", "variation", "delay_event", "claim"}
             # Another project's selection leaves them out too, and an unusable selection does not fail the call.
             assert not set((await env.target_types("member_ab", PROJ_A2)).json()["target_types"]) & {
                 "programme_milestone", "chronology_event"}
@@ -815,5 +828,38 @@ def test_link_target_types_follow_permissions_and_selection() -> None:
             # A viewer who may manage nothing gets nothing - and no record was needed to say so.
             viewer = await env.target_types("project_user", PROJ_A1)
             assert viewer.status_code == 200 and viewer.json()["target_types"] == []
+
+    _run(scenario())
+
+
+class _UnboundClaimAdapter(ClaimEntityAdapter):
+    """Reads the same Claim rows; differs only in not opting into the selection."""
+
+    target_type = "unbound_claim"
+    active_scope_enforced = False
+
+
+def test_a_target_type_that_does_not_opt_in_still_ignores_the_selection() -> None:
+    """CL-4A: every registered type is selection-bound now; the framework still
+    leaves a type without ``active_scope_enforced`` selection-blind."""
+
+    async def scenario() -> None:
+        registry = EntityAdapterRegistry([*EntityAdapterRegistry().adapters(), _UnboundClaimAdapter()])
+        async with _env(registry=registry) as env:
+            # Claim is bound the way Variation is.
+            assert _selection_required(await env.link("member_ab", None, "claim", CLAIM_A1, DOC_IN_ID))
+            assert _forbidden(await env.link("member_ab", PROJ_A2, "claim", CLAIM_A1, DOC_IN_ID))
+            assert _forbidden(await env.link("member_ab", PROJ_A2, "variation", VAR_A1, DOC_IN_ID))
+
+            for project in (None, PROJ_A2):
+                types = set((await env.target_types("member_ab", project)).json()["target_types"])
+                assert "unbound_claim" in types and "claim" not in types, (project, types)
+            linked = await env.link("member_ab", PROJ_A2, "unbound_claim", CLAIM_A1, DOC_IN_ID)
+            assert linked.status_code == 201, linked.text
+            assert len(_links(await env.forward("member_ab", None, "unbound_claim", CLAIM_A1))) == 1
+            assert ("unbound_claim", CLAIM_A1, "correspondence") in await env.reverse_keys("member_ab", PROJ_A2)
+            # Membership still decides: a non-member is refused whatever it selects.
+            refused = await env.forward("foreign_org_admin", None, "unbound_claim", CLAIM_A1)
+            assert refused.status_code == 403, refused.text
 
     _run(scenario())

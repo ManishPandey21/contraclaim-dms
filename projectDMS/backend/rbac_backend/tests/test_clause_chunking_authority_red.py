@@ -21,6 +21,7 @@ from rbac_backend.routers import contract_clauses
 from rbac_backend.services.contract_clause.agent import ClauseChunkingAgent
 from rbac_backend.services.contract_clause.embedding_service import ClauseEmbeddingService
 from rbac_backend.services.contract_clause.graph_service import ClauseGraphService
+from rbac_backend.tests.selection_fixtures import pin_selection
 
 
 QDRANT_MARKER = "CLAUSE_BLOCKED_QDRANT_MARKER_20260819"
@@ -236,6 +237,9 @@ async def _post_index_route(
         route_document
     )
     app.dependency_overrides[get_current_user] = lambda: _User()
+    # CL-4A holds the contract to the navbar selection; this suite is about publication
+    # authority, so it sends the selection the browser would: the contract's own project.
+    pin_selection(app, db, "org-authority", "project-authority")
 
     contract_clauses._BACKGROUND_TASKS.clear()
     transport = httpx.ASGITransport(app=app)

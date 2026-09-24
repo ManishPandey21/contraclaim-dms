@@ -23,6 +23,7 @@ import tempfile
 from ..core.database import get_db, get_database
 from ..core.permissions import Permissions
 from ..core.security import get_current_user, CurrentUser
+from ..core.tenant_context import ActiveScope, active_scope
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
 from ..services.archive_policy import ArchiveIntakePolicy
@@ -73,7 +74,7 @@ from ..utils.validation import sanitize_filename
 from ..utils.error_handler import BaseDomainError, handle_exceptions, DocumentError
 from ..utils.date_parser import parse_date_safely
 from ..utils.csv_validator import validate_csv_structure, parse_csv_row
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -109,21 +110,74 @@ def _current_user_policy_scope(current_user: CurrentUser) -> tuple[Optional[str]
     )
 
 
-async def _ensure_document_access(
-    current_user: CurrentUser,
-    document_id: str,
-    permission: str,
-) -> None:
-    db = await get_database()
+async def _find_raw_document(db: Any, document_id: str) -> Optional[Dict[str, Any]]:
     candidates: list[Any] = [document_id]
     try:
         candidates.append(ObjectId(document_id))
     except Exception:
         pass
-    document = await db.documents.find_one({"_id": {"$in": candidates}})
+    return await db.documents.find_one({"_id": {"$in": candidates}})
+
+
+async def _ensure_document_access(
+    current_user: CurrentUser,
+    document_id: str,
+    permission: str,
+    selection: Optional[ActiveScope] = None,
+) -> None:
+    """Load the raw Document and authorize ``permission`` on it.
+
+    With ``selection`` (CL-4A) the Document is first held to the navbar selection:
+    400 ``selection_required`` before the load, 403 ``context_forbidden`` for a
+    Document in another project. An organisation-level Document (no project) is held
+    to the selected organisation only.
+    """
+    if selection is not None:
+        selection.require_selection()
+    db = await get_database()
+    document = await _find_raw_document(db, document_id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+    if selection is not None:
+        await selection.require_record(document, allow_unscoped=True)
     await PolicyService(db).authorize_document(current_user, permission, document)
+
+
+async def _hold_document(selection: ActiveScope, document_id: str) -> None:
+    """Hold a Document to the selection before a route's own load/authorize (CL-4A).
+
+    A missing Document is left to the route's existing 404.
+    """
+    selection.require_selection()
+    document = await _find_raw_document(await get_database(), document_id)
+    if document:
+        await selection.require_record(document, allow_unscoped=True)
+
+
+async def _linked_within_selection(selection: ActiveScope, linked: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop linked references whose target Document is outside the selection (CL-4A).
+
+    A reference is kept when its target is in the selected project, or is an
+    organisation-level Document of the selected organisation. A target that no
+    longer exists carries no metadata and is kept, so it can still be removed.
+    """
+    if not linked:
+        return linked
+    db = await get_database()
+    kept: List[Dict[str, Any]] = []
+    for entry in linked:
+        target = await _find_raw_document(db, str(entry.get("documentId") or entry.get("id") or ""))
+        if not target:
+            kept.append(entry)
+            continue
+        project = str(target.get("project_id") or target.get("projectId") or "")
+        organization = str(target.get("organization_id") or target.get("organizationId") or "")
+        if organization and selection.organization_id and organization != selection.organization_id:
+            continue
+        if project and project != selection.project_id:
+            continue
+        kept.append(entry)
+    return kept
 
 
 def _parse_revision_header(
@@ -1658,6 +1712,10 @@ async def controller_list_documents(
         )
         if filters.get("linkable_only"):
             authorized_query = _apply_linkable_document_constraints(authorized_query)
+        elif filters.get("include_organization_level") and isinstance(authorized_query.get("project_id"), str):
+            # CL-4A: the selected project, plus the selected organisation's
+            # organisation-level Documents (no project) - not another project's.
+            authorized_query["project_id"] = {"$in": [authorized_query["project_id"], "", None]}
 
         documents, total_count = await self.document_service.list_documents(
             authorized_query, pagination
@@ -2264,7 +2322,9 @@ async def vector_search_documents_endpoint(
     uploadType: Optional[str] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ) -> Dict[str, Any]:
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
     filters = {
         "organization_id": organization_id,
         "project_id": project_id,
@@ -2291,12 +2351,15 @@ async def export_documents(
     date_to: Optional[date] = Query(None),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Export documents with filtering. Returns a downloadable file.
     Note: Uses enrichment so Tag/Sub-Tag names and project_name are included.
     """
     from fastapi.responses import StreamingResponse
+
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
 
     # Build filters consistent with list endpoint
     filters: Dict[str, Any] = {
@@ -2561,8 +2624,11 @@ async def create_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Create a new document."""
+    # The form's project must BE the selection: refused, never rewritten.
+    await selection.require_project(project_id, organization_id)
     await policy.authorize(
         current_user,
         "dms.document.upload",
@@ -2600,9 +2666,10 @@ async def get_document(
     response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Get a specific document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     document = await controller_get_document(controller, id, current_user)
     await PolicyService().authorize_document(current_user, Permissions.DOCUMENT_VIEW, document)
     await _set_document_revision_headers(response, controller, id)
@@ -2615,9 +2682,10 @@ async def process_document_endpoint(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ) -> DocumentProcessingResult:
     """Trigger OCR/AI processing for an existing document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     return await controller.process_document(id, current_user)
 
 
@@ -2643,6 +2711,7 @@ async def download_all_project_documents(
     document_id: Optional[str] = Query(None, min_length=1),
     service: DocumentBulkDownloadService = Depends(get_document_bulk_download_service),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Download all project letters/documents, contract documents, or both as a zip.
@@ -2652,7 +2721,12 @@ async def download_all_project_documents(
     - orgadmin: projects in their organization
     - projectadmin: assigned projects
     - other users: assigned project plus dms.document.bulk_download
+
+    CL-4A: the archived project must BE the navbar selection. ``GET /documents/{id}``
+    is registered first and matches this path, so the route is currently unreachable
+    over HTTP (recorded debt; routes deliberately not reordered).
     """
+    await selection.require_project(project_id)
     result = await service.create_project_archive(
         project_id=project_id,
         download_type=type,  # type: ignore[arg-type]
@@ -2683,6 +2757,15 @@ async def download_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
+    redirect: bool = Query(
+        True,
+        description=(
+            "False: answer an S3-stored file with {\"url\": presigned} instead of a 307. The "
+            "browser follows a 307 with the request's own headers - the navbar selection "
+            "included - which turns a presigned GET into a CORS preflight against storage."
+        ),
+    ),
 ):
     """
     Securely download/stream the original document bytes.
@@ -2691,6 +2774,7 @@ async def download_document(
     - Prefers local file path (filepath_local) if available
     - Falls back to redirect to presigned_url if provided
     """
+    await _hold_document(selection, id)
     # Load document
     document = await controller.document_service.get_document_by_id(id)
     if not document:
@@ -2741,6 +2825,8 @@ async def download_document(
                 project_id=document.project_id,
                 metadata={"provider": "s3"},
             )
+            if not redirect and presigned.get("url"):
+                return JSONResponse({"url": presigned.get("url")})
             return Response(status_code=307, headers={"Location": presigned.get("url")})
         except Exception:
             # continue to presigned_url below
@@ -2819,8 +2905,19 @@ async def list_documents(
     limit: int = Query(100, ge=1, le=1000),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """List documents with filtering and pagination."""
+    """List documents with filtering and pagination.
+
+    CL-4A: with a project selected the list is pinned to it; a filter may narrow
+    the selection, never leave it. The navbar always selects a project when the
+    organisation has one, so the register also lists the selected organisation's
+    organisation-level Documents (no project) - to the roles that listed them
+    before (organisation roles, superadmin), never to a project-tier user. The
+    link picker (``/document-search``) offers only project Documents, as before.
+    """
+    organization_id, project_id = await selection.list_filters(organization_id, project_id)
+    roles = {str(role).lower() for role in (getattr(current_user, "roles", None) or [])}
     filters = {
         "organization_id": organization_id,
         "project_id": project_id,
@@ -2834,6 +2931,8 @@ async def list_documents(
         "letterNo": letterNo,
         "subject": subject,
         "linkable_only": request.url.path.rstrip("/").endswith("/document-search"),
+        "include_organization_level": selection.has_project
+        and bool(roles & {"orgadmin", "orguser", "superadmin"}),
     }
     pagination = {"skip": skip, "limit": limit}
 
@@ -2859,8 +2958,10 @@ async def update_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Update a document."""
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2886,8 +2987,10 @@ async def update_document_summary_metadata(
     response: Response,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Update manually curated Letter Summary metadata and keyword fields."""
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2926,9 +3029,11 @@ async def delete_document(
     x_document_revision: Optional[str] = Header(default=None, alias="X-Document-Revision"),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Delete a document."""
     await require_step_up(request, current_user, action="documents.delete")
+    await _hold_document(selection, id)
     existing = await controller.document_service.get_document_by_id(id)
     if not existing:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -2951,9 +3056,10 @@ async def list_document_audit_events(
     limit: int = Query(100, ge=1, le=500),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Return immutable audit events for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     document = await controller.document_service.get_document_by_id(id)
     if not document:
         raise DocumentError("Document not found", status.HTTP_404_NOT_FOUND)
@@ -2971,9 +3077,10 @@ async def list_enclosures(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """List all enclosures for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
     return await controller_list_enclosures(controller, id, current_user)
 
 
@@ -2984,9 +3091,10 @@ async def add_enclosure(
     file: UploadFile = File(...),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Add an enclosure to a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     return await controller_add_enclosure(controller, id, file, current_user)
 
 
@@ -2997,9 +3105,10 @@ async def remove_enclosure(
     enclosure_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Remove an enclosure from a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_EDIT_METADATA, selection)
     await controller_remove_enclosure(controller, id, enclosure_id, current_user)
 
 
@@ -3009,10 +3118,13 @@ async def get_document_references(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Retrieve parsed and linked references for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
-    return await controller_list_references(controller, id, current_user)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    references = await controller_list_references(controller, id, current_user)
+    references["linked"] = await _linked_within_selection(selection, list(references.get("linked") or []))
+    return references
 
 
 @router.post("/documents/{id}/references", response_model=Document)
@@ -3022,9 +3134,12 @@ async def add_document_reference(
     reference_data: ReferenceCreate,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Add or update a linked reference for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
+    # The referenced Document is written too (its backlink): hold it as well.
+    await _hold_document(selection, str(reference_data.referenced_document_id))
     return await controller_add_reference(controller, id, reference_data, current_user)
 
 
@@ -3035,9 +3150,12 @@ async def delete_document_reference(
     reference_id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Remove a linked reference from a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
+    # Removing a reference also rewrites the referenced Document's backlink.
+    await _hold_document(selection, reference_id)
     return await controller_remove_reference(controller, id, reference_id, current_user)
 
 
@@ -3047,9 +3165,10 @@ async def trigger_reference_sync(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Manually trigger bidirectional reference synchronisation for a document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_LINK_REFERENCE, selection)
     return await controller_sync_references(controller, id, current_user)
 
 
@@ -3059,10 +3178,13 @@ async def link_documents_endpoint(
     payload: LinkDocumentsRequest,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
-    """Link two documents together."""
-    await _ensure_document_access(current_user, payload.source_document_id, Permissions.DOCUMENT_LINK_REFERENCE)
-    await _ensure_document_access(current_user, payload.target_document_id, Permissions.DOCUMENT_VIEW)
+    """Link two documents together. Both Documents are held to the selection (CL-4A)."""
+    await _ensure_document_access(
+        current_user, payload.source_document_id, Permissions.DOCUMENT_LINK_REFERENCE, selection
+    )
+    await _ensure_document_access(current_user, payload.target_document_id, Permissions.DOCUMENT_VIEW, selection)
     return await controller_link_documents(controller, payload, current_user)
 
 
@@ -3072,10 +3194,13 @@ async def get_linked_documents(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """Return documents linked to the given document."""
-    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW)
-    return await controller_list_linked_documents(controller, id, current_user)
+    await _ensure_document_access(current_user, id, Permissions.DOCUMENT_VIEW, selection)
+    return await _linked_within_selection(
+        selection, await controller_list_linked_documents(controller, id, current_user)
+    )
 
 # ---------------------------------------------
 # Comments endpoints used by LetterSummaryPage
@@ -3086,10 +3211,12 @@ async def get_document_comments(
     id: str,
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Return comments for a document: [{ id, text, author, createdAt }, ...]
     """
+    await _hold_document(selection, id)
     # Load document for auth context
     document = await controller.document_service.get_document_by_id(id)
     if not document:
@@ -3106,10 +3233,12 @@ async def add_document_comment(
     text: str = Body(..., embed=True),
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Add a comment to a document. Body shape: { "text": "..." }
     """
+    await _hold_document(selection, id)
     document = await controller.document_service.get_document_by_id(id)
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -3141,6 +3270,7 @@ async def bulk_upload_documents(
     # Add validation for bulk upload limits
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Bulk upload documents with CSV metadata.
@@ -3148,6 +3278,7 @@ async def bulk_upload_documents(
     The CSV file should contain metadata for each document file.
     File names in CSV must match the uploaded file names.
     """
+    await selection.require_project(project_id, organization_id)
     await PolicyService().authorize(
         current_user,
         Permissions.DOCUMENT_UPLOAD,
@@ -3240,11 +3371,13 @@ async def request_draft_for_document(
     controller: DocumentController = Depends(get_document_controller),
     current_user: CurrentUser = Depends(get_current_user),
     policy: PolicyService = Depends(get_policy_service),
+    selection: ActiveScope = Depends(active_scope),
 ):
     """
     Initialize a draft letter request for a document.
     Returns document details to prefill the letter initiation form.
     """
+    await _hold_document(selection, id)
     try:
         # Get the document
         document = await controller.document_service.get_document_by_id(id)

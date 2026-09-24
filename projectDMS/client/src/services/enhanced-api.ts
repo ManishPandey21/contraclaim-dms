@@ -590,13 +590,24 @@ class EnhancedApiService {
     if (response.status === 403) {
       // Permission denied should surface a clear message to the UI
       let detail = "Permission denied";
+      let structured: any = null;
       try {
         const parsed = await response.json();
-        detail = parsed?.detail || parsed?.message || detail;
+        // A scope refusal (`context_forbidden`) carries {code, message}: show the
+        // message, keep the code for callers, never render "[object Object]".
+        if (parsed?.detail && typeof parsed.detail === "object") {
+          structured = parsed.detail;
+          detail = structured.message || detail;
+        } else {
+          detail = parsed?.detail || parsed?.message || detail;
+        }
       } catch {
         // ignore parse errors
       }
-      throw new Error(detail);
+      const error = new Error(detail) as Error & { status?: number; detail?: any };
+      error.status = 403;
+      if (structured) error.detail = structured;
+      throw error;
     }
 
     if (!response.ok) {

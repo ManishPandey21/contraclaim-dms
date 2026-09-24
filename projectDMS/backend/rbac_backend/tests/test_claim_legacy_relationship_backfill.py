@@ -421,6 +421,7 @@ async def test_forward_and_reverse_views_agree_after_backfill(monkeypatch) -> No
     from rbac_backend.core.database import get_db
     from rbac_backend.core.security import get_current_user
     from rbac_backend.routers.document_relationships import router as relationship_router
+    from rbac_backend.tests.selection_fixtures import pin_selection
     from rbac_backend.tests.test_claim_document_relationships import _user
 
     db = _seed_claim_legacy_array()
@@ -430,6 +431,7 @@ async def test_forward_and_reverse_views_agree_after_backfill(monkeypatch) -> No
     app.include_router(relationship_router, prefix="/api")
     app.dependency_overrides[get_db] = lambda: db
     app.dependency_overrides[get_current_user] = _user
+    pin_selection(app, db, "org-1", "project-1")
     transport = httpx.ASGITransport(app=app)
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:

@@ -52,6 +52,7 @@ from rbac_backend.services.contract_migration_reconciliation import (  # noqa: E
 )
 
 CANDIDATE = "contract-master-migration:contracts:doc-1"
+ORG = "org-1"
 
 
 @asynccontextmanager
@@ -65,7 +66,7 @@ async def _database():
                 "_id": CANDIDATE,
                 "candidate_id": CANDIDATE,
                 "canonical_document_id": "doc-1",
-                "organization_id": "org-1",
+                "organization_id": ORG,
                 "module": "contracts",
                 "scope_state": ScopeClassificationState.AMBIGUOUS.value,
                 "type_state": TypeClassificationState.TYPE_UNKNOWN.value,
@@ -93,11 +94,11 @@ def test_two_operators_cannot_hold_the_same_candidate():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            first = await service.claim(CANDIDATE, operator_id="alice")
+            first = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             assert isinstance(first, CandidateClaim)
 
             with pytest.raises(ClaimUnavailable):
-                await service.claim(CANDIDATE, operator_id="bob")
+                await service.claim(CANDIDATE, organization_id=ORG, operator_id="bob")
 
     asyncio.run(scenario())
 
@@ -109,7 +110,7 @@ def test_concurrent_claims_produce_exactly_one_winner():
             await service.ensure_indexes()
 
             results = await asyncio.gather(
-                *(service.claim(CANDIDATE, operator_id=f"operator-{i}") for i in range(8)),
+                *(service.claim(CANDIDATE, organization_id=ORG, operator_id=f"operator-{i}") for i in range(8)),
                 return_exceptions=True,
             )
             winners = [r for r in results if isinstance(r, CandidateClaim)]
@@ -138,7 +139,7 @@ def test_lease_expiry_changes_no_legal_state_at_all():
         async with _database() as db:
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
-            await service.claim(CANDIDATE, operator_id="alice")
+            await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
 
             before_legal = await _legal_snapshot(db)
             before_row = await db[RECONCILIATION_COLLECTION].find_one({"_id": CANDIDATE})
@@ -164,10 +165,10 @@ def test_lease_expiry_has_exactly_one_effect_another_operator_may_claim():
         async with _database() as db:
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
-            await service.claim(CANDIDATE, operator_id="alice")
+            await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
 
             with pytest.raises(ClaimUnavailable):
-                await service.claim(CANDIDATE, operator_id="bob")
+                await service.claim(CANDIDATE, organization_id=ORG, operator_id="bob")
 
             await db[ADJUDICATION_CLAIMS_COLLECTION].update_one(
                 {"candidate_id": CANDIDATE},
@@ -175,7 +176,7 @@ def test_lease_expiry_has_exactly_one_effect_another_operator_may_claim():
             )
             await service.expire_stale_claims()
 
-            reclaimed = await service.claim(CANDIDATE, operator_id="bob")
+            reclaimed = await service.claim(CANDIDATE, organization_id=ORG, operator_id="bob")
             assert reclaimed.operator_id == "bob"
 
     asyncio.run(scenario())
@@ -208,19 +209,21 @@ def test_conflicting_operator_classifications_fail_closed():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
+            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             await service.adjudicate(
                 alice,
+                organization_id=ORG,
                 scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                 contract_document_type=ContractDocumentType.GENERAL_CONDITIONS,
                 reason="volume 1 is the GCC",
             )
             await service.release(alice)
 
-            bob = await service.claim(CANDIDATE, operator_id="bob")
+            bob = await service.claim(CANDIDATE, organization_id=ORG, operator_id="bob")
             with pytest.raises(ConflictingAdjudication) as excinfo:
                 await service.adjudicate(
                     bob,
+                    organization_id=ORG,
                     scope_state=ScopeClassificationState.PROJECT_SCOPE_CONFIRMED,
                     contract_document_type=ContractDocumentType.PARTICULAR_CONDITIONS,
                     reason="I think it is the PCC",
@@ -244,10 +247,14 @@ def test_an_identical_re_adjudication_is_not_a_conflict():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
             for _ in range(2):
+                # A recorded decision releases its lease, so each decision is
+                # made under its own claim; the second, identical one is still
+                # not a disagreement.
+                alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
                 await service.adjudicate(
                     alice,
+                    organization_id=ORG,
                     scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                     contract_document_type=ContractDocumentType.GENERAL_CONDITIONS,
                     reason="volume 1 is the GCC",
@@ -262,9 +269,10 @@ def test_adjudication_records_actor_and_reason():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
+            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             await service.adjudicate(
                 alice,
+                organization_id=ORG,
                 scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                 contract_document_type=ContractDocumentType.GENERAL_CONDITIONS,
                 reason="volume 1 is the GCC",
@@ -284,12 +292,13 @@ def test_adjudication_without_a_live_claim_is_refused():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
+            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             await service.release(alice)
 
             with pytest.raises(ClaimUnavailable):
                 await service.adjudicate(
                     alice,
+                    organization_id=ORG,
                     scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                     contract_document_type=ContractDocumentType.GENERAL_CONDITIONS,
                     reason="stale claim",
@@ -305,9 +314,10 @@ def test_adjudication_writes_no_authoritative_collection():
             await service.ensure_indexes()
             before = await _legal_snapshot(db)
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
+            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             await service.adjudicate(
                 alice,
+                organization_id=ORG,
                 scope_state=ScopeClassificationState.ORG_SCOPE_CONFIRMED,
                 contract_document_type=ContractDocumentType.GENERAL_CONDITIONS,
                 reason="volume 1 is the GCC",
@@ -329,10 +339,11 @@ def test_an_invalid_candidate_is_terminal_and_never_downgraded():
             service = ContractMigrationAdjudication(db)
             await service.ensure_indexes()
 
-            alice = await service.claim(CANDIDATE, operator_id="alice")
+            alice = await service.claim(CANDIDATE, organization_id=ORG, operator_id="alice")
             with pytest.raises(ConflictingAdjudication):
                 await service.adjudicate(
                     alice,
+                    organization_id=ORG,
                     scope_state=ScopeClassificationState.AMBIGUOUS,
                     contract_document_type=None,
                     reason="let us reconsider",

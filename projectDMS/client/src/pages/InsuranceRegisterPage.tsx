@@ -75,6 +75,8 @@ import {
 import type { DocumentItem } from "@/services/documents-api";
 import type { InsuranceUploadRole } from "@/services/insurance-api";
 import useHasPermission from "@/hooks/useHasPermission";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 
 const STATUSES = ["active", "expiring_soon", "expired"];
 const fmtDate = (d?: string | null) => (d ? new Date(d).toLocaleDateString() : "—");
@@ -143,7 +145,8 @@ const InsuranceRegisterPage: React.FC = () => {
   const [summary, setSummary] = useState<InsuranceSummaryDTO | null>(null);
   const [projects, setProjects] = useState<{ id: string; name: string }[]>([]);
   const [types, setTypes] = useState<InsuranceTypeDTO[]>([]);
-  const [projectFilter, setProjectFilter] = useState("all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope();
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
   const [companyFilter, setCompanyFilter] = useState("");
@@ -179,14 +182,14 @@ const InsuranceRegisterPage: React.FC = () => {
       setItems(await getInsurance(params));
       setSummary(await getInsuranceSummary(scoped));
       setAlerts(await getInsuranceAlerts(scoped));
-    } catch {
-      toast.error("Failed to load insurance policies");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "insurance policy") || "Failed to load insurance policies");
     } finally {
       setLoaded(true);
     }
   }, [projectFilter, statusFilter, typeFilter, companyFilter, search]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { if (!tenantLoading) void load(); }, [load, tenantLoading]);
 
   // Server-side canonical search. No client-side filtering of a preloaded list:
   // the Document library is far larger than any page we could hold.
@@ -307,7 +310,7 @@ const InsuranceRegisterPage: React.FC = () => {
     }
     void getInsuranceById(deepLinkId)
       .then(openEdit)
-      .catch(() => toast.error("Linked insurance policy could not be opened"));
+      .catch((error) => toast.error(scopeRefusalMessage(error, "insurance policy") || "Linked insurance policy could not be opened"));
   }, [deepLinkId, items, loaded]);
 
   const buildPayload = (): InsurancePayload => ({
@@ -466,7 +469,7 @@ const InsuranceRegisterPage: React.FC = () => {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-48"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>

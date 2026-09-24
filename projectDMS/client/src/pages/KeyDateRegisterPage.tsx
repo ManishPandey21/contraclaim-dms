@@ -66,6 +66,8 @@ import {
   updateMilestone,
 } from "@/services/key-dates-api";
 import { enhancedApi } from "@/services/enhanced-api";
+import { useRegisterProjectScope } from "@/hooks/useRegisterProjectScope";
+import { scopeRefusalMessage } from "@/services/active-scope";
 import { statusColor, statusLabel, alertText, achievementText, maxRevisionCount, revisionAt } from "@/lib/key-date-helpers";
 import { formatDate } from "@/utils/dateFormat";
 
@@ -112,7 +114,8 @@ const KeyDateRegisterPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const focusSubmissionId = searchParams.get("submission_id");
   const focusDeterminationId = searchParams.get("determination_id");
-  const [projectFilter, setProjectFilter] = useState(() => searchParams.get("project_id") || "all");
+  // CL-4A: the navbar project pins this filter (useRegisterProjectScope).
+  const { projectFilter, setProjectFilter, projectLocked, tenantLoading } = useRegisterProjectScope(searchParams.get("project_id") || "all");
   const [statusFilter, setStatusFilter] = useState("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [csvOpen, setCsvOpen] = useState(false);
@@ -129,14 +132,14 @@ const KeyDateRegisterPage: React.FC = () => {
       if (statusFilter !== "all") params.status = statusFilter;
       setItems(await getMilestones(params));
       setDash(await getKeyDateDashboard(projectFilter !== "all" ? { project_id: projectFilter } : undefined));
-    } catch {
-      toast.error("Failed to load key dates");
+    } catch (error) {
+      toast.error(scopeRefusalMessage(error, "key date") || "Failed to load key dates");
     }
   }, [projectFilter, statusFilter]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (!tenantLoading) void load();
+  }, [load, tenantLoading]);
 
   useEffect(() => {
     let active = true;
@@ -324,7 +327,7 @@ const KeyDateRegisterPage: React.FC = () => {
         <CardHeader>
           <CardTitle>Register</CardTitle>
           <div className="flex flex-wrap gap-3 pt-3">
-            <Select value={projectFilter} onValueChange={setProjectFilter}>
+            <Select value={projectFilter} onValueChange={setProjectFilter} disabled={projectLocked}>
               <SelectTrigger className="w-56"><SelectValue placeholder="Project" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All projects</SelectItem>
