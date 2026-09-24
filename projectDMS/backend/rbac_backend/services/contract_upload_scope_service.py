@@ -27,12 +27,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, Optional, Sequence, Tuple
 
+from fastapi import status
+from pymongo.errors import DuplicateKeyError
+
 from ..core.permissions import Permissions
 from ..models.contract_upload_scope import (
     ContractUploadScope,
     OrganizationScopeUpload,
     ProjectScopeUpload,
 )
+from ..utils.error_handler import ContractError
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
     ScopeClassificationState,
@@ -44,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ORGANIZATION_SCOPE_UPLOAD_CAPABILITIES",
+    "CandidateScopeConflict",
     "ContractUploadScopeService",
     "ScopeAuthorisationDenied",
     "UnknownProjectAnchor",
@@ -62,6 +67,25 @@ ORGANIZATION_SCOPE_UPLOAD_CAPABILITIES: Tuple[str, ...] = (
 
 class ScopeAuthorisationDenied(Exception):
     """The actor may not create a document at the requested scope."""
+
+
+class CandidateScopeConflict(ContractError):
+    """The document already has a candidate this upload may not redefine.
+
+    Candidate identity is deterministic (module + canonical document), so a
+    retried or repeated upload reaches the existing row. Creation is insert-only:
+    an existing row keeps its organisation, scope, project anchor and every later
+    decision (type, adjudication, fingerprint, promotion), and a request for a
+    different scope - or from another organisation - is refused rather than
+    written or pretended. The message names no organisation.
+    """
+
+    def __init__(self, candidate_id: str) -> None:
+        super().__init__(
+            f"candidate {candidate_id} is already recorded with a scope this upload "
+            "does not match; nothing was changed",
+            status.HTTP_409_CONFLICT,
+        )
 
 
 class UnknownProjectAnchor(Exception):
@@ -143,12 +167,21 @@ class ContractUploadScopeService:
         selected_contract_id: Optional[str] = None,
         module: str = "contracts",
     ) -> UploadedCandidate:
-        """Record the scope decision against a canonical Document.
+        """Record the scope decision against a canonical Document - once.
 
         ``selected_contract_id`` is captured as operational context only. It is
         never turned into applicability: the uploader chose a place to work, not
         a legal fact about which contract this instrument governs.
+
+        Insert-only. ``candidate.project_id`` is a trust anchor
+        (``contract_candidate_authority``), so an existing row is never rewritten:
+        the write is ``$setOnInsert`` under a filter pinned to the organisation,
+        and the answer is read back from what is stored. An identical replay
+        returns the stored scope; anything else is ``CandidateScopeConflict``.
         """
+        # Normalised once: the anchor check, the filter, the stored field and the
+        # answer all use the same string.
+        organization_id = str(organization_id)
         if isinstance(scope, ProjectScopeUpload):
             await self._require_project_anchor(scope.project_id, organization_id)
             scope_state = ScopeClassificationState.PROJECT_SCOPE_CONFIRMED
@@ -163,33 +196,56 @@ class ContractUploadScopeService:
         candidate_id = candidate_identity(
             module=module, canonical_document_id=canonical_document_id
         )
-        await self._db[RECONCILIATION_COLLECTION].update_one(
-            {"_id": candidate_id},
-            {
-                "$set": {
-                    "candidate_id": candidate_id,
-                    "canonical_document_id": canonical_document_id,
-                    "organization_id": organization_id,
-                    "module": module,
-                    "scope_state": scope_state.value,
-                    "scope_level": scope.scope_level,
-                    "project_id": project_id,
-                    # Type is per file and nobody has decided it yet.
-                    "type_state": TypeClassificationState.TYPE_UNKNOWN.value,
-                    # Operational context. Never applicability.
-                    "selected_contract_id": selected_contract_id,
-                    "uploaded_by": actor_id,
-                    "scope_recorded_at": datetime.now(timezone.utc),
-                }
-            },
-            upsert=True,
-        )
+        pinned = {"_id": candidate_id, "organization_id": organization_id}
+        try:
+            await self._db[RECONCILIATION_COLLECTION].update_one(
+                pinned,
+                {
+                    # Only ever on insert. _id and organization_id come from the
+                    # filter, so they cannot be rewritten either.
+                    "$setOnInsert": {
+                        "candidate_id": candidate_id,
+                        "canonical_document_id": canonical_document_id,
+                        "module": module,
+                        "scope_state": scope_state.value,
+                        "scope_level": scope.scope_level,
+                        "project_id": project_id,
+                        # Type is per file and nobody has decided it yet.
+                        "type_state": TypeClassificationState.TYPE_UNKNOWN.value,
+                        # Operational context of the first upload. Never
+                        # applicability, and never overwritten by a later one.
+                        "selected_contract_id": selected_contract_id,
+                        "uploaded_by": actor_id,
+                        "scope_recorded_at": datetime.now(timezone.utc),
+                    }
+                },
+                upsert=True,
+            )
+        except DuplicateKeyError as exc:
+            # The id exists, but not in this organisation: the upsert tried to
+            # insert a second row with the same _id. Refused - never retried with
+            # a wider filter, never "fixed" by updating on _id alone.
+            raise CandidateScopeConflict(candidate_id) from exc
+
+        stored = await self._db[RECONCILIATION_COLLECTION].find_one(pinned)
+        if stored is None:  # pragma: no cover - deleted between write and read
+            raise CandidateScopeConflict(candidate_id)
+        if (
+            stored.get("canonical_document_id") != canonical_document_id
+            or stored.get("module") != module
+            or stored.get("scope_level") != scope.scope_level
+            or (stored.get("project_id") or None) != project_id
+        ):
+            # Same organisation, a different decision already recorded (or none,
+            # on a materialised legacy row): the stored anchor stands, and the
+            # caller is told rather than handed the scope they asked for.
+            raise CandidateScopeConflict(candidate_id)
         return UploadedCandidate(
             candidate_id=candidate_id,
-            canonical_document_id=canonical_document_id,
-            organization_id=organization_id,
-            scope_level=scope.scope_level,
-            project_id=project_id,
+            canonical_document_id=str(stored["canonical_document_id"]),
+            organization_id=str(stored["organization_id"]),
+            scope_level=str(stored["scope_level"]),
+            project_id=stored.get("project_id"),
         )
 
     async def create_batch_candidates(
@@ -201,7 +257,13 @@ class ContractUploadScopeService:
         actor_id: str,
         selected_contract_id: Optional[str] = None,
     ) -> Tuple[UploadedCandidate, ...]:
-        """One scope decision, applied identically to every file in the batch."""
+        """One scope decision, applied identically to every file in the batch.
+
+        Each file goes through ``create_candidate`` - the one insert-only write -
+        so a batch can no more rewrite an existing candidate than a single upload
+        can. Not atomic: files before a conflicting one are recorded, and the
+        conflict is raised for the caller to report.
+        """
         created = []
         for document_id in canonical_document_ids:
             created.append(
@@ -217,7 +279,7 @@ class ContractUploadScopeService:
 
     async def _require_project_anchor(self, project_id: str, organization_id: str) -> None:
         project = await self._db["projects"].find_one(
-            {"_id": project_id, "organization_id": organization_id}
+            {"_id": project_id, "organization_id": str(organization_id)}
         )
         if project is None:
             raise UnknownProjectAnchor(

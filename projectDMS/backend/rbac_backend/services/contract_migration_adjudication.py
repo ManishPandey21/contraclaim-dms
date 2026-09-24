@@ -121,10 +121,9 @@ class ContractMigrationAdjudication:
         the caller was authorised for - *before* the claim row is written, so a
         candidate of another organisation, or none at all, never acquires one.
         This read is not the race the unique insert decides: a candidate's
-        organisation is written once, by ``materialise_inventory``'s insert. (The
-        only other writer, ``ContractUploadScopeService.create_candidate``, upserts
-        it but has no production caller; it must not gain one without a filter
-        that pins the organisation.)
+        organisation is written once: by ``materialise_inventory``'s insert, or by
+        ``ContractUploadScopeService.create_candidate``'s insert-only upsert, whose
+        filter pins the organisation.
         """
         candidate = await self._db[RECONCILIATION_COLLECTION].find_one(
             scoped_candidate_filter(candidate_id, organization_id), {"_id": 1}
