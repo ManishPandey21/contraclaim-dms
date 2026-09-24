@@ -2763,3 +2763,73 @@ def test_reclaiming_your_own_lease_does_not_extend_it() -> None:
             assert after["owner_token"] != first.json()["owner_token"]
 
     _run(scenario)
+
+
+# --------------------------------------------------------------------------- #
+# capabilities mirror the routes they describe, under the current selection
+# --------------------------------------------------------------------------- #
+
+CAPABILITY_MATRIX = {
+    # (persona, selected project or "org") -> expected flags
+    ("project_admin_a1", PROJ_A1): {
+        "can_review_migration": True,
+        "can_promote": True,
+        "can_manage_applicability": True,
+        "can_manage_classification": True,
+        "can_manage_organization_migration": False,
+        "can_upload_organization_scope": False,
+    },
+    ("project_admin_a1", "org"): {
+        # Nothing it may act on is actionable without its project selected.
+        "can_review_migration": True,
+        "can_promote": False,
+        "can_manage_applicability": False,
+        "can_manage_classification": False,
+        "can_manage_organization_migration": False,
+    },
+    ("org_admin", "org"): {
+        "can_review_migration": True,
+        "can_promote": True,
+        "can_manage_applicability": False,
+        "can_manage_classification": True,
+        "can_manage_organization_migration": True,
+        "can_upload_organization_scope": True,
+    },
+    ("org_admin", PROJ_A1): {
+        "can_review_migration": True,
+        "can_promote": True,
+        "can_manage_applicability": True,
+        "can_manage_classification": True,
+        "can_manage_organization_migration": True,
+    },
+    ("project_user", PROJ_A1): {
+        "can_review_migration": False,
+        "can_promote": False,
+        "can_manage_classification": False,
+        "can_manage_organization_migration": False,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    "persona,selected", sorted(CAPABILITY_MATRIX), ids=lambda value: str(value)
+)
+def test_capabilities_match_the_route_gates(persona, selected) -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            selection = (
+                {"selected_org": ORG_A} if selected == "org" else {"selected": selected}
+            )
+            response = await env.call(
+                persona,
+                "GET",
+                "/api/contract-master/capabilities",
+                params={"organization_id": ORG_A},
+                **selection,
+            )
+            assert response.status_code == 200, response.text
+            body = response.json()
+            for flag, expected in CAPABILITY_MATRIX[(persona, selected)].items():
+                assert body[flag] is expected, (flag, body)
+
+    _run(scenario)

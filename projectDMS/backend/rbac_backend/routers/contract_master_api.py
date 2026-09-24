@@ -106,7 +106,7 @@ from ..services.contract_upload_scope_service import (
 )
 from ..services.policy_service import PolicyService
 from ..services.publication_policy import is_consumable, resolve_canonical_document
-from ..utils.error_handler import ContractError
+from ..utils.error_handler import BaseDomainError, ContractError
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +224,10 @@ class PromotionCommand(BaseModel):
 
 
 class CapabilityResponse(BaseModel):
+    """Each flag: may this actor, under the CURRENT navbar selection, act on some
+    record through that route. Answered by the same questions the route asks, so
+    a flag is never true for a route that would refuse everything."""
+
     can_browse_catalogue: bool
     can_view_instruments: bool
     can_manage_classification: bool
@@ -232,6 +236,9 @@ class CapabilityResponse(BaseModel):
     can_upload_project_scope: bool
     can_review_migration: bool
     can_promote: bool
+    #: Inventory, materialise, unanchored candidates and organisation-scope
+    #: decisions: organisation-wide scope, which no permission expresses.
+    can_manage_organization_migration: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -1176,6 +1183,9 @@ async def get_capabilities(
     organization_id = selected_org or organization_id
 
     async def may(permission, *, scope_project_id=None) -> bool:
+        # Only a refusal is an answer here. An outage, a conflict, an expired
+        # session or a bug is not "you may not": it propagates as what it is,
+        # rather than greying out the UI as though the caller lacked authority.
         try:
             await policy.authorize(
                 current_user,
@@ -1186,9 +1196,14 @@ async def get_capabilities(
                 audit=False,
             )
             return True
-        except Exception:
-            # A denial is an answer, not an error, at this endpoint.
-            return False
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_403_FORBIDDEN:
+                return False
+            raise
+        except BaseDomainError as exc:
+            if getattr(exc, "http_status", None) == status.HTTP_403_FORBIDDEN:
+                return False
+            raise
 
     can_upload = await may(Permissions.DOCUMENT_UPLOAD, scope_project_id=project_id)
     # Organisation-scope acts need organisation-wide scope, which no permission
@@ -1202,14 +1217,27 @@ async def get_capabilities(
             organisation_upload = False
             break
 
+    # The reconciliation and instrument routes all gate membership with MANAGE
+    # at the organisation, then act per record: a project's record at its
+    # project (which must be the selected one), an organisation-level record with
+    # organisation-wide scope. The flags ask exactly that.
     can_manage = await may(Permissions.CONTRACT_MASTER_MANAGE)
+    manage_selected_project = bool(project_id) and await may(
+        Permissions.CONTRACT_MASTER_MANAGE, scope_project_id=project_id
+    )
+    manage_organisation_level = can_manage and organization_wide
+    act_on_some_record = can_manage and (manage_selected_project or manage_organisation_level)
     return CapabilityResponse(
         can_browse_catalogue=await may(Permissions.CONTRACT_CATALOGUE_BROWSE),
         can_view_instruments=await may(Permissions.CONTRACT_MASTER_VIEW),
-        can_manage_classification=can_manage,
-        can_manage_applicability=await may(Permissions.CONTRACT_APPLICABILITY_MANAGE),
+        can_manage_classification=act_on_some_record,
+        # The applicability body names a project, which must be the selected one.
+        can_manage_applicability=bool(project_id)
+        and await may(Permissions.CONTRACT_APPLICABILITY_MANAGE, scope_project_id=project_id),
         can_upload_organization_scope=organisation_upload,
         can_upload_project_scope=can_upload,
+        # The queue is 200 bounded to the caller's projects for any MANAGE holder.
         can_review_migration=can_manage,
-        can_promote=can_manage,
+        can_promote=act_on_some_record,
+        can_manage_organization_migration=manage_organisation_level,
     )
