@@ -110,22 +110,39 @@ def test_an_organisation_scope_outage_surfaces(monkeypatch):
     assert response.status_code == 500, response.text
 
 
+def test_a_selection_refusal_inside_authorize_is_not_read_as_no_permission(monkeypatch):
+    from rbac_backend.core.tenant_context import CONTEXT_FORBIDDEN, TenantContextError
+
+    _authorize_raising(
+        monkeypatch,
+        TenantContextError(status_code=403, code=CONTEXT_FORBIDDEN, message="elsewhere"),
+    )
+    response = _client().get(PATH)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == CONTEXT_FORBIDDEN
+
+
 def test_the_helper_names_no_broad_handler():
     """Guard: ``may()`` must not reacquire an ``except Exception``."""
     import ast
     import inspect
+
+    def names(node):
+        if node is None:
+            return {"<bare>"}
+        if isinstance(node, ast.Tuple):
+            return set().union(*(names(item) for item in node.elts))
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Attribute):
+            return {node.attr}
+        return set()
 
     tree = ast.parse(inspect.getsource(contract_master_api.get_capabilities))
     broad = [
         node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.ExceptHandler)
-        and (
-            node.type is None
-            or (
-                isinstance(node.type, ast.Name)
-                and node.type.id in {"Exception", "BaseException"}
-            )
-        )
+        and names(node.type) & {"<bare>", "Exception", "BaseException"}
     ]
     assert broad == []

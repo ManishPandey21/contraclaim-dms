@@ -2770,7 +2770,39 @@ def test_reclaiming_your_own_lease_does_not_extend_it() -> None:
 # --------------------------------------------------------------------------- #
 
 CAPABILITY_MATRIX = {
-    # (persona, selected project or "org") -> expected flags
+    # (persona, selection) -> expected flags. Selection: a project id, "org"
+    # (only X-Org-Id), None (nothing selected), or "org+query" (only X-Org-Id,
+    # with ?project_id=PROJ_A1 in the query - a filter, never the selection).
+    ("superadmin", None): {
+        # Nothing selected: every record route and write answers 400.
+        "can_review_migration": True,
+        "can_view_instruments": False,
+        "can_promote": False,
+        "can_manage_classification": False,
+        "can_manage_applicability": False,
+        "can_manage_organization_migration": False,
+    },
+    ("org_admin", None): {
+        "can_review_migration": True,
+        "can_view_instruments": False,
+        "can_promote": False,
+        "can_manage_classification": False,
+        "can_manage_organization_migration": False,
+    },
+    ("project_admin_a1", "org+query"): {
+        # The query names A1, but the navbar selected only the organisation.
+        "can_promote": False,
+        "can_manage_classification": False,
+        "can_manage_applicability": False,
+    },
+    ("project_user", PROJ_A1): {
+        "can_review_migration": False,
+        "can_promote": False,
+        "can_manage_classification": False,
+        "can_manage_applicability": False,
+        "can_manage_organization_migration": False,
+        "can_upload_organization_scope": False,
+    },
     ("project_admin_a1", PROJ_A1): {
         "can_review_migration": True,
         "can_promote": True,
@@ -2802,29 +2834,29 @@ CAPABILITY_MATRIX = {
         "can_manage_classification": True,
         "can_manage_organization_migration": True,
     },
-    ("project_user", PROJ_A1): {
-        "can_review_migration": False,
-        "can_promote": False,
-        "can_manage_classification": False,
-        "can_manage_organization_migration": False,
-    },
 }
 
 
 @pytest.mark.parametrize(
-    "persona,selected", sorted(CAPABILITY_MATRIX), ids=lambda value: str(value)
+    "persona,selected",
+    sorted(CAPABILITY_MATRIX, key=lambda key: (key[0], str(key[1]))),
+    ids=lambda value: str(value),
 )
 def test_capabilities_match_the_route_gates(persona, selected) -> None:
     async def scenario() -> None:
         async with _env() as env:
-            selection = (
-                {"selected_org": ORG_A} if selected == "org" else {"selected": selected}
-            )
+            params = {"organization_id": ORG_A}
+            if selected in ("org", "org+query"):
+                selection = {"selected_org": ORG_A}
+                if selected == "org+query":
+                    params["project_id"] = PROJ_A1
+            else:
+                selection = {"selected": selected}
             response = await env.call(
                 persona,
                 "GET",
                 "/api/contract-master/capabilities",
-                params={"organization_id": ORG_A},
+                params=params,
                 **selection,
             )
             assert response.status_code == 200, response.text

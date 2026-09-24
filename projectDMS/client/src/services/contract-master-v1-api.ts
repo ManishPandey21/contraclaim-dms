@@ -57,6 +57,8 @@ export interface ContractMasterCapabilities extends ContractUploadCapabilities {
   can_manage_applicability: boolean;
   can_review_migration: boolean;
   can_promote: boolean;
+  /** Materialise, unanchored candidates, organisation-scope decisions. */
+  can_manage_organization_migration?: boolean;
 }
 
 export type QueryMode = "current_state" | "historical";

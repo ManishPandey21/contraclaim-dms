@@ -120,6 +120,15 @@ export default function ContractMasterWorkspacePage({
   );
 
   if (!capabilities) {
+    // A capabilities failure is an outage, not "no permission": show it rather
+    // than waiting forever.
+    if (error) {
+      return (
+        <p className="m-6 rounded bg-rose-50 p-3 text-sm text-rose-800" role="alert">
+          {error}
+        </p>
+      );
+    }
     return (
       <div className="p-6" data-testid="workspace-loading">
         Loading capabilities…

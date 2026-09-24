@@ -37,6 +37,8 @@ from ..models.contract_upload_scope import (
     ProjectScopeUpload,
 )
 from ..utils.error_handler import ContractError
+from .publication_policy import resolve_canonical_document
+from .scope_service import ScopeService
 from .contract_migration_reconciliation import (
     RECONCILIATION_COLLECTION,
     ScopeClassificationState,
@@ -182,10 +184,34 @@ class ContractUploadScopeService:
         # Normalised once: the anchor check, the filter, the stored field and the
         # answer all use the same string.
         organization_id = str(organization_id)
+        canonical_document_id = str(canonical_document_id)
+        candidate_id = candidate_identity(
+            module=module, canonical_document_id=canonical_document_id
+        )
+
+        # The Document must be this organisation's. Without it an organisation
+        # could claim another's deterministic candidate id first - and, creation
+        # being insert-only, keep it: the owner's own upload would then conflict
+        # and its inventory would skip the id. Same refusal for "missing" and
+        # "someone else's", so the answer discloses neither.
+        document = await resolve_canonical_document(self._db, canonical_document_id)
+        document_org = str(
+            (document or {}).get("organization_id") or (document or {}).get("organizationId") or ""
+        )
+        if document is None or document_org != organization_id:
+            raise CandidateScopeConflict(candidate_id)
+        document_project = str(
+            document.get("project_id") or document.get("projectId") or ""
+        )
+
         if isinstance(scope, ProjectScopeUpload):
             await self._require_project_anchor(scope.project_id, organization_id)
+            if document_project and document_project != str(scope.project_id):
+                # The Document already belongs to another project; the anchor
+                # would be conflicted from birth.
+                raise CandidateScopeConflict(candidate_id)
             scope_state = ScopeClassificationState.PROJECT_SCOPE_CONFIRMED
-            project_id: Optional[str] = scope.project_id
+            project_id: Optional[str] = str(scope.project_id)
         else:
             # An affirmative organisation decision by an authorised actor IS
             # confirmation - unlike the legacy corpus, where the same state was
@@ -193,9 +219,6 @@ class ContractUploadScopeService:
             scope_state = ScopeClassificationState.ORG_SCOPE_CONFIRMED
             project_id = None
 
-        candidate_id = candidate_identity(
-            module=module, canonical_document_id=canonical_document_id
-        )
         pinned = {"_id": candidate_id, "organization_id": organization_id}
         try:
             await self._db[RECONCILIATION_COLLECTION].update_one(
@@ -222,19 +245,30 @@ class ContractUploadScopeService:
                 upsert=True,
             )
         except DuplicateKeyError as exc:
-            # The id exists, but not in this organisation: the upsert tried to
-            # insert a second row with the same _id. Refused - never retried with
-            # a wider filter, never "fixed" by updating on _id alone.
-            raise CandidateScopeConflict(candidate_id) from exc
+            key = (getattr(exc, "details", None) or {}).get("keyPattern")
+            if key not in (None, {"_id": 1}):
+                raise
+            # Either an identical create won a race to insert this id in this
+            # organisation (the pinned upsert does not converge on its own, since
+            # its filter is not the unique key), or the id exists under another
+            # organisation. Re-read with the SAME pinned filter - never wider -
+            # and let the comparison below decide; no row here means the id is
+            # held elsewhere.
+            if await self._db[RECONCILIATION_COLLECTION].find_one(pinned) is None:
+                raise CandidateScopeConflict(candidate_id) from exc
 
         stored = await self._db[RECONCILIATION_COLLECTION].find_one(pinned)
         if stored is None:  # pragma: no cover - deleted between write and read
             raise CandidateScopeConflict(candidate_id)
+        stored_project = str(stored.get("project_id") or "") or None
         if (
-            stored.get("canonical_document_id") != canonical_document_id
+            str(stored.get("canonical_document_id") or "") != canonical_document_id
             or stored.get("module") != module
             or stored.get("scope_level") != scope.scope_level
-            or (stored.get("project_id") or None) != project_id
+            or stored_project != project_id
+            # A later decision (AMBIGUOUS, INVALID, the other scope) stands; the
+            # upload's scope is not the candidate's scope any more.
+            or stored.get("scope_state") != scope_state.value
         ):
             # Same organisation, a different decision already recorded (or none,
             # on a materialised legacy row): the stored anchor stands, and the
@@ -245,7 +279,7 @@ class ContractUploadScopeService:
             canonical_document_id=str(stored["canonical_document_id"]),
             organization_id=str(stored["organization_id"]),
             scope_level=str(stored["scope_level"]),
-            project_id=stored.get("project_id"),
+            project_id=stored_project,
         )
 
     async def create_batch_candidates(
@@ -278,8 +312,15 @@ class ContractUploadScopeService:
         return tuple(created)
 
     async def _require_project_anchor(self, project_id: str, organization_id: str) -> None:
+        # Production projects are ObjectId-keyed with an ObjectId organisation;
+        # match both spellings of each, and only an active project.
+        owner = ScopeService.object_id_query(str(organization_id))
         project = await self._db["projects"].find_one(
-            {"_id": project_id, "organization_id": str(organization_id)}
+            {
+                "_id": ScopeService.object_id_query(str(project_id)),
+                "$or": [{"organization_id": owner}, {"organizationId": owner}],
+                "is_active": {"$ne": False},
+            }
         )
         if project is None:
             raise UnknownProjectAnchor(

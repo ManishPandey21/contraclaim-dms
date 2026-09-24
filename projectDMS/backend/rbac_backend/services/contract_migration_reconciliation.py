@@ -242,6 +242,20 @@ class ContractMigrationReconciliation:
                 # Already materialised: the identity is the candidate, so the row
                 # that exists IS this candidate. Left exactly as it is - never
                 # overwritten, so an adjudication or promotion on it survives.
+                existing = await self._db[RECONCILIATION_COLLECTION].find_one(
+                    {"_id": candidate.candidate_id}, {"organization_id": 1}
+                )
+                if existing is not None and str(existing.get("organization_id")) != str(
+                    candidate.organization_id
+                ):
+                    # Held under another organisation: never "done", never
+                    # silent. Nothing is rewritten; an operator must look.
+                    logger.warning(
+                        "reconciliation candidate %s is held by another organisation; "
+                        "not materialised for %s",
+                        candidate.candidate_id,
+                        candidate.organization_id,
+                    )
                 continue
             written += 1
         return written
