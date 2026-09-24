@@ -52,6 +52,7 @@ any of this runs.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -88,6 +89,8 @@ __all__ = [
     "resolve_candidate_anchor",
     "visible_candidates",
 ]
+
+logger = logging.getLogger(__name__)
 
 ORGANIZATION_SCOPE_REQUIRED = "Not authorized: organization_scope_required"
 
@@ -216,6 +219,20 @@ async def require_organization_wide_scope(
     if not await policy.scope_service.has_organization_wide_scope(
         current_user, organization_id=organization_id
     ):
+        # Refused before the policy call, so audit the refusal here - an attempt
+        # at organisation-wide authority from project tier is worth a record.
+        try:
+            await policy.audit_service.emit(
+                action="policy.authorize",
+                actor_id=getattr(current_user, "id", None),
+                resource_type="contract_reconciliation",
+                organization_id=organization_id,
+                result="deny",
+                reason="organization_scope_required",
+                metadata={"permission": permission},
+            )
+        except Exception:  # noqa: BLE001 - auditing must never turn a 403 into a 500
+            logger.warning("failed to audit organisation-scope refusal", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail=ORGANIZATION_SCOPE_REQUIRED
         )

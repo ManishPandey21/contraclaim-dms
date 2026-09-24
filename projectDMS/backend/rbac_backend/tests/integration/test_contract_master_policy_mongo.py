@@ -2441,3 +2441,200 @@ def test_an_unrelated_duplicate_key_is_not_reported_as_already_promoted() -> Non
             assert not isinstance(raised.value, (AlreadyPromoted, NotPromotable))
 
     _run(scenario)
+
+
+# --------------------------------------------------------------------------- #
+# verification round: leases, fingerprints, promotion inputs
+# --------------------------------------------------------------------------- #
+
+
+def test_organisation_scope_breaks_a_project_tier_lease() -> None:
+    """A project-tier lease never locks the organisation out of its own decision."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            held = await env.claim("project_admin_a1", CAND_P1_OPEN, ORG_A)
+            assert held.status_code == 200, held.text
+            taken = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            assert taken.status_code == 200, taken.text
+            (row,) = await env.claims()
+            assert row["operator_id"] == "user-org_admin"
+            assert row["organization_wide"] is True
+            # The project-tier holder cannot take it back, nor use its old token.
+            again = await env.claim("project_admin_a1", CAND_P1_OPEN, ORG_A)
+            assert again.status_code == 409, again.text
+            stale = await env.adjudicate(
+                "project_admin_a1",
+                CAND_P1_OPEN,
+                ORG_A,
+                held.json()["owner_token"],
+                scope_state="PROJECT_SCOPE_CONFIRMED",
+            )
+            assert stale.status_code == 409, stale.text
+
+    _run(scenario)
+
+
+def test_an_operator_can_reclaim_their_own_lease_after_a_refusal() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            first = await env.claim("project_admin_a1", CAND_P1_OPEN, ORG_A)
+            refused = await env.adjudicate(
+                "project_admin_a1",
+                CAND_P1_OPEN,
+                ORG_A,
+                first.json()["owner_token"],
+                scope_state="INVALID",
+            )
+            assert refused.status_code == 403, refused.text
+            second = await env.claim("project_admin_a1", CAND_P1_OPEN, ORG_A)
+            assert second.status_code == 200, second.text
+            assert second.json()["owner_token"] != first.json()["owner_token"]
+
+    _run(scenario)
+
+
+def test_a_lease_token_proves_nothing_for_another_operator() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            alice = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            before = await env.candidate(CAND_P1_OPEN)
+            response = await env.adjudicate(
+                "project_admin_a1",
+                CAND_P1_OPEN,
+                ORG_A,
+                alice.json()["owner_token"],
+                scope_state="PROJECT_SCOPE_CONFIRMED",
+            )
+            assert response.status_code == 409, response.text
+            assert "no longer live" in response.text
+            assert await env.candidate(CAND_P1_OPEN) == before
+
+    _run(scenario)
+
+
+def test_an_echoed_fingerprint_ties_the_decision_to_what_was_reviewed() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            review = await env.call(
+                "org_admin",
+                "GET",
+                "/api/contract-master/reconciliation/candidates",
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
+            )
+            rows = {row["candidate_id"]: row for row in review.json()["candidates"]}
+            seen = rows[CAND_P1_OPEN]["document_fingerprint"]
+            assert seen == "sha-doc-p1-open"
+
+            await env.db.documents.update_one(
+                {"_id": "doc-p1-open"},
+                {"$set": {"checksum": "sha-edited-after-review"}},
+            )
+            claimed = await env.claim("org_admin", CAND_P1_OPEN, ORG_A)
+            before = await env.candidate(CAND_P1_OPEN)
+            response = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_P1_OPEN}/adjudicate",
+                selected=PROJ_A1,
+                params={
+                    "organization_id": ORG_A,
+                    "owner_token": claimed.json()["owner_token"],
+                },
+                json={
+                    "scope_state": "PROJECT_SCOPE_CONFIRMED",
+                    "contract_document_type": "general_conditions",
+                    "reason": "reviewed",
+                    "expected_fingerprint": seen,
+                },
+            )
+            assert response.status_code == 409, response.text
+            assert "changed since it was reviewed" in response.text
+            assert await env.candidate(CAND_P1_OPEN) == before
+
+    _run(scenario)
+
+
+def test_production_sha256_fingerprints_are_recorded_and_enforced() -> None:
+    """Production Documents carry sha256, not checksum."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            await env.db.documents.update_one(
+                {"_id": "doc-a-open"},
+                {"$unset": {"checksum": ""}, "$set": {"sha256": "a" * 64}},
+            )
+            claimed = await env.claim("org_admin", CAND_A_OPEN, ORG_A)
+            decided = await env.adjudicate(
+                "org_admin", CAND_A_OPEN, ORG_A, claimed.json()["owner_token"]
+            )
+            assert decided.status_code == 200, decided.text
+            assert (await env.candidate(CAND_A_OPEN))["source_fingerprint"] == "a" * 64
+
+            # The fingerprint vanishes from the document: refused, nothing written.
+            await env.db.documents.update_one(
+                {"_id": "doc-a-open"}, {"$unset": {"sha256": ""}}
+            )
+            everything = await env.snapshot()
+            promoted = await env.promote("org_admin", CAND_A_OPEN, ORG_A)
+            assert promoted.status_code == 409, promoted.text
+            assert "no longer carries" in promoted.text
+            assert await env.snapshot() == everything
+
+    _run(scenario)
+
+
+def test_promotion_inputs_are_validated_not_dropped() -> None:
+    async def scenario() -> None:
+        async with _env() as env:
+            everything = await env.snapshot()
+            bad_date = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_P1_READY}/promote",
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
+                json={"contract_id": CONTRACT, "effective_from": "01/03/2026"},
+            )
+            assert bad_date.status_code == 422, bad_date.text
+            contract_at_org_scope = await env.promote(
+                "org_admin", CAND_A_READY, ORG_A, contract_id=CONTRACT
+            )
+            assert contract_at_org_scope.status_code == 422, contract_at_org_scope.text
+            assert "organisation-scoped" in contract_at_org_scope.text
+            assert await env.snapshot() == everything
+
+            dated = await env.call(
+                "org_admin",
+                "POST",
+                f"/api/contract-master/reconciliation/candidates/{CAND_P1_READY}/promote",
+                selected=PROJ_A1,
+                params={"organization_id": ORG_A},
+                json={"contract_id": CONTRACT, "effective_from": "2026-03-01"},
+            )
+            assert dated.status_code == 200, dated.text
+            event = await env.db["contract_document_applicability_events"].find_one({})
+            assert event["effective_at"] == "2026-03-01"
+
+    _run(scenario)
+
+
+def test_a_genuine_repeat_is_already_promoted_even_without_the_marker() -> None:
+    """The instrument exists but the promoted flag was lost: 409, never 422."""
+
+    async def scenario() -> None:
+        async with _env() as env:
+            assert (
+                await env.promote("org_admin", CAND_A_READY, ORG_A)
+            ).status_code == 200
+            await env.db[RECONCILIATION_COLLECTION_NAME].update_one(
+                {"_id": CAND_A_READY}, {"$unset": {"promoted": ""}}
+            )
+            everything = await env.snapshot()
+            again = await env.promote("org_admin", CAND_A_READY, ORG_A)
+            assert again.status_code == 409, again.text
+            assert "already promoted" in again.text
+            assert await env.snapshot() == everything
+
+    _run(scenario)

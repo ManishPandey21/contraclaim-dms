@@ -30,7 +30,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from pymongo.errors import DuplicateKeyError
 
@@ -102,7 +102,12 @@ class ContractMigrationAdjudication:
     # -- claim --------------------------------------------------------------- #
 
     async def claim(
-        self, candidate_id: str, *, organization_id: str, operator_id: str
+        self,
+        candidate_id: str,
+        *,
+        organization_id: str,
+        operator_id: str,
+        organization_wide: bool = False,
     ) -> CandidateClaim:
         """Take the candidate, or raise.
 
@@ -134,16 +139,27 @@ class ContractMigrationAdjudication:
             "owner_token": owner_token,
             "claimed_at": now,
             "lease_expires_at": now + ADJUDICATION_CLAIM_LEASE,
+            #: Whether the holder has organisation-wide scope. A project-tier lease
+            #: must never lock the organisation out of its own decision.
+            "organization_wide": bool(organization_wide),
         }
         try:
             await self._db[ADJUDICATION_CLAIMS_COLLECTION].insert_one(row)
         except DuplicateKeyError as exc:
-            # Held - unless the lease has run out. Taking over an expired lease is
-            # one conditional replace, so two operators racing for it still get one
-            # winner. Only the collision means "held": any other failure is an
-            # outage and propagates as one, never as somebody else's claim.
+            # Held - unless the lease may be taken over: it has run out, it is the
+            # caller's own (a refused attempt must not strand its operator for the
+            # whole lease), or the caller has organisation-wide scope and the
+            # holder does not. One conditional replace, so racing operators still
+            # get one winner. Only the collision means "held": any other failure is
+            # an outage and propagates as one, never as somebody else's claim.
+            takeover: list = [
+                {"lease_expires_at": {"$lte": now}},
+                {"operator_id": operator_id},
+            ]
+            if organization_wide:
+                takeover.append({"organization_wide": {"$ne": True}})
             taken = await self._db[ADJUDICATION_CLAIMS_COLLECTION].find_one_and_replace(
-                {"_id": claim_id, "lease_expires_at": {"$lte": now}}, row
+                {"_id": claim_id, "$or": takeover}, row
             )
             if taken is None:
                 raise ClaimUnavailable(
@@ -180,6 +196,7 @@ class ContractMigrationAdjudication:
         scope_state: ScopeClassificationState,
         contract_document_type: Optional[ContractDocumentType],
         reason: str,
+        expected_fingerprint: Optional[str] = None,
     ) -> None:
         """Record one operator's decision about one candidate.
 
@@ -198,6 +215,8 @@ class ContractMigrationAdjudication:
             {
                 "candidate_id": claim.candidate_id,
                 "owner_token": claim.owner_token,
+                # The token proves the lease only for the operator it was issued to.
+                "operator_id": claim.operator_id,
                 # An expired lease is not a lease: another operator may hold it now.
                 "lease_expires_at": {"$gt": _now()},
             }
@@ -255,14 +274,27 @@ class ContractMigrationAdjudication:
             self._db, str(row.get("canonical_document_id") or "")
         )
         fingerprint = (document or {}).get("checksum") or (document or {}).get("sha256")
+        if expected_fingerprint is not None and str(fingerprint) != str(expected_fingerprint):
+            # The operator reviewed other content than the document now holds.
+            raise ConflictingAdjudication(
+                f"candidate {claim.candidate_id}'s document changed since it was "
+                "reviewed; review it again before deciding"
+            )
+        unset: Dict[str, Any] = {}
         if fingerprint is not None:
             update["source_fingerprint"] = str(fingerprint)
+        else:
+            # Nothing to tie the decision to: never keep an older review's print.
+            unset["source_fingerprint"] = ""
         if contract_document_type is not None:
             update["type_state"] = TypeClassificationState.TYPE_RESOLVED.value
             update["contract_document_type"] = contract_document_type.value
 
+        change: Dict[str, Any] = {"$set": update}
+        if unset:
+            change["$unset"] = unset
         written = await self._db[RECONCILIATION_COLLECTION].update_one(
-            {**candidate_filter, "promoted": {"$ne": True}}, {"$set": update}
+            {**candidate_filter, "promoted": {"$ne": True}}, change
         )
         if getattr(written, "matched_count", 0) != 1:
             # Promoted between the read and the write (the filter refuses it), or

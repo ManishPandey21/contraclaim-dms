@@ -200,11 +200,16 @@ class AdjudicationCommand(BaseModel):
     scope_state: str
     contract_document_type: Optional[str] = None
     reason: str = Field(min_length=1)
+    #: The review row's ``document_fingerprint``, echoed back: the decision is
+    #: then tied to the content the operator actually saw.
+    expected_fingerprint: Optional[str] = None
 
 
 class PromotionCommand(BaseModel):
     contract_id: Optional[str] = None
-    effective_from: Optional[str] = None
+    #: An ISO date or nothing. Unknown stays unknown; a typo is a 422, never an
+    #: "unknown" legal start.
+    effective_from: Optional[date] = None
 
 
 class CapabilityResponse(BaseModel):
@@ -804,6 +809,7 @@ async def reconciliation_review(
         organization_wide=organization_wide,
         selected_project=selection.project_id,
     )
+    fingerprints = await _document_fingerprints(db, [row for row, _ in visible])
     return {
         "candidates": [
             {
@@ -818,11 +824,37 @@ async def reconciliation_review(
                 # Acting on an anchored row needs its project selected; an
                 # unanchored or conflicted one is organisation business.
                 "project_anchor": anchor.project_id,
+                # Echo it as expected_fingerprint when adjudicating.
+                "document_fingerprint": fingerprints.get(
+                    str(row.get("canonical_document_id") or "")
+                ),
                 "anchor_conflict": anchor.conflict,
                 "promotion_blocked_reasons": _promotion_blockers(row, anchor),
             }
             for row, anchor in visible
         ]
+    }
+
+
+async def _document_fingerprints(db, rows: List[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """``canonical_document_id`` -> the fingerprint an operator reviews, in one query."""
+    from ..services.publication_policy import document_id_candidates
+
+    keys: List[Any] = []
+    for row in rows:
+        keys.extend(document_id_candidates(str(row.get("canonical_document_id") or "")))
+    if not keys:
+        return {}
+    found = await db["documents"].find(
+        {"_id": {"$in": keys}}, {"checksum": 1, "sha256": 1}
+    ).to_list(length=None)
+    return {
+        str(doc["_id"]): (
+            str(doc.get("checksum") or doc.get("sha256"))
+            if (doc.get("checksum") or doc.get("sha256"))
+            else None
+        )
+        for doc in found
     }
 
 
@@ -901,6 +933,9 @@ async def claim_candidate(
             candidate_id,
             organization_id=organization_id,
             operator_id=str(getattr(current_user, "id", "")),
+            organization_wide=await policy.scope_service.has_organization_wide_scope(
+                current_user, organization_id=organization_id
+            ),
         )
     except CandidateNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -993,6 +1028,7 @@ async def adjudicate_candidate(
             scope_state=scope_state,
             contract_document_type=document_type,
             reason=command.reason,
+            expected_fingerprint=command.expected_fingerprint,
         )
     except CandidateNotFound as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -1069,7 +1105,9 @@ async def promote_candidate(
             organization_id=organization_id,
             actor_id=str(getattr(current_user, "id", "")),
             contract_id=command.contract_id,
-            effective_from=command.effective_from,
+            effective_from=(
+                command.effective_from.isoformat() if command.effective_from else None
+            ),
             expected_scope_state=authority.candidate.get("scope_state"),
             expected_project_id=authority.project_id or "",
         )

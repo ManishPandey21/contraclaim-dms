@@ -186,6 +186,13 @@ class ContractPromotionService:
                 "authorised at; nothing is written"
             )
         scope_level, project_id = self._resolve_scope(candidate, anchor)
+        if scope_level == "organization" and contract_id:
+            # An organisation-scope instrument gets no applicability at promotion;
+            # a contract named here would be silently dropped.
+            raise NotPromotable(
+                f"candidate {candidate_id} is organisation-scoped; it is applied to a "
+                "contract afterwards, not at promotion"
+            )
         if scope_level == "project" and not contract_id:
             raise NotPromotable(
                 f"candidate {candidate_id} is project-scoped, so promotion must "
@@ -222,6 +229,13 @@ class ContractPromotionService:
                         await self._apply(plan, session=session)
             except DuplicateKeyError as exc:
                 key = (getattr(exc, "details", None) or {}).get("keyPattern") or {}
+                if "document_id" in key and await self._db[
+                    CONTRACT_DOCUMENTS_COLLECTION
+                ].find_one({"_id": plan["instrument"]["_id"]}):
+                    # This candidate's own instrument: a genuine repeat.
+                    raise AlreadyPromoted(
+                        f"candidate {candidate_id} is already promoted"
+                    ) from exc
                 if "document_id" in key:
                     # Another instrument already governs this canonical Document
                     # (one instrument per document). This candidate is not promoted.
@@ -330,6 +344,11 @@ class ContractPromotionService:
     ) -> None:
         recorded = candidate.get("source_fingerprint")
         current = document.get("checksum") or document.get("sha256")
+        if recorded is not None and current is None:
+            raise RevalidationRequired(
+                f"candidate {candidate.get('_id')} was reviewed against a fingerprint "
+                "its document no longer carries; nothing is written"
+            )
         if recorded is None:
             if current is not None:
                 # The document can be fingerprinted and the review never was: the
