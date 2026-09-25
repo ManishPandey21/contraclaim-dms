@@ -8,6 +8,8 @@ import {
   UploadResult,
   StatusResponse,
   ContractSearchResponse,
+  ContractJobStatus,
+  isTerminalContractStatus,
 } from "@/services/contracts-api";
 import { usePinnedPageScope } from "@/hooks/useRegisterProjectScope";
 
@@ -16,7 +18,7 @@ type UploadProgress = {
   mode: "multipart" | "chunked";
   progress: number; // 0-100
   upload_id?: string;
-  status?: "queued" | "processing" | "completed" | "failed" | "unknown";
+  status?: ContractJobStatus;
   error?: string | null;
 };
 
@@ -87,7 +89,7 @@ const ContractsPage: React.FC = () => {
                 : u
             )
           );
-          if (st.status === "completed" || st.status === "failed") {
+          if (isTerminalContractStatus(st.status)) {
             stopPolling(uploadId);
           }
         } catch (e) {
@@ -340,7 +342,7 @@ const ContractsPage: React.FC = () => {
                     {u.status ? (
                       <span
                         className={`px-2 py-0.5 rounded text-white ${
-                          u.status === "failed"
+                          u.status === "failed" || u.status === "human_review_required"
                             ? "bg-red-600"
                             : u.status === "completed"
                             ? "bg-green-600"

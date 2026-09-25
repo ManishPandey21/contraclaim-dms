@@ -41,10 +41,27 @@ export interface ChunkUploadResponse {
   upload_complete?: boolean;
 }
 
+/**
+ * `human_review_required`: extraction left pages unresolved (unreadable text,
+ * failed or disabled OCR). Nothing was published and the contract is not
+ * evidence until those pages are OCR-retried or reviewed. It is terminal - no
+ * further automatic work happens - so polling must stop on it.
+ */
+export type ContractJobStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "failed"
+  | "human_review_required"
+  | "unknown";
+
+export const isTerminalContractStatus = (status?: string | null): boolean =>
+  status === "completed" || status === "failed" || status === "human_review_required";
+
 export interface StatusResponse {
   upload_id: string;
   document_id?: string | null;
-  status: "queued" | "processing" | "completed" | "failed" | "unknown";
+  status: ContractJobStatus;
   filename?: string | null;
   categories?: string[] | null;
   error?: string | null;
@@ -57,6 +74,7 @@ export interface StatusResponse {
   processing_stage?: string | null;
   stage_label?: string | null;
   progress?: number | null;
+  unresolved_pages?: number[] | null;
 }
 
 export interface HighlightOffset {

@@ -18,6 +18,8 @@ import tempfile
 
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..models.processing_state import ProcessingState, build_attempt_outcome
+from .extraction.models import PageClass, PageStatus
 from .contract_categorizer import create_contract_categorizer
 from .contract_graph_service import (
     ContractGraphIdentityError,
@@ -25,7 +27,12 @@ from .contract_graph_service import (
     ContractGraphService,
     DocumentGraphPayload,
 )
-from .publication_policy import is_publication_blocked, resolve_canonical_document
+from .publication_policy import (
+    CONTRACT_EXTRACTION_HOLD,
+    held_by_contract_extraction,
+    is_publication_blocked,
+    resolve_canonical_document,
+)
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.generator import LLMGenerator
 from ..retrieval.source_metadata import normalize_source_payload
@@ -108,12 +115,66 @@ class ParsedPage:
 
 
 @dataclass
+class ContractExtractionVerdict:
+    """What page extraction concluded about the whole contract, before anything publishes.
+
+    The engine already judges every page (PR #25 withholds unusable ``(cid:N)``
+    text; PR #28 makes a retry cumulative). This carries that judgement past
+    ``result.pages`` so ingest can refuse to complete a contract a page short.
+    The state is the shared ``derive_processing_state`` verdict - the same one
+    the document path persists - with ``attempts_exhausted=True``, because a
+    contract has no automatic retry loop: an unresolved page waits for an
+    operator's OCR retry, so it needs a person now.
+
+    One contract-specific settlement: a page the classifier found BLANK (no
+    usable text layer, no image, no table) that OCR then read as empty is an
+    empty page, not missing content. Holding it would keep a contract with a
+    blank separator sheet out of evidence for good - a retry reaches the same
+    verdict and contracts have no review action.
+    """
+
+    state: ProcessingState
+    unresolved_pages: List[int]
+    withheld_pages: List[int]
+    #: page_number/status/batch_id for every page of the run, carried pages
+    #: included, so the job summary describes the contract, not one attempt.
+    run_page_records: List[Dict[str, Any]]
+
+    @property
+    def complete(self) -> bool:
+        return self.state is ProcessingState.COMPLETED
+
+
+def _settled_blank_pages(pages: Sequence[Any]) -> Set[int]:
+    """BLANK pages OCR confirmed empty - see ContractExtractionVerdict.
+
+    Only an OCR read that returned no text at all settles a page. OCR text
+    judged unusable carries the same OCR_EMPTY status, and on a BLANK page
+    (text drawn as vector outlines has no text layer and no image) it means
+    content exists that nobody could read - that page stays unresolved.
+    """
+    from .extraction.engine import OCR_RETURNED_NO_TEXT
+
+    return {
+        page.number
+        for page in pages
+        if page.status is PageStatus.OCR_EMPTY
+        and page.classification.page_class is PageClass.BLANK
+        and page.error == OCR_RETURNED_NO_TEXT
+        and not page.text_withheld
+    }
+
+
+@dataclass
 class ParsedDocument:
     """Full document text plus page-aware spans for PDF grounding."""
 
     text: str
     pages: List[ParsedPage]
     file_path: str
+    #: Set for page-extracted PDFs; absent for text/DOCX, which have no pages
+    #: an extraction engine could leave unresolved.
+    extraction: Optional[ContractExtractionVerdict] = None
 
 
 @dataclass
@@ -1039,6 +1100,10 @@ class DatabaseService:
         )
         return batch_id
 
+    async def has_ocr_pages(self, document_id: str) -> bool:
+        found = await self.db.contract_ocr_pages.find_one({"document_id": str(document_id)})
+        return found is not None
+
     async def upsert_ocr_pages(self, page_records: List[Dict[str, Any]]) -> None:
         if not page_records:
             return
@@ -1307,10 +1372,34 @@ class ContractIngestor:
             record["cleaned_text_length"] = len(record["cleaned_text"])
             record["cleaning"] = audit_by_page.get(page_number, {})
             record["source_pdf_page_link"] = self._source_pdf_page_link(document_id, page_number)
-        await self.db_service.upsert_ocr_pages(page_records)
+        verdict = raw_doc.extraction
+        fresh_numbers = {int(record.get("page_number") or 0) for record in page_records}
+        carried_cleaning = [
+            {
+                "document_id": document_id,
+                "page_number": int(run_record["page_number"]),
+                "cleaned_text": cleaned_by_page.get(int(run_record["page_number"]), ""),
+                "cleaned_text_length": len(
+                    cleaned_by_page.get(int(run_record["page_number"]), "")
+                ),
+                "cleaning": audit_by_page.get(int(run_record["page_number"]), {}),
+            }
+            for run_record in (verdict.run_page_records if verdict is not None else [])
+            if int(run_record["page_number"]) not in fresh_numbers
+        ]
+        # A carried page keeps its extraction row (status, raw_text, batch)
+        # exactly; only the text derived from the whole run - which the clause
+        # index reads - is refreshed, so it agrees with what publishes.
+        await self.db_service.upsert_ocr_pages(page_records + carried_cleaning)
 
-        summary = self._summarize_ocr_records(page_records)
+        summary = self._summarize_ocr_records(
+            verdict.run_page_records if verdict is not None else page_records
+        )
         summary["page_cleaning"] = page_audit
+        if verdict is not None:
+            summary["unresolved_pages"] = list(verdict.unresolved_pages)
+            summary["withheld_pages"] = list(verdict.withheld_pages)
+        cleaned_doc.extraction = verdict
         await self.db_service.upsert_job_status(
             upload_id,
             str(file_path),
@@ -1351,7 +1440,10 @@ class ContractIngestor:
         from .extraction.engine import PageExtractionEngine
         from .extraction.models import PageExtractionPolicy
         from .extraction.ocrmypdf_runner import OcrMyPdfRunner
-        from .extraction_adapters.contract_page_store import ContractPageStore
+        from .extraction_adapters.contract_page_store import (
+            ContractPageStore,
+            ResumableContractPageStore,
+        )
 
         async def _meter(
             *, page_count: int, page_numbers: Sequence[int], retry: bool
@@ -1370,7 +1462,24 @@ class ContractIngestor:
                 },
             )
 
-        store = ContractPageStore(
+        # An OCR retry continues the contract's recorded run: the engine then
+        # reworks only the pages that still owe work and carries every resolved
+        # page forward (PR #28). A first ingest or a reindex has no run to
+        # continue and re-extracts every page, as before.
+        resume = bool(retry_ocr_pages) and await self.db_service.has_ocr_pages(document_id)
+        if retry_ocr_pages and not resume:
+            # No recorded run to continue: re-reading only the listed pages
+            # would rebuild every other page from a fresh native read, which
+            # returns nothing for a scan. Extract the whole contract instead.
+            logger.warning(
+                "OCR retry of %s names pages %s but no page rows exist; "
+                "re-extracting every page",
+                document_id,
+                retry_ocr_pages,
+            )
+            retry_ocr_pages = None
+        store_type = ResumableContractPageStore if resume else ContractPageStore
+        store = store_type(
             db_service=self.db_service,
             document_id=document_id,
             upload_id=upload_id,
@@ -1404,6 +1513,26 @@ class ContractIngestor:
             ],
             file_path,
         )
+        outcome = build_attempt_outcome(
+            result, prior_page_attempts={}, attempts_exhausted=True
+        )
+        blank = _settled_blank_pages(result.pages)
+        unresolved = [n for n in outcome.remaining_page_numbers if n not in blank]
+        parsed.extraction = ContractExtractionVerdict(
+            state=outcome.state if unresolved else ProcessingState.COMPLETED,
+            unresolved_pages=unresolved,
+            withheld_pages=list(result.withheld_pages),
+            run_page_records=[
+                {
+                    "page_number": page.number,
+                    "status": page.status.value,
+                    "batch_id": page.batch_id,
+                }
+                for page in result.pages
+            ],
+        )
+        # Only the pages this attempt produced are written back; a page the
+        # run carried forward keeps its durable row exactly as it was.
         return parsed, store.records
 
     @staticmethod
@@ -1487,7 +1616,12 @@ class ContractIngestor:
             except OSError:
                 pass
 
-            await self._assert_current_publication_authority(document_id)
+            # A hold this contract's own extraction placed does not stop the
+            # extraction that may resolve it; nothing publishes until the new
+            # verdict is complete and the hold is lifted below.
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=True
+            )
 
             logger.info(f"Starting ingestion for {filename} (upload_id: {upload_id})")
 
@@ -1522,6 +1656,30 @@ class ContractIngestor:
                 file_size=file_size,
                 retry_ocr_pages=retry_ocr_pages,
             )
+            verdict = parsed_doc.extraction
+            if verdict is not None and not verdict.complete:
+                # A page the engine could not settle - withheld (cid:N) text,
+                # failed or empty OCR, OCR switched off, unrenderable - means
+                # the contract's text is incomplete. Publishing the rest would
+                # complete the contract and make it evidence-ready with that
+                # page's content silently gone, so nothing publishes and the
+                # contract waits for review or an OCR retry.
+                return await self._hold_for_review(
+                    verdict,
+                    upload_id=upload_id,
+                    document_id=document_id,
+                    file_path=file_path_obj,
+                    filename=filename,
+                    organization_id=organization_id,
+                    project_id=project_id,
+                    tags=final_tags,
+                    file_size=file_size,
+                )
+            # A complete verdict may publish through this contract's own
+            # extraction hold; the hold is lifted only after publication has
+            # succeeded, so a failure part-way leaves the contract held.
+            own_hold_ok = verdict is not None
+
             text = parsed_doc.text
             logger.info(f"Extracted {len(text)} characters from {filename}")
             if not text or not text.strip():
@@ -1672,6 +1830,7 @@ class ContractIngestor:
                 payloads,
                 vector_results,
                 document_id=document_id,
+                allow_own_extraction_hold=own_hold_ok,
             )
             await self.db_service.upsert_job_status(
                 upload_id,
@@ -1706,7 +1865,9 @@ class ContractIngestor:
                         priority=priority,
                     )
                     if clause_nodes:
-                        await self._assert_current_publication_authority(document_id)
+                        await self._assert_current_publication_authority(
+                            document_id, allow_own_extraction_hold=own_hold_ok
+                        )
                         self.contract_graph.upsert_contract_graph(doc_payload, clause_nodes)
                     else:
                         graph_skipped_reason = "no_clause_nodes"
@@ -1724,7 +1885,9 @@ class ContractIngestor:
                     logger.warning("Contract graph ingestion skipped for %s: %s", filename, exc)
 
             # Insert into database
-            await self._assert_current_publication_authority(document_id)
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=own_hold_ok
+            )
             await self.db_service.insert_document_vectors(records)
 
             # Guard against silently completing a contract whose semantic
@@ -1741,6 +1904,9 @@ class ContractIngestor:
                     "enabled but the vector store was unreachable, so the contract "
                     "would not be searchable. Refusing to mark it completed."
                 )
+
+            if own_hold_ok:
+                await self._release_extraction_hold(document_id)
 
             # Update job status to completed
             await self.db_service.upsert_job_status(
@@ -2236,6 +2402,7 @@ class ContractIngestor:
         vector_results: Optional[List[Dict[str, Any]]] = None,
         *,
         document_id: Optional[str] = None,
+        allow_own_extraction_hold: bool = False,
     ) -> int:
         if not payloads or not self.processing_config.qdrant_enabled or not self.vector_client.enabled:
             return 0
@@ -2266,7 +2433,9 @@ class ContractIngestor:
                 self._build_qdrant_chunk(item.get("metadata") or {}, item.get("text") or "", len(vector))
                 for item, vector in zip(batch, batch_vectors)
             ]
-            await self._assert_current_publication_authority(document_id)
+            await self._assert_current_publication_authority(
+                document_id, allow_own_extraction_hold=allow_own_extraction_hold
+            )
             total += await self.vector_client.upsert(batch_vectors, chunks)
 
         return total
@@ -2274,12 +2443,146 @@ class ContractIngestor:
     async def _assert_current_publication_authority(
         self,
         document_id: Optional[str],
+        *,
+        allow_own_extraction_hold: bool = False,
     ) -> None:
         document = await resolve_canonical_document(self.db_service.db, document_id)
-        if is_publication_blocked(document):
+        if not is_publication_blocked(document):
+            return
+        if (
+            allow_own_extraction_hold
+            and document is not None
+            and held_by_contract_extraction(document)
+            and not is_publication_blocked({**document, "processing_status": None})
+        ):
+            return
+        raise IngestionError(
+            f"Document {document_id or '<missing>'} is not authoritative for contract publication"
+        )
+
+    async def _hold_for_review(
+        self,
+        verdict: ContractExtractionVerdict,
+        *,
+        upload_id: str,
+        document_id: str,
+        file_path: Path,
+        filename: str,
+        organization_id: str,
+        project_id: Optional[str],
+        tags: List[str],
+        file_size: Optional[int],
+    ) -> Dict[str, Any]:
+        """Record that the contract's text is incomplete, and publish nothing.
+
+        The canonical Document takes the shared ``human_review_required``
+        state, so the one publication predicate (``is_consumable``) denies it
+        to every consumer - Contract Master evidence readiness, the clause
+        agent, retrieval - rather than each one having to learn about contract
+        pages.
+        """
+        pages = list(verdict.unresolved_pages)
+        withheld = list(verdict.withheld_pages)
+        listed = ", ".join(str(page) for page in pages)
+        message = (
+            f"{len(pages)} page(s) could not be read ({listed}); the contract is "
+            "incomplete until they are OCR-retried or reviewed"
+        )
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if document is None:
             raise IngestionError(
                 f"Document {document_id or '<missing>'} is not authoritative for contract publication"
             )
+        now = datetime.utcnow()
+        # Never relabel another writer's review verdict as this contract's own:
+        # a later extraction would then lift a hold it did not place. If one
+        # is already in place the document is held anyway, so it stays as is.
+        await self.db_service.db.documents.update_one(
+            {
+                "_id": document["_id"],
+                "$or": [
+                    {
+                        "processing_status": {
+                            "$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value
+                        }
+                    },
+                    {"processing_error.source": CONTRACT_EXTRACTION_HOLD},
+                ],
+            },
+            {
+                "$set": {
+                    "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    "processing_error": {
+                        "message": message,
+                        "pages": pages,
+                        "withheld_pages": withheld,
+                        "source": CONTRACT_EXTRACTION_HOLD,
+                        "terminal": True,
+                        "timestamp": now,
+                    },
+                    "updatedAt": now,
+                }
+            },
+        )
+        await self.db_service.upsert_job_status(
+            upload_id,
+            str(file_path),
+            filename,
+            ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+            error=message,
+            organization_id=organization_id,
+            project_id=project_id,
+            tags=tags,
+            file_size=file_size,
+            extra={
+                "unresolved_pages": pages,
+                "withheld_pages": withheld,
+                "processing_stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                "stage_label": f"{len(pages)} page(s) need OCR retry or review",
+                "progress": 100,
+            },
+        )
+        logger.warning(
+            "Contract %s held for review: unresolved pages %s (withheld %s)",
+            document_id,
+            pages,
+            withheld,
+        )
+        return {
+            "ok": False,
+            "human_review_required": True,
+            "upload_id": upload_id,
+            "document_id": document_id,
+            "file": filename,
+            "unresolved_pages": pages,
+            "withheld_pages": withheld,
+            "error": message,
+        }
+
+    async def _release_extraction_hold(self, document_id: str) -> None:
+        """Lift this contract's own extraction hold after a complete publication.
+
+        Only a hold contract extraction placed, and only while it is still in
+        place: the update matches both the status and the hold's owner, so an
+        adverse verdict another writer placed in between is never overwritten.
+        """
+        document = await resolve_canonical_document(self.db_service.db, document_id)
+        if document is None or not held_by_contract_extraction(document):
+            return
+        await self.db_service.db.documents.update_one(
+            {
+                "_id": document["_id"],
+                "processing_status": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                "processing_error.source": CONTRACT_EXTRACTION_HOLD,
+            },
+            {
+                "$set": {
+                    "processing_status": ProcessingState.PROCESSING.value,
+                    "processing_error": None,
+                    "updatedAt": datetime.utcnow(),
+                }
+            },
+        )
 
     def _payloads_to_records(
         self,

@@ -26,6 +26,7 @@ from ..models.contract_models import (
     StatusResponse,
 )
 from ..models.document import Document
+from ..models.processing_state import _UNRESOLVED_PAGE_STATUSES, ProcessingState
 from ..models.storage_architecture import ContractAggregate, ContractVersion
 from ..retrieval.embeddings import EmbeddingClient
 from ..retrieval.vector_client import VectorClient
@@ -40,6 +41,9 @@ from .document_audit_service import DocumentAuditService
 from .document_service import DocumentService, DocumentServiceError
 from .file_object_service import FileObjectService
 from .contract_graph_service import ContractGraphService
+from .extraction.engine import OCR_RETURNED_NO_TEXT
+from .extraction.models import PageClass, PageStatus
+from .publication_policy import resolve_canonical_document
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +432,41 @@ class ContractService:
             {"_id": self._as_lookup_id(document_id)},
             {"$set": update_fields},
         )
+        await self._update_contract_version_status(document_id, status_value)
+
+    async def _settle_processing_status(self, document_id: str, *, completed: bool) -> None:
+        """Record the ingest outcome on the canonical publication axis.
+
+        ``processing_status`` is what ``is_consumable`` reads. Only an ingest
+        that published a complete contract may write ``completed``; an
+        operational failure writes ``failed`` only over the ``processing`` a
+        released extraction hold left behind. Neither may overwrite a
+        ``human_review_required`` verdict, whoever wrote it.
+        """
+        documents = await self._get_documents()
+        # The one identity resolver, so a legacy string-keyed contract that
+        # happens to look like an ObjectId is still found.
+        document = await resolve_canonical_document(await self._get_db(), document_id)
+        if document is None:
+            return
+        if completed:
+            await documents.update_one(
+                {
+                    "_id": document["_id"],
+                    "processing_status": {"$ne": ProcessingState.HUMAN_REVIEW_REQUIRED.value},
+                },
+                {"$set": {"processing_status": ProcessingState.COMPLETED.value, "processing_error": None}},
+            )
+            return
+        await documents.update_one(
+            {
+                "_id": document["_id"],
+                "processing_status": ProcessingState.PROCESSING.value,
+            },
+            {"$set": {"processing_status": ProcessingState.FAILED.value}},
+        )
+
+    async def _update_contract_version_status(self, document_id: str, status_value: str) -> None:
         try:
             await (await self._get_db()).contract_versions.update_one(
                 {"document_id": document_id},
@@ -568,6 +607,34 @@ class ContractService:
                 document_id,
                 retry_ocr_pages=retry_ocr_pages,
             )
+            if result.get("human_review_required"):
+                # Extraction left pages unresolved. That is a verdict about the
+                # content, not a pipeline failure: nothing was published, the
+                # Document is held out of every consumer, and the contract waits
+                # for an OCR retry or a reviewer. Not raised, so a queue retry
+                # cannot spend OCR re-reaching the same verdict.
+                unresolved_pages = list(result.get("unresolved_pages") or [])
+                await self.update_job_status(
+                    upload_id,
+                    ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    error=result.get("error"),
+                    metadata={
+                        "document_id": document_id,
+                        "filename": filename,
+                        "unresolved_pages": unresolved_pages,
+                        "withheld_pages": list(result.get("withheld_pages") or []),
+                        "processing_stage": ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                        "stage_label": f"{len(unresolved_pages)} page(s) need OCR retry or review",
+                        "progress": 100,
+                    },
+                )
+                await self.update_contract_document(
+                    document_id,
+                    status_value=ProcessingState.HUMAN_REVIEW_REQUIRED.value,
+                    error=result.get("error"),
+                    tags=tags,
+                )
+                return
             # ingest_file reports failures via {"ok": False} rather than raising,
             # so a failed ingest must not fall through to marking the contract
             # "completed" (that is how unsearchable documents ended up completed).
@@ -594,9 +661,12 @@ class ContractService:
                     "processing_stage": "completed",
                     "stage_label": "Processing complete",
                     "progress": 100,
+                    "unresolved_pages": [],
+                    "withheld_pages": [],
                 },
             )
             await self.update_contract_document(document_id, status_value="completed", categories=categories, tags=tags)
+            await self._settle_processing_status(document_id, completed=True)
         except Exception as exc:
             await self.update_job_status(
                 upload_id,
@@ -610,6 +680,7 @@ class ContractService:
                 },
             )
             await self.update_contract_document(document_id, status_value="failed", error=str(exc), tags=tags)
+            await self._settle_processing_status(document_id, completed=False)
             raise
         finally:
             if materialized_temp or processing_path_value:
@@ -656,14 +727,39 @@ class ContractService:
         return document
 
     async def get_failed_ocr_pages(self, document_id: str) -> List[int]:
+        """Pages an OCR retry of this contract still has work on.
+
+        The same predicate the extraction run uses (`_UNRESOLVED_PAGE_STATUSES`,
+        or published text that was withheld), minus pages that cannot be
+        rendered - OCR cannot read those either. A narrower list left a
+        withheld ``ocr_pending`` page with no way to be retried.
+        """
+        retryable = sorted(
+            status.value
+            for status in _UNRESOLVED_PAGE_STATUSES
+            if status not in (PageStatus.UNRENDERABLE, PageStatus.OCR_EMPTY)
+        )
         rows = await (
             (await self._get_db())
             .contract_ocr_pages.find(
                 {
                     "document_id": str(document_id),
-                    "status": {"$in": ["ocr_failed", "ocr_empty", "ocr_disabled"]},
+                    "$or": [
+                        {"status": {"$in": retryable}},
+                        # Only a blank page OCR read as having no text at all
+                        # is settled (see contracts_ingest._settled_blank_pages).
+                        {
+                            "status": PageStatus.OCR_EMPTY.value,
+                            "page_class": {"$ne": PageClass.BLANK.value},
+                        },
+                        {
+                            "status": PageStatus.OCR_EMPTY.value,
+                            "error": {"$ne": OCR_RETURNED_NO_TEXT},
+                        },
+                        {"text_withheld": True},
+                    ],
                 },
-                {"page_number": 1},
+                {"page_number": 1, "status": 1},
             )
             .sort("page_number", 1)
             .to_list(length=5000)
@@ -673,6 +769,30 @@ class ContractService:
             for row in rows
             if isinstance(row.get("page_number"), int) or str(row.get("page_number")).isdigit()
         ]
+
+    async def resolve_ocr_retry_pages(self, document_id: str, requested: Sequence[int]) -> List[int]:
+        """The pages an OCR retry will rework, or a 422 naming why it cannot.
+
+        A retry continues the contract's recorded run, so a page that run has
+        already resolved is carried, not re-read. An explicit request for such
+        a page - or for one the contract does not have - is refused here rather
+        than accepted and silently ignored; re-extracting a resolved page is a
+        reindex.
+        """
+        retryable = await self.get_failed_ocr_pages(document_id)
+        wanted = sorted({int(page) for page in requested if int(page) > 0})
+        if not wanted:
+            if not retryable:
+                raise ContractError("No failed OCR pages found for this contract", status.HTTP_422_UNPROCESSABLE_ENTITY)
+            return retryable
+        refused = [page for page in wanted if page not in set(retryable)]
+        if refused:
+            raise ContractError(
+                f"Pages {refused} have no unresolved OCR work (already resolved or not in this "
+                "contract); reindex the contract to re-extract resolved pages",
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        return wanted
 
     def _hybrid_enabled(self, request: ContractSearchRequest) -> bool:
         return bool((request.query or "").strip() and self._processing_config.qdrant_enabled and self._vector_client.enabled)

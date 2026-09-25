@@ -42,6 +42,16 @@ from rbac_backend.tests.test_document_processing_jobs import (
 # --- In-memory Mongo double ---------------------------------------------
 
 
+def _field(document: Dict[str, Any], key: str) -> Any:
+    """Mongo's dotted-path read: ``a.b`` is ``document["a"]["b"]``."""
+    value: Any = document
+    for part in key.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
 def _matches(document: Dict[str, Any], query: Dict[str, Any]) -> bool:
     for key, expected in (query or {}).items():
         if key == "$or":
@@ -52,7 +62,7 @@ def _matches(document: Dict[str, Any], query: Dict[str, Any]) -> bool:
             if not all(_matches(document, branch) for branch in expected):
                 return False
             continue
-        actual = document.get(key)
+        actual = _field(document, key)
         if isinstance(expected, dict):
             if "$in" in expected and actual not in expected["$in"]:
                 return False

@@ -820,11 +820,7 @@ async def retry_contract_ocr_pages(
         resource_type="contract_ocr",
         audit=True,
     )
-    page_numbers = sorted({int(page) for page in request.page_numbers if int(page) > 0})
-    if not page_numbers:
-        page_numbers = await contract_service.get_failed_ocr_pages(document_id)
-    if not page_numbers:
-        raise ContractError("No failed OCR pages found for this contract", status.HTTP_422_UNPROCESSABLE_ENTITY)
+    page_numbers = await contract_service.resolve_ocr_retry_pages(document_id, request.page_numbers)
 
     upload_id = str(document.get("contract_upload_id") or document.get("upload_id") or document_id)
     local_path = document.get("filepath_local") or document.get("file_path")

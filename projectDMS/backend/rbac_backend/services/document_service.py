@@ -1675,6 +1675,19 @@ class DocumentService:
             if not stored:
                 logger.warning("Document %s not found for processing", document_id)
                 return False
+            from .publication_policy import held_by_contract_extraction
+
+            if held_by_contract_extraction(stored):
+                # The general pipeline would write `processing` and then a
+                # settled state over the hold, making a contract with unread
+                # pages consumable. Only the contract path's own extraction may
+                # lift that hold. Nothing is written here, deliberately.
+                logger.warning(
+                    "Document %s is held by contract extraction; the general "
+                    "pipeline will not reprocess it",
+                    document_id,
+                )
+                return False
             if stored.get("lifecycle_state") == "deleted":
                 now = datetime.utcnow()
                 message = "Document is soft-deleted; skipping processing"

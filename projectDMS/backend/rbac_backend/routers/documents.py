@@ -26,6 +26,7 @@ from ..core.security import get_current_user, CurrentUser
 from ..core.tenant_context import ActiveScope, active_scope
 from ..core.config import settings
 from ..config.document_processing_config import DocumentProcessingConfig
+from ..services.publication_policy import held_by_contract_extraction
 from ..services.archive_policy import ArchiveIntakePolicy
 from ..services.document_service import (
     DocumentConflictError,
@@ -1544,6 +1545,18 @@ class DocumentController:
                     raise DocumentError("Unauthorized", status.HTTP_401_UNAUTHORIZED)
                 await self.policy_service.authorize_document(
                     current_user, Permissions.DOCUMENT_EDIT_METADATA, document
+                )
+
+            if held_by_contract_extraction(
+                {
+                    "processing_status": getattr(document, "processing_status", None),
+                    "processing_error": getattr(document, "processing_error", None),
+                }
+            ):
+                raise DocumentError(
+                    "This contract has pages that could not be read. Use the contract's "
+                    "OCR retry or reindex; general reprocessing would mark it complete.",
+                    status.HTTP_409_CONFLICT,
                 )
 
             file_path = await self._materialize_for_processing(document)

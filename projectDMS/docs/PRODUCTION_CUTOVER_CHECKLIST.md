@@ -117,6 +117,15 @@ exist only because of a decision recorded there.
       set, and only `up` fails, on a missing `client/.env.development`.
 - [ ] Verify the server checkout is byte-identical to the running containers
       (tree-wide `sha256sum` compare) before trusting any code read of production.
+- [ ] **Legacy-contract census — a cutover gate (owner decision 2026-09-25).**
+      On a fresh ISOLATED copy of production - never the live database - stream
+      the newest verified backup archive through
+      `scripts/legacy_contract_extraction_census.py --list-ids` (it parses the
+      archive in memory; nothing is restored). Record the backup timestamp, its
+      sha256, and every count the script prints. **`affected_legacy_contracts`
+      must be 0; exit 3 means STOP the cutover** until those contracts are
+      classified and a repair/backfill plan is approved. Background:
+      `EXTRACTION_RUN_CONTRACT.md`, "Owner-accepted debt on the contract path".
 
 ## 5. Fresh backups
 

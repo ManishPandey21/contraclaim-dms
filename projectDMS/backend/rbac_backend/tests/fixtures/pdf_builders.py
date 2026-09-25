@@ -323,3 +323,34 @@ def build_composite_font_pdf(
     )
     pdf.pages.append(pikepdf.Page(pdf.make_indirect(page)))
     return _save(pdf, path)
+
+
+def build_image_page_pdf(path: Path) -> Path:
+    """One page that is nothing but a full-page raster - the shape of a real scan.
+
+    ``build_scanned_only_pdf`` draws no image at all, so the classifier reads
+    its pages as BLANK. A test that needs a SCANNED_IMAGE page - one whose
+    empty OCR read means content was lost, not that the page was empty - uses
+    this instead.
+    """
+    pdf = pikepdf.new()
+    width, height = 8, 8
+    image = pdf.make_stream(
+        bytes([0x80] * (width * height)),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Image,
+        Width=width,
+        Height=height,
+        ColorSpace=pikepdf.Name.DeviceGray,
+        BitsPerComponent=8,
+    )
+    x0, y0, x1, y1 = A4_PORTRAIT
+    contents = f"q {x1 - x0} 0 0 {y1 - y0} {x0} {y0} cm /Im1 Do Q".encode("ascii")
+    page = pikepdf.Dictionary(
+        Type=pikepdf.Name.Page,
+        MediaBox=list(A4_PORTRAIT),
+        Resources=pikepdf.Dictionary(XObject=pikepdf.Dictionary(Im1=image)),
+        Contents=pdf.make_stream(contents),
+    )
+    pdf.pages.append(pikepdf.Page(pdf.make_indirect(page)))
+    return _save(pdf, path)

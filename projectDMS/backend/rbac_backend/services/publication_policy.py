@@ -94,6 +94,23 @@ KNOWN_STATES = (
 #: Retained for callers that still import it; equal to the adverse set.
 BLOCKED_STATES = ADVERSE_STATES
 
+#: The ``processing_error.source`` of a ``human_review_required`` verdict that
+#: contract extraction placed because pages of the contract could not be read.
+#: Only such a hold may be lifted, and only by a later extraction of the same
+#: contract that settles every page; no other writer may overwrite it.
+CONTRACT_EXTRACTION_HOLD = "contract_extraction"
+
+
+def held_by_contract_extraction(document: Optional[Mapping[str, Any]]) -> bool:
+    """Is this document held out of consumption by its own contract extraction?"""
+    if not document:
+        return False
+    if str(document.get("processing_status") or "") != ProcessingState.HUMAN_REVIEW_REQUIRED.value:
+        return False
+    error = document.get("processing_error")
+    return isinstance(error, Mapping) and error.get("source") == CONTRACT_EXTRACTION_HOLD
+
+
 #: Fields that carry document body text, in precedence order.
 #:
 #: `summary` is included. It is *derived from* the extracted text by the same
