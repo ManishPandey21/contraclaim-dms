@@ -18,7 +18,8 @@ import {
 } from "@/services/enhanced-api";
 import { joinApiUrl } from "@/config/api";
 import { authenticatedFetch } from "@/services/http";
-import { listSubTags, listTags } from "@/services/tags-api";
+import { listTags } from "@/services/tags-api";
+import { useSubtagOptions } from "@/hooks/useSubtagOptions";
 import RouteSkeleton from "@/components/layout/RouteSkeleton";
 
 // Import our new components
@@ -139,10 +140,7 @@ const DocumentViewerPage: React.FC = () => {
   const [availableTags, setAvailableTags] = useState<
     { value: string; label: string }[]
   >([]);
-  const [availableSubtags, setAvailableSubtags] = useState<
-    { value: string; label: string; tagId: string }[]
-  >([]);
-  const [isLoadingSubtags, setIsLoadingSubtags] = useState(false);
+  const { availableSubtags, isLoadingSubtags, fetchSubtags } = useSubtagOptions();
 
   // Track the currently selected tag to update subtag options dynamically
   const [currentSelectedTag, setCurrentSelectedTag] = useState<string>("");
@@ -378,44 +376,6 @@ const DocumentViewerPage: React.FC = () => {
       setIsLoadingReferences(false);
     }
   }, [documentId, uploadType, document?.project_id]);
-
-  const fetchSubtags = useCallback(async (tagId: string) => {
-    if (!tagId) {
-      setAvailableSubtags([]); // Clear subtags if no tagId
-      return;
-    }
-
-    setIsLoadingSubtags(true);
-    try {
-      const subtagArray = await listSubTags(tagId, { limit: 200 });
-
-      setAvailableSubtags((prevSubtags) => {
-        // Filter out subtags belonging to this tagId before adding new ones
-        const otherSubtags = prevSubtags.filter(
-          (subtag) => subtag.tagId !== tagId
-        );
-        const newSubtags = subtagArray
-          .map((subtag) => ({
-            value: subtag._id,
-            label: subtag.name,
-            tagId: tagId,
-          }))
-          .filter((subtag) => subtag.value && subtag.label);
-        return [...otherSubtags, ...newSubtags];
-      });
-    } catch (error) {
-      console.error("Error fetching subtags:", error);
-      toast.error("Failed to fetch subtags", {
-        description: "Please try again later",
-      });
-      // Set empty array on error to prevent UI issues
-      setAvailableSubtags((prevSubtags) =>
-        prevSubtags.filter((subtag) => subtag.tagId !== tagId)
-      );
-    } finally {
-      setIsLoadingSubtags(false);
-    }
-  }, []);
 
   const getSubtagOptions = useCallback(
     (selectedTagValue: string | undefined): string[] => {
@@ -679,9 +639,10 @@ const DocumentViewerPage: React.FC = () => {
               // Clear subtag when tag changes
               updatedDoc.subTags = [];
               setCurrentSelectedTag(selectedTag.value);
-            } else {
-              setAvailableSubtags([]);
             }
+            // No match (a stray empty value): leave the loaded options alone.
+            // They are filtered by the selected tag, and clearing them would
+            // only cost another read when the same tag is picked again.
             break;
           }
           case "subTag": {

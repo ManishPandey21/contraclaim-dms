@@ -140,6 +140,9 @@ jobs:
           CONTRACT_REHEARSAL_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           CONTRACT_UPLOAD_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           CONTRACT_DURABILITY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Batched subtag lookup: caller-supplied tag ids must never reach a
+          # foreign tag's subtags (real HTTP, Mongo and RBAC).
+          TAGS_SUBTAG_BATCH_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
         run: |
           python -m pytest -q -rs \
             backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py \
@@ -155,6 +158,7 @@ jobs:
             backend/rbac_backend/tests/integration/test_migration_rehearsal_mongo.py \
             backend/rbac_backend/tests/integration/test_contract_upload_scope_mongo.py \
             backend/rbac_backend/tests/integration/test_contract_upload_durability_mongo.py \
+            backend/rbac_backend/tests/integration/test_tags_subtag_batch_mongo.py \
             | tee real-mongo-relationships.log
           if grep -qE "[0-9]+ skipped" real-mongo-relationships.log; then
             echo "real-Mongo relationship suites skipped: no transaction evidence" >&2

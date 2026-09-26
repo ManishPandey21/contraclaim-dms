@@ -9,6 +9,7 @@ from typing import List, Optional, Dict, Any
 import logging
 from datetime import datetime
 
+from ..core.config import settings
 from ..core.security import get_current_user, CurrentUser
 from ..core.database import get_db
 from ..services.tag_service import TagService
@@ -17,7 +18,7 @@ from ..services.audit_event_service import AuditEventService
 from ..services.policy_service import PolicyService
 from ..models.tag import (
     Tag, TagCreate, TagUpdate, TagResponse, TagListResponse,
-    Subtag, SubtagCreate, SubtagUpdate, SubtagListResponse
+    Subtag, SubtagCreate, SubtagUpdate, SubtagListResponse, SubtagBatchResponse
 )
 from ..utils.validation import validate_input, sanitize_text, validate_object_id
 from ..utils.error_handler import BaseDomainError, handle_exceptions, TagError, AuthorizationError
@@ -27,6 +28,39 @@ from ..utils.audit_logger import AuditLogger
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+#: Most distinct tag ids one batched subtag lookup accepts (more is 422), and
+#: the raw parameter count tolerated before de-duplication.
+SUBTAG_BATCH_MAX_TAG_IDS = 100
+SUBTAG_BATCH_MAX_RAW_TAG_IDS = 4 * SUBTAG_BATCH_MAX_TAG_IDS
+SUBTAG_BATCH_MAX_TAG_ID_LENGTH = 64
+
+
+def _unique_batch_tag_ids(tag_ids: List[str]) -> List[str]:
+    """Trimmed, de-duplicated (first occurrence wins) and bounded, or 422."""
+    if len(tag_ids) > SUBTAG_BATCH_MAX_RAW_TAG_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"At most {SUBTAG_BATCH_MAX_RAW_TAG_IDS} tag_ids parameters may be sent at once",
+        )
+    unique: List[str] = []
+    seen: set[str] = set()
+    for raw in tag_ids:
+        value = raw.strip()
+        if not value or len(value) > SUBTAG_BATCH_MAX_TAG_ID_LENGTH:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Each tag id must be a non-empty identifier",
+            )
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    if len(unique) > SUBTAG_BATCH_MAX_TAG_IDS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"At most {SUBTAG_BATCH_MAX_TAG_IDS} tag ids may be requested at once",
+        )
+    return unique
+
 
 class TagController:
     """Secure tag controller with comprehensive validation and authorization."""
@@ -35,12 +69,15 @@ class TagController:
         self,
         tag_service: TagService,
         auth_service: AuthorizationService,
-        rate_limiter: RateLimiter,
+        read_limiter: RateLimiter,
+        write_limiter: RateLimiter,
         audit_logger: AuditLogger
     ):
         self.tag_service = tag_service
         self.auth_service = auth_service
-        self.rate_limiter = rate_limiter
+        # Separate budgets: exhausting reads must not block writes, nor the reverse.
+        self.read_limiter = read_limiter
+        self.write_limiter = write_limiter
         self.audit_logger = audit_logger
 
     async def create_tag(
@@ -51,7 +88,7 @@ class TagController:
         """Create tag with comprehensive validation."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id, cost=2)
+            await self.write_limiter.check_user_limit(current_user.id, cost=2)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:create")
@@ -108,7 +145,7 @@ class TagController:
         """Get tags with filtering and authorization."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id)
+            await self.read_limiter.check_user_limit(current_user.id)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:read")
@@ -149,7 +186,7 @@ class TagController:
         """Get single tag with authorization."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id)
+            await self.read_limiter.check_user_limit(current_user.id)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:read")
@@ -195,7 +232,7 @@ class TagController:
         """Update tag with validation and authorization."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id, cost=2)
+            await self.write_limiter.check_user_limit(current_user.id, cost=2)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:update")
@@ -265,7 +302,7 @@ class TagController:
         """Delete tag with cascade deletion of subtags."""
         try:
             # Rate limiting for destructive operations
-            await self.rate_limiter.check_user_limit(current_user.id, cost=5)
+            await self.write_limiter.check_user_limit(current_user.id, cost=5)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:delete")
@@ -333,7 +370,7 @@ class TagController:
         """Create subtag with validation."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id, cost=2)
+            await self.write_limiter.check_user_limit(current_user.id, cost=2)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:create")
@@ -402,7 +439,7 @@ class TagController:
         """Get subtags for a tag with pagination."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id)
+            await self.read_limiter.check_user_limit(current_user.id)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:read")
@@ -449,6 +486,40 @@ class TagController:
                 detail="Subtag service temporarily unavailable"
             )
 
+    async def get_subtags_batch(
+        self,
+        tag_ids: List[str],
+        current_user: CurrentUser
+    ) -> SubtagBatchResponse:
+        """Subtags of many tags in one read (display lookups, e.g. the Documents page).
+
+        Costs one read unit whatever the number of ids. Requested ids are only
+        ever resolved inside the caller's authorized tag universe; an
+        inaccessible tag is omitted, never reported.
+        """
+        try:
+            await self.read_limiter.check_user_limit(current_user.id)
+            await self.auth_service.require_permission(current_user, "tags:read")
+
+            unique_ids = _unique_batch_tag_ids(tag_ids)
+            if not unique_ids:
+                return SubtagBatchResponse(subtags=[])
+
+            authorized_query = await self.auth_service.build_tag_query(current_user, {})
+            subtags, truncated = await self.tag_service.get_subtag_lookup_for_tags(
+                authorized_query, unique_ids
+            )
+            return SubtagBatchResponse(subtags=subtags, truncated=truncated)
+
+        except (BaseDomainError, HTTPException):
+            raise
+        except Exception as e:
+            logger.error(f"Failed to batch-load subtags: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Subtag service temporarily unavailable"
+            )
+
     async def update_subtag(
         self,
         subtag_id: str,
@@ -458,7 +529,7 @@ class TagController:
         """Update subtag with validation."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id, cost=2)
+            await self.write_limiter.check_user_limit(current_user.id, cost=2)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:update")
@@ -532,7 +603,7 @@ class TagController:
         """Delete subtag with validation."""
         try:
             # Rate limiting
-            await self.rate_limiter.check_user_limit(current_user.id, cost=3)
+            await self.write_limiter.check_user_limit(current_user.id, cost=3)
 
             # Authorization check
             await self.auth_service.require_permission(current_user, "tags:delete")
@@ -721,21 +792,49 @@ class TagController:
 
 
 # Dependency injection
+TAGS_READ_RATE_LIMIT_SCOPE = "tags:read"
+TAGS_WRITE_RATE_LIMIT_SCOPE = "tags:write"
+
+
 async def get_tag_controller() -> TagController:
     """Factory function for tag controller."""
     tag_service = TagService()
     auth_service = AuthorizationService()
-    rate_limiter = RateLimiter(
-        max_requests=120,
-        window_seconds=3600,
-        scope="tags",
+    read_limiter = RateLimiter(
+        max_requests=settings.TAGS_READ_RATE_LIMIT_REQUESTS,
+        window_seconds=settings.TAGS_READ_RATE_LIMIT_WINDOW,
+        scope=TAGS_READ_RATE_LIMIT_SCOPE,
+    )
+    write_limiter = RateLimiter(
+        max_requests=settings.TAGS_WRITE_RATE_LIMIT_REQUESTS,
+        window_seconds=settings.TAGS_WRITE_RATE_LIMIT_WINDOW,
+        scope=TAGS_WRITE_RATE_LIMIT_SCOPE,
     )
     audit_logger = AuditLogger()
 
-    return TagController(tag_service, auth_service, rate_limiter, audit_logger)
+    return TagController(tag_service, auth_service, read_limiter, write_limiter, audit_logger)
 
 
 # API Endpoints - Tags
+# Static path, declared before every /tags/{tag_id} route.
+@router.get("/tags/subtags/batch", response_model=SubtagBatchResponse)
+@handle_exceptions
+async def get_subtags_batch(
+    tag_ids: List[str] = Query(default=[]),
+    controller: TagController = Depends(get_tag_controller),
+    current_user: CurrentUser = Depends(get_current_user)
+):
+    """Subtags of up to SUBTAG_BATCH_MAX_TAG_IDS tags in one request."""
+    await PolicyService().authorize(
+        current_user,
+        "dms.document.view",
+        resource_type="tag",
+        organization_id=getattr(current_user, "organization_id", None),
+        audit=False,
+    )
+    return await controller.get_subtags_batch(tag_ids, current_user)
+
+
 @router.get("/tags", response_model=TagListResponse)
 @handle_exceptions
 async def get_tags(
