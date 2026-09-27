@@ -30,6 +30,7 @@ from .models import (
     SearchResult,
     SearchStrategy,
 )
+from .authority import user_metadata_filters
 from .reranker import RerankerService
 from .source_metadata import normalize_source_payload
 from .vector_client import VectorClient
@@ -129,14 +130,17 @@ class RetrievalService:
                         # collection below stays as compatibility fallback.
                         results = await self._search_contract_clauses(q_vector, request)
                     if not results:
+                        # Authority LAST, after caller metadata stripped of
+                        # authority keys: `metadata.org_id` once replaced the
+                        # authorised org here (see `retrieval/authority.py`).
                         results = await self.vector_client.search(
                             q_vector,
                             filters={
-                                "org_id": request.filters.org_id,
-                                "project_id": request.filters.project_id,
                                 "document_id": request.filters.document_id,
                                 "tags": request.filters.tags,
-                                **(request.filters.metadata or {}),
+                                **user_metadata_filters(request.filters.metadata),
+                                "org_id": request.filters.org_id,
+                                "project_id": request.filters.project_id,
                             },
                             limit=request.limit,
                         )
@@ -519,9 +523,8 @@ class RetrievalService:
             query["document_id"] = request.filters.document_id
         if request.filters.tags:
             query["tags"] = {"$in": request.filters.tags}
-        if request.filters.metadata:
-            for key, value in request.filters.metadata.items():
-                query[f"metadata.{key}"] = value
+        for key, value in user_metadata_filters(request.filters.metadata).items():
+            query[f"metadata.{key}"] = value
         cursor = self.db.chunks.find(query).limit(request.limit * 3)
         docs = [doc async for doc in cursor]
         scored: List[Dict[str, Any]] = []
@@ -603,10 +606,14 @@ class RetrievalService:
             ]
         if request.filters.tags:
             query["tags"] = {"$all": request.filters.tags}
-        for key, value in (request.filters.metadata or {}).items():
+        for key, value in user_metadata_filters(request.filters.metadata).items():
             if key in {"uploadType", "document_type"}:
                 continue
             query[key] = value
+        # Authority last; the metadata above can no longer name these keys,
+        # and this keeps a future edit to the loop from reopening the override.
+        query["organization_id"] = request.filters.org_id
+        query["project_id"] = request.filters.project_id
 
         cursor = self.db.document_vectors.find(query).limit(
             self._contract_mongo_scan_limit(request)
