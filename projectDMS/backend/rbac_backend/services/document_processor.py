@@ -16,6 +16,7 @@ from .file_service import FileService
 from .ocr_service import OCRService
 from .openai_service import OpenAIService
 from .pydantic_ai_service import PydanticAIService, PydanticAIMetadataError
+from .metadata_integrity import assess_metadata_quality
 
 from .extraction.fallback.models import FallbackOutcome
 from .extraction.image_extractor import extract_image, extract_text_file
@@ -753,12 +754,18 @@ class DocumentProcessor:
                 logger.warning(f"Error closing database connection: {e}")
 
     def _build_ocr_fallback_report(self, ocr_text: str, *, filename: str) -> str:
-        """Build a structured report from OCR text when AI extraction is unavailable."""
+        """Build a structured report from OCR text when AI extraction is unavailable.
+
+        Every value comes from a labelled line of the OCR text, or is
+        ``null``. The filename is never promoted to a letter number, subject
+        or summary: a guessed value stored as an extracted fact looks real,
+        yields a false ``letterNoNormalized`` and then false reference links
+        (DI-H6). The caller marks this source degraded (metadata_integrity).
+        """
 
         text = (ocr_text or "").strip()
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         first_lines = lines[:80]
-        filename_letter_no = self._letter_no_from_filename(filename)
 
         def first_match(patterns: list[str], source: str = text) -> Optional[str]:
             for pattern in patterns:
@@ -769,24 +776,21 @@ class DocumentProcessor:
                         return value[:250]
             return None
 
+        # Header fields are read from the start of a line only. Mid-sentence
+        # matches ("... our letter no. XYZ/12 dated 01.08.2024") and the first
+        # bare date in the text belong to some other letter.
         date = first_match(
             [
-                r"\bDate\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
-                r"\bDated?\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
-                r"\b([0-3]?\d[./-][01]?\d[./-](?:19|20)\d{2})\b",
+                r"^\s*Date\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
+                r"^\s*Dated?\s*[:\-]?\s*([0-3]?\d[./-][01]?\d[./-](?:19|20)?\d{2})",
             ]
         )
-        letter_no = first_match(
-            [
-                r"\bLetter\s*No\.?\s*[:\-]?\s*([A-Z0-9][A-Z0-9/_.\-\s]{4,90})",
-                r"\b(?:Our\s+)?Ref(?:erence)?\s*(?:No\.?)?\s*[:\-]?\s*([A-Z0-9][A-Z0-9/_.\-\s]{4,90})",
-            ]
-        ) or filename_letter_no
-        subject = self._subject_from_lines(first_lines) or filename_letter_no
+        letter_no = self._fallback_letter_number(lines[:40])
+        subject = self._subject_from_lines(first_lines)
         from_company = first_match([r"^\s*From\s*[:\-]\s*(.+)$"])
         to_company = first_match([r"^\s*To\s*[:\-]\s*(.+)$"])
         summary_lines = [line for line in lines if len(line) >= 24][:5]
-        summary = "\n".join(f"- {line[:220]}" for line in summary_lines) or f"- OCR completed for {filename}"
+        summary = "\n".join(f"- {line[:220]}" for line in summary_lines) or None
         keywords = self._keywords_from_text(" ".join(first_lines), letter_no=letter_no, subject=subject)
 
         def value_or_null(value: Optional[str]) -> str:
@@ -813,8 +817,8 @@ class DocumentProcessor:
                 f"18) Key Words: {', '.join(keywords) if keywords else 'null'}",
                 "19) Linked Event Suggested: null",
                 "20) Reference Chain: null",
-                f"21) Key Words: {', '.join(keywords) if keywords else 'null'}",
-                f"22) Summary: {summary}",
+                f"21) Additional Key Words: {', '.join(keywords) if keywords else 'null'}",
+                f"22) Summary: {value_or_null(summary)}",
                 "23) Contractual Clauses: null",
                 "24) Key Reply Points - Points to be Addressed While Responding: null",
                 f"25) Full Content: {text}",
@@ -823,10 +827,41 @@ class DocumentProcessor:
             ]
         )
 
-    def _letter_no_from_filename(self, filename: str) -> Optional[str]:
-        stem = Path(filename or "").stem.strip()
-        stem = re.sub(r"^[a-f0-9]{24}_", "", stem, flags=re.IGNORECASE)
-        return stem or None
+    #: "Letter No.: X" / "Our Ref: X" / "Ref. No. X" at the start of a line.
+    #: The label must end in a delimiter or "No", so "References:" and
+    #: "Refund of retention ..." are not labels.
+    _LETTER_NO_LABEL = re.compile(
+        r"^(?P<label>Letter[ \t]*(?:No\.?|Number)|(?:Our[ \t]+)?Ref(?:erence)?\b\.?(?:[ \t]*No\.?)?)"
+        r"[ \t]*[:\-]?[ \t]*(?P<value>\S.*)$",
+        flags=re.IGNORECASE,
+    )
+    _DATED_CLAUSE = re.compile(r"\s+(?:dated|dtd|dt\.?|date)\b", flags=re.IGNORECASE)
+
+    def _fallback_letter_number(self, lines: list[str]) -> Optional[str]:
+        """This letter's own number from a labelled header line, or None.
+
+        A candidate must be one identifier-shaped token containing a digit.
+        A ``Ref:`` line carrying "dated ..." cites *another* letter and is
+        skipped; a ``Letter No.`` line may carry its own date.
+        """
+        for line in lines:
+            match = self._LETTER_NO_LABEL.match(line.strip())
+            if not match:
+                continue
+            is_ref_label = re.sub(r"^our\s+", "", match.group("label").lower()).startswith("ref")
+            value = match.group("value").strip()
+            parts = self._DATED_CLAUSE.split(value, maxsplit=1)
+            if is_ref_label and len(parts) > 1:
+                continue
+            candidate = parts[0].strip(" :-.,;")[:90]
+            # One identifier-shaped token: segments joined by / - _ . with a
+            # digit somewhere. Prose ("to your letter no. 12", "GCC Clause
+            # 8.4", "2 above is relevant") has spaces and is rejected.
+            if re.fullmatch(r"[A-Za-z0-9]+(?:[/_.\-][A-Za-z0-9]+)+", candidate) and re.search(
+                r"\d", candidate
+            ):
+                return candidate
+        return None
 
     def _subject_from_lines(self, lines: list[str]) -> Optional[str]:
         for index, line in enumerate(lines):
@@ -873,6 +908,8 @@ class DocumentProcessor:
         document_id: Optional[str],
         parsed_metadata: ParsedDocumentMetadata,
         skip_embeddings: bool = False,
+        *,
+        metadata_quality: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Save processing results to file system and database"""
         try:
@@ -893,6 +930,7 @@ class DocumentProcessor:
                 full_text=text_for_db,
                 embedding_text=text_for_embedding,
                 skip_embeddings=skip_embeddings,
+                metadata_quality=metadata_quality,
             )
 
             return chunks_created
@@ -1041,6 +1079,14 @@ class DocumentProcessor:
 
 
 
+            # Degraded extraction must be visible on every path that persists
+            # it, including bulk upload, which never reaches DocumentService.
+            metadata_quality = assess_metadata_quality(
+                parsed_metadata,
+                metadata_source=metadata_source,
+                partial_failures=partial_failures,
+            )
+
             # The publication barrier. Decided once, here, BEFORE any
             # publishing side effect runs, and carried on the result so every
             # downstream boundary honours the same decision instead of
@@ -1067,6 +1113,7 @@ class DocumentProcessor:
                 extracted_content, raw_ocr_text, original_path, path_structure,
                 upload_type, document_id, parsed_metadata,
                 skip_embeddings=skip_embeddings or blocked_for_review,
+                metadata_quality=metadata_quality,
             )
             partial_failures.update(dict(getattr(self.database_service, "partial_failures", {}) or {}))
 

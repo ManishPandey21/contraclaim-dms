@@ -252,7 +252,15 @@ class OpenAIService:
         return self._expanded_extraction_prompt()
 
     def _expanded_extraction_prompt(self) -> str:
-        """Expanded contract letter metadata extraction prompt."""
+        """Expanded contract letter metadata extraction prompt.
+
+        The item numbers are a wire contract with
+        ``TextProcessingService.parse_extraction_report``, which matches each
+        block by number *and* label. Item 10 is intentionally unused: an older
+        layout used 7-11 for other fields, and renumbering would silently
+        re-map every later field. Any change to this text bumps
+        ``METADATA_EXTRACTION_PROMPT_VERSION``.
+        """
         from .ai_guardrails import UNTRUSTED_DOCUMENT_GUARD
 
         tag_options = ", ".join(EXTRACTED_TAG_OPTIONS)
@@ -283,7 +291,7 @@ class OpenAIService:
             "18) Key Words: [comma-separated list of key contractual words mentioned, tags, topic, claim type, location, work type, and issue nature]\n"
             "19) Linked Event Suggested: [short event title useful for chronology/claim matrix or 'null']\n"
             "20) Reference Chain: [whether this letter is original notice/reply/reminder/response to previous letter/follow-up or 'null']\n"
-            "21) Key Words: [comma-separated additional tags useful for search/RAG, including location tags, issue tags, claim tags, clause tags, delay event tags, payment tags, authority tags, and document topic tags. Use concise tags only.]\n"
+            "21) Additional Key Words: [comma-separated additional tags useful for search/RAG, including location tags, issue tags, claim tags, clause tags, delay event tags, payment tags, authority tags, and document topic tags. Use concise tags only.]\n"
             "22) Summary: [Write a 4-6 line contractual/legal summary/fact of the matter suitable for vector search/RAG. Mention issue, location, responsibility alleged, contractual implication, and required action where available.]\n"
             "23) Contractual Clauses: [comma-separated list of clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon; write 'null' if absent]\n"
             "24) Key Reply Points - Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response - one point per line with a - prefix, or 'null']\n"

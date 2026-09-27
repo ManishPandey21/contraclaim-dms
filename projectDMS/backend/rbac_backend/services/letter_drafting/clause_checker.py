@@ -81,10 +81,11 @@ class ClauseCheckingAgent:
             if key:
                 by_no.setdefault(key, []).append(record)
 
+        # Applicability is an evidence verdict, so it is judged against what
+        # the letter says. AI reply advice (key_reply_points) is not that.
         issue_terms = _terms(
             analysis.subject,
             analysis.main_request,
-            " ".join(analysis.key_reply_points or []),
         )
 
         enriched: List[CitedClauseEvaluation] = []
