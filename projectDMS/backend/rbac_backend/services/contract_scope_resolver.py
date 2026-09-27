@@ -185,6 +185,12 @@ class ResolvedContractScope:
     instruments: Tuple[ApplicableInstrument, ...]
     eligible_document_ids: frozenset
     legal_effects: Tuple[Dict[str, Any], ...] = ()
+    #: Instruments that DO apply and whose document may publish, but whose
+    #: projection is not current for their live revision. They are excluded from
+    #: the eligible set like before; they are also named here, because "nothing
+    #: applies" and "something applies and cannot be searched yet" are different
+    #: answers, and the evidence path must not report the second as the first.
+    projection_not_current: Tuple[Dict[str, Any], ...] = ()
 
 
 def _parse_date(value: Any) -> Optional[date]:
@@ -297,6 +303,7 @@ class ContractScopeResolver:
 
             instruments: List[ApplicableInstrument] = []
             eligible: List[str] = []
+            not_current: List[Dict[str, Any]] = []
 
             for aggregate in aggregates:
                 events = await self._db[APPLICABILITY_EVENTS_COLLECTION].find(
@@ -315,11 +322,19 @@ class ContractScopeResolver:
                 )
                 if record is None:
                     continue
-                if not _projection_is_current(record):
-                    continue
 
                 document_id = str(record.get("document_id") or "")
                 if not await self._document_is_positively_authorised(document_id):
+                    continue
+                if not _projection_is_current(record):
+                    not_current.append(
+                        {
+                            "contract_document_id": str(record.get("_id")),
+                            "classification_revision": record.get("classification_revision"),
+                            "projection_revision": record.get("projection_revision"),
+                            "projection_status": record.get("projection_status"),
+                        }
+                    )
                     continue
 
                 basis = next(
@@ -368,6 +383,7 @@ class ContractScopeResolver:
             instruments=tuple(instruments),
             eligible_document_ids=frozenset(eligible),
             legal_effects=tuple(effects),
+            projection_not_current=tuple(not_current),
         )
 
     async def browse_catalogue(

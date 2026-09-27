@@ -89,6 +89,9 @@ services:
       LANGGRAPH_ENABLED: "false"
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      # Contract Master reprojection (PENDING -> CURRENT). Exactly one service
+      # runs it; the claim lease keeps extra replicas safe, not useful.
+      START_CONTRACT_REPROJECTION_WORKERS: "true"
       # H2: single owner of the leader-locked cron jobs.
       RUN_SCHEDULER: "true"
     depends_on:

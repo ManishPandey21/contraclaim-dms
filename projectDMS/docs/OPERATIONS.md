@@ -392,6 +392,106 @@ Verify after deploy:
 - `scheduler_locks` contains short-lived locks while jobs run.
 - No duplicate daily or weekly notifications are emitted.
 
+## 7a. Contract Master Reprojection Ownership
+
+A promoted or corrected contract instrument is written `projection_status=PENDING`
+in the same transaction that makes its classification authoritative. Only the
+reprojection runtime moves it to `CURRENT`, and until then Contract Master
+evidence for that contract answers `409 projection_not_current`. The 2026-09-25
+staging rehearsal failed exactly here: PENDING was written and no process owned
+it. A deploy that ships the code without a running owner reproduces that
+incident, so ownership is verified after every deploy, not assumed.
+
+| Service | `START_CONTRACT_REPROJECTION_WORKERS` | Owns |
+|---|---|---|
+| `contract-worker` | `true` (exactly one service) | reprojection, contract ingest queue, scheduler |
+| `backend` (web) | unset / `false` | must never reproject |
+| `document-worker` | unset / `false` | page extraction (`START_DOCUMENT_EXTRACTION_WORKERS=true`) |
+
+**Build every image with the release identity.** Each service builds its own
+image from `./backend`, so rebuilding only `backend` leaves `contract-worker` on
+the previous code while the checkout says otherwise. The build stamps the commit
+into the image label `org.opencontainers.image.revision`, and `up` passes the
+same value to the process as `RELEASE_SHA`:
+
+```bash
+export RELEASE_SHA=$(git rev-parse HEAD)
+docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build backend contract-worker document-worker document-worker-canary
+docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-deps backend contract-worker document-worker
+```
+
+An image built without `RELEASE_SHA` is labelled `unknown`, which the check below
+reports as a failure: it cannot prove what code is running.
+
+**What `scripts/post_deploy_verify.sh` asserts** (section "Contract Master
+reprojection ownership"; read-only, it writes nothing):
+
+1. `contract-worker` is running with `START_CONTRACT_REPROJECTION_WORKERS=true`.
+2. `backend` and every `document-worker*` container do **not** have it set. A
+   second owner would be safe (the claim lease) but is a topology error.
+3. `document-worker` still owns extraction (`START_DOCUMENT_EXTRACTION_WORKERS=true`).
+4. The `contract-worker` image revision equals the deployed checkout's commit
+   (FAIL on mismatch); `backend` and `document-worker` are compared too (WARN).
+5. The runtime recorded liveness in `contract_reprojection_runtime_heartbeats`
+   within three poll intervals (`CONTRACT_REPROJECTION_POLL_SECONDS`, at least
+   180 s), from a running `contract-worker` container, on the deployed
+   `RELEASE_SHA` - and no running `backend` or `document-worker` container has a
+   fresh row. Liveness is written throughout a pass, so a long pass over a
+   backlog does not read as a dead owner; the pass start is recorded too, and a
+   pass still running after 30 minutes (the claim lease) fails the check as
+   stuck. A stopped runtime deletes its row, and rows of processes that
+   died expire after 7 days (TTL); a row left by the container a deploy
+   replaced names a host that no longer runs and is ignored. This proves the
+   loop is running the new code, not only that the flag is set.
+
+**Staging only: a deterministic PENDING generation.** Promote a fixture contract
+on staging (the Contract Master runtime harness, or the migration adjudication
+flow by hand), then run the verifier with its instrument id:
+
+```bash
+REPROJECTION_PROBE_INSTRUMENT_ID=<contract_documents._id> scripts/post_deploy_verify.sh
+```
+
+It waits up to `REPROJECTION_PROBE_TIMEOUT_SECONDS` (default 300) for the
+instrument to leave PENDING, and passes only when it is `CURRENT` at its live
+revision **and** its completed claim names a worker id that heartbeated from a
+`contract-worker` container. The probe only reads; the promotion that creates the
+PENDING generation is the operator's, so run it only against a fixture made for
+the purpose, never a production instrument.
+
+**When a generation does not reach CURRENT.** `GET
+/api/contract-master/instruments/{id}/projection` shows the claim state:
+`failures`, `next_attempt_at` and an operator-safe `last_error`. A FAILED
+generation retries by itself with capped backoff (1, 2, 4 … 60 minutes); an
+operator retry is `python -m rbac_backend.scripts.contract_reprojection_retry
+--contract-document-id <instrument id>` inside the contract-worker container.
+
+| `last_error` says | Meaning | Action |
+|---|---|---|
+| `embedding unavailable` / `vector publication failed` | a derived store is down | none; it retries |
+| `the source of … is mutating` | an ingest (upload, OCR retry, reindex) is writing the text | none; the ingest re-opens the generation when it settles |
+| `the source of … is failed` | the last ingest stopped part-way; its text is half-written | reindex the contract |
+| `no persisted page text` | a PDF contract ingested before the page store existed | reindex the contract |
+
+**Generic pipelines never repair a governed contract.** `POST
+/api/v1/ingestion/jobs` answers `409` for a document a Contract Master instrument
+names (that pipeline prunes every point it did not write, which deleted the
+projection's vectors), general reprocess answers `409`, and storage repair
+delegates: a CURRENT projection whose points are missing from the vector store is
+handed back to reprojection (PENDING), a FAILED one is re-opened, and bulk resync
+skips governed documents entirely.
+
+**One writer of a contract's source.** A contract ingest holds a durable lease
+on the document (`contract_source_leases`, 10 minutes, renewed every minute). A
+second ingest of the same document is not started: the queue puts it back
+without spending a retry, or leaves it to the run that holds the lease when it
+is a redelivered copy of that run. An ingest that cannot renew for 7 minutes
+stops itself (recorded as a failed, retried ingest) before its lease can lapse;
+one whose lease was taken marks the source tainted. A lease that lapses while
+`mutating` is a crashed ingest; a failed or tainted source is not projected
+until another ingest settles it cleanly - the projection route then says
+`the source of … is failed`, and the fix is a reindex.
+
 ## 8. Security Operations
 
 - Keep `.env` out of git and source production values from a secrets manager.

@@ -475,6 +475,166 @@ print(f"ok {len(seeded)} permissions seeded, superadmin holds all {len(expected)
   fi
 fi
 
+# ---------------------------------------------------------------------------
+# Contract Master reprojection ownership (docs/OPERATIONS.md section 7a)
+#
+# READ-ONLY. Promotion writes PENDING and only the contract-worker's
+# reprojection runtime moves it to CURRENT; the 2026-09-25 staging incident was
+# PENDING with no running owner. The flag alone proves nothing (a stale image,
+# a crashed loop), so the running image and the runtime's own heartbeat are
+# checked too.
+# ---------------------------------------------------------------------------
+printf '\n--- Contract Master reprojection ownership ---\n'
+
+image_revision() {
+  docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1" 2>/dev/null || true
+}
+
+contract_worker_hosts=""
+contract_worker_cids=$(compose_ps_q contract-worker)
+if [[ -z "$contract_worker_cids" ]]; then
+  fail "No running contract-worker container: nothing owns Contract Master reprojection"
+fi
+for cid in $contract_worker_cids; do
+  flag=$(container_env "$cid" START_CONTRACT_REPROJECTION_WORKERS)
+  if [[ "$flag" == "true" || "$flag" == "True" ]]; then
+    pass "contract-worker ${cid:0:12} owns reprojection (START_CONTRACT_REPROJECTION_WORKERS=true)"
+  else
+    fail "contract-worker ${cid:0:12} has START_CONTRACT_REPROJECTION_WORKERS=${flag:-<unset>}: promoted contracts would stay PENDING"
+  fi
+  revision=$(image_revision "$cid")
+  if [[ -n "$deployed_commit" && "$revision" == "$deployed_commit" ]]; then
+    pass "contract-worker image revision matches the deployed commit ${deployed_commit:0:12}"
+  else
+    fail "contract-worker image revision is '${revision:-<none>}', deployed commit is '${deployed_commit:-<unknown>}' (build with RELEASE_SHA=\$(git rev-parse HEAD))"
+  fi
+  contract_worker_hosts="$contract_worker_hosts $(docker inspect -f '{{.Config.Hostname}}' "$cid" 2>/dev/null || true)"
+done
+
+non_owner_hosts=""
+for svc in backend document-worker document-worker-canary; do
+  for cid in $(compose_ps_q "$svc"); do
+    [[ -z "$cid" ]] && continue
+    non_owner_hosts="$non_owner_hosts $(docker inspect -f '{{.Config.Hostname}}' "$cid" 2>/dev/null || true)"
+    flag=$(container_env "$cid" START_CONTRACT_REPROJECTION_WORKERS)
+    if [[ "$flag" == "true" || "$flag" == "True" ]]; then
+      fail "$svc ${cid:0:12} has START_CONTRACT_REPROJECTION_WORKERS=true: only contract-worker may own reprojection"
+    else
+      pass "$svc ${cid:0:12} is not a reprojection owner"
+    fi
+    revision=$(image_revision "$cid")
+    if [[ -n "$deployed_commit" && "$revision" != "$deployed_commit" ]]; then
+      warn "$svc ${cid:0:12} image revision is '${revision:-<none>}', deployed commit is '${deployed_commit}'"
+    fi
+  done
+done
+
+document_worker_cids=$(compose_ps_q document-worker)
+if [[ -n "$document_worker_cids" ]]; then
+  for cid in $document_worker_cids; do
+    flag=$(container_env "$cid" START_DOCUMENT_EXTRACTION_WORKERS)
+    if [[ "$flag" == "true" || "$flag" == "True" ]]; then
+      pass "document-worker ${cid:0:12} owns extraction"
+    else
+      fail "document-worker ${cid:0:12} has START_DOCUMENT_EXTRACTION_WORKERS=${flag:-<unset>}"
+    fi
+  done
+else
+  warn "No running document-worker container; extraction ownership not verified"
+fi
+
+if [[ -n "$backend_cid" && -n "$contract_worker_cids" ]]; then
+  if docker compose --env-file "$ENV_FILE" $COMPOSE_FILES exec -T --interactive=false \
+    -e "CW_HOSTS=${contract_worker_hosts}" \
+    -e "NON_OWNER_HOSTS=${non_owner_hosts}" \
+    -e "DEPLOYED_COMMIT=${deployed_commit}" \
+    -e "PROBE_INSTRUMENT=${REPROJECTION_PROBE_INSTRUMENT_ID:-}" \
+    -e "PROBE_TIMEOUT=${REPROJECTION_PROBE_TIMEOUT_SECONDS:-300}" \
+    backend python -c '
+import os, sys, time
+from datetime import datetime, timedelta, timezone
+from pymongo import MongoClient
+
+from rbac_backend.services.contract_reprojection_runtime import RUNTIME_HEARTBEATS_COLLECTION
+
+hosts = set(os.environ.get("CW_HOSTS", "").split())
+# Only a RUNNING container that must not reproject counts as a second owner. A
+# row left by the contract-worker this deploy replaced names a host that no
+# longer exists and is ignored (a stopped runtime also removes its own row).
+non_owners = set(os.environ.get("NON_OWNER_HOSTS", "").split())
+deployed = os.environ.get("DEPLOYED_COMMIT", "")
+db = MongoClient(os.environ["DATABASE_URL"], serverSelectionTimeoutMS=8000).get_default_database()
+
+def aware(value):
+    return value.replace(tzinfo=timezone.utc) if value and value.tzinfo is None else value
+
+now = datetime.now(timezone.utc)
+beats = list(db[RUNTIME_HEARTBEATS_COLLECTION].find({}))
+fresh = []
+for beat in beats:
+    window = max(180.0, 3 * float(beat.get("interval_seconds") or 60))
+    # Liveness is written during a pass too (per instrument and per build
+    # step), so a long pass over a backlog does not read as a dead owner.
+    last = aware(beat.get("last_alive_at") or beat.get("last_pass_at"))
+    if last and now - last <= timedelta(seconds=window):
+        fresh.append(beat)
+problems = []
+owners = [b for b in fresh if b.get("host") in hosts]
+strangers = [b for b in fresh if b.get("host") in non_owners]
+if not owners:
+    problems.append("no live reprojection runtime recorded by a contract-worker container")
+if strangers:
+    problems.append("reprojection runtime running in non-contract-worker containers: " + ", ".join(sorted({str(b.get("host")) for b in strangers})))
+# A pass still running after the claim lease (30 min) plus one interval is
+# stuck: its liveness ticker keeps writing, but no generation is moving.
+stuck = []
+for beat in owners:
+    started = aware(beat.get("pass_started_at"))
+    finished = aware(beat.get("last_pass_at"))
+    limit = timedelta(seconds=1800 + float(beat.get("interval_seconds") or 60))
+    if started and (finished is None or finished < started) and now - started > limit:
+        stuck.append(beat)
+if stuck:
+    problems.append("reprojection pass running for more than 30 minutes on: " + ", ".join(sorted({str(b.get("host")) for b in stuck})))
+stale_code = [b for b in owners if deployed and b.get("release") != deployed]
+if stale_code:
+    problems.append("contract-worker runtime release " + ", ".join(sorted({str(b.get("release")) for b in stale_code})) + " != deployed " + deployed)
+
+probe = os.environ.get("PROBE_INSTRUMENT", "")
+if probe and not problems:
+    deadline = time.time() + float(os.environ.get("PROBE_TIMEOUT") or 300)
+    owner_ids = {b["_id"] for b in owners}
+    while True:
+        inst = db["contract_documents"].find_one({"_id": probe})
+        if inst is None:
+            problems.append(f"probe instrument {probe} does not exist"); break
+        revision = int(inst.get("classification_revision") or 0)
+        if inst.get("projection_status") == "CURRENT" and int(inst.get("projection_revision") or 0) == revision:
+            claim = db["contract_reprojection_claims"].find_one({"_id": f"contract-reprojection:{probe}:{revision}"}) or {}
+            worker = claim.get("worker_id")
+            if claim.get("status") != "complete" or worker not in owner_ids:
+                problems.append(f"probe {probe} is CURRENT but its claim was completed by {worker!r}, not a live contract-worker runtime")
+            break
+        state = inst.get("projection_status")
+        if time.time() > deadline:
+            problems.append(f"probe {probe} still {state} after the timeout"); break
+        time.sleep(5)
+
+if problems:
+    print("; ".join(problems)); sys.exit(1)
+suffix = f"; probe {probe} reached CURRENT through it" if probe else ""
+first = owners[0]
+runtime_id, host, release = first["_id"], first.get("host"), first.get("release")
+print(f"ok runtime {runtime_id} on {host} release {release}{suffix}")
+' >/tmp/reprojection_owner.out 2>&1; then
+    pass "Reprojection runtime is live: $(tail -n 1 /tmp/reprojection_owner.out 2>/dev/null)"
+  else
+    fail "Reprojection runtime check failed: $(tail -n 3 /tmp/reprojection_owner.out 2>/dev/null)"
+  fi
+elif [[ -z "$backend_cid" ]]; then
+  fail "Cannot verify reprojection runtime liveness: no running backend container to run the check in"
+fi
+
 # 11. Archive MIME configuration. ZIP is stored intact and never unpacked; RAR
 #     stays disabled until clamd is proven to scan inside a .rar (Task 0.4).
 if [[ -n "$worker_cid" ]]; then

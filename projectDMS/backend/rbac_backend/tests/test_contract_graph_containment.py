@@ -660,9 +660,12 @@ def test_embedding_generation_change_was_not_absorbed():
 
     worker = contract_reprojection_worker.ContractReprojectionWorker
     assert not [name for name in dir(worker) if "embed" in name.lower()]
-    assert sorted(contract_reprojection_worker.__all__) == [
+    # The worker owns claims and fences; the embedding input lives with the
+    # projection builder (which reuses the ingest's), never in this module.
+    assert not [name for name in contract_reprojection_worker.__all__ if "embed" in name.lower()]
+    assert {
         "ContractReprojectionWorker",
         "ProjectionClaim",
         "REPROJECTION_CLAIMS_COLLECTION",
         "StaleWorkerGeneration",
-    ]
+    } <= set(contract_reprojection_worker.__all__)

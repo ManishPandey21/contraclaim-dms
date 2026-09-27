@@ -433,12 +433,20 @@ async def get_projection_status(
         project_id=record.get("project_id"),
         audit=False,
     )
+    from ..services.contract_reprojection_worker import ContractReprojectionWorker
+
+    # Operational diagnostics of the live generation's work: why it failed, when
+    # it retries. Never authority - evidence readiness is still the comparison.
+    work = await ContractReprojectionWorker(db).claim_state(
+        contract_document_id, int(record.get("classification_revision") or 0)
+    )
     return {
         "contract_document_id": contract_document_id,
         "projection_status": record.get("projection_status"),
         "projection_revision": record.get("projection_revision"),
         "classification_revision": record.get("classification_revision"),
         "is_current": _projection_current(record),
+        "projection_work": work,
     }
 
 

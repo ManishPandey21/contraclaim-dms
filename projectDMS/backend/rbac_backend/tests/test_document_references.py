@@ -331,6 +331,7 @@ class FakeCollection:
 class FakeDatabase:
     def __init__(self, documents: Iterable[Dict[str, Any]] | None = None) -> None:
         self.documents = FakeCollection(documents)
+        self.contract_documents = FakeCollection()
         # Collections used indirectly by enrichment logic; populate with empty stubs
         self.projects = FakeCollection()
         self.tags = FakeCollection()

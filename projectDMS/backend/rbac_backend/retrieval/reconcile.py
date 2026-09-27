@@ -25,6 +25,33 @@ class VectorReconciler:
         self.embedding_client = embedding_client
         self.vector_client = vector_client
 
+    @staticmethod
+    def _untouched() -> Dict[str, int]:
+        return {
+            "missing_in_qdrant": 0,
+            "missing_in_mongo": 0,
+            "repaired": 0,
+            "removed": 0,
+            "qdrant_ids": 0,
+            "mongo_chunks": 0,
+        }
+
+    async def _is_contract_projection(self, document_id: str, document: Dict) -> bool:
+        if str((document or {}).get("uploadType") or "").lower() == "contract":
+            return True
+        from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+
+        instruments = getattr(self.db, CONTRACT_DOCUMENTS_COLLECTION, None)
+        if instruments is None:
+            return False
+        ids = sorted(
+            {str(document_id), str((document or {}).get("_id") or document_id)}
+        )
+        return (
+            await instruments.find_one({"document_id": {"$in": ids}}, {"_id": 1})
+            is not None
+        )
+
     async def reconcile_document(
         self,
         document_id: str,
@@ -34,14 +61,16 @@ class VectorReconciler:
     ) -> Dict[str, int]:
         document = await resolve_canonical_document(self.db, document_id)
         if not is_consumable(document):
-            return {
-                "missing_in_qdrant": 0,
-                "missing_in_mongo": 0,
-                "repaired": 0,
-                "removed": 0,
-                "qdrant_ids": 0,
-                "mongo_chunks": 0,
-            }
+            return self._untouched()
+        if await self._is_contract_projection(document_id, document):
+            # Contract vectors are not described by ``chunks`` rows: every point
+            # would read as "missing in Mongo" and be deleted, emptying the
+            # evidence vector source under a CURRENT Contract Master projection.
+            # Their only writers are contract ingest and the contract-worker's
+            # reprojection, so this reconciler leaves them alone.
+            result = self._untouched()
+            result["skipped_contract"] = 1
+            return result
 
         chunks = [
             doc
