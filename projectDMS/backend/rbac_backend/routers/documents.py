@@ -14,6 +14,8 @@ from pathlib import Path
 import uuid
 import csv
 import io
+import numbers
+import numpy as np
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
@@ -1267,9 +1269,19 @@ class DocumentController:
         tags = self._parse_list_field(row.get('tags', ''))
         sub_tags = self._parse_list_field(row.get('sub_tags') or row.get('subTags') or '')
         status = str(row.get('status', 'draft')).strip()
-        ocr_enabled = self._parse_boolean_field(row.get('ocr_enabled') or row.get('ocrEnabled') or 'true')
+        # First PRESENT value, not first truthy: pandas reads "false" as False
+        # and "0" as 0, and an `a or b or 'true'` chain turned both into true.
+        ocr_enabled = self._parse_boolean_field(
+            self._first_present(row, 'ocr_enabled', 'ocrEnabled'),
+            field='ocr_enabled',
+            default=True,
+            row_number=row_number,
+        )
         compression_enabled = self._parse_boolean_field(
-            row.get('compression_enabled') or row.get('compressionEnabled') or 'false'
+            self._first_present(row, 'compression_enabled', 'compressionEnabled'),
+            field='compression_enabled',
+            default=False,
+            row_number=row_number,
         )
         path_structure = str(row.get('path_structure') or row.get('pathStructure') or '').strip() or None
         path_structure1 = str(row.get('path_structure1') or row.get('pathStructure1') or '').strip() or None
@@ -1302,18 +1314,60 @@ class DocumentController:
 
         return []
 
-    def _parse_boolean_field(self, value: Any) -> bool:
-        """Parse boolean field from various formats."""
-        if pd.isna(value):
+    @staticmethod
+    def _is_blank_cell(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            # `read_csv_from_upload_file` casts text columns with astype(str),
+            # which turns a blank cell into the literal string "nan".
+            return value.strip().lower() in ('', 'nan')
+        try:
+            return bool(pd.isna(value))
+        except (TypeError, ValueError):
             return False
 
-        if isinstance(value, bool):
-            return value
+    def _first_present(self, row: Dict[str, Any], *keys: str) -> Any:
+        """The first of ``keys`` whose cell is not blank (``False``/``0`` count)."""
+        for key in keys:
+            value = row.get(key)
+            if not self._is_blank_cell(value):
+                return value
+        return None
 
-        if isinstance(value, str):
-            return value.lower() in ['true', '1', 't', 'y', 'yes', 'on']
+    _TRUE_TOKENS = frozenset({'true', '1', 't', 'y', 'yes', 'on'})
+    _FALSE_TOKENS = frozenset({'false', '0', 'f', 'n', 'no', 'off'})
 
-        return bool(value)
+    def _parse_boolean_field(
+        self, value: Any, *, field: str, default: bool, row_number: Any
+    ) -> bool:
+        """Parse a CSV boolean cell as pandas delivers it.
+
+        pandas yields ``bool``/``numpy.bool_`` for a true/false column, ``int``
+        or ``float`` for 0/1 (``float`` with ``NaN`` when a cell is blank), and
+        ``str`` otherwise. A blank cell means "not specified" and takes the
+        field's default. A value that is neither true nor false is a row error:
+        guessing ``False`` for "maybe" or ``2`` would silently change what the
+        upload does.
+        """
+        if self._is_blank_cell(value):
+            return default
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, numbers.Number):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+        elif isinstance(value, str):
+            token = value.strip().lower()
+            if token in self._TRUE_TOKENS:
+                return True
+            if token in self._FALSE_TOKENS:
+                return False
+        raise ValueError(
+            f"Row {row_number}: {field} must be true or false, not {value!r}"
+        )
 
     async def _emit_bulk_upload_notification(
         self,
