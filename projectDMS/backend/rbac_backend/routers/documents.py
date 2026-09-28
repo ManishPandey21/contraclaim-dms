@@ -1082,11 +1082,7 @@ class DocumentController:
                     csv_data.append(validated_row)
                 except Exception as e:
                     logger.error(f"CSV row {idx + 1} validation failed: {str(e)}")
-                    csv_data.append({
-                        **row_dict,
-                        '_validation_error': str(e),
-                        '_row_number': idx + 1
-                    })
+                    csv_data.append(self._csv_refused_row(row_dict, str(e), idx + 1))
 
             # Persist uploaded files so background processing can safely re-open them
             stored_files = await self.bulk_upload_service.persist_upload_files(files)
@@ -1210,11 +1206,7 @@ class DocumentController:
                 except Exception as e:
                     logger.error(f"Row {idx} validation failed: {str(e)}")
                     # Continue processing other rows
-                    validated_data.append({
-                        **row,
-                        '_validation_error': str(e),
-                        '_row_number': idx
-                    })
+                    validated_data.append(self._csv_refused_row(row, str(e), idx))
 
             return validated_data
 
@@ -1231,28 +1223,28 @@ class DocumentController:
 
     async def _validate_csv_row(self, row: Dict[str, Any], row_number: int) -> Dict[str, Any]:
         """Validate individual CSV row."""
+        # A blank CSV cell arrives as NaN (pandas' missing marker). It is truthy,
+        # so it would win every `or` chain below, and `str()` of it is "nan" -
+        # which then passes "is required" and persists as data. Every cell is
+        # read through `_csv_value` / `_csv_text`, which treat it as absent.
         # Clean and validate filename
-        filename = str(row.get('filename', '')).strip()
+        filename = self._csv_text(row.get('filename'))
         if not filename:
             raise ValueError(f"Row {row_number}: filename is required")
 
         # Validate upload type
-        upload_type_value = (
-            row.get('upload_type')
-            or row.get('uploadtype')
-            or row.get('uploadType')
-        )
-        upload_type = str(upload_type_value or '').strip().lower()
+        upload_type_value = self._csv_value(row, 'upload_type', 'uploadtype', 'uploadType')
+        upload_type = self._csv_text(upload_type_value).lower()
         if upload_type not in ['incoming', 'outgoing']:
             raise ValueError(f"Row {row_number}: upload_type must be 'incoming' or 'outgoing'")
 
         # Validate letter number
-        letter_no = str(row.get('letter_no') or row.get('letterNo') or '').strip()
+        letter_no = self._csv_text(self._csv_value(row, 'letter_no', 'letterNo'))
         if not letter_no:
             raise ValueError(f"Row {row_number}: letter_no is required")
 
         # Validate and parse date
-        date_str = str(row.get('date', '')).strip()
+        date_str = self._csv_text(row.get('date'))
         if not date_str:
             raise ValueError(f"Row {row_number}: date is required")
 
@@ -1261,14 +1253,16 @@ class DocumentController:
             raise ValueError(f"Row {row_number}: invalid date format '{date_str}'")
 
         # Subject is optional for bulk upload; default to empty string
-        subject = str(row.get('subject', '') or '').strip()
+        subject = self._csv_text(self._csv_value(row, 'subject'))
 
         # Optional fields with defaults
-        from_company = str(row.get('from_') or row.get('from') or '').strip() or None
-        to_company = str(row.get('to', '')).strip() or None
+        from_company = self._csv_text(self._csv_value(row, 'from_', 'from')) or None
+        to_company = self._csv_text(row.get('to')) or None
         tags = self._parse_list_field(row.get('tags', ''))
-        sub_tags = self._parse_list_field(row.get('sub_tags') or row.get('subTags') or '')
-        status = str(row.get('status', 'draft')).strip()
+        sub_tags = self._parse_list_field(self._csv_value(row, 'sub_tags', 'subTags'))
+        # A blank status cell means the same as no status column: the default.
+        status_value = row.get('status', 'draft')
+        status = 'draft' if self._is_blank_csv_value(status_value) else str(status_value).strip()
         # First PRESENT value, not first truthy: pandas reads "false" as False
         # and "0" as 0, and an `a or b or 'true'` chain turned both into true.
         ocr_enabled = self._parse_boolean_field(
@@ -1283,8 +1277,8 @@ class DocumentController:
             default=False,
             row_number=row_number,
         )
-        path_structure = str(row.get('path_structure') or row.get('pathStructure') or '').strip() or None
-        path_structure1 = str(row.get('path_structure1') or row.get('pathStructure1') or '').strip() or None
+        path_structure = self._csv_text(self._csv_value(row, 'path_structure', 'pathStructure')) or None
+        path_structure1 = self._csv_text(self._csv_value(row, 'path_structure1', 'pathStructure1')) or None
 
         return {
             'filename': filename,
@@ -1304,9 +1298,51 @@ class DocumentController:
             '_row_number': row_number
         }
 
+    @staticmethod
+    def _is_blank_csv_value(value: Any) -> bool:
+        """True for a CSV cell that holds nothing: None, NaN, pd.NA or NaT.
+
+        Asked explicitly because truthiness cannot: ``bool(float('nan'))`` is
+        True and ``bool(pd.NA)`` raises.
+        """
+        return value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value)))
+
+    @classmethod
+    def _csv_value(cls, row: Dict[str, Any], *keys: str) -> Any:
+        """The first of ``keys`` whose cell is present and non-empty, else None.
+
+        The ``row.get(a) or row.get(b)`` chain this replaces, except that a
+        blank (NaN) cell no longer wins it.
+        """
+        for key in keys:
+            value = row.get(key)
+            if not cls._is_blank_csv_value(value) and value:
+                return value
+        return None
+
+    @classmethod
+    def _csv_text(cls, value: Any) -> str:
+        """A cell as stripped text; ``''`` for a blank cell, never ``'nan'``."""
+        return '' if cls._is_blank_csv_value(value) else str(value).strip()
+
+    @classmethod
+    def _csv_refused_row(cls, row: Dict[str, Any], error: str, row_number: int) -> Dict[str, Any]:
+        """A row `_validate_csv_row` refused, carried to the job as a per-row failure.
+
+        The raw cells ride along for the report, but ``filename`` is made text:
+        a blank one is NaN, which ``DocumentProcessingResult`` rejects - and that
+        rejection, raised inside the background job, failed the whole job.
+        """
+        return {
+            **row,
+            'filename': cls._csv_text(row.get('filename')),
+            '_validation_error': error,
+            '_row_number': row_number,
+        }
+
     def _parse_list_field(self, value: Any) -> List[str]:
         """Parse comma-separated string into list."""
-        if not value or pd.isna(value):
+        if self._is_blank_csv_value(value) or not value:
             return []
 
         if isinstance(value, str):
@@ -1471,7 +1507,7 @@ class DocumentController:
                     logger.error(f"Failed to process file {row_data.get('filename')}: {str(e)}")
 
                     failed_result = DocumentProcessingResult(
-                        filename=row_data.get('filename', 'unknown'),
+                        filename=self._csv_text(row_data.get('filename')) or 'unknown',
                         success=False,
                         error=str(e),
                         row_number=row_data.get('_row_number', 0)
@@ -1540,7 +1576,8 @@ class DocumentController:
         current_user: CurrentUser
     ) -> DocumentProcessingResult:
         """Process a single file from bulk upload."""
-        filename = row_data['filename']
+        # A refused row may still carry the raw cell; the result model needs text.
+        filename = self._csv_text(row_data['filename'])
         row_number = row_data.get('_row_number', 0)
 
         try:
