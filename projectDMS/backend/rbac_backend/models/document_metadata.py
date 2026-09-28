@@ -14,7 +14,42 @@ ReferenceValue = Union[str, Dict[str, Any]]
 #: (services/openai_service.py). Bump it whenever that prompt text changes.
 #: v3: item 21 relabelled "Additional Key Words" - it duplicated item 18's
 #: "Key Words" label, so label-based parsing could not tell them apart (DI-L7).
-METADATA_EXTRACTION_PROMPT_VERSION = "existing_document_metadata.v3"
+#: v4: items 22 (Summary) and 24 (Key Reply Points) redefined from the two
+#: instructions below; labels and item numbers are unchanged.
+METADATA_EXTRACTION_PROMPT_VERSION = "existing_document_metadata.v4"
+
+#: What "summary" means, for every extraction path. The numbered report prompt,
+#: the PydanticAI prompt and the PydanticAI output-schema descriptions all use
+#: this text, so the prompt and the schema cannot drift apart.
+#:
+#: Detailed but bounded. The report has one 4096-token output budget, and
+#: Summary (22) comes before Key Reply Points (24), Full Content (25) and the
+#: tags (26-27); Full Content is the letter itself. An open-ended "in detail"
+#: summary of a four-to-six page letter leaves no room for the letter's tail
+#: or the tags, and a cut-off reply is not detected.
+SUMMARY_EXTRACTION_INSTRUCTION = (
+    "Summarise in sufficient detail the background and sequence of material events stated "
+    "in the letter. Preserve their chronology and include material dates and developments "
+    "where stated, while avoiding repetition. Base the summary strictly on the letter and do "
+    "not add external information, assumptions, legal analysis or unsupported facts; do not "
+    "supply dates or events the letter does not state. Give one material event or development "
+    "per point, in chronological order, in one sentence each."
+)
+
+#: What "key_reply_points" means. These are AI-derived reply considerations:
+#: advice about a reply, never source text or source facts. They stay out of
+#: correspondence evidence and vector payloads (retrieval.correspondence_payload
+#: ADVISORY_FIELDS); this text only defines what the model is asked for.
+KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION = (
+    "Identify every point in the letter that must be considered when preparing the reply. "
+    "Capture each distinct issue, allegation, request, instruction, demand, question, "
+    "rejection, criticism, responsibility attribution, contractual position, claim, "
+    "reservation, deadline, commitment or other matter that may require acknowledgement, "
+    "clarification, substantiation or response. Every point must be grounded in something "
+    "the letter actually states. These are considerations for a reply, not quotations or "
+    "facts: do not draft the reply, do not decide contractual entitlement, do not propose "
+    "counterarguments, and do not add facts or clauses the letter does not state."
+)
 
 NULLISH_VALUES = {"", "null", "'null'", '"null"', "not found", "none", "n/a", "na", "not applicable", "-", "--"}
 
@@ -297,6 +332,8 @@ __all__ = [
     "ProcessingResult",
     "build_parsed_metadata",
     "METADATA_EXTRACTION_PROMPT_VERSION",
+    "SUMMARY_EXTRACTION_INSTRUCTION",
+    "KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION",
     "ReferenceValue",
     "EXTRACTED_TAG_OPTIONS",
     "EXTRACTED_SUBTAG_OPTIONS",

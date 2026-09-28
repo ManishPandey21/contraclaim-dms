@@ -7,6 +7,8 @@ from ..config.document_processing_config import DocumentProcessingConfig
 from ..models.document_metadata import (
     EXTRACTED_SUBTAG_OPTIONS,
     EXTRACTED_TAG_OPTIONS,
+    KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION,
+    SUMMARY_EXTRACTION_INSTRUCTION,
     ParsedDocumentMetadata,
 )
 from ..utils.date_parser import format_date_ddmmyyyy
@@ -99,14 +101,27 @@ class PydanticAIService:
             claim_category: Optional[str] = Field(default=None, alias="claimCategory")
             alleged_responsibility: Optional[str] = Field(default=None, alias="allegedResponsibility")
             priority: Optional[str] = None
-            summary_points: List[str] = Field(default_factory=list)
-            summary_text: Optional[str] = Field(default=None, alias="summary")
+            # The descriptions are part of the output schema the model reads,
+            # so they carry the same definitions as the prompt.
+            summary_points: List[str] = Field(
+                default_factory=list,
+                description=SUMMARY_EXTRACTION_INSTRUCTION + " One event or development per list item.",
+            )
+            summary_text: Optional[str] = Field(
+                default=None,
+                alias="summary",
+                description="Used only when summary_points is empty. " + SUMMARY_EXTRACTION_INSTRUCTION,
+            )
             keywords: List[str] = Field(default_factory=list)
             linked_event_suggested: Optional[str] = Field(default=None, alias="linkedEventSuggested")
             reference_chain: Optional[str] = Field(default=None, alias="referenceChain")
             additional_keywords: List[str] = Field(default_factory=list, alias="additionalKeywords")
             contractual_clauses: List[str] = Field(default_factory=list, alias="clauses")
-            key_reply_points: List[str] = Field(default_factory=list, alias="keyReplyPoints")
+            key_reply_points: List[str] = Field(
+                default_factory=list,
+                alias="keyReplyPoints",
+                description=KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION + " One point per list item.",
+            )
             full_content: Optional[str] = Field(default=None, alias="fullContent")
             tags: List[str] = Field(
                 default_factory=list,
@@ -266,9 +281,9 @@ class PydanticAIService:
             "19) Linked Event Suggested: short event title useful for chronology/claim matrix",
             "20) Reference Chain: original notice/reply/reminder/response to previous letter/follow-up",
             "21) Additional Keywords: concise search/RAG tags including location, issue, claim, clause, delay, payment, authority, and topic tags",
-            "22) Summary: 4-6 line contractual/legal summary suitable for vector search/RAG, mentioning issue, location, alleged responsibility, contractual implication, and required action where available",
+            f"22) Summary: {SUMMARY_EXTRACTION_INSTRUCTION} Return each event or development as one summary_points item.",
             "23) Contractual Clauses: clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon",
-            "24) Key Reply Points: concise contractual/legal points that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response",
+            f"24) Key Reply Points: {KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION} Return each point as one key_reply_points item.",
             "25) Full Content: cleaned text of the full letter",
             f"26) extracted_tags: select one or more from: {tag_options}; otherwise empty",
             f"27) extracted_subTags: select one or more from: {subtag_options}; otherwise empty",

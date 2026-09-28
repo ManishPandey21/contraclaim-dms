@@ -9,7 +9,12 @@ from typing import Any, Iterable, List, Optional
 from openai import AsyncOpenAI
 
 from ..config.document_processing_config import DocumentProcessingConfig
-from ..models.document_metadata import EXTRACTED_SUBTAG_OPTIONS, EXTRACTED_TAG_OPTIONS
+from ..models.document_metadata import (
+    EXTRACTED_SUBTAG_OPTIONS,
+    EXTRACTED_TAG_OPTIONS,
+    KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION,
+    SUMMARY_EXTRACTION_INSTRUCTION,
+)
 from ..utils.exceptions import DocumentProcessingError
 
 logger = logging.getLogger(__name__)
@@ -292,9 +297,12 @@ class OpenAIService:
             "19) Linked Event Suggested: [short event title useful for chronology/claim matrix or 'null']\n"
             "20) Reference Chain: [whether this letter is original notice/reply/reminder/response to previous letter/follow-up or 'null']\n"
             "21) Additional Key Words: [comma-separated additional tags useful for search/RAG, including location tags, issue tags, claim tags, clause tags, delay event tags, payment tags, authority tags, and document topic tags. Use concise tags only.]\n"
-            "22) Summary: [Write a 4-6 line contractual/legal summary/fact of the matter suitable for vector search/RAG. Mention issue, location, responsibility alleged, contractual implication, and required action where available.]\n"
+            # One "- " line per event, never numbered: the report parser opens a
+            # new item on any "N) Label:" line, which would cut a numbered
+            # chronology short.
+            f"22) Summary: [{SUMMARY_EXTRACTION_INSTRUCTION} Put each event or development on its own line with a - prefix; do not number the lines. Write 'null' only if the letter states nothing to summarise.]\n"
             "23) Contractual Clauses: [comma-separated list of clauses, Employer's Requirements, GCC/SCC provisions, specifications, drawings, approved proposals, or prior records relied upon; write 'null' if absent]\n"
-            "24) Key Reply Points - Points to be Addressed While Responding: [list each concise contractual/legal point that must be addressed in a future reply, claim defence, Statement of Defence, rejoinder, variation/payment dispute, or delay response - one point per line with a - prefix, or 'null']\n"
+            f"24) Key Reply Points - Points to be Addressed While Responding: [{KEY_REPLY_POINTS_EXTRACTION_INSTRUCTION} One point per line with a - prefix, or 'null']\n"
             "25) Full Content: [cleaned text of the full letter]\n"
             f"26) extracted_tags: [select one or more from: {tag_options}; write 'null' if none]\n"
             f"27) extracted_subTags: [select one or more from: {subtag_options}; write 'null' if none]\n"

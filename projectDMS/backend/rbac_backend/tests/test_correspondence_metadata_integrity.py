@@ -886,7 +886,7 @@ def test_prompt_items_have_distinct_labels_and_a_bumped_version() -> None:
     ]
     assert len(labels) == len(set(labels)), labels
     assert "Additional Key Words" in labels
-    assert METADATA_EXTRACTION_PROMPT_VERSION == "existing_document_metadata.v3"
+    assert METADATA_EXTRACTION_PROMPT_VERSION == "existing_document_metadata.v4"
 
 
 # --- Sibling fixes ------------------------------------------------------------

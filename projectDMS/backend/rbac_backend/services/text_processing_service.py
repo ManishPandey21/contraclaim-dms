@@ -14,6 +14,12 @@ logger = logging.getLogger(__name__)
 #: description ("reply to previous letter"), not a reference.
 _REFERENCES_LABEL = r"^References?(?!\s*Chain)\b"
 
+#: A summary line's own list marker ("- ", "* ", "1. ", "2) "). Only the
+#: marker: the summary is a chronology, and a line that opens with its date
+#: ("- 01-08-2024: ...", "12.09.2024 ...") must keep it. The earlier
+#: character-class strip ate every leading digit, dot and hyphen.
+_SUMMARY_LINE_MARKER = re.compile(r"^\s*(?:[-*•]+\s*)?(?:\(?\d{1,3}[.)]\s+)?")
+
 #: Report item number -> the label(s) that item may carry: the current
 #: prompt (services/openai_service.py) and the older 7-11 layout. A numbered
 #: line with any other label is text, not an item.
@@ -285,7 +291,7 @@ class TextProcessingService:
             return None
         lines_clean = []
         for line in block.splitlines():
-            cleaned = re.sub(r"^[\-\*\d\.\)\s]+", "", line).strip()
+            cleaned = _SUMMARY_LINE_MARKER.sub("", line).strip()
             if cleaned:
                 lines_clean.append(f"- {cleaned}")
         return "\n".join(lines_clean) if lines_clean else self._null_if_placeholder(block)
@@ -597,7 +603,7 @@ End:") so '$' can match the artificial end marker."""
             # Format as bullet points
             lines_clean = []
             for line in raw_summary.splitlines():
-                cleaned = re.sub(r"^[\-\*\d\.\)\s]+", "", line).strip()
+                cleaned = _SUMMARY_LINE_MARKER.sub("", line).strip()
                 if cleaned:
                     lines_clean.append(f"- {cleaned}")
 
