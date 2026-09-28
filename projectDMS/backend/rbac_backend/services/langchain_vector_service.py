@@ -1,12 +1,24 @@
 import asyncio
 import logging
-import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 try:
     from ..config.document_processing_config import DocumentProcessingConfig
+    from ..retrieval.correspondence_payload import (
+        CorrespondencePayloadError,
+        assert_canonical_correspondence_payload,
+    )
+    from ..retrieval.vector_client import VectorScopeError, VectorStoreUnavailableError
 except ImportError:  # pragma: no cover - script compatibility
     from config.document_processing_config import DocumentProcessingConfig
+    from retrieval.correspondence_payload import (  # type: ignore[no-redef]
+        CorrespondencePayloadError,
+        assert_canonical_correspondence_payload,
+    )
+    from retrieval.vector_client import (  # type: ignore[no-redef]
+        VectorScopeError,
+        VectorStoreUnavailableError,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -237,126 +249,154 @@ class LangChainVectorService:
         logger.info("Deleted Qdrant vectors for document_id=%s", document_id)
         return True
 
-    async def replace_document(self, payloads: List[Dict[str, Any]]) -> int:
-        """Replace document vectors in Qdrant using LangChain with UUID-based point IDs."""
+    async def replace_document(self, points: List[Dict[str, Any]]) -> int:
+        """Replace one document's correspondence vectors with canonical points.
+
+        ``points`` come from ``build_correspondence_chunks`` and nothing else:
+        each carries its UUID ``point_id``, ``text`` and the canonical flat
+        ``payload`` the tenant-scoped readers filter on. This used to hand the
+        text to LangChain ``add_texts``, which nests the payload under
+        ``metadata`` - a shape no scoped reader can match (DI-B1). LangChain is
+        still the embedding model here; it is no longer the payload author.
+
+        A point that is not a canonical, scoped payload is refused with
+        ``CorrespondencePayloadError`` before anything is deleted or written.
+        """
         if not self._enabled or not self._vector_store:
             return 0
 
-        if not payloads:
+        if not points:
             return 0
 
-        document_id = str(payloads[0]["metadata"].get("document_id", ""))
-        if not document_id:
-            logger.debug("Skipping LangChain Qdrant upsert; missing document_id metadata")
-            return 0
+        for point in points:
+            payload = point.get("payload")
+            if not isinstance(payload, dict):
+                raise CorrespondencePayloadError(
+                    "replace_document takes canonical correspondence points"
+                )
+            assert_canonical_correspondence_payload(payload)
+            if point.get("point_id") != payload.get("qdrant_point_id"):
+                raise CorrespondencePayloadError("point_id disagrees with its payload")
+        scopes = {
+            (p["payload"]["document_id"], p["payload"]["org_id"], p["payload"]["project_id"])
+            for p in points
+        }
+        if len(scopes) != 1:
+            raise CorrespondencePayloadError(
+                "replace_document writes one document in one scope per call"
+            )
+        document_id, org_id, project_id = next(iter(scopes))
 
         try:
             try:
-                base_metadata = dict(payloads[0].get("metadata") or {})
-                org_id = base_metadata.get("organization_id")
-                project_id = base_metadata.get("project_id")
                 deleted = await self.delete_document(
                     document_id,
-                    organization_id=str(org_id) if org_id else None,
-                    project_id=str(project_id) if project_id else None,
+                    organization_id=org_id,
+                    project_id=project_id,
                 )
                 if deleted:
                     logger.debug("Deleted existing vectors for document_id=%s", document_id)
             except Exception as fallback_exc:
                 logger.warning("Delete failed for document_id=%s: %s", document_id, fallback_exc)
 
-            # Prepare texts, metadatas, and deterministic point IDs.
-            #
-            # Keep the application-level chunk_id unchanged in metadata for
-            # Mongo/reconciliation, but never pass it directly as the Qdrant
-            # point id. Qdrant accepts only unsigned integers or UUID strings;
-            # legacy document chunk ids are often "<document_id>-<digest>".
-            texts: List[str] = []
-            metadatas: List[Dict[str, Any]] = []
-            ids: List[str] = []
-
-            for payload in payloads:
-                chunk_text = payload.get("text") or ""
-                if not chunk_text.strip():
-                    continue
-
-                metadata = dict(payload.get("metadata") or {})
-                metadata["checksum"] = payload.get("checksum")
-                metadata.setdefault("document_id", document_id)
-
-                chunk_id = payload.get("chunk_id") or metadata.get("chunk_id")
-                if not chunk_id:
-                    chunk_index = metadata.get("chunk_index", len(texts))
-                    chunk_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}:{chunk_index}"))
-                chunk_id = str(chunk_id)
-                point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"contraclaim:qdrant:{document_id}:{chunk_id}"))
-                metadata["chunk_id"] = chunk_id
-                metadata["qdrant_point_id"] = point_id
-                metadata.setdefault("embedding_model", self.config.openai_embedding_model)
-                metadata.setdefault("embedding_provider", "openai")
-
-                ids.append(point_id)
-                texts.append(chunk_text)
-                metadatas.append(metadata)
-
-            if not texts:
+            writable = [p for p in points if str(p.get("text") or "").strip()]
+            if not writable:
                 logger.debug("No valid chunks to upsert for document_id=%s", document_id)
                 return 0
 
-            # Upsert vectors with valid point IDs
+            embeddings = getattr(self._vector_store, "embeddings", None)
+            if embeddings is None:
+                raise RuntimeError("vector store exposes no embedding model")
+            vectors = await asyncio.to_thread(
+                embeddings.embed_documents, [p["text"] for p in writable]
+            )
+            vector_name = self.config.qdrant_vector_name
+            models = self._qdrant_models
             await asyncio.to_thread(
-                self._vector_store.add_texts,
-                texts=texts,
-                metadatas=metadatas,
-                ids=ids,
+                self._client.upsert,
+                collection_name=self.config.qdrant_collection,
+                points=[
+                    models.PointStruct(
+                        id=p["point_id"],
+                        vector={vector_name: vector} if vector_name else vector,
+                        payload=p["payload"],
+                    )
+                    for p, vector in zip(writable, vectors)
+                ],
+                wait=True,
             )
 
             logger.info(
-                "Upserted %s chunks to Qdrant via LangChain (document_id=%s)",
-                len(texts),
+                "Upserted %s canonical correspondence points to Qdrant (document_id=%s)",
+                len(writable),
                 document_id,
             )
-            return len(texts)
+            return len(writable)
 
         except Exception as exc:
-            logger.warning("LangChain Qdrant upsert failed: %s", exc)
+            logger.warning("Qdrant correspondence upsert failed: %s", exc)
             return 0
 
     async def similarity_search(
         self,
         query_text: str,
         *,
+        org_ids: Sequence[str],
+        project_ids: Optional[Sequence[str]] = None,
+        upload_type: Optional[str] = None,
         top_k: int = 5,
-        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Perform semantic search against Qdrant and return scored chunks."""
+        """Semantic search over canonical correspondence points, tenant-bounded.
+
+        The authority is required and becomes a typed Qdrant filter on the
+        canonical flat fields. The old signature took a caller-built ``dict``;
+        LangChain rejected it (``'dict' object has no attribute 'must'``), the
+        error was swallowed, and every search answered ``[]`` (DI-N2). A
+        failing search now raises ``VectorStoreUnavailableError``.
+        """
         if not query_text or not self._enabled or not self._vector_store:
             return []
-
-        search_filter = filters or None
+        orgs = [str(o) for o in (org_ids or []) if o]
+        if not orgs:
+            raise VectorScopeError("correspondence vector search requires an organisation scope")
+        models = self._qdrant_models
+        must = [models.FieldCondition(key="org_id", match=models.MatchAny(any=orgs))]
+        projects = [str(p) for p in (project_ids or []) if p]
+        if projects:
+            must.append(
+                models.FieldCondition(key="project_id", match=models.MatchAny(any=projects))
+            )
+        if upload_type:
+            must.append(
+                models.FieldCondition(
+                    key="uploadType", match=models.MatchValue(value=str(upload_type).lower())
+                )
+            )
+        vector_name = self.config.qdrant_vector_name
 
         def _search():
-            try:
-                return self._vector_store.similarity_search_with_score(
-                    query_text,
-                    k=top_k,
-                    filter=search_filter,
-                )
-            except Exception as exc:
-                logger.warning("LangChain Qdrant similarity search failed: %s", exc)
-                return []
-
-        pairs = await asyncio.to_thread(_search)
-
-        results: List[Dict[str, Any]] = []
-        for doc, score in pairs:
-            metadata = dict(getattr(doc, "metadata", {}) or {})
-            results.append(
-                {
-                    "text": getattr(doc, "page_content", "") or "",
-                    "score": float(score) if score is not None else 0.0,
-                    "metadata": metadata,
-                }
+            query_vector = self._vector_store.embeddings.embed_query(query_text)
+            return self._client.search(
+                collection_name=self.config.qdrant_collection,
+                query_vector=(vector_name, query_vector) if vector_name else query_vector,
+                query_filter=models.Filter(must=must),
+                limit=top_k,
+                with_payload=True,
             )
 
+        try:
+            hits = await asyncio.to_thread(_search)
+        except Exception as exc:
+            raise VectorStoreUnavailableError(f"Qdrant search failed: {exc}") from exc
+
+        results: List[Dict[str, Any]] = []
+        for hit in hits:
+            payload = dict(getattr(hit, "payload", None) or {})
+            results.append(
+                {
+                    "text": str(payload.get("text") or ""),
+                    "score": float(hit.score) if hit.score is not None else 0.0,
+                    "metadata": payload,
+                }
+            )
         return results

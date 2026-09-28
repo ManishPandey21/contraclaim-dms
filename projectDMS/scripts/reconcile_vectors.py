@@ -28,6 +28,17 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from backend.rbac_backend.config.document_processing_config import DocumentProcessingConfig
+from backend.rbac_backend.retrieval.correspondence_payload import (
+    CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION_FIELD,
+    CorrespondencePayloadError,
+    build_correspondence_chunks,
+    rows_need_reprocess,
+)
+from backend.rbac_backend.services.publication_policy import (
+    is_consumable,
+    resolve_canonical_document,
+)
 from backend.rbac_backend.core.database import get_database
 from backend.rbac_backend.services.langchain_vector_service import LangChainVectorService
 
@@ -85,31 +96,38 @@ async def _repair_document(
         logger.info("No Mongo vector chunks available to repair document %s", document_id)
         return None
 
-    payloads = []
-    for index, chunk in enumerate(vector_docs):
-        text = chunk.get("text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        metadata = {
-            "document_id": document_id,
-            "organization_id": chunk.get("organization_id"),
-            "org_id": chunk.get("organization_id"),
-            "project_id": chunk.get("project_id"),
-            "uploadType": chunk.get("uploadType"),
-            "letterNo": chunk.get("letterNo"),
-            "filepath_local": chunk.get("filepath_local"),
-            "filepath_s3": chunk.get("filepath_s3"),
-            "chunk_index": chunk.get("chunk_index", index),
-            "chunk_id": chunk.get("chunk_id"),
-            "source": chunk.get("source", "reconcile"),
-        }
-        payloads.append(
-            {
-                "text": text,
-                "metadata": metadata,
-                "checksum": chunk.get("checksum_sha256"),
-            }
+    # Authority comes from the canonical document row, never from the stored
+    # vector rows; the payload from the one correspondence builder (DI-B1).
+    document = await resolve_canonical_document(db, document_id)
+    if not is_consumable(document):
+        logger.info("Skipped repair for %s; document is not consumable", document_id)
+        return None
+    vector_docs.sort(key=lambda row: str(row.get("chunk_index") or 0).zfill(12))
+    texts = [
+        chunk["text"]
+        for chunk in vector_docs
+        if isinstance(chunk.get("text"), str) and chunk["text"].strip()
+    ]
+    written_canonically = all(
+        row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+        for row in vector_docs
+    )
+    if not written_canonically and rows_need_reprocess(document, texts):
+        logger.warning(
+            "Skipped repair for %s; stored rows carry extraction-report reply advice "
+            "(reprocess the document instead)",
+            document_id,
         )
+        return None
+    try:
+        payloads = build_correspondence_chunks(
+            document,
+            texts,
+            embedding_model=langchain_service.config.openai_embedding_model,
+        )
+    except CorrespondencePayloadError as exc:
+        logger.warning("Skipped repair for %s; %s", document_id, exc)
+        return None
 
     if not payloads:
         logger.info("Skipped repair for %s; no valid payloads derived from Mongo", document_id)

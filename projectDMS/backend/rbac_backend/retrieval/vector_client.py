@@ -6,6 +6,10 @@ import math
 from typing import Any, Dict, List, Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
+from .correspondence_payload import (
+    CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION_FIELD,
+)
 from .source_metadata import normalize_source_payload
 
 logger = logging.getLogger(__name__)
@@ -19,6 +23,29 @@ class VectorStoreUnavailableError(RuntimeError):
     fell back to the in-process memory index — which is empty in production —
     so vector outages presented as silent empty result sets.
     """
+
+
+class _IsNull:
+    """Filter value meaning "this payload field is null" (an explicit match).
+
+    A plain ``None`` filter value means "no condition" to every builder here,
+    so it can never express organisation-level scope: passed through, it drops
+    the project condition and widens a search to every project. This sentinel
+    is the only way to ask for ``project_id IS NULL``.
+    """
+
+    _instance: Optional["_IsNull"] = None
+
+    def __new__(cls) -> "_IsNull":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "IS_NULL"
+
+
+IS_NULL = _IsNull()
 
 
 class VectorScopeError(ValueError):
@@ -402,21 +429,41 @@ class VectorClient:
         limit: int = 1000,
         allow_global: bool = False,
     ) -> List[str]:
+        """Chunk ids of the native ``chunks``-collection points in scope.
+
+        Every caller reconciles against ``db.chunks`` and deletes what it does
+        not find there. Canonical correspondence points are flat too, but they
+        are written from ``document_vectors`` and never have ``chunks`` rows, so
+        they are excluded here: otherwise a reconcile or a manual re-ingest of a
+        letter would see its searchable vectors as stale and delete them.
+        """
         self._require_tenant_scope(filters, allow_global)
         collection = namespace or self.collection_name or self.config.qdrant_collection
         if self.enabled and self._client and self._qmodels:
             try:
                 ids: List[str] = []
                 seen: set[str] = set()
+                not_correspondence = [
+                    self._qmodels.FieldCondition(
+                        key=PAYLOAD_SCHEMA_VERSION_FIELD,
+                        match=self._qmodels.MatchValue(
+                            value=CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+                        ),
+                    )
+                ]
                 # Native VectorClient writes flat payload fields, while
                 # LangChain QdrantVectorStore writes the same metadata under
                 # ``metadata``. Reconciliation must see both representations
                 # during the migration; otherwise valid UUID-backed points look
                 # missing and trigger needless repair.
-                for qfilter in (
+                for base_filter in (
                     self._build_filter(filters),
                     self._build_filter(filters, field_prefix="metadata."),
                 ):
+                    qfilter = self._qmodels.Filter(
+                        must=getattr(base_filter, "must", None),
+                        must_not=not_correspondence,
+                    )
                     res, _ = await asyncio.to_thread(
                         self._client.scroll,
                         collection_name=collection,
@@ -445,6 +492,11 @@ class VectorClient:
             if entry.get("namespace") != collection:
                 continue
             payload = entry.get("payload", {})
+            if (
+                payload.get(PAYLOAD_SCHEMA_VERSION_FIELD)
+                == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+            ):
+                continue
             if payload.get("org_id") != filters.get("org_id") or payload.get(
                 "project_id"
             ) != filters.get("project_id"):
@@ -524,6 +576,10 @@ class VectorClient:
             if expected is None:
                 continue
             actual = payload.get(key)
+            if expected is IS_NULL:
+                if key not in payload or actual is not None:
+                    return False
+                continue
             if key == "tags":
                 if isinstance(expected, list) and expected:
                     actual_values = actual if isinstance(actual, list) else [actual]
@@ -558,6 +614,13 @@ class VectorClient:
             if value is None:
                 continue
             field = f"{field_prefix}{key}"
+            if value is IS_NULL:
+                must.append(
+                    self._qmodels.IsNullCondition(
+                        is_null=self._qmodels.PayloadField(key=field)
+                    )
+                )
+                continue
             if key == "tags":
                 if isinstance(value, list) and value:
                     must.append(

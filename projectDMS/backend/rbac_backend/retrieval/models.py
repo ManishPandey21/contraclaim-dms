@@ -24,7 +24,12 @@ class SearchBackend(str, Enum):
 
 class SearchFilters(BaseModel):
     org_id: str
-    project_id: str
+    #: Required, and nullable on purpose. A string is a project scope. ``None``
+    #: is ORGANISATION-LEVEL scope: documents that belong to no project, and
+    #: only those - never "all projects". Whether the actor may see them is
+    #: decided server-side (``RetrievalService._project_constraint``), not by
+    #: the value the caller sent.
+    project_id: Optional[str]
     document_id: Optional[str] = None
     date_range: Optional[List[str]] = None
     doc_type: Optional[str] = None

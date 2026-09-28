@@ -1,6 +1,5 @@
 # services/database_service.py
 
-import hashlib
 import logging
 import os
 from datetime import datetime
@@ -30,7 +29,10 @@ from .metadata_integrity import (
     protect_human_edited_fields,
 )
 from ..utils.pipeline_logging import configure_pipeline_logger
-from ..ingestion.chunk_ids import deterministic_chunk_id
+from ..retrieval.correspondence_payload import (
+    build_correspondence_chunks,
+    refuse_report_derived_text,
+)
 
 
 class DocumentProcessingError(Exception):
@@ -423,6 +425,10 @@ class DatabaseService:
             from .text_processing_service import TextProcessingService
 
             text_service = TextProcessingService(self.config)
+            # With no OCR text and no parsed full content, the text is the LLM
+            # extraction report itself - reply advice included - not the
+            # letter. It is refused here, visibly, rather than indexed.
+            refuse_report_derived_text(document_id, text)
             chunks = text_service.chunk_text(text)
             if not chunks:
                 logger.warning("No text chunks to embed")
@@ -436,72 +442,18 @@ class DatabaseService:
                 )
                 return 0
 
+            # One builder for the Qdrant payload and the Mongo row (DI-B1). It
+            # raises on a document with no organisation: an unscoped vector is
+            # refused here, and the except below marks the sync `error`.
+            payloads: List[Dict[str, Any]] = build_correspondence_chunks(
+                doc,
+                chunks,
+                embedding_model=self.config.openai_embedding_model,
+                embedding_version=getattr(self.config, "embedding_version", "v1"),
+                chunking_version=getattr(self.config, "chunking_version", "v1"),
+            )
+
             vector_service = self._get_vector_service()
-
-            organization_id = doc.get("organization_id")
-            project_id = doc.get("project_id")
-
-            def _maybe_str(value: Any) -> Optional[str]:
-                if value is None:
-                    return None
-                return str(value)
-
-            payloads: List[Dict[str, Any]] = []
-            for index, chunk_text in enumerate(chunks):
-                checksum = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
-                chunk_id = deterministic_chunk_id(document_id, index, text=chunk_text[:50])
-                metadata = {
-                    "document_id": document_id,
-                    "organization_id": _maybe_str(organization_id) or "",
-                    "project_id": _maybe_str(project_id) or "",
-                    "uploadType": str(doc.get("uploadType", "incoming")),
-                    "letterNo": doc.get("letterNo"),
-                    "filepath_local": doc.get("filepath_local"),
-                    "filepath_s3": doc.get("filepath_s3"),
-                    "chunk_index": index,
-                    "source": "document_processing",
-                    "chunk_id": chunk_id,
-                    "embedding_model": self.config.openai_embedding_model,
-                    "embedding_provider": "openai",
-                    "embedding_version": getattr(self.config, "embedding_version", "v1"),
-                    "chunking_version": getattr(self.config, "chunking_version", "v1"),
-                }
-                for field in (
-                    "subject",
-                    "summary",
-                    "keywords",
-                    "additional_keywords",
-                    "contractual_clauses",
-                    # key_reply_points is deliberately absent: it is AI reply
-                    # advice, not content of the letter, and must not travel
-                    # with evidence chunks as if it were (DI-N6).
-                    "asset_type",
-                    "location",
-                    "specific_area",
-                    "chainage_from",
-                    "chainage_to",
-                    "work_type",
-                    "issue_nature",
-                    "claim_category",
-                    "alleged_responsibility",
-                    "priority",
-                    "linked_event_suggested",
-                    "reference_chain",
-                    "extracted_tags",
-                    "extracted_subTags",
-                ):
-                    value = doc.get(field)
-                    if value not in (None, "", [], {}):
-                        metadata[field] = value
-                metadata["checksum_sha256"] = checksum
-                payloads.append(
-                    {
-                        "text": chunk_text,
-                        "metadata": metadata,
-                        "checksum": checksum,
-                        "chunk_id": chunk_id,
-                    }
-                )
 
             langchain_service = self._get_langchain_vector_service()
             expected_chunks = len(payloads)

@@ -858,17 +858,18 @@ def test_scope_question_does_not_call_ai_advice_the_letters_content() -> None:
 
 
 def test_reply_advice_is_not_copied_into_evidence_chunk_payloads() -> None:
-    source = textwrap.dedent(inspect.getsource(DatabaseService._create_and_store_embeddings))
-    tree = ast.parse(source)
-    payload_fields = {
-        element.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Tuple)
-        for element in node.elts
-        if isinstance(element, ast.Constant) and isinstance(element.value, str)
-    }
-    assert "summary" in payload_fields  # positive control: found the tuple
-    assert "key_reply_points" not in payload_fields
+    # The payload field list moved to the one correspondence builder (DI-B1);
+    # the writer must still go through it.
+    from rbac_backend.retrieval.correspondence_payload import (
+        ADVISORY_FIELDS,
+        DESCRIPTIVE_FIELDS,
+    )
+
+    source = inspect.getsource(DatabaseService._create_and_store_embeddings)
+    assert "build_correspondence_chunks(" in source
+    assert "summary" in DESCRIPTIVE_FIELDS  # positive control
+    assert "key_reply_points" not in DESCRIPTIVE_FIELDS
+    assert "key_reply_points" in ADVISORY_FIELDS
 
 
 # --- DI-L7: prompt labels -----------------------------------------------------

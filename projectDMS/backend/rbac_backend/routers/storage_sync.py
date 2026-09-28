@@ -23,6 +23,13 @@ from ..services.step_up_service import require_step_up
 from ..services.falkor_graph_service import FalkorGraphService, FalkorGraphError
 from ..services.langchain_vector_service import LangChainVectorService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.correspondence_payload import (
+    CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+    PAYLOAD_SCHEMA_VERSION_FIELD,
+    CorrespondencePayloadError,
+    build_correspondence_chunks,
+    rows_need_reprocess,
+)
 from ..retrieval.vector_client import VectorClient
 from ..services.publication_policy import is_consumable
 from ..utils.error_handler import BaseDomainError
@@ -230,12 +237,23 @@ async def _fetch_qdrant_document_count(
 
 
 def _qdrant_document_filter(qmodels: Any, document_id: str):
-    """Match native and LangChain Qdrant payload layouts without double-counting."""
-    match = qmodels.MatchValue(value=document_id)
+    """Count only this document's CANONICAL correspondence points.
+
+    This count decides "synced" for correspondence (``document_vectors``)
+    documents. It used to count the LangChain ``metadata.*`` layout as well, so a
+    document whose only points were pre-DI-B1 legacy points - stored, but
+    unreachable by every tenant-scoped reader - reported in sync. Counting
+    canonical points only makes such a document a visible repair candidate.
+    """
     return qmodels.Filter(
-        should=[
-            qmodels.FieldCondition(key="document_id", match=match),
-            qmodels.FieldCondition(key="metadata.document_id", match=match),
+        must=[
+            qmodels.FieldCondition(
+                key="document_id", match=qmodels.MatchValue(value=document_id)
+            ),
+            qmodels.FieldCondition(
+                key=PAYLOAD_SCHEMA_VERSION_FIELD,
+                match=qmodels.MatchValue(value=CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION),
+            ),
         ]
     )
 def _candidate_field_filters(field: str, raw_id: str) -> List[Dict[str, Any]]:
@@ -552,6 +570,14 @@ async def _compare_projection_points(
     return {"final": False, "expected": expected, "missing": missing, "extra": extra}
 
 
+def _chunk_order(row: Dict[str, Any]) -> int:
+    """Row order for a rebuild; a malformed index sorts last instead of raising."""
+    try:
+        return int(row.get("chunk_index") or 0)
+    except (TypeError, ValueError):
+        return 1 << 30
+
+
 async def _resync_document_vectors(
     document_id: str,
     db,
@@ -705,39 +731,40 @@ async def _resync_document_vectors(
         status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
     else:
         legacy_vectors = [v async for v in db.document_vectors.find(document_ref_query)]
-        payloads: List[Dict[str, Any]] = []
-        for index, chunk in enumerate(legacy_vectors):
+        legacy_vectors.sort(key=_chunk_order)
+        legacy_texts: List[str] = []
+        for chunk in legacy_vectors:
             text = chunk.get("text") or chunk.get("text_enriched") or chunk.get("text_original") or ""
-            if not isinstance(text, str) or not text.strip():
-                continue
-            organization_id = chunk.get("organization_id") or doc.get("organization_id")
-            project_id = chunk.get("project_id") or doc.get("project_id")
-            payloads.append(
-                {
-                    "text": text,
-                    "metadata": {
-                        "document_id": document_id,
-                        "organization_id": organization_id,
-                        "org_id": organization_id,
-                        "project_id": project_id,
-                        "uploadType": chunk.get("uploadType"),
-                        "letterNo": chunk.get("letterNo"),
-                        "filepath_local": chunk.get("filepath_local"),
-                        "filepath_s3": chunk.get("filepath_s3"),
-                        "chunk_index": chunk.get("chunk_index", index),
-                        "chunk_id": chunk.get("chunk_id") or str(chunk.get("_id") or index),
-                        "source": chunk.get("source", "legacy_vector_repair"),
-                        "embedding_model": chunk.get("embedding_model"),
-                        "embedding_provider": chunk.get("embedding_provider"),
-                        "embedding_version": chunk.get("embedding_version"),
-                        "chunking_version": chunk.get("chunking_version"),
-                    },
-                    "checksum": chunk.get("checksum_sha256"),
-                }
+            if isinstance(text, str) and text.strip():
+                legacy_texts.append(text)
+
+        if not legacy_texts:
+            raise HTTPException(status_code=404, detail="No chunks or legacy vector rows found for document")
+        written_canonically = bool(legacy_vectors) and all(
+            row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+            for row in legacy_vectors
+        )
+        if not written_canonically and rows_need_reprocess(doc, legacy_texts):
+            # These rows were chunked from the LLM extraction report, reply
+            # advice included, and a row boundary can split that item; they
+            # cannot be cleaned row by row. Reprocess the document instead.
+            raise HTTPException(
+                status_code=409,
+                detail="Stored vector rows carry extraction-report reply advice; reprocess the document",
             )
 
-        if not payloads:
-            raise HTTPException(status_code=404, detail="No chunks or legacy vector rows found for document")
+        # Authority comes from the canonical document row, never from the
+        # stored vector rows; the payload from the one correspondence builder.
+        try:
+            payloads = build_correspondence_chunks(
+                doc,
+                legacy_texts,
+                embedding_model=config.openai_embedding_model,
+                embedding_version=getattr(config, "embedding_version", "v1"),
+                chunking_version=getattr(config, "chunking_version", "v1"),
+            )
+        except CorrespondencePayloadError as exc:
+            raise HTTPException(status_code=409, detail=f"Document cannot be indexed: {exc}") from exc
 
         legacy_service = LangChainVectorService(config)
         if not legacy_service.enabled:

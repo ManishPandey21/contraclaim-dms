@@ -39,6 +39,7 @@ from ..services.export_service import ExportService
 from ..services.authorization_service import AuthorizationService
 from ..services.bulk_upload_service import BulkUploadService
 from ..services.langchain_vector_service import LangChainVectorService
+from ..retrieval.vector_client import VectorStoreUnavailableError
 from ..dependencies import get_notification_service
 from ..services.reference_sync_service import ReferenceSyncError
 from ..services.metadata_integrity import (
@@ -630,47 +631,41 @@ class DocumentController:
             filters,
         )
 
-        must_conditions: List[Dict[str, Any]] = []
+        def _scope_values(value: Any) -> List[str]:
+            if isinstance(value, dict):
+                value = value.get("$in", [])
+            if isinstance(value, (list, tuple, set)):
+                return [str(item) for item in value if item not in (None, "")]
+            return [str(value)] if value not in (None, "") else []
 
-        def _add_match(key: str, value: Any) -> None:
-            if value in (None, ""):
-                return
-            must_conditions.append(
-                {"key": key, "match": {"value": str(value)}}
-            )
-
-        def _add_any(key: str, values: Any) -> None:
-            try:
-                candidates = [str(item) for item in values if item not in (None, "")]
-            except TypeError:
-                candidates = []
-            if candidates:
-                must_conditions.append(
-                    {"key": key, "match": {"any": candidates}}
-                )
-
-        for key in ("organization_id", "project_id"):
-            value = validated_filters.get(key)
-            if isinstance(value, dict) and "$in" in value:
-                _add_any(key, value.get("$in", []))
-            elif isinstance(value, (list, tuple, set)):
-                _add_any(key, value)
-            elif value:
-                _add_match(key, value)
-
-        upload_type = filters.get("uploadType") or validated_filters.get("uploadType")
-        if upload_type:
-            _add_match("uploadType", upload_type)
-
-        qdrant_filter: Optional[Dict[str, Any]] = None
-        if must_conditions:
-            qdrant_filter = {"must": must_conditions}
-
-        search_results = await vector_service.similarity_search(
-            query_text=query,
-            top_k=limit,
-            filters=qdrant_filter,
+        # The canonical correspondence payload is flat `org_id`/`project_id`
+        # (DI-B1). The organisation bound is mandatory: a superadmin with no
+        # selection gets a 400, never a cross-tenant vector search.
+        org_ids = _scope_values(validated_filters.get("organization_id")) or _scope_values(
+            scope_org
         )
+        if not org_ids:
+            raise DocumentError(
+                "Vector search requires an organisation scope",
+                status.HTTP_400_BAD_REQUEST,
+            )
+        project_ids = _scope_values(validated_filters.get("project_id"))
+        upload_type = filters.get("uploadType") or validated_filters.get("uploadType")
+
+        try:
+            search_results = await vector_service.similarity_search(
+                query_text=query,
+                org_ids=org_ids,
+                project_ids=project_ids or None,
+                upload_type=str(upload_type) if upload_type else None,
+                top_k=limit,
+            )
+        except VectorStoreUnavailableError as exc:
+            logger.warning("Document vector search failed: %s", exc)
+            raise DocumentError(
+                "Vector search is currently unavailable",
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         ordered_ids: List[str] = []
         seen_ids: set[str] = set()
@@ -681,36 +676,43 @@ class DocumentController:
                 seen_ids.add(doc_id)
                 ordered_ids.append(doc_id)
 
-        documents = await self.document_service.get_documents_by_ids(ordered_ids)
+        # A vector hit is only a candidate. It is served only when its document
+        # resolves through the actor's scope AND current publication authority;
+        # a hit whose row is missing, withheld, deleted or out of scope is
+        # dropped - text included - because a stale point outlives a failed
+        # purge and must not outlive the policy that withdrew it.
+        documents = await self.document_service.get_documents_by_ids_in_scope(
+            ordered_ids,
+            current_user,
+            organization_id=filters.get("organization_id"),
+            project_id=filters.get("project_id"),
+        )
         doc_lookup = {str(doc.id): doc for doc in documents}
 
         response_results: List[Dict[str, Any]] = []
         for item in search_results:
             metadata = item.get("metadata") or {}
             doc_id = str(metadata.get("document_id") or "").strip()
-            if not doc_id:
+            document = doc_lookup.get(doc_id) if doc_id else None
+            if document is None:
                 continue
-
-            document = doc_lookup.get(doc_id)
-            doc_summary: Optional[Dict[str, Any]] = None
-            if document:
-                await self.policy_service.authorize_document(
-                    current_user, Permissions.DOCUMENT_VIEW, document
-                )
-                doc_summary = {
-                    "id": doc_id,
-                    "filename": document.filename,
-                    "letterNo": document.letterNo,
-                    "subject": document.subject,
-                    "uploadType": document.uploadType,
-                    "organization_id": document.organization_id,
-                    "project_id": document.project_id,
-                    "date": document.date.isoformat() if document.date else None,
-                    "tags": document.tags or [],
-                    "subTags": document.subTags or [],
-                    "summary": document.summary,
-                    "keywords": document.keywords or [],
-                }
+            await self.policy_service.authorize_document(
+                current_user, Permissions.DOCUMENT_VIEW, document
+            )
+            doc_summary: Dict[str, Any] = {
+                "id": doc_id,
+                "filename": document.filename,
+                "letterNo": document.letterNo,
+                "subject": document.subject,
+                "uploadType": document.uploadType,
+                "organization_id": document.organization_id,
+                "project_id": document.project_id,
+                "date": document.date.isoformat() if document.date else None,
+                "tags": document.tags or [],
+                "subTags": document.subTags or [],
+                "summary": document.summary,
+                "keywords": document.keywords or [],
+            }
 
             response_results.append(
                 {

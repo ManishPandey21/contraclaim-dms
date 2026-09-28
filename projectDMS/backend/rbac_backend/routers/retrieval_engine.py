@@ -93,22 +93,50 @@ async def get_policy_service(db=Depends(get_db)) -> PolicyService:
 
 
 def _require_scope_values(
-    org_id: Optional[str], project_id: Optional[str]
-) -> tuple[str, str]:
+    org_id: Optional[str],
+    project_id: Optional[str],
+    *,
+    allow_organization_level: bool = False,
+) -> tuple[str, Optional[str]]:
     """Reject blank/missing scope before it reaches the deny-by-default policy.
 
-    SearchFilters types ``org_id``/``project_id`` as required strings, but empty
-    strings would otherwise pass straight through scope evaluation and return
-    unfiltered (cross-tenant) results.
+    Empty strings would otherwise pass straight through scope evaluation and
+    return unfiltered (cross-tenant) results, so a blank organisation or a
+    blank/whitespace project is always a 400.
+
+    With ``allow_organization_level`` an explicit ``null`` project is accepted:
+    it asks for organisation-level documents only. The policy still checks
+    membership of the organisation, and ``RetrievalService`` decides whether
+    this actor may see organisation-level rows at all.
     """
     org = (org_id or "").strip()
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A non-empty organization and project scope is required",
+        )
+    if project_id is None and allow_organization_level:
+        return org, None
     project = (project_id or "").strip()
-    if not org or not project:
+    if not project:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A non-empty organization and project scope is required",
         )
     return org, project
+
+
+def _refuse_org_level_contract(
+    request: SearchRequest, retrieval_service: RetrievalService
+) -> None:
+    """Contract retrieval has no organisation-level scope: a 400, not a 500."""
+    if request.filters.project_id is None and retrieval_service._is_contract_request(
+        request
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Contract retrieval requires a project scope",
+        )
 
 
 async def _authorize_scope(
@@ -118,6 +146,7 @@ async def _authorize_scope(
     *,
     permission: str = Permissions.DOCUMENT_VIEW,
     policy: Optional[PolicyService] = None,
+    allow_organization_level: bool = False,
 ) -> None:
     """Deny-by-default scope enforcement for the retrieval engine.
 
@@ -129,7 +158,9 @@ async def _authorize_scope(
     and tenant membership (``ScopeService.is_client_scope_allowed``) and emits an
     audit event, matching the documents router.
     """
-    org, project = _require_scope_values(org_id, project_id)
+    org, project = _require_scope_values(
+        org_id, project_id, allow_organization_level=allow_organization_level
+    )
     policy = policy or PolicyService()
     await policy.authorize(
         current_user,
@@ -215,8 +246,13 @@ async def search(
     policy: PolicyService = Depends(get_policy_service),
 ) -> SearchResponse:
     await _authorize_scope(
-        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+        current_user,
+        request.filters.org_id,
+        request.filters.project_id,
+        policy=policy,
+        allow_organization_level=True,
     )
+    _refuse_org_level_contract(request, retrieval_service)
     return await retrieval_service.search(request, current_user)
 
 
@@ -228,8 +264,13 @@ async def rag(
     policy: PolicyService = Depends(get_policy_service),
 ) -> RagResponse:
     await _authorize_scope(
-        current_user, request.filters.org_id, request.filters.project_id, policy=policy
+        current_user,
+        request.filters.org_id,
+        request.filters.project_id,
+        policy=policy,
+        allow_organization_level=True,
     )
+    _refuse_org_level_contract(request, retrieval_service)
     return await retrieval_service.rag(request, current_user)
 
 

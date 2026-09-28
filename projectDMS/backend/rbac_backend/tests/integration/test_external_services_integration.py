@@ -16,6 +16,7 @@ import rbac_backend.services.openai_service as openai_module
 from rbac_backend.config.document_processing_config import DocumentProcessingConfig
 from rbac_backend.services.falkordb_vector_service import FalkorDBVectorService
 from rbac_backend.services.langchain_vector_service import LangChainVectorService
+from rbac_backend.retrieval.correspondence_payload import build_correspondence_chunks
 from rbac_backend.services.openai_service import OpenAIService
 from rbac_backend.tests import staging_gate
 
@@ -271,18 +272,19 @@ async def test_qdrant_langchain_vector_round_trip_contract(monkeypatch: pytest.M
     if not service.enabled:
         pytest.fail(f"LangChainVectorService did not initialize: {getattr(service, '_init_error', None)}")
 
-    payloads = [
+    payloads = build_correspondence_chunks(
         {
-            "text": (
-                "This integration smoke document references the alpha retention clause "
-                "and the omega fallback obligation for vector-search validation."
-            ),
-            "metadata": {
-                "document_id": document_id,
-                "chunk_index": 0,
-            },
-        }
-    ]
+            "_id": document_id,
+            "organization_id": "org-itest",
+            "project_id": "project-itest",
+            "uploadType": "incoming",
+        },
+        [
+            "This integration smoke document references the alpha retention clause "
+            "and the omega fallback obligation for vector-search validation."
+        ],
+        embedding_model=config.openai_embedding_model,
+    )
 
     try:
         written = await service.replace_document(payloads)
@@ -290,7 +292,9 @@ async def test_qdrant_langchain_vector_round_trip_contract(monkeypatch: pytest.M
 
         results = []
         for _ in range(3):
-            results = await service.similarity_search("alpha retention clause", top_k=1)
+            results = await service.similarity_search(
+                "alpha retention clause", org_ids=["org-itest"], top_k=1
+            )
             if results:
                 break
             await asyncio.sleep(0.2)
@@ -396,18 +400,19 @@ async def test_qdrant_langchain_vector_round_trip_live() -> None:
     if not service.enabled:
         pytest.fail(f"LangChainVectorService did not initialize: {getattr(service, '_init_error', None)}")
 
-    payloads = [
+    payloads = build_correspondence_chunks(
         {
-            "text": (
-                "This integration smoke document references the alpha retention clause "
-                "and the omega fallback obligation for vector-search validation."
-            ),
-            "metadata": {
-                "document_id": document_id,
-                "chunk_index": 0,
-            },
-        }
-    ]
+            "_id": document_id,
+            "organization_id": "org-itest",
+            "project_id": "project-itest",
+            "uploadType": "incoming",
+        },
+        [
+            "This integration smoke document references the alpha retention clause "
+            "and the omega fallback obligation for vector-search validation."
+        ],
+        embedding_model=config.openai_embedding_model,
+    )
 
     try:
         written = await service.replace_document(payloads)
@@ -415,7 +420,9 @@ async def test_qdrant_langchain_vector_round_trip_live() -> None:
 
         results = []
         for _ in range(3):
-            results = await service.similarity_search("alpha retention clause", top_k=1)
+            results = await service.similarity_search(
+                "alpha retention clause", org_ids=["org-itest"], top_k=1
+            )
             if results:
                 break
             await asyncio.sleep(1)
