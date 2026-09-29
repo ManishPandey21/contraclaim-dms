@@ -413,7 +413,7 @@ class _OpenAI:
     def __init__(self, report: str = "REPORT") -> None:
         self.report = report
 
-    async def process_text(self, text: str, *, filename: str) -> str:
+    async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
         return self.report
 
     async def upload_file(self, path: str) -> str:

@@ -23,6 +23,7 @@ from .langchain_vector_service import LangChainVectorService
 from .publication_policy import is_publication_blocked, resolve_canonical_document
 from .reference_parser import parse_legacy_reference_text
 from .falkor_graph_service import normalize_letter_code
+from .source_text import OCR_TEXT_KIND_SOURCE, full_text_updates, select_body_text
 from .metadata_integrity import (
     keep_stored_values_on_degraded_source,
     merge_degraded_snapshot,
@@ -175,9 +176,14 @@ class DatabaseService:
         embedding_text: str,
         skip_embeddings: bool = False,
         metadata_quality: Optional[Dict[str, Any]] = None,
+        source_provenance: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Save document data to database and create embeddings.
+
+        ``source_provenance`` labels what ``full_text`` (the ``ocrText`` write)
+        is: ``ocr_text_kind`` and ``source_text_status`` from
+        ``services/source_text.py``.
 
         Returns:
             Number of embedding chunks created
@@ -194,6 +200,7 @@ class DatabaseService:
             doc = await self._upsert_document_metadata(
                 db, document_id, file_path, parsed_metadata, full_text,
                 metadata_quality=metadata_quality,
+                source_provenance=source_provenance,
             )
 
             # Deferred while a duplicate check is pending: metadata is saved,
@@ -263,9 +270,21 @@ class DatabaseService:
             )
             return 0
 
-        text = doc.get("full_text") or doc.get("ocrText") or ""
+        # The same source-authority rule as every reader: source text first,
+        # Item 25 only as the fallback, never the extraction report.
+        text = select_body_text(doc, include_summary=False)
         if not str(text).strip():
             logger.warning("Cannot create deferred embeddings; document %s has no text", document_id)
+            # Visible, not left `deferred` for ever: there is no source text
+            # and no complete Item 25 to index (the report is never indexed).
+            await self._update_vector_sync_status(
+                db,
+                str(doc.get("_id")),
+                status="empty",
+                mongo_chunks=0,
+                qdrant_chunks=None,
+                details="No source text or complete Full Content to index",
+            )
             return 0
         return await self._create_and_store_embeddings(db, doc, str(text))
 
@@ -278,6 +297,7 @@ class DatabaseService:
         full_text: str,
         *,
         metadata_quality: Optional[Dict[str, Any]] = None,
+        source_provenance: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Upsert document metadata to documents collection"""
         try:
@@ -289,6 +309,10 @@ class DatabaseService:
                 "ocrText": full_text,
                 "updatedAt": datetime.utcnow(),
             }
+            for key in ("ocr_text_kind", "source_text_status"):
+                value = (source_provenance or {}).get(key)
+                if value:
+                    updates[key] = value
 
             # Add parsed metadata fields (assuming dataclass or dict)
             if hasattr(parsed_metadata, "subject") and parsed_metadata.subject:
@@ -317,8 +341,7 @@ class DatabaseService:
                 normalized_refs = self._normalize_metadata_references(parsed_metadata.references)
                 if normalized_refs:
                     updates["reference"] = normalized_refs
-            if hasattr(parsed_metadata, "full_content") and parsed_metadata.full_content:
-                updates["full_text"] = parsed_metadata.full_content
+            updates.update(full_text_updates(parsed_metadata))
             if hasattr(parsed_metadata, "keywords") and parsed_metadata.keywords:
                 updates["keywords"] = parsed_metadata.keywords
             if hasattr(parsed_metadata, "contractual_clauses") and parsed_metadata.contractual_clauses:
@@ -428,7 +451,17 @@ class DatabaseService:
             # With no OCR text and no parsed full content, the text is the LLM
             # extraction report itself - reply advice included - not the
             # letter. It is refused here, visibly, rather than indexed.
-            refuse_report_derived_text(document_id, text)
+            # Text the extractor itself recorded as the source is not judged
+            # by the report's shape (a letter may number its own particulars);
+            # the reply-advice heading is still refused whatever the label.
+            refuse_report_derived_text(
+                document_id,
+                text,
+                recorded_source=(
+                    doc.get("ocr_text_kind") == OCR_TEXT_KIND_SOURCE
+                    and text == doc.get("ocrText")
+                ),
+            )
             chunks = text_service.chunk_text(text)
             if not chunks:
                 logger.warning("No text chunks to embed")

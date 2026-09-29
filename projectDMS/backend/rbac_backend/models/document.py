@@ -85,6 +85,12 @@ class Document(BaseModel):
     compressionEnabled: bool = Field(default=False)
     ocrText: Optional[str] = Field(None)
     full_text: Optional[str] = Field(default=None)
+    #: Source-text provenance (services/source_text.py). Declared so a model
+    #: object carries it to the publication policy; this model drops
+    #: undeclared fields.
+    ocr_text_kind: Optional[str] = Field(default=None)
+    full_text_source: Optional[str] = Field(default=None)
+    source_text_status: Optional[str] = Field(default=None)
     keywords: Optional[List[str]] = Field(default=None)
     additional_keywords: Optional[List[str]] = Field(default=None)
     contractual_clauses: Optional[List[str]] = Field(default=None)

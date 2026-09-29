@@ -406,7 +406,7 @@ class LetterDraftGraph:
             # lifecycle_state, so the predicate takes its "absent state is
             # allowed" branch and returns True for everything. A guard that
             # reads the wrong record is equivalent to no guard (G34).
-            from ...services.publication_policy import is_consumable
+            from ...services.publication_policy import consumable_fact_text, is_consumable
 
             for doc in filtered_documents:
                 doc_id = str(doc.id)
@@ -428,6 +428,10 @@ class LetterDraftGraph:
                         "subject": doc.subject,
                         "uploadType": doc.uploadType,
                         "summary": doc.summary,
+                        # The drafting-source snippet: the document's own text
+                        # (never the LLM summary ahead of it). Condensed here so
+                        # the persisted context row does not carry the letter.
+                        "fact_snippet": _condense_text(consumable_fact_text(doc), 280),
                         "keywords": doc.keywords or [],
                         "date": doc.date.isoformat() if doc.date else None,
                         # Carried so a downstream is_consumable() is a real
@@ -831,7 +835,7 @@ class LetterDraftGraph:
                     if not doc_id:
                         continue
                     label = pick_non_empty([doc.get("subject"), doc.get("letterNo")]) or "Context document"
-                    snippet = _condense_text(doc.get("summary"), 280)
+                    snippet = doc.get("fact_snippet") or _condense_text(doc.get("summary"), 280)
                     source_id = f"{doc_id}::context"
                     draft_sources.append(
                         DraftSource(
@@ -1049,9 +1053,12 @@ class LetterDraftGraph:
 
             contractual_references: List[str] = []
             for doc in selected_documents:
-                summary = doc.get("summary") or ""
-                if "clause" in summary.lower():
-                    snippet = _condense_text(summary, 160) or summary.strip()
+                # A contractual reference is cited to drafting, so it comes
+                # from the letter's own text; a clause that only the LLM
+                # summary mentions may be the model's own.
+                fact = doc.get("fact_snippet") or ""
+                if "clause" in fact.lower():
+                    snippet = _condense_text(fact, 160) or fact.strip()
                     if snippet:
                         contractual_references.append(snippet)
                 elif doc.get("letterNo"):
@@ -1224,7 +1231,12 @@ class LetterDraftGraph:
             document_items: List[Dict[str, Any]] = []
             now_iso = datetime.now(timezone.utc).isoformat()
             for doc in selected_documents:
-                doc_text = doc.get("summary") or doc.get("subject") or doc.get("letterNo")
+                doc_text = (
+                    doc.get("fact_snippet")
+                    or doc.get("summary")
+                    or doc.get("subject")
+                    or doc.get("letterNo")
+                )
                 if not doc_text:
                     continue
                 document_items.append(

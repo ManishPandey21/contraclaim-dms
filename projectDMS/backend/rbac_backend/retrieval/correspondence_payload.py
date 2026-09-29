@@ -225,14 +225,24 @@ class CorrespondencePayloadError(ValueError):
     """
 
 
-def refuse_report_derived_text(document_id: str, text: str) -> None:
+def refuse_report_derived_text(
+    document_id: str, text: str, *, recorded_source: bool = False
+) -> None:
     """Refuse to index text that is the LLM extraction report, not the letter.
 
     Raised before chunking, so nothing is published; the writer's existing
     handling marks the sync ``error`` and records a partial failure. The
     message names the document only - never the text.
     """
-    if has_advisory_report_item(text):
+    from ..services.source_text import is_extraction_report_text
+
+    # The advice heading, or the report's numbered item layout: a reply cut
+    # off before its reply-advice item is still the report, not the letter.
+    # ``recorded_source``: the writer labelled this text as the extracted
+    # source, so only the advice heading (never in a letter) is judged.
+    if has_advisory_report_item(text) or (
+        not recorded_source and is_extraction_report_text(text)
+    ):
         raise CorrespondencePayloadError(
             f"document {document_id}: the text to index is the extraction report "
             "(it carries the reply-advice item), not the letter; reprocess the "

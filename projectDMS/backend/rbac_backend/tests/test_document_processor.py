@@ -64,7 +64,7 @@ class FakeOpenAIService:
         self.process_text_calls = 0
         self.upload_file_calls = 0
 
-    async def process_text(self, document_text: str, *, filename=None):
+    async def process_text(self, document_text: str, *, filename=None, include_full_content=True):
         self.process_text_calls += 1
         if self.fail_text:
             raise DocumentProcessingError("OpenAI unavailable")

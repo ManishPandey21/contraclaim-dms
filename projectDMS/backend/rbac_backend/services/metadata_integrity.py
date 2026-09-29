@@ -63,6 +63,14 @@ def assess_metadata_quality(
         and ai_failure_record.get("stage") == "ocr_text_extraction"
     )
     fallback = (metadata_source or "") in DEGRADED_METADATA_SOURCES
+    # A model reply cut off at the output cap (or otherwise incomplete) on any
+    # extraction path. When it is the extraction that was used, `ai_failure`
+    # already degrades the result; when another path's complete reply was
+    # used instead, the result is still not a clean "complete".
+    output_incomplete = any(
+        isinstance(record, Mapping) and bool(record.get("incomplete"))
+        for record in (partial_failures or {}).values()
+    )
 
     warnings: List[str] = []
     if field_failures:
@@ -71,6 +79,8 @@ def assess_metadata_quality(
         warnings.append("ai_extraction_unavailable_deterministic_fallback")
     if ai_failure:
         warnings.append("ai_extraction_partial_failure")
+    if output_incomplete:
+        warnings.append("model_output_incomplete")
     if no_core:
         warnings.append("no_core_metadata_extracted")
     elif missing_core:
@@ -79,7 +89,7 @@ def assess_metadata_quality(
     degraded = bool(field_failures) or fallback or ai_failure or no_core
     if degraded:
         status = QUALITY_PARTIAL_EXTRACTION
-    elif missing_core:
+    elif missing_core or output_incomplete:
         status = QUALITY_COMPLETE_WITH_WARNINGS
     else:
         status = QUALITY_COMPLETE

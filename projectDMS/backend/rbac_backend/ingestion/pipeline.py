@@ -385,11 +385,15 @@ class IngestionPipeline:
         if not is_consumable(document):
             return ""
 
-        for key in ("full_text", "ocrText", "text"):
-            value = document.get(key)
-            if value:
-                return str(value)
-        return ""
+        # Source text outranks the LLM's retyped Item 25, and the extraction
+        # report is never indexed as the letter - the rule every writer shares.
+        from ..services.source_text import select_body_text
+
+        body = select_body_text(document, include_summary=False)
+        if body:
+            return body
+        value = document.get("text")
+        return str(value) if value else ""
 
     async def _persist_chunks(
         self,

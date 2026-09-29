@@ -144,8 +144,8 @@ from ..contract_scope_resolver import (
     resolve_authorized_project_universe,
 )
 from ..publication_policy import (
+    authoritative_fact_text,
     authoritative_summary,
-    authoritative_text,
     is_consumable,
     resolve_document_authority,
 )
@@ -958,12 +958,12 @@ class ArbitrationDraftingService:
                         source_id=str(doc.get("_id")),
                         label=doc.get("subject") or doc.get("filename") or "Document",
                         citation=doc.get("letterNo") or doc.get("filename"),
-                        # authoritative_summary first: `doc.get("summary") or
-                        # authoritative_text(doc)` short-circuits on a truthy
-                        # summary and never evaluates the guard.
+                        # A selected reference becomes pleading evidence, so
+                        # the snippet is the document's own text; the LLM
+                        # summary never outranks it.
                         snippet=condense(
-                            authoritative_summary(doc)
-                            or authoritative_text(doc)
+                            authoritative_fact_text(doc)
+                            or authoritative_summary(doc)
                             or doc.get("subject"),
                             500,
                         ),

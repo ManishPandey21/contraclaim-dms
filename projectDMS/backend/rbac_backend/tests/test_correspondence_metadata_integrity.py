@@ -706,7 +706,7 @@ class _FileService:
 
 def _real_parser_processor(reply: Any) -> DocumentProcessor:
     class _OpenAI:
-        async def process_text(self, text: str, *, filename: str) -> str:
+        async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
             if isinstance(reply, Exception):
                 raise reply
             return reply

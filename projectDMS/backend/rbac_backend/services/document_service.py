@@ -53,6 +53,7 @@ from .duplicate_detection_service import (
 from .falkor_graph_service import normalize_letter_code
 from .evidence_graph_service import EvidenceGraphService
 from .reference_parser import parse_legacy_reference_text
+from .source_text import full_text_updates
 
 logger = logging.getLogger(__name__)
 configure_pipeline_logger(logger)
@@ -132,7 +133,12 @@ class DocumentService:
         extracted_payload: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Merge extracted fields with the current canonical authority axes."""
-        from .publication_policy import is_consumable, resolve_canonical_document
+        from .publication_policy import (
+            _TEXT_FIELDS,
+            _TEXT_PROVENANCE_FIELDS,
+            is_consumable,
+            resolve_canonical_document,
+        )
 
         db = await self._get_db()
         current = await resolve_canonical_document(db, document_id)
@@ -149,6 +155,13 @@ class DocumentService:
         # from the full current Mongo row rather than the earlier Pydantic dump.
         payload = dict(current)
         payload.update(extracted_payload)
+        # The body and its provenance come from the row as written, too: the
+        # extracted payload starts from a Document dumped BEFORE processing,
+        # whose stale `ocrText`/markers would otherwise hide the source text
+        # this run stored and hand Item 25 to evidence derivation.
+        for field in (*_TEXT_FIELDS, *_TEXT_PROVENANCE_FIELDS):
+            if field in current:
+                payload[field] = current[field]
         for field in ("processing_status", "duplicate_status", "lifecycle_state"):
             if field in current:
                 payload[field] = current[field]
@@ -1985,8 +1998,9 @@ class DocumentService:
                     if references_authoritative:
                         update_fields["reference"] = normalized_refs
                         metadata_references = normalized_refs
-                if getattr(metadata, "full_content", None):
-                    update_fields["full_text"] = metadata.full_content
+                # Source text when it was complete, the report's Item 25 only
+                # as the fallback - one rule shared with DatabaseService.
+                update_fields.update(full_text_updates(metadata))
                 if getattr(metadata, "subject", None):
                     update_fields["subject"] = metadata.subject
                 if getattr(metadata, "letter_no", None):

@@ -319,7 +319,7 @@ class _OpenAI:
         self.texts: List[str] = []
         self.uploads: List[str] = []
 
-    async def process_text(self, text: str, *, filename: str) -> str:
+    async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
         self.texts.append(text)
         processor: DocumentProcessor = self.processor_ref["processor"]
         return processor._build_ocr_fallback_report(text, filename=filename)

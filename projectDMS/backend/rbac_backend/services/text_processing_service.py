@@ -147,6 +147,7 @@ class TextProcessingService:
         self,
         text: str,
         unrecognised: Optional[Dict[int, str]] = None,
+        header_lines: Optional[List[int]] = None,
     ) -> Dict[int, Dict[str, str]]:
         """Parse report lines like ``14) Issue Nature: ...`` into blocks.
 
@@ -164,12 +165,15 @@ class TextProcessingService:
         field, which would corrupt that field's value.
 
         Markdown emphasis around labels ("1) **Date:** 01-08-2024") is ignored.
+
+        ``header_lines``, when given, receives the index (in
+        ``text.splitlines()``) of every line that opened an item.
         """
         blocks: Dict[int, Dict[str, str]] = {}
         current: Optional[int] = None
         full_content_number: Optional[int] = None
         set_aside = False
-        for raw_line in (text or "").splitlines():
+        for line_index, raw_line in enumerate((text or "").splitlines()):
             line = raw_line.strip()
             if not line:
                 continue
@@ -197,6 +201,8 @@ class TextProcessingService:
                         unrecognised.pop(number, None)
                     if re.search(r"Full\s*content", label, flags=re.I):
                         full_content_number = number
+                    if header_lines is not None:
+                        header_lines.append(line_index)
                     content = match.group(3).strip()
                     if content.endswith("**"):
                         content = content[:-2].rstrip()
@@ -224,6 +230,29 @@ class TextProcessingService:
                 existing = blocks[current].get("content", "")
                 blocks[current]["content"] = f"{existing}\n{line}".strip()
         return blocks
+
+    def trim_incomplete_report(self, report: str) -> tuple[str, List[int]]:
+        """Keep only the items a cut-off report finished writing.
+
+        A reply that stopped at the output-token limit stopped inside its last
+        item, so that item - whichever it is - is partial and is dropped, with
+        everything after it. Every earlier item is followed by the next item's
+        header and was therefore written out in full.
+
+        Items are recognised exactly as :meth:`parse_extraction_report`
+        recognises them, so a numbered paragraph inside the letter text is not
+        mistaken for a header. Returns the trimmed report and the item numbers
+        it still contains.
+        """
+        lines = [line.strip() for line in (report or "").splitlines() if line.strip()]
+        headers: List[int] = []
+        blocks = self._parse_numbered_blocks("\n".join(lines), header_lines=headers)
+        if not headers:
+            return "", []
+        last = headers[-1]
+        kept_text = "\n".join(lines[:last])
+        # Blocks are recorded in header order; the last one is the cut item.
+        return kept_text, sorted(list(blocks)[:-1])
 
     def _block_by_number(self, blocks: Dict[int, Dict[str, str]], number: int, label_pattern: str) -> Optional[str]:
         block = blocks.get(number)

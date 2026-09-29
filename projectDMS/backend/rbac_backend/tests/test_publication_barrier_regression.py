@@ -64,7 +64,7 @@ class _FileService:
 
 
 class _OpenAI:
-    async def process_text(self, text: str, *, filename: str) -> str:
+    async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
         return "REPORT"
 
     async def upload_file(self, path: str) -> str:

@@ -163,7 +163,7 @@ class _OpenAI:
         self.uploads: List[str] = []
         self.upload_reply = upload_reply
 
-    async def process_text(self, text: str, *, filename: str) -> str:
+    async def process_text(self, text: str, *, filename: str, include_full_content: bool = True) -> str:
         self.texts.append(text)
         return "REPORT"
 

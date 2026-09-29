@@ -17,6 +17,14 @@ from ..services.document_service import DocumentService
 logger = logging.getLogger(__name__)
 
 
+def _body_text(doc: Any) -> Optional[str]:
+    """A document model's body by source authority (source text before Item 25)."""
+    from .publication_policy import _as_mapping
+    from .source_text import select_body_text
+
+    return select_body_text(_as_mapping(doc), include_summary=False) or None
+
+
 ROLE_KEYWORDS: Dict[str, Tuple[str, ...]] = {
     "contractor": ("contractor", "consortium", "afcons", "sam india"),
     "engineer": ("engineer", "general consultant", "gc"),
@@ -142,7 +150,7 @@ class StrategyContextService:
                                         getattr(doc, "letterNo", None),
                                         getattr(doc, "subject", None),
                                         getattr(doc, "summary", None),
-                                        getattr(doc, "full_text", None),
+                                        _body_text(doc),
                                     ],
                                 )
                             )
@@ -249,7 +257,7 @@ class StrategyContextService:
             date_label = None
         letter_no = getattr(doc, "letterNo", None) or getattr(doc, "letter_no", None)
         subject = getattr(doc, "subject", None) or getattr(doc, "title", None)
-        summary = getattr(doc, "summary", None) or getattr(doc, "full_text", None) or getattr(doc, "ocrText", None)
+        summary = getattr(doc, "summary", None) or _body_text(doc)
         header_parts = [part for part in [date_label, letter_no, subject] if part]
         lines: List[str] = []
         if header_parts:

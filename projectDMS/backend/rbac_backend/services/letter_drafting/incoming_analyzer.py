@@ -57,7 +57,7 @@ ISSUE_KEYWORDS = [
 ]
 
 
-from ..publication_policy import consumable_summary, consumable_text
+from ..publication_policy import consumable_fact_text, consumable_summary
 
 
 class IncomingLetterAnalyzer:
@@ -251,9 +251,11 @@ class IncomingLetterAnalyzer:
         if doc is not None:
             # This text becomes the basis of the AI-drafted reply, so a
             # blocked or quarantined incoming document must not supply it.
+            # Amounts, dates, deadlines and requests are read out of this
+            # text, so it is the letter's own body, not the LLM summary.
             text = condense_text(
-                consumable_summary(doc)
-                or consumable_text(doc)
+                consumable_fact_text(doc)
+                or consumable_summary(doc)
                 or getattr(doc, "content", None),
                 2500,
             )

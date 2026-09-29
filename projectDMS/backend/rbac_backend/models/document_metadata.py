@@ -192,6 +192,14 @@ class ParsedDocumentMetadata(BaseModel):
     #: from dumps so it never lands in the stored ``metadata`` snapshot as if
     #: it were extracted content.
     field_failures: Dict[str, str] = Field(default_factory=dict, exclude=True)
+    #: The letter body the processor chose to persist as ``documents.full_text``,
+    #: and where it came from (``services/source_text.py``). Set only when it is
+    #: not ``full_content``: complete native/OCR source text is the body, and
+    #: the report is then not asked for Item 25 at all. Excluded from dumps -
+    #: source text is not extracted metadata and must not be copied into the
+    #: ``metadata`` snapshot.
+    body_text: Optional[str] = Field(default=None, exclude=True)
+    body_text_source: Optional[str] = Field(default=None, exclude=True)
 
     model_config = ConfigDict(populate_by_name=True)
 
