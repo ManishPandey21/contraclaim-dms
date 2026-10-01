@@ -60,7 +60,7 @@
     "@tiptap/extension-underline": "^3.15.0",
     "@tiptap/react": "^3.15.0",
     "@tiptap/starter-kit": "^3.15.0",
-    "axios": "^1.18.0",
+    "axios": "^1.20.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.0.0",
@@ -91,7 +91,7 @@
     "zustand": "^5.0.8"
   },
   "overrides": {
-    "brace-expansion": "^2.1.4",
+    "brace-expansion": "^2.1.7",
     "linkify-it": "^5.0.2",
     "tar": "^7.5.2"
   },
