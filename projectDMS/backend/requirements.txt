@@ -63,7 +63,7 @@ pymongo==4.11.2
 pytest==8.3.5
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
-PyJWT[crypto]==2.13.0
+PyJWT[crypto]==2.15.1
 python-multipart==0.0.20
 reportlab==5.0.0
 rich==14.1.0
@@ -78,7 +78,7 @@ tqdm==4.67.1
 typing-inspect==0.9.0
 typing-inspection==0.4.1
 typing_extensions==4.12.2
-urllib3==2.3.0
+urllib3==2.8.0
 uvicorn==0.34.0
 wrapt==1.17.3
 llama-index-core==0.14.22
