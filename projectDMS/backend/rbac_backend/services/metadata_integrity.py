@@ -238,8 +238,16 @@ def protect_human_edited_fields(
     if not stored:
         return []
     protected: List[str] = []
-    stored_snapshot = stored.get("metadata") if isinstance(stored.get("metadata"), Mapping) else {}
-    new_snapshot = updates.get("metadata") if isinstance(updates.get("metadata"), dict) else None
+    # Read each snapshot once, so the value used is the value whose type was
+    # tested, not a second lookup that could differ.
+    raw_stored_snapshot = stored.get("metadata")
+    stored_snapshot: Mapping[str, Any] = (
+        raw_stored_snapshot if isinstance(raw_stored_snapshot, Mapping) else {}
+    )
+    raw_new_snapshot = updates.get("metadata")
+    new_snapshot: Optional[Dict[str, Any]] = (
+        raw_new_snapshot if isinstance(raw_new_snapshot, dict) else None
+    )
     for field in effective_human_edited_fields(stored):
         keys = HUMAN_EDITABLE_FIELDS[field]
         touched = False

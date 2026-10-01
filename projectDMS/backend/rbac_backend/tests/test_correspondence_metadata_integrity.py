@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import copy
 import inspect
 import textwrap
 from pathlib import Path
@@ -1487,3 +1488,61 @@ def test_a_numbered_sub_list_inside_a_list_item_is_kept_whole() -> None:
     assert any("Reserve rights" in point for point in parsed.key_reply_points)
     assert parsed.full_content == CLEAN_EXPECTED["full_content"]
     assert parsed.field_failures == {}
+
+
+# --- PR #36 typing correction: the paths mypy flagged ---------------------------
+#
+# mypy reported seven Optional findings in `_parse_numbered_blocks` and
+# `protect_human_edited_fields`. No finding was reachable: the parser's number and
+# label are None only when the line did not match, and every use sat behind a
+# `match is not None` test mypy could not connect to them; the snapshot was
+# type-tested on one lookup and used from another. The correction moved those
+# uses inside the match and reads each snapshot once. These pin the inputs that
+# would have exercised a None if one had been reachable.
+
+
+def test_unnumbered_and_unmatched_lines_never_open_or_set_aside_an_item() -> None:
+    unrecognised: Dict[int, str] = {}
+    blocks = _parser()._parse_numbered_blocks(
+        "\n".join(
+            [
+                "Preamble without a number",
+                "7 ) spaced number: not an item",
+                "no) label: not an item",
+                "1) Date: 01-08-2024",
+                "a continuation line",
+                "99) Unknown label: x",
+                "3) Sender (Company): set aside",
+                "glued nowhere",
+            ]
+        ),
+        unrecognised,
+    )
+    assert list(blocks) == [1]
+    # 99 is no schema item, so it is content of the open item, not a new one.
+    assert blocks[1]["content"] == "01-08-2024\na continuation line\n99) Unknown label: x"
+    assert unrecognised == {3: "Sender (Company)"}
+
+
+def test_parser_tolerates_an_empty_or_missing_report() -> None:
+    assert _parser()._parse_numbered_blocks("") == {}
+    assert _parser()._parse_numbered_blocks(None) == {}  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("stored_snapshot", [None, [], "text", 0])
+@pytest.mark.parametrize("new_snapshot", [None, [], "text", {"subject": "AI"}])
+def test_protection_tolerates_a_non_mapping_snapshot(stored_snapshot: Any, new_snapshot: Any) -> None:
+    # The helper mutates the snapshot in place; a parametrize value is shared
+    # across cases, so each case gets its own copy.
+    new_snapshot = copy.deepcopy(new_snapshot)
+    updates: Dict[str, Any] = {"subject": "AI", "metadata": new_snapshot}
+    stored = {"human_edited_fields": ["subject"], "metadata": stored_snapshot, "subject": ""}
+    kept = protect_human_edited_fields(updates, stored)
+    assert kept == ["subject"]
+    assert "subject" not in updates
+    if isinstance(new_snapshot, dict):
+        # No human value and no stored snapshot value: the AI value is removed
+        # rather than published over the person's (empty) field.
+        assert updates["metadata"] == {}
+    else:
+        assert updates["metadata"] == new_snapshot

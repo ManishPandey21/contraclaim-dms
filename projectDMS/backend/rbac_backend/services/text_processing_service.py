@@ -171,45 +171,47 @@ class TextProcessingService:
                 r"^(\d+)\)\s*(?:\*\*|__)?\s*([^:\n]+?)\s*(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*)$",
                 line,
             )
-            number = int(match.group(1)) if match else None
-            label = match.group(2).strip().strip("*").strip() if match else ""
-            label_expected = (
-                match is not None
-                and re.search(_ITEM_LABELS.get(number, r"(?!)"), label, flags=re.I) is not None
-            )
-            if (
-                label_expected
-                and number not in blocks
-                and (full_content_number is None or number > full_content_number)
-            ):
-                current = number
-                set_aside = False
-                if unrecognised is not None:
-                    unrecognised.pop(number, None)
-                if re.search(r"Full\s*content", label, flags=re.I):
-                    full_content_number = number
-                content = match.group(3).strip()
-                if content.endswith("**"):
-                    content = content[:-2].rstrip()
-                blocks[current] = {"label": label, "content": content}
-                continue
-            if (
-                match is not None
-                and number in _ITEM_LABELS
-                and number not in blocks
-                and full_content_number is None
-                and current != 6
-                # Only a number past the current item is header drift. A lower
-                # number ("10) Reserve rights: ..." inside Summary or Key
-                # Reply Points) is a sub-list line of the current item.
-                and (current is None or number > current)
-            ):
-                # A header item with a label we do not recognise: its value is
-                # unknown, and must not become part of the previous field.
-                set_aside = True
-                if unrecognised is not None:
-                    unrecognised.setdefault(number, label)
-                continue
+            # Only a numbered line can open or set aside an item; every other
+            # line is content. Scoping the item logic to a real match keeps
+            # the number and label it reads from ever being absent.
+            if match is not None:
+                number = int(match.group(1))
+                label = match.group(2).strip().strip("*").strip()
+                label_expected = (
+                    re.search(_ITEM_LABELS.get(number, r"(?!)"), label, flags=re.I) is not None
+                )
+                if (
+                    label_expected
+                    and number not in blocks
+                    and (full_content_number is None or number > full_content_number)
+                ):
+                    current = number
+                    set_aside = False
+                    if unrecognised is not None:
+                        unrecognised.pop(number, None)
+                    if re.search(r"Full\s*content", label, flags=re.I):
+                        full_content_number = number
+                    content = match.group(3).strip()
+                    if content.endswith("**"):
+                        content = content[:-2].rstrip()
+                    blocks[current] = {"label": label, "content": content}
+                    continue
+                if (
+                    number in _ITEM_LABELS
+                    and number not in blocks
+                    and full_content_number is None
+                    and current != 6
+                    # Only a number past the current item is header drift. A lower
+                    # number ("10) Reserve rights: ..." inside Summary or Key
+                    # Reply Points) is a sub-list line of the current item.
+                    and (current is None or number > current)
+                ):
+                    # A header item with a label we do not recognise: its value is
+                    # unknown, and must not become part of the previous field.
+                    set_aside = True
+                    if unrecognised is not None:
+                        unrecognised.setdefault(number, label)
+                    continue
             if set_aside:
                 continue
             if current is not None:
