@@ -202,3 +202,24 @@ def test_the_self_fence_fires_before_the_lease_can_lapse(monkeypatch):
         assert fenced_at < lapse_at, f"fenced {fenced_at - lapse_at:.3f}s after the lease could lapse"
 
     asyncio.run(scenario())
+
+
+def test_the_stop_hold_outlasts_one_retried_driver_operation(monkeypatch):
+    """Derived from the client's own bounds: two attempts of server selection +
+    connect + socket timeout, never under the floor."""
+    from rbac_backend.core.config import settings
+
+    monkeypatch.setattr(source_lease, "STOP_RELEASE_HOLD", None)
+    monkeypatch.setattr(settings, "MONGODB_SERVER_SELECTION_TIMEOUT_MS", 30_000)
+    monkeypatch.setattr(settings, "MONGODB_CONNECT_TIMEOUT_MS", 20_000)
+    monkeypatch.setattr(settings, "MONGODB_SOCKET_TIMEOUT_MS", 60_000)
+    assert source_lease.stop_release_hold() == timedelta(milliseconds=2 * 110_000)
+
+    monkeypatch.setattr(settings, "MONGODB_SOCKET_TIMEOUT_MS", 1)
+    monkeypatch.setattr(settings, "MONGODB_SERVER_SELECTION_TIMEOUT_MS", 1)
+    monkeypatch.setattr(settings, "MONGODB_CONNECT_TIMEOUT_MS", 1)
+    assert source_lease.stop_release_hold() == source_lease.STOP_RELEASE_HOLD_FLOOR
+
+    # 0 = the client never times out: no derived bound, so a whole lease.
+    monkeypatch.setattr(settings, "MONGODB_SOCKET_TIMEOUT_MS", 0)
+    assert source_lease.stop_release_hold() == source_lease.SOURCE_LEASE_DURATION

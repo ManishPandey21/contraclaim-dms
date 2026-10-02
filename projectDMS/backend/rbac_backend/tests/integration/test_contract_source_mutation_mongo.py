@@ -415,11 +415,11 @@ def test_a_failed_ingest_whose_failure_cannot_be_recorded_is_never_settled(
     real_fail = source_lease.fail
     calls = {"n": 0}
 
-    async def flaky_fail(db, lease, *, error):
+    async def flaky_fail(db, lease, *, error, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             raise AutoReconnect("primary stepped down (test)")
-        return await real_fail(db, lease, error=error)
+        return await real_fail(db, lease, error=error, **kwargs)
 
     monkeypatch.setattr(source_lease, "fail", flaky_fail)
 
@@ -439,9 +439,18 @@ def test_a_failed_ingest_whose_failure_cannot_be_recorded_is_never_settled(
 def test_an_ingest_that_cannot_renew_stops_itself_before_its_lease_can_lapse(
     database, tmp_path, monkeypatch
 ):
-    """Renewals fail (a partition, a stalled loop). The ingest must stop writing
-    before its lease lapses - otherwise the next owner and this one write the
-    same source at once, and nothing fences the page and row writes."""
+    """Renewals fail (a partition, a stalled loop) while the ingest is writing.
+    The ingest must stop writing before its lease lapses - otherwise the next
+    owner and this one write the same source at once, and nothing fences the
+    page and row writes.
+
+    The partition starts once the ingest is inside its write, never on a timer.
+    With renewals failing from acquisition, the fence (one or two scaled
+    intervals in) raced the ingest's status writes and projection invalidation
+    on a real replica set and often won: the ingest then stopped before writing
+    anything and the source was, correctly, put back as settled - the case the
+    next test pins, not this one.
+    """
     from datetime import timedelta as _td
 
     from pymongo.errors import AutoReconnect
@@ -451,15 +460,23 @@ def test_an_ingest_that_cannot_renew_stops_itself_before_its_lease_can_lapse(
     _current(database)
     monkeypatch.setattr(source_lease, "SOURCE_LEASE_RENEW_EVERY", _td(milliseconds=100))
     monkeypatch.setattr(source_lease, "SOURCE_LEASE_SELF_FENCE", _td(milliseconds=500))
+    marks: Dict[str, Any] = {}
 
-    async def no_renewal(db, lease, **kwargs):
+    async def partitioned_once_writing(db, lease, **kwargs):
+        # Before the partition a renewal succeeds at once. A real one is a
+        # replica-set round trip that can outlast the scaled 100 ms bound and
+        # fence the ingest before it writes; the 10-minute lease taken at
+        # acquisition has not moved toward expiry either way.
+        if not marks["writing"].is_set():
+            return None
         raise AutoReconnect("partitioned from the primary (test)")
 
-    monkeypatch.setattr(source_lease, "renew", no_renewal)
+    monkeypatch.setattr(source_lease, "renew", partitioned_once_writing)
 
     async def run(db, client):
         hold = asyncio.Event()  # never set: the ingest would write forever
         ingest = _Ingest(db, hold=hold)
+        marks["writing"] = ingest.entered  # set once page 1 is rewritten
         outcome = None
         try:
             await asyncio.wait_for(
@@ -471,13 +488,194 @@ def test_an_ingest_that_cannot_renew_stops_itself_before_its_lease_can_lapse(
         return outcome, await db[LEASES].find_one({}), page2
 
     outcome, lease, page2 = database.run(run)
+    assert marks["writing"].is_set(), "the ingest never reached its write; nothing was exercised"
     # No other owner is known: an ordinary, retryable failed attempt - not a
     # lost lease (which the queue would discard as superseded).
     assert isinstance(outcome, source_lease.SourceLeaseFenced), repr(outcome)
     assert NEW_CLAUSE not in page2["cleaned_text"], "the ingest kept writing after it fenced itself"
-    assert lease["status"] != "settled"
+    assert lease["status"] == "failed", "a half-written source was not failed"
     document = database.run(lambda db, client: db["documents"].find_one({"_id": runtime.DOC}))
     assert document["status"] == "failed", "a fenced ingest left the document in flight"
+
+
+def test_an_ingest_fenced_before_it_writes_puts_the_source_back_as_settled(
+    database, tmp_path, monkeypatch
+):
+    """Renewals fail while the ingest is still recording its status, and the
+    fence fires there. Nothing was written to the source, so it is put
+    back as it was (settled) - failing it would withdraw a coherent projection
+    for an attempt that never touched it. The attempt itself is still a
+    reported, retryable failure."""
+    from datetime import timedelta as _td
+
+    from pymongo.errors import AutoReconnect
+
+    from rbac_backend.services import contract_source_lease as source_lease
+    from rbac_backend.services.contract_service import ContractService
+
+    _current(database)
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_RENEW_EVERY", _td(milliseconds=100))
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_SELF_FENCE", _td(milliseconds=500))
+
+    marks = {"stalled": False}
+
+    async def partitioned_once_stalled(db, lease, **kwargs):
+        if not marks["stalled"]:
+            return None  # see the test above
+        raise AutoReconnect("partitioned from the primary (test)")
+
+    monkeypatch.setattr(source_lease, "renew", partitioned_once_stalled)
+    real_update = ContractService.update_contract_document
+
+    async def stall_before_writing(self, document_id, *args, **kwargs):
+        if kwargs.get("status_value") == "processing":
+            marks["stalled"] = True
+            await asyncio.Event().wait()  # never returns: only the fence ends it
+        return await real_update(self, document_id, *args, **kwargs)
+
+    monkeypatch.setattr(ContractService, "update_contract_document", stall_before_writing)
+
+    async def run(db, client):
+        ingest = _Ingest(db)
+        outcome = None
+        try:
+            await asyncio.wait_for(
+                _service(db, ingest).process_ingest_job(_payload(tmp_path, "a")), 20
+            )
+        except BaseException as exc:  # noqa: BLE001
+            outcome = exc
+        return outcome, ingest.entered.is_set(), await db[LEASES].find_one({})
+
+    outcome, wrote, lease = database.run(run)
+    assert marks["stalled"], "the ingest never reached its status write; nothing was exercised"
+    assert not wrote, "the ingest reached the source write; that case is the test above"
+    assert isinstance(outcome, source_lease.SourceLeaseFenced), repr(outcome)
+    assert lease["status"] == "settled", "an untouched source was not put back as settled"
+    assert lease.get("tainted_at") is None
+    document = database.run(lambda db, client: db["documents"].find_one({"_id": runtime.DOC}))
+    assert document["status"] == "failed", "a fenced ingest left the document in flight"
+
+
+def test_a_stopped_ingest_holds_its_source_until_writes_it_sent_have_drained(
+    database, tmp_path, monkeypatch
+):
+    """A fenced ingest is cancelled, not finished: a page write it had already
+    sent runs on in a driver thread (and a retryable write is re-sent after a
+    reconnect). Released at once, the source could be taken by a new owner and
+    that late write land in the middle of the new owner's text. The release
+    after a stop holds the source for ``stop_release_hold()``."""
+    from datetime import timedelta as _td
+
+    from pymongo.errors import AutoReconnect
+
+    from rbac_backend.services import contract_source_lease as source_lease
+
+    _current(database)
+    # Long enough that no runner is too slow to meet it; the test ends it by
+    # moving the hold into the past, never by sleeping.
+    hold = _td(minutes=10)
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_RENEW_EVERY", _td(milliseconds=100))
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_SELF_FENCE", _td(milliseconds=500))
+    monkeypatch.setattr(source_lease, "STOP_RELEASE_HOLD", hold)
+    marks: Dict[str, Any] = {}
+
+    async def partitioned_once_writing(db, lease, **kwargs):
+        if "writing" not in marks or not marks["writing"].is_set():
+            return None  # instant success: see the cannot-renew test
+        raise AutoReconnect("partitioned from the primary (test)")
+
+    monkeypatch.setattr(source_lease, "renew", partitioned_once_writing)
+
+    async def run(db, client):
+        stopped = _Ingest(db, hold=asyncio.Event())
+        marks["writing"] = stopped.entered
+        with pytest.raises(source_lease.SourceLeaseFenced):
+            await asyncio.wait_for(_service(db, stopped).process_ingest_job(_payload(tmp_path, "a")), 20)
+        held = await db[LEASES].find_one({})
+        # The retry arrives while the hold is on: refused, nothing written, and
+        # no holder - nobody owns the source, so the job waits its turn rather
+        # than taking itself for a live copy.
+        with pytest.raises(source_lease.ContractSourceBusy) as busy:
+            await _service(db, _Ingest(db)).process_ingest_job(_payload(tmp_path, "b"))
+        page2 = await db.contract_ocr_pages.find_one({"document_id": runtime.DOC, "page_number": 2})
+        await db[LEASES].update_one(
+            {}, {"$set": {"reacquirable_at": datetime.now(timezone.utc) - timedelta(seconds=1)}}
+        )
+        await _service(db, _Ingest(db)).process_ingest_job(_payload(tmp_path, "c"))
+        return held, busy.value, page2, await db[LEASES].find_one({})
+
+    held, busy, page2, after = database.run(run)
+    assert held["status"] == "failed"
+    assert held["reacquirable_at"] is not None and held["reacquirable_at"] > held["released_at"]
+    assert busy.holder is None, busy.holder
+    assert NEW_CLAUSE not in page2["cleaned_text"], "an ingest wrote during the hold"
+    assert after["status"] == "settled", "the source was not ingestable once the hold passed"
+    assert after.get("reacquirable_at") is None
+
+
+def test_a_fenced_ingest_whose_first_release_fails_is_still_held(database, tmp_path, monkeypatch):
+    """The stop path's release hit a transient error and left the lease to the
+    outer handler. That handler must hold it too - releasing it outright reopens
+    the window the hold closes."""
+    from datetime import timedelta as _td
+
+    from pymongo.errors import AutoReconnect
+
+    from rbac_backend.services import contract_source_lease as source_lease
+
+    _current(database)
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_RENEW_EVERY", _td(milliseconds=100))
+    monkeypatch.setattr(source_lease, "SOURCE_LEASE_SELF_FENCE", _td(milliseconds=500))
+    monkeypatch.setattr(source_lease, "STOP_RELEASE_HOLD", _td(minutes=10))
+    marks: Dict[str, Any] = {"fails": 0}
+
+    async def partitioned_once_writing(db, lease, **kwargs):
+        if "writing" not in marks or not marks["writing"].is_set():
+            return None
+        raise AutoReconnect("partitioned from the primary (test)")
+
+    real_fail = source_lease.fail
+
+    async def first_release_fails(db, lease, *, error, **kwargs):
+        marks["fails"] += 1
+        if marks["fails"] == 1:
+            raise AutoReconnect("primary stepped down during the release (test)")
+        return await real_fail(db, lease, error=error, **kwargs)
+
+    monkeypatch.setattr(source_lease, "renew", partitioned_once_writing)
+    monkeypatch.setattr(source_lease, "fail", first_release_fails)
+
+    async def run(db, client):
+        ingest = _Ingest(db, hold=asyncio.Event())
+        marks["writing"] = ingest.entered
+        with pytest.raises(source_lease.SourceLeaseFenced):
+            await asyncio.wait_for(_service(db, ingest).process_ingest_job(_payload(tmp_path, "a")), 20)
+        return await db[LEASES].find_one({})
+
+    lease = database.run(run)
+    assert marks["fails"] >= 2, "the outer handler never retried the release"
+    assert lease["status"] == "failed"
+    assert lease.get("reacquirable_at") is not None, "the retried release dropped the hold"
+
+
+def test_an_ingest_that_fails_on_its_own_releases_without_a_hold(database, tmp_path):
+    """The hold is for cancelled ingests only. An ingest that raised awaited its
+    own writes first, so nothing of it is in flight: the retry may start now."""
+    from rbac_backend.services import contract_source_lease as source_lease
+
+    _current(database)
+
+    async def run(db, client):
+        with pytest.raises(Exception):
+            await _service(db, _Failing(db)).process_ingest_job(_payload(tmp_path, "a"))
+        failed = await db[LEASES].find_one({})
+        await _service(db, _Ingest(db)).process_ingest_job(_payload(tmp_path, "b"))
+        return failed, await db[LEASES].find_one({})
+
+    failed, after = database.run(run)
+    assert failed["status"] == "failed" and failed.get("reacquirable_at") is None
+    assert after["status"] == "settled"
+    assert source_lease.STOP_RELEASE_HOLD is None  # production derives it
 
 
 def test_a_tainted_source_is_reported_as_a_failed_ingest(database, tmp_path):
@@ -683,7 +881,7 @@ def test_a_lease_lost_at_fail_with_no_owner_records_the_failure(database, tmp_pa
 
     _current(database)
 
-    async def lapsed(db, lease, *, error):
+    async def lapsed(db, lease, *, error, **kwargs):
         raise source_lease.LostSourceLease("lapsed, nobody holds it (test)", holder=None)
 
     monkeypatch.setattr(source_lease, "fail", lapsed)
@@ -840,14 +1038,16 @@ def test_a_fenced_ingest_that_finds_its_lease_gone_taints_the_source(database, t
     monkeypatch.setattr(source_lease, "SOURCE_LEASE_RENEW_EVERY", _td(milliseconds=50))
     monkeypatch.setattr(source_lease, "SOURCE_LEASE_SELF_FENCE", _td(milliseconds=300))
     wrote = asyncio.Event()
-    real_renew = source_lease.renew
 
     async def failing(db, lease, **kwargs):
+        # Instant success until the ingest writes: a real renew can outlast the
+        # scaled 50 ms bound and fence the ingest before it writes, and an
+        # untouched source is (correctly) never tainted.
         if not wrote.is_set():
-            return await real_renew(db, lease, **kwargs)
+            return None
         raise AutoReconnect("partitioned (test)")
 
-    async def gone(db, lease, *, error):
+    async def gone(db, lease, *, error, **kwargs):
         raise source_lease.LostSourceLease("already taken (test)", holder=None)
 
     monkeypatch.setattr(source_lease, "renew", failing)
@@ -861,4 +1061,5 @@ def test_a_fenced_ingest_that_finds_its_lease_gone_taints_the_source(database, t
         return await db[LEASES].find_one({})
 
     lease = database.run(run)
+    assert wrote.is_set(), "the ingest never reached its write; nothing was exercised"
     assert lease.get("tainted_at") is not None, "a fenced ingest that lost its lease left the source untainted"

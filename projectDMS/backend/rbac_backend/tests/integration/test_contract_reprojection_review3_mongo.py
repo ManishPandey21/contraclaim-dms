@@ -420,10 +420,22 @@ def test_the_post_deploy_check_proves_a_live_owner_on_the_deployed_release(datab
         )
         checks = {}
         for name, env in {
-            "ok": dict(CW_HOSTS=host, DEPLOYED_COMMIT="release-abc", PROBE_INSTRUMENT=instrument_id),
-            "stale_release": dict(CW_HOSTS=host, DEPLOYED_COMMIT="release-def"),
-            "second_owner": dict(CW_HOSTS="new-contract-worker", NON_OWNER_HOSTS=host, DEPLOYED_COMMIT="release-abc"),
-            "not_started": dict(CW_HOSTS="new-contract-worker", DEPLOYED_COMMIT="release-abc"),
+            # CW_RELEASES: the release baked into each running contract-worker
+            # image (the shell half ties it to the deployed checkout).
+            "ok": dict(
+                CW_HOSTS=host, CW_RELEASES="release-abc", DEPLOYED_COMMIT="release-abc",
+                PROBE_INSTRUMENT=instrument_id,
+            ),
+            # The runtime runs code older than the running image claims.
+            "stale_release": dict(CW_HOSTS=host, CW_RELEASES="release-def", DEPLOYED_COMMIT="release-def"),
+            # No image identity at all: nothing can vouch for the runtime.
+            "no_image_release": dict(CW_HOSTS=host, CW_RELEASES="", DEPLOYED_COMMIT="release-abc"),
+            "unknown_image": dict(CW_HOSTS=host, CW_RELEASES="unknown", DEPLOYED_COMMIT="release-abc"),
+            "second_owner": dict(
+                CW_HOSTS="new-contract-worker", NON_OWNER_HOSTS=host, CW_RELEASES="release-abc",
+                DEPLOYED_COMMIT="release-abc",
+            ),
+            "not_started": dict(CW_HOSTS="new-contract-worker", CW_RELEASES="release-abc", DEPLOYED_COMMIT="release-abc"),
         }.items():
             checks[name] = await asyncio.to_thread(_run_owner_check, database, **env)
         beat = await heartbeats.find_one({"_id": "contract-worker-1"})
@@ -441,7 +453,13 @@ def test_the_post_deploy_check_proves_a_live_owner_on_the_deployed_release(datab
     assert "reached CURRENT" in ok.stdout
 
     stale = checks["stale_release"]
-    assert stale.returncode == 1 and "!= deployed release-def" in stale.stdout, stale.stdout + stale.stderr
+    assert stale.returncode == 1, stale.stdout + stale.stderr
+    assert "runtime release release-abc is not the release of a running contract-worker image (release-def)" in stale.stdout
+
+    for name in ("no_image_release", "unknown_image"):
+        refused = checks[name]
+        assert refused.returncode == 1, name + ": " + refused.stdout + refused.stderr
+        assert "(none known)" in refused.stdout, refused.stdout
 
     second = checks["second_owner"]
     assert second.returncode == 1, second.stdout

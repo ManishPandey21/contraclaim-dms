@@ -6,8 +6,6 @@ x-logging: &default-logging
 
 x-backend-env: &backend-env
   ENVIRONMENT: "production"
-  # Recorded by the reprojection runtime heartbeat (OPERATIONS 7a).
-  RELEASE_SHA: "${RELEASE_SHA:-unknown}"
   ENABLE_API_DOCS: "false"
   ALLOW_DEV_HEADERS: "false"
   DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must point to the production MongoDB replica set}"
@@ -167,10 +165,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      # The release identity post_deploy_verify.sh compares with the deployed
-      # checkout: build with RELEASE_SHA=$(git rev-parse HEAD) (OPERATIONS 7a).
-      labels:
-        org.opencontainers.image.revision: "${RELEASE_SHA:-unknown}"
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     environment:
       <<: *backend-env
@@ -213,6 +214,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      # Release identity baked into the image (client/Dockerfile).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     depends_on:
       backend:
@@ -234,10 +238,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      # The release identity post_deploy_verify.sh compares with the deployed
-      # checkout: build with RELEASE_SHA=$(git rev-parse HEAD) (OPERATIONS 7a).
-      labels:
-        org.opencontainers.image.revision: "${RELEASE_SHA:-unknown}"
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     environment:
@@ -275,10 +282,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      # The release identity post_deploy_verify.sh compares with the deployed
-      # checkout: build with RELEASE_SHA=$(git rev-parse HEAD) (OPERATIONS 7a).
-      labels:
-        org.opencontainers.image.revision: "${RELEASE_SHA:-unknown}"
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     environment:
@@ -338,10 +348,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      # The release identity post_deploy_verify.sh compares with the deployed
-      # checkout: build with RELEASE_SHA=$(git rev-parse HEAD) (OPERATIONS 7a).
-      labels:
-        org.opencontainers.image.revision: "${RELEASE_SHA:-unknown}"
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     deploy:

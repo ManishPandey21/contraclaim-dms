@@ -57,5 +57,10 @@ RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && chown -R app:app /app
 USER app
+# Release identity, as for the backend images (backend/Dockerfile): the commit
+# this image was built from, read by post_deploy_verify.sh against the release
+# manifest. Last, so a new commit rebuilds only this metadata layer.
+ARG RELEASE_SHA=unknown
+LABEL org.opencontainers.image.revision=${RELEASE_SHA}
 EXPOSE 5173
 CMD ["node", "scripts/serve-dist.mjs"]

@@ -381,7 +381,13 @@ ingest that finds its lease already taken taints the source. Each with a determi
 fails on the pre-fix code; no renewal happens after quiesce returns (counted against Mongo).
 
 Owner decisions (2026-09-27): the post-deploy image-revision check stays **strict** (a deploy
-that does not rebuild the contract-worker fails verification); CURRENT point verification only
+that does not rebuild the contract-worker fails verification) - **refined by the owner 2026-10-02:** strictness stays,
+and becomes service-scoped. A deploy declares `FULL`, `CLIENT_ONLY` or `BACKEND_ONLY`; every
+deployed service must run exactly the image its release manifest records, built from the
+deployed commit; every other app service must stay on exactly its approved image, with an
+unchanged build context; drift and any unprovable identity fail (`scripts/release_manifest.py`,
+deployment guide 5a-7a). A client-only deploy rebuilds nothing else and still proves every
+backend image unchanged. CURRENT point verification only
 in the single-document repair, the silent drop of held/quarantined/deleted instruments from
 evidence, and the general pipeline's refusal of governed documents (with the CL-4A tests
 promoting after extraction) are **accepted residuals**.
@@ -390,6 +396,7 @@ Residual gaps — stated, not waived:
 
 | Gap | Why it does not make evidence lie | Follow-up |
 |---|---|---|
+| **Owner-accepted residual, MEDIUM, pre-existing (decision 2026-10-02; PR #34 hardening).** The race: a contract ingest that is stopped (self-fence or shutdown) cancels its asyncio task, but Motor 3.7 runs each MongoDB operation on an executor thread and re-sends a retryable write once, and without CSOT no `maxTimeMS` reaches the server - so a page, lexical-row or vector write the stopped ingest already sent can still be applied after its lease is released. A new owner may then be rewriting the same source, and its settle would vouch for text from two writers. Pre-existing: the lease and self-fence shipped with PR #34's base commit 3ca0149 releasing at once; this hardening did not introduce the race, it narrowed it | mitigation in place: the release after a stop holds the source unacquirable for `stop_release_hold()` - two attempts of the client's server-selection + connect + socket timeouts (default 2 min floor; a whole lease if any timeout is 0), including when the stop path's own release failed and the outer handler releases. A retry during the hold waits its turn. Impact if it occurs: a source projected from interleaved text until the next clean ingest; low likelihood (an in-flight write must outlast the hold - a batched write still executing server-side, or a saturated pool wait). Weaker paths: every release attempt failing (the lease then lapses about 3 min after the fence), and an ingest that failed on its own after a client-side `NetworkTimeout`/`AutoReconnect` mid-write (released at once) | follow-up (preferred permanent fix): fence every source write (page store, lexical rows, contract vectors) on the lease generation, and refuse to settle or project a source holding more than one generation. Not CSOT, not in PR #34 (owner decision). |
 | `resolve_authorized_project_universe` (letter + arbitration drafting) drops a not-current instrument silently instead of failing | pre-existing behaviour, unchanged; only the evidence route hard-fails today | extend `projection_not_current` to the drafting universe |
 | The evidence route's *query* embedding still uses the non-strict client (fake vector when the provider fails) | pre-existing DEBT-15 class; lexical still answers, but the vector source reports success | strict query embedding + `degraded` marking |
 | `contract_clauses` rows and Falkor clause nodes carry no `source_classification_revision` | Contract Master evidence reads neither for eligibility (lexical = `document_vectors`, vector = Qdrant payloads, both tagged) | tag when those stores join the evidence path |
@@ -434,7 +441,8 @@ Residual gaps — stated, not waived:
 | Each pass scans `contract_documents` with an unindexed `$expr`, and exhausted generations stay due | one worker, small collection | index + pre-skip exhausted/backoff claims |
 | Upload ingestion still writes vectors to the configured `QDRANT_COLLECTION`; only the projection names `document_vectors` | evidence reads projection vectors, which are now always in `document_vectors` | check production `QDRANT_COLLECTION` before deploy (not read here: production is out of bounds) |
 
-Deploy note: the fix lives in the **contract-worker** as well as the backend. Rebuild and
-recreate both with `RELEASE_SHA` set (OPERATIONS 7a); `post_deploy_verify.sh` fails when the
-contract-worker image revision, its runtime heartbeat or its ownership flag does not match
-the deployed commit.
+Deploy note: the fix lives in the **contract-worker** as well as the backend, so this release
+is `FULL` or `BACKEND_ONLY`. Build with `RELEASE_SHA="$(git rev-parse HEAD)"` - a build argument
+baked into the image, not an `up`-time variable - write the release manifest and verify against
+it (deployment guide 5a-7a); `post_deploy_verify.sh` fails when any app service runs an image
+the manifest does not record, or the runtime heartbeat or ownership flag disagrees.

@@ -72,6 +72,17 @@ RUN adduser --disabled-password --gecos "" appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
+# Release identity: the commit this image was built from, baked in once at
+# build time. The label is what post_deploy_verify.sh compares with the deployed
+# checkout; the environment variable is what the reprojection runtime records in
+# its heartbeat. Both come from this one build argument, so a container
+# recreated later can never claim a release its code is not - which an `up`-time
+# variable could. Last, so a new commit rebuilds only these metadata layers.
+# docs/OPERATIONS.md 7a.
+ARG RELEASE_SHA=unknown
+ENV RELEASE_SHA=${RELEASE_SHA}
+LABEL org.opencontainers.image.revision=${RELEASE_SHA}
+
 EXPOSE 8000
 
 # --proxy-headers: derive request.client.host from X-Forwarded-For so per-IP

@@ -9,6 +9,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity baked into the image (backend/Dockerfile, OPERATIONS 7a).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     env_file:
       - path: ./backend/.env
         required: false
@@ -54,6 +57,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      # Release identity baked into the image (client/Dockerfile).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     env_file:
       - ./client/.env.development
     depends_on:
@@ -70,6 +76,9 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity baked into the image (backend/Dockerfile, OPERATIONS 7a).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     command: ["python", "-m", "rbac_backend.worker"]
     env_file:
       - path: ./backend/.env

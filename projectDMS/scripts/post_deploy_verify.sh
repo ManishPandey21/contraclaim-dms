@@ -37,6 +37,14 @@ fail() { printf 'FAIL: %s\n' "$1"; failures=$((failures + 1)); }
 # shellcheck source=scripts/lib/clamav_readiness.sh
 . "$ROOT_DIR/scripts/lib/clamav_readiness.sh"
 
+# Which exact image every app service must run after this deploy: the declared
+# scope (FULL / CLIENT_ONLY / BACKEND_ONLY), the release manifest of this deploy
+# and, for a scoped deploy, the approved manifest of the release it replaces.
+# See scripts/release_manifest.py and the deployment guide.
+DEPLOY_SCOPE=${DEPLOY_SCOPE:-}
+RELEASE_MANIFEST=${RELEASE_MANIFEST:-}
+APPROVED_MANIFEST=${APPROVED_MANIFEST:-}
+
 
 resolve_python_bin() {
   if [[ -n "$PYTHON_BIN" ]]; then
@@ -491,6 +499,7 @@ image_revision() {
 }
 
 contract_worker_hosts=""
+contract_worker_releases=""
 contract_worker_cids=$(compose_ps_q contract-worker)
 if [[ -z "$contract_worker_cids" ]]; then
   fail "No running contract-worker container: nothing owns Contract Master reprojection"
@@ -502,12 +511,17 @@ for cid in $contract_worker_cids; do
   else
     fail "contract-worker ${cid:0:12} has START_CONTRACT_REPROJECTION_WORKERS=${flag:-<unset>}: promoted contracts would stay PENDING"
   fi
+  # Which image it must run is the release-image section's question; here, the
+  # identity its runtime will report.
   revision=$(image_revision "$cid")
-  if [[ -n "$deployed_commit" && "$revision" == "$deployed_commit" ]]; then
-    pass "contract-worker image revision matches the deployed commit ${deployed_commit:0:12}"
-  else
-    fail "contract-worker image revision is '${revision:-<none>}', deployed commit is '${deployed_commit:-<unknown>}' (build with RELEASE_SHA=\$(git rev-parse HEAD))"
+  # The process reports the identity baked into its image. A different value
+  # means something set RELEASE_SHA at `up`, and the heartbeat would vouch for
+  # code the container does not run.
+  process_release=$(container_env "$cid" RELEASE_SHA)
+  if [[ "$process_release" != "$revision" ]]; then
+    fail "contract-worker ${cid:0:12} process RELEASE_SHA is '${process_release:-<unset>}' but its image was built from '${revision:-<none>}'"
   fi
+  contract_worker_releases="$contract_worker_releases $revision"
   contract_worker_hosts="$contract_worker_hosts $(docker inspect -f '{{.Config.Hostname}}' "$cid" 2>/dev/null || true)"
 done
 
@@ -522,12 +536,108 @@ for svc in backend document-worker document-worker-canary; do
     else
       pass "$svc ${cid:0:12} is not a reprojection owner"
     fi
-    revision=$(image_revision "$cid")
-    if [[ -n "$deployed_commit" && "$revision" != "$deployed_commit" ]]; then
-      warn "$svc ${cid:0:12} image revision is '${revision:-<none>}', deployed commit is '${deployed_commit}'"
-    fi
   done
 done
+
+# ---------------------------------------------------------------------------
+# Release images, per service (owner decision 2026-10-02: strict, scoped)
+#
+# READ-ONLY. Every app service must run exactly the image the release manifest
+# records: a service this scope deploys, the image built from the deployed
+# commit; a service it does not deploy, the image the approved manifest of the
+# previous release recorded - unchanged, with an unchanged build context. A
+# running service the manifest does not name is drift. No scope, no manifest, an
+# image without its identity: FAIL, never a skip.
+# ---------------------------------------------------------------------------
+printf '\n--- Release images (scope %s) ---\n' "${DEPLOY_SCOPE:-<undeclared>}"
+
+running_json=$(mktemp)
+{
+  printf '{'
+  first_service=1
+  for svc in backend contract-worker document-worker document-worker-canary client; do
+    [[ $first_service -eq 1 ]] || printf ','
+    first_service=0
+    printf '"%s":[' "$svc"
+    first_row=1
+    for cid in $(compose_ps_q "$svc"); do
+      [[ -z "$cid" ]] && continue
+      [[ $first_row -eq 1 ]] || printf ','
+      first_row=0
+      printf '{"id":"%s","image_id":"%s","revision":"%s"}' "$cid" \
+        "$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true)" "$(image_revision "$cid")"
+    done
+    printf ']'
+  done
+  # Every other container of the compose project: one running an app image
+  # under another service name is drift the per-service lists cannot see.
+  # The project and its services come from the compose configuration, not from
+  # one container's label (several backend ids during a recreate made that
+  # empty, and an empty project silently scanned nothing).
+  project=""
+  known_services=""
+  if config_python=$(resolve_python_bin); then
+    config_json=$(docker compose --env-file "$ENV_FILE" $COMPOSE_FILES config --format json 2>/dev/null || true)
+    project=$("$config_python" -c 'import json,sys; print(json.loads(sys.stdin.read() or "{}").get("name", ""))' <<<"$config_json" 2>/dev/null || true)
+    known_services=$("$config_python" -c 'import json,sys; print(" ".join(json.loads(sys.stdin.read() or "{}").get("services", {})))' <<<"$config_json" 2>/dev/null || true)
+  fi
+  printf ',"_project":"%s","_others":[' "$project"
+  first_row=1
+  if [[ -n "$project" ]]; then
+    for cid in $(docker ps -q --filter "label=com.docker.compose.project=$project" 2>/dev/null || true); do
+      other_service=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$cid" 2>/dev/null || true)
+      oneoff=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.oneoff"}}' "$cid" 2>/dev/null || true)
+      known=false
+      [[ " $known_services " == *" $other_service "* ]] && known=true
+      is_oneoff=false
+      case "$other_service" in
+        backend|contract-worker|document-worker|document-worker-canary|client)
+          # `compose ps` lists the service's containers; a `compose run` one-off
+          # of an app service is invisible there, so it is reported here.
+          [[ "$oneoff" == "True" ]] || continue
+          is_oneoff=true ;;
+      esac
+      [[ $first_row -eq 1 ]] || printf ','
+      first_row=0
+      printf '{"id":"%s","service":"%s","image_id":"%s","revision":"%s","oneoff":%s,"known":%s}' \
+        "$cid" "$other_service" "$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null || true)" \
+        "$(image_revision "$cid")" "$is_oneoff" "$known"
+    done
+  fi
+  printf ']}'
+} >"$running_json"
+
+# A pending receipt from an earlier run never carries over into this one, and
+# none survives this run unless its very end confirms it: an abort, an
+# interrupt or any later failure removes it.
+receipt_args=()
+if [[ -n "$RELEASE_MANIFEST" && "$DEPLOY_SCOPE" != "UNCHANGED" ]]; then
+  # An earlier green run's receipt is withdrawn too: approval is THIS run's
+  # verdict, so a manifest that fails now cannot be promoted on an old one.
+  rm -f "$RELEASE_MANIFEST.verified.pending" "$RELEASE_MANIFEST.verified"
+  trap 'rm -f "$RELEASE_MANIFEST.verified.pending"' EXIT
+  receipt_args=(--receipt)
+fi
+if manifest_python=$(resolve_python_bin); then
+  manifest_rc=0
+  manifest_out=$("$manifest_python" "$ROOT_DIR/scripts/release_manifest.py" verify \
+    --scope "$DEPLOY_SCOPE" --target "$RELEASE_MANIFEST" --approved "$APPROVED_MANIFEST" \
+    --checkout "$ROOT_DIR" --running "$running_json" ${receipt_args[@]+"${receipt_args[@]}"} 2>&1) || manifest_rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      "PASS "*) pass "${line#PASS }" ;;
+      "FAIL "*) fail "${line#FAIL }" ;;
+      "") ;;
+      *) fail "release image check: $line" ;;
+    esac
+  done <<<"$manifest_out"
+  if [[ $manifest_rc -ne 0 ]] && ! grep -q '^FAIL ' <<<"$manifest_out"; then
+    fail "release image check exited $manifest_rc without a finding"
+  fi
+else
+  fail "No python interpreter for the release image check (set PYTHON_BIN)"
+fi
+rm -f "$running_json"
 
 document_worker_cids=$(compose_ps_q document-worker)
 if [[ -n "$document_worker_cids" ]]; then
@@ -548,6 +658,7 @@ if [[ -n "$backend_cid" && -n "$contract_worker_cids" ]]; then
     -e "CW_HOSTS=${contract_worker_hosts}" \
     -e "NON_OWNER_HOSTS=${non_owner_hosts}" \
     -e "DEPLOYED_COMMIT=${deployed_commit}" \
+    -e "CW_RELEASES=${contract_worker_releases}" \
     -e "PROBE_INSTRUMENT=${REPROJECTION_PROBE_INSTRUMENT_ID:-}" \
     -e "PROBE_TIMEOUT=${REPROJECTION_PROBE_TIMEOUT_SECONDS:-300}" \
     backend python -c '
@@ -596,9 +707,14 @@ for beat in owners:
         stuck.append(beat)
 if stuck:
     problems.append("reprojection pass running for more than 30 minutes on: " + ", ".join(sorted({str(b.get("host")) for b in stuck})))
-stale_code = [b for b in owners if deployed and b.get("release") != deployed]
+# The runtime must report the release baked into a running contract-worker
+# image - which the shell checks above tie to the deployed checkout. Comparing
+# it with HEAD itself failed every client-only deploy, which rebuilds no
+# backend image.
+images = set(os.environ.get("CW_RELEASES", "").split()) - {"unknown"}
+stale_code = [b for b in owners if b.get("release") not in images]
 if stale_code:
-    problems.append("contract-worker runtime release " + ", ".join(sorted({str(b.get("release")) for b in stale_code})) + " != deployed " + deployed)
+    problems.append("contract-worker runtime release " + ", ".join(sorted({str(b.get("release")) for b in stale_code})) + " is not the release of a running contract-worker image (" + (", ".join(sorted(images)) or "none known") + "); deployed " + deployed)
 
 probe = os.environ.get("PROBE_INSTRUMENT", "")
 if probe and not problems:
@@ -656,5 +772,21 @@ fi
 
 printf '\nPost-deploy verification complete: %s failure(s), %s warning(s).\n' "$failures" "$warnings"
 if [[ "$failures" -gt 0 ]]; then
+  [[ -n "$RELEASE_MANIFEST" ]] && rm -f "$RELEASE_MANIFEST.verified.pending"
   exit 1
+fi
+
+# Only a run with no failure at all confirms the receipt the release-image check
+# left pending for the exact bytes it evaluated. `release_manifest.py promote`
+# makes a manifest the approved state only with that receipt, so a hand-edited,
+# unverified or failed manifest is never approval. Receipts sit next to the
+# manifest; nothing in the running stack changes.
+if [[ -n "$RELEASE_MANIFEST" && "$DEPLOY_SCOPE" != "UNCHANGED" ]]; then
+  if "$manifest_python" "$ROOT_DIR/scripts/release_manifest.py" confirm \
+    --manifest "$RELEASE_MANIFEST"; then
+    printf 'Promote it: python3 scripts/release_manifest.py promote --manifest %s --current <manifests>/current.json\n' "$RELEASE_MANIFEST"
+  else
+    printf 'FAIL: could not record the verification receipt for %s\n' "$RELEASE_MANIFEST"
+    exit 1
+  fi
 fi

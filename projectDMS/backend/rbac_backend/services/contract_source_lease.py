@@ -37,6 +37,7 @@ from .publication_policy import resolve_canonical_document
 __all__ = [
     "CONTRACT_SOURCE_LEASES_COLLECTION",
     "SOURCE_LEASE_DURATION",
+    "STOP_RELEASE_HOLD",
     "ContractSourceBusy",
     "LostSourceLease",
     "SourceLease",
@@ -50,6 +51,7 @@ __all__ = [
     "renew",
     "settle",
     "source_state",
+    "stop_release_hold",
     "taint",
 ]
 
@@ -67,6 +69,44 @@ SOURCE_LEASE_RENEW_EVERY = timedelta(seconds=60)
 #: fenced one by one, so this self-fence is what guarantees two writers never
 #: overlap (margin covers clock skew between workers and the time to unwind).
 SOURCE_LEASE_SELF_FENCE = SOURCE_LEASE_DURATION - timedelta(minutes=3)
+
+#: How long a source released by a STOPPED ingest (self-fenced, or cancelled by
+#: a shutdown) stays unacquirable. Cancelling the ingest's task does not stop a
+#: driver operation already sent: Motor runs it on an executor thread, and a
+#: retryable write is re-sent once after reconnecting. Releasing at once let a
+#: new owner start while that write could still land in the source it was
+#: rewriting - text from two writers, settled by the new owner as coherent.
+#: ``None``: derived from the client's own bounds (``stop_release_hold``).
+STOP_RELEASE_HOLD: Optional[timedelta] = None
+
+#: The floor of the derived hold: the bounds cover MongoDB operations, and an
+#: ingest also writes through other clients.
+STOP_RELEASE_HOLD_FLOOR = timedelta(minutes=2)
+
+
+def stop_release_hold() -> timedelta:
+    """How long the CLIENT keeps any operation the stopped ingest already sent
+    alive: two attempts (one retry) of server selection + connect + socket
+    timeout, never less than ``STOP_RELEASE_HOLD_FLOOR``.
+
+    It is a mitigation, not a proof: without CSOT (``timeoutMS``) no
+    ``maxTimeMS`` reaches the server, which may finish an operation after the
+    client gave up, and a pool wait has no bound. Fencing each source write on
+    the lease generation is the complete fix (implementation-debt doc)."""
+    if STOP_RELEASE_HOLD is not None:
+        return STOP_RELEASE_HOLD
+    from ..core.config import settings
+
+    bounds = (
+        int(settings.MONGODB_SERVER_SELECTION_TIMEOUT_MS),
+        int(settings.MONGODB_CONNECT_TIMEOUT_MS),
+        int(settings.MONGODB_SOCKET_TIMEOUT_MS),
+    )
+    if min(bounds) <= 0:
+        # 0 means "no timeout": the client never gives up, so nothing derives a
+        # bound - hold for a whole lease rather than silently the floor.
+        return max(STOP_RELEASE_HOLD_FLOOR, SOURCE_LEASE_DURATION)
+    return max(STOP_RELEASE_HOLD_FLOOR, timedelta(milliseconds=2 * sum(bounds)))
 
 MUTATING = "mutating"
 SETTLED = "settled"
@@ -150,7 +190,8 @@ async def acquire(
             {
                 "_id": key,
                 "$or": [
-                    {"status": {"$in": [SETTLED, FAILED]}},
+                    # Released - and, after a stopped ingest, past the hold.
+                    {"status": {"$in": [SETTLED, FAILED]}, "reacquirable_at": {"$not": {"$gt": now}}},
                     {"lease_expires_at": {"$lte": now}},
                 ],
             },
@@ -165,16 +206,24 @@ async def acquire(
                 "$inc": {"generation": 1},
                 # A new writer rewrites the whole source: an earlier taint is
                 # about text this ingest replaces.
-                "$unset": {"tainted_at": "", "taint_reason": ""},
+                "$unset": {"tainted_at": "", "taint_reason": "", "reacquirable_at": ""},
             },
             upsert=True,
             return_document=ReturnDocument.BEFORE,
         )
     except DuplicateKeyError as exc:
-        holder = await _leases(db).find_one({"_id": key}, {"owner": 1})
+        row = await _leases(db).find_one({"_id": key}, {"owner": 1, "status": 1, "reacquirable_at": 1})
+        if row and row.get("status") != MUTATING:
+            # Held after a stopped ingest: nobody owns it, so no holder - the
+            # waiting job runs again rather than taking itself for a live copy.
+            raise ContractSourceBusy(
+                f"the source of {key} is held until {row.get('reacquirable_at')} after a stopped "
+                "ingest, so a write it had already sent cannot land under a new owner",
+                holder=None,
+            ) from exc
         raise ContractSourceBusy(
             f"another ingest is writing the source of {key}; this one did not start",
-            holder=(holder or {}).get("owner"),
+            holder=(row or {}).get("owner"),
         ) from exc
     before = row or {}
     previous = before.get("status")
@@ -205,10 +254,17 @@ async def renew(db: Any, lease: SourceLease, *, duration: timedelta = SOURCE_LEA
         )
 
 
-async def _release(db: Any, lease: SourceLease, status: str, error: Optional[str]) -> str:
+async def _release(
+    db: Any, lease: SourceLease, status: str, error: Optional[str], *, hold: bool = False
+) -> str:
     now = datetime.now(timezone.utc)
     owned = {"_id": lease.key, "owner_token": lease.owner_token, "status": MUTATING}
-    values = {"released_at": now, "lease_expires_at": None, "last_error": error}
+    values = {
+        "released_at": now,
+        "lease_expires_at": None,
+        "last_error": error,
+        "reacquirable_at": now + stop_release_hold() if hold else None,
+    }
     if status == SETTLED:
         # Settles only while untainted. A taint recorded while this owner was
         # writing (a superseded ingest kept writing) leaves text interleaved
@@ -260,9 +316,14 @@ async def settle(db: Any, lease: SourceLease) -> None:
         )
 
 
-async def fail(db: Any, lease: SourceLease, *, error: str) -> None:
-    """The ingest failed part-way: the source is not projectable until re-ingested."""
-    await _release(db, lease, FAILED, str(error)[:500])
+async def fail(db: Any, lease: SourceLease, *, error: str, stopped: bool = False) -> None:
+    """The ingest failed part-way: the source is not projectable until re-ingested.
+
+    ``stopped``: the ingest was cancelled (self-fence, shutdown) rather than
+    finishing its own awaits, so a write it sent may still be in flight; the
+    source stays unacquirable for ``stop_release_hold()``.
+    """
+    await _release(db, lease, FAILED, str(error)[:500], hold=stopped)
 
 
 async def taint(db: Any, key: str, *, reason: str) -> None:

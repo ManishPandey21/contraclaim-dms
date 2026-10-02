@@ -243,10 +243,12 @@ scripts/production_restore_volumes.sh --apply <project>_redis_data /var/backups/
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Post-restore verification:
+Post-restore verification. A restore changes data, not app images, so the scope is
+`UNCHANGED` (deployment guide, 5a-7a):
 
 ```bash
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 SMOKE_BASE_URL=https://<host> SMOKE_CHECK_OPERATIONS=true METRICS_TOKEN=<token> python scripts/smoke_health.py
 ```
 
@@ -317,10 +319,12 @@ any of the three items closes.
 
 ## 6. Post-Deploy Verification
 
-Run:
+Run it with the deployment's declared scope and release manifest (deployment guide,
+5a-7a); a missing scope or manifest is a failure, not a skip:
 
 ```bash
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=<FULL|BACKEND_ONLY|CLIENT_ONLY|UNCHANGED> RELEASE_MANIFEST=<release manifest> \
+  APPROVED_MANIFEST=<current.json, for BACKEND_ONLY or CLIENT_ONLY> scripts/post_deploy_verify.sh
 ```
 
 This checks container status, `/health/live`, `/health/ready`,
@@ -410,18 +414,32 @@ incident, so ownership is verified after every deploy, not assumed.
 
 **Build every image with the release identity.** Each service builds its own
 image from `./backend`, so rebuilding only `backend` leaves `contract-worker` on
-the previous code while the checkout says otherwise. The build stamps the commit
-into the image label `org.opencontainers.image.revision`, and `up` passes the
-same value to the process as `RELEASE_SHA`:
+the previous code while the checkout says otherwise. The build argument
+`RELEASE_SHA` is baked into the image twice by `backend/Dockerfile`: the label
+`org.opencontainers.image.revision` and the process environment variable
+`RELEASE_SHA` the runtime heartbeat records. It is a **build-time** value only -
+`up` neither needs nor overrides it - so a container recreated later cannot claim
+a release its code is not:
 
 ```bash
-export RELEASE_SHA=$(git rev-parse HEAD)
-docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build backend contract-worker document-worker document-worker-canary
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build backend contract-worker document-worker document-worker-canary
 docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-deps backend contract-worker document-worker
 ```
 
 An image built without `RELEASE_SHA` is labelled `unknown`, which the check below
-reports as a failure: it cannot prove what code is running.
+reports as a failure: it cannot prove what code is running. A certified image is
+retagged, not rebuilt, and keeps the identity it was certified with.
+
+**Which image each service must run is scoped and strict** (owner decision
+2026-10-02). The deploy declares `DEPLOY_SCOPE` - `FULL`, `CLIENT_ONLY` or
+`BACKEND_ONLY` - and a release manifest (`scripts/release_manifest.py`) records
+the exact image id and build commit of every app service. A service the scope
+deploys must run the manifest's image, built from the deployed commit; a service
+it does not deploy must run exactly the image the approved manifest of the
+previous release recorded, with an unchanged build context; a running service the
+manifest does not name is drift. A client-only deploy therefore rebuilds and
+restarts nothing but `client`, and still proves every backend image unchanged.
+The deployment guide (sections 5a-7a) has the commands.
 
 **What `scripts/post_deploy_verify.sh` asserts** (section "Contract Master
 reprojection ownership"; read-only, it writes nothing):
@@ -430,8 +448,10 @@ reprojection ownership"; read-only, it writes nothing):
 2. `backend` and every `document-worker*` container do **not** have it set. A
    second owner would be safe (the claim lease) but is a topology error.
 3. `document-worker` still owns extraction (`START_DOCUMENT_EXTRACTION_WORKERS=true`).
-4. The `contract-worker` image revision equals the deployed checkout's commit
-   (FAIL on mismatch); `backend` and `document-worker` are compared too (WARN).
+4. The `contract-worker` process `RELEASE_SHA` equals its image's revision label
+   (FAIL: something set it at `up`). Which image it - and every other app service -
+   must run is the section "Release images", against the release manifest (FAIL on
+   any mismatch, drift, missing scope or manifest).
 5. The runtime recorded liveness in `contract_reprojection_runtime_heartbeats`
    within three poll intervals (`CONTRACT_REPROJECTION_POLL_SECONDS`, at least
    180 s), from a running `contract-worker` container, on the deployed
@@ -441,15 +461,18 @@ reprojection ownership"; read-only, it writes nothing):
    pass still running after 30 minutes (the claim lease) fails the check as
    stuck. A stopped runtime deletes its row, and rows of processes that
    died expire after 7 days (TTL); a row left by the container a deploy
-   replaced names a host that no longer runs and is ignored. This proves the
-   loop is running the new code, not only that the flag is set.
+   replaced names a host that no longer runs and is ignored. The heartbeat's
+   release must be the revision of a running `contract-worker` image (which
+   the release-image check ties to the manifest), so this proves the loop is
+   running the approved code, not only that the flag is set.
 
 **Staging only: a deterministic PENDING generation.** Promote a fixture contract
 on staging (the Contract Master runtime harness, or the migration adjudication
 flow by hand), then run the verifier with its instrument id:
 
 ```bash
-REPROJECTION_PROBE_INSTRUMENT_ID=<contract_documents._id> scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST="$MANIFESTS/current.json" \
+  REPROJECTION_PROBE_INSTRUMENT_ID=<contract_documents._id> scripts/post_deploy_verify.sh
 ```
 
 It waits up to `REPROJECTION_PROBE_TIMEOUT_SECONDS` (default 300) for the

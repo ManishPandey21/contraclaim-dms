@@ -664,7 +664,16 @@ class ContractService:
             await self._stop_renewal(renewal, state)
             with contextlib.suppress(Exception):
                 if state["source_written"]:
-                    await source_lease.fail(db, lease, error="ingest stopped part-way")
+                    # A cancelled ingest (self-fenced, or stopped by nobody we
+                    # know of) did not finish its awaits: hold the source as the
+                    # stop path does - its release may have failed and left the
+                    # lease to this one.
+                    await source_lease.fail(
+                        db,
+                        lease,
+                        error="ingest stopped part-way",
+                        stopped=bool(state["stop"]) or work.cancelled(),
+                    )
                 else:
                     await source_lease.release_untouched(db, lease)
             raise
@@ -721,7 +730,9 @@ class ContractService:
         try:
             if state["source_written"]:
                 try:
-                    await source_lease.fail(db, lease, error="ingest stopped part-way")
+                    # Cancelled mid-write: a write already sent may still land,
+                    # so the source is held before anyone can take it.
+                    await source_lease.fail(db, lease, error="ingest stopped part-way", stopped=True)
                 except source_lease.LostSourceLease:
                     # Already taken: this ingest may have written into the new
                     # owner's source, so no settle may vouch for it.
