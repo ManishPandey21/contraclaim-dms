@@ -421,41 +421,24 @@ def test_semicolon_delimited_csv_still_parses_with_blanks() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Boolean columns: this ticket does not change them
+# Boolean columns: the combined release semantics
 # --------------------------------------------------------------------------- #
 
 
-BOOLEANS_BEFORE_THIS_CHANGE = {
-    # (ocr_enabled, compression_enabled) per row, captured from the unmodified
-    # base 4fcd012 by running `_csv()` through each path.
-    "bulk_route": [(True, True), (False, False), (False, False)],
-    # Row 3's `ocr_enabled` is "false" in the CSV and reads as True here. That
-    # is the existing `or ... or 'true'` defect in `_validate_csv_row`: this
-    # path never stringifies, so a real bool False falls through the chain. It
-    # belongs to `fix/bulk-ocr-enabled-parsing`, not this ticket; it is pinned
-    # so that a change to it here cannot pass unnoticed.
-    "parse_and_validate": [(True, True), (False, False), (True, False)],
-}
+#: (ocr_enabled, compression_enabled) per row. This ticket pinned the base's
+#: values - blank read as False, and the parse path turned row 3's explicit
+#: "false" into True - and left the flags to `fix/bulk-ocr-enabled-parsing`.
+#: Combined with that fix, the owner decision (2026-10-02) is: a blank flag
+#: takes its documented default (ocr_enabled ON, compression_enabled OFF), an
+#: explicit value is honoured, and both paths agree.
+BOOLEANS_COMBINED = [(True, True), (True, False), (False, False)]
 
 
-@pytest.mark.parametrize(
-    ("read_rows", "expected"),
-    [
-        (_bulk_route_rows, BOOLEANS_BEFORE_THIS_CHANGE["bulk_route"]),
-        (_parse_path_rows, BOOLEANS_BEFORE_THIS_CHANGE["parse_and_validate"]),
-    ],
-    ids=["bulk_route", "parse_and_validate"],
-)
-def test_boolean_columns_parse_as_they_did_before(read_rows, expected) -> None:
-    """Pinned to the values the unmodified base produced.
-
-    Blank ``ocr_enabled`` / ``compression_enabled`` read as ``False`` before this
-    change and still do. Whether a blank flag should instead take its documented
-    default is ``fix/bulk-ocr-enabled-parsing``, not this ticket.
-    """
+@PATHS
+def test_boolean_columns_follow_the_combined_contract(read_rows) -> None:
     rows = read_rows(_csv())
 
-    assert [(r["ocr_enabled"], r["compression_enabled"]) for r in rows] == expected
+    assert [(r["ocr_enabled"], r["compression_enabled"]) for r in rows] == BOOLEANS_COMBINED
 
 
 def test_reader_leaves_populated_boolean_cells_as_the_strings_they_were() -> None:
