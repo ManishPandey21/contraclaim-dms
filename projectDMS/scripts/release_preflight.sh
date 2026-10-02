@@ -2,10 +2,11 @@
 # Release preflight: what must hold BEFORE a deploy restarts anything.
 #
 # Read-only. Run after the release manifest is written (guide step 6b) and
-# before any container is recreated (step 7). A FULL or BACKEND_ONLY deploy is
-# refused while a document-worker canary runs that the manifest does not
-# declare: post_deploy_verify.sh would otherwise fail only after production had
-# already changed. See `release_manifest.py preflight`.
+# before any container is recreated (step 7). A deploy is refused while a
+# document-worker canary runs that verification would fail (undeclared under
+# FULL/BACKEND_ONLY, or not on the image it is held to): post_deploy_verify.sh
+# would otherwise fail only after production had already changed. See
+# `release_manifest.py preflight`.
 #
 #   DEPLOY_SCOPE=FULL RELEASE_MANIFEST="$MANIFESTS/$RELEASE.json" scripts/release_preflight.sh
 #
@@ -39,7 +40,7 @@ canary_ids=$(docker compose --env-file "$ENV_FILE" $COMPOSE_FILES ps -q document
   for cid in $canary_ids; do
     [[ $first_row -eq 1 ]] || printf ','
     first_row=0
-    printf '{"id":"%s"}' "$cid"
+    printf '{"id":"%s","image_id":"%s"}' "$cid" "$(docker inspect -f '{{.Image}}' "$cid")"
   done
   printf ']}'
 } >"$running_json"

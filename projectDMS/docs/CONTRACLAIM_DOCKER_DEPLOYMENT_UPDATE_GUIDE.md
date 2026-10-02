@@ -341,11 +341,13 @@ It fails a `FULL` or `BACKEND_ONLY` deploy while a `document-worker-canary` is r
 that the release manifest does not declare. Such a canary is held to the
 `document-worker` image, which these scopes replace while no step here recreates the
 canary, so post-deploy verification could only fail once production had changed. Either
-stop the canary first (scale `document-worker-canary` to 0, as outside an authorised
-canary), or declare it: build, scan and certify its image with the others, pass
+stop the canary first - set `DOCUMENT_WORKER_CANARY_REPLICAS=0` in `.env` and run
+`docker compose --env-file .env -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-deps --no-build document-worker-canary`
+(0 replicas, as outside an authorised canary) - or declare it: build, scan and certify its image with the others, pass
 `--image document-worker-canary="$PROJECT-document-worker-canary:latest"` to `target`, and
-recreate it with the scope's services. There is no override. `CLIENT_ONLY` keeps the
-approved worker image, so a canary there is judged by the verifier as before.
+recreate it with the scope's services. There is no override. Under `CLIENT_ONLY` (and `UNCHANGED`) an undeclared canary
+must already run the approved `document-worker` image; the preflight refuses one on any
+other image, which is what a plain `up` of the canary builds.
 
 ## 7. Restart the Updated Containers
 

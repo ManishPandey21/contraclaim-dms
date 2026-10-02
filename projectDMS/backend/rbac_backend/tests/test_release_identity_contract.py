@@ -1465,3 +1465,42 @@ def test_the_preflight_script_asks_the_manifest_tool_and_fails_closed():
     # Read-only: it never changes a container.
     for verb in (" up ", " stop ", " rm ", " restart ", " kill ", "--scale"):
         assert verb not in text.replace("# ", ""), verb
+
+
+@pytest.mark.parametrize("scope", ["CLIENT_ONLY", "UNCHANGED"])
+def test_preflight_fails_a_canary_off_the_worker_image_it_is_held_to(scope):
+    """A canary started from its own, uncertified image (`up` built it) fails
+    verification under any scope; the preflight says so before the restart."""
+    release = "a" * 40
+    target = _manifest(release, scope, _preflight_state(release))
+    stale = _running({**_preflight_state("b" * 40), CANARY: (99, "b" * 40)})
+    failures = _failures(RM.preflight(scope, target, stale))
+    assert len(failures) == 1 and failures[0].startswith(CANARY), failures
+    assert "--no-build" in failures[0] and "stop" in failures[0], failures
+    # An image that cannot be read is not the approved one either.
+    unread = _running(_preflight_state("b" * 40))
+    unread[CANARY] = [{"id": "cid-canary"}]
+    assert _failures(RM.preflight(scope, target, unread))
+
+
+@pytest.mark.parametrize("scope", ["CLIENT_ONLY", "UNCHANGED"])
+def test_preflight_passes_a_canary_on_the_approved_worker_image(scope):
+    release = "a" * 40
+    target = _manifest(release, scope, _preflight_state(release))
+    on_worker = _running({**_preflight_state("b" * 40), CANARY: (10, "b" * 40)})
+    assert _failures(RM.preflight(scope, target, on_worker)) == []
+
+
+def test_the_canary_runbooks_start_the_canary_from_the_approved_worker_image():
+    """Its own `up` would build an uncertified `<project>-document-worker-canary`
+    image that verification then holds to the approved worker image."""
+    for name in (
+        "unified_extraction_canary_execution_package.md",
+        "unified_extraction_canary_and_rollback.md",
+    ):
+        text = (PROJECT / "docs" / "operations" / name).read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if " up " in line and "document-worker-canary" in line and "--scale" not in line:
+                assert "--no-build" in line, f"{name}: {line.strip()}"
+        assert "document-worker-canary:latest" in text, name
+        assert "scripts/release_preflight.sh" in text, name

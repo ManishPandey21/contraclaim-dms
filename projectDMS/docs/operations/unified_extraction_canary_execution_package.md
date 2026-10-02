@@ -119,9 +119,9 @@ normal job throughput."*
 |---|---|---|---|---|---|---|---|
 | **C2.1** | Confirm `.env` has routing off before deploying | `grep -E 'UNIFIED_EXTRACTION_(ENABLED\|CANARY_ORG_IDS)\|DOCUMENT_WORKER_' .env` | RO | `ENABLED=false`, allowlist empty, canary replicas 0 | Otherwise ⛔ | Lines | Step 1 |
 | **C2.2** | Fetch the authorised commit | `git fetch --all && git pull --ff-only origin <branch>` | **MUT** | HEAD == authorised SHA | Non-fast-forward ⛔ | SHA before/after | C2.1 |
-| **C2.3** | Rebuild **only** affected services | `$DC build backend document-worker document-worker-canary` | **MUT** | Build succeeds | Failure ⛔ (nothing deployed yet) | Image IDs + digests | C2.2 |
-| **C2.4** | Recreate only those services | `$DC up -d --no-deps backend document-worker document-worker-canary` | **MUT** | Containers healthy | Crash/restart loop ⛔ → §9 | `ps` output | C2.3 |
-| **C2.5** | Readiness + route/auth controls | `scripts/post_deploy_verify.sh` | RO | 0 failures | Any FAIL ⛔ → §9 | Full output | C2.4 |
+| **C2.3** | Build, scan, certify and write the release manifest - `BACKEND_ONLY`, the canary at 0 replicas (C2.1) | Deployment guide §6 - 6c with `DEPLOY_SCOPE=BACKEND_ONLY`: build `backend contract-worker document-worker` with `RELEASE_SHA`, Trivy, `release_manifest.py certify` and `target`, then `scripts/release_preflight.sh` | **MUT** (images only) | Preflight passes | Any refusal ⛔ (nothing deployed yet) | Certification, manifest, preflight output | C2.2 |
+| **C2.4** | Recreate only those services | `$DC up -d --no-deps backend contract-worker document-worker` (guide §7) | **MUT** | Containers healthy | Crash/restart loop ⛔ → §9 | `ps` output | C2.3 |
+| **C2.5** | Readiness, route/auth controls and release images | `DEPLOY_SCOPE=BACKEND_ONLY RELEASE_MANIFEST=... APPROVED_MANIFEST=... scripts/post_deploy_verify.sh` (guide §7a), then `release_manifest.py promote` | RO (promote writes the approved manifest) | 0 failures | Any FAIL ⛔ → §9 | Full output | C2.4 |
 | **C2.6** | Exactly one document-worker owner | Covered by C2.5 (`START_DOCUMENT_EXTRACTION_WORKERS`) | RO | Only `document-worker` (+ canary at 0 replicas) | Web tier extracting ⛔ | Verify output | C2.5 |
 | **C2.7** | No duplicate background document loop on the web tier | `$DC logs --since=10m backend \| grep -c 'document_pipeline.*claim'` | RO | `0` | Non-zero ⛔ | Count | C2.5 |
 | **C2.8** | Exactly one scheduler owner | Covered by C2.5 (`RUN_SCHEDULER`) | RO | Exactly 1 | ≠1 ⛔ | Verify output | C2.5 |
@@ -570,11 +570,19 @@ ORG="<approved-demo-org-id>"
 #   DOCUMENT_WORKER_CANARY_REPLICAS=1
 #   DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0
 
-# S3.3 recreate only the two workers
-$DC up -d --no-deps document-worker document-worker-canary
+# S3.3 start the canary on the APPROVED document-worker image. It has no
+#      `image:` key: a plain `up` would build its own, uncertified
+#      <project>-document-worker-canary image, which verification refuses.
+MANIFESTS=/opt/contraclaim-dms/release-manifests
+PROJECT="$($DC config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])')"
+WORKER_IMAGE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["services"]["document-worker"]["image_id"])' "$MANIFESTS/current.json")"
+docker tag "$WORKER_IMAGE" "$PROJECT-document-worker-canary:latest"
+$DC up -d --no-deps --no-build document-worker document-worker-canary
 
 # S3.4 confirm topology from the running containers. No image changes: the canary
-#      runs the approved document-worker image, so the scope is UNCHANGED.
+#      runs the approved document-worker image, so the scope is UNCHANGED. While
+#      the canary runs, every deploy runs scripts/release_preflight.sh (guide 6c)
+#      before restarting anything.
 DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
   scripts/post_deploy_verify.sh
 ```
@@ -835,7 +843,7 @@ that nothing can claim.
 | **1** | Clear canary allowlist → no new `unified_v1` jobs | set `UNIFIED_EXTRACTION_CANARY_ORG_IDS=` in `.env`, then `$DC up -d --no-deps backend document-worker` | MUT | New demo job created after this is `legacy_v0` |
 | **2** | Observe/record already-persisted `unified_v1` jobs | contamination query §8 + list in-flight jobs with `extraction_run_id`, `attempts`, remaining pages | **RO** | Full inventory captured **before** anything stops |
 | **3** | Apply documented policy to in-flight jobs | Decide per job: **(a)** let it finish on the canary before scaling down, **(b)** leave it queued and requeue after the window, or **(c)** mark review-required. Record the choice and reason per job. | MUT | Every in-flight job has an explicit recorded decision. No job silently abandoned. |
-| **4** | Scale canary to 0 | set `DOCUMENT_WORKER_CANARY_REPLICAS=0`, `$DC up -d --no-deps document-worker-canary` | MUT | `$DC ps` shows 0 canary containers; graceful stop, no kill |
+| **4** | Scale canary to 0 | set `DOCUMENT_WORKER_CANARY_REPLICAS=0`, `$DC up -d --no-deps --no-build document-worker-canary` | MUT | `$DC ps` shows 0 canary containers; graceful stop, no kill |
 | **5** | Verify new jobs are `legacy_v0` | enqueue one demo document, read its `pipeline_version` | MUT (demo) | `legacy_v0`, claimed by `document-worker`, reaches `completed` |
 | **6** | Verify identities intact | compare each recorded job's `attempts`, `remaining_page_numbers`, `processing_state`, and its head's `extraction_run_id`/`expected_page_numbers`/`published_at` against step 2. **`extraction_run_id` is `str(job._id)`**, so it cannot drift unless the job itself was recreated — verify page rows still carry that exact run id. | **RO** | **Byte-identical** to step 2 for every field; page rows still reference `str(job._id)` |
 | **7** | Verify nothing deleted or reclassified | compare `document_ocr_pages`, `document_extraction_heads`, `page_extraction_interventions` counts against Table C *before* | **RO** | Counts **≥** pre-canary; no pre-canary or canary page evidence removed; no `pipeline_version` value changed on any existing job |
@@ -1196,13 +1204,18 @@ Execution order: **§6 Stage A → §2 → §3 → §4 → §5 (before) → §6 
 
 1. Create a verified backup of production `.env`, uploads volume, and Mongo.
 2. `git fetch` + `git pull --ff-only` to `<FROZEN_SHA>` on the branch production tracks.
-3. Rebuild images for **`backend`, `document-worker`, `document-worker-canary` only**.
-4. Recreate those three services (`up -d --no-deps`).
+3. Build, scan and certify images for **`backend`, `contract-worker`, `document-worker`**
+   and write the `BACKEND_ONLY` release manifest (deployment guide §6 - 6b). The canary
+   image is not built: it is the approved `document-worker` image, retagged (S3.3).
+4. Run `scripts/release_preflight.sh` (guide 6c), then recreate those three services
+   (`up -d --no-deps`).
 5. Apply migration `20260814_0001` (creates 5 indexes; additive, no data rewrite).
 6. Edit `.env`: set `UNIFIED_EXTRACTION_CANARY_ORG_IDS=<ORG_ID>`,
    `DOCUMENT_WORKER_CANARY_REPLICAS=1`, keeping
    `DOCUMENT_WORKER_PIPELINE_VERSIONS=legacy_v0`.
-7. Recreate `document-worker` and `document-worker-canary` to pick that up.
+7. Retag the approved `document-worker` image onto
+   `<project>-document-worker-canary:latest` and recreate `document-worker` and
+   `document-worker-canary` with `--no-build` to pick that up (S3.3).
 8. Upload and process **demo-organisation fixtures F1–F6 only**.
 9. Execute the §9 rollback: clear the allowlist, set canary replicas to 0,
    recreate both workers.

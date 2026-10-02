@@ -26,9 +26,10 @@ Commands:
     confirm  turn that pending receipt into the receipt - post_deploy_verify.sh
              does it at the end of a run with no failure at all.
     promote  make a verified manifest the approved state (``current.json``).
-    preflight  before any restart: refuse a FULL or BACKEND_ONLY deploy while a
-             document-worker canary runs that the manifest does not declare
-             (release_preflight.sh calls it). Read-only.
+    preflight  before any restart: refuse a deploy while a document-worker
+             canary runs that verification would fail - undeclared, under a
+             scope that replaces the worker image, or on any image but the
+             one it is held to (release_preflight.sh calls it). Read-only.
 
 Policy (owner decision 2026-10-02 - strict, service-scoped):
 
@@ -549,8 +550,9 @@ def preflight(
     such a deploy can only fail verification - after production has changed.
     It has to be stopped first, or declared: built, scanned, certified and
     named in the manifest (``target --image document-worker-canary=...``),
-    which the verifier then holds it to. CLIENT_ONLY leaves the worker image as
-    approved, so the verifier's existing rule stands there. Nothing here
+    which the verifier then holds it to. Under a scope that keeps the worker
+    image (CLIENT_ONLY, UNCHANGED) an undeclared canary must already run that
+    image, or verification fails after the restart all the same. Nothing here
     relaxes ``evaluate``.
     """
     out: List[Finding] = []
@@ -577,13 +579,30 @@ def preflight(
         containers = [row for row in (running.get(canary) or []) if row]
         if not containers:
             out.append(Finding(True, f"{canary}: not running"))
-        elif worker not in SCOPES[scope]:
-            out.append(
-                Finding(
-                    True,
-                    f"{canary}: running; scope {scope} leaves the {worker} image it is held to as approved",
+        elif worker not in SCOPES[scope] and canary not in services:
+            held_to = str((services.get(worker) or {}).get("image_id") or "")
+            stray = [
+                row for row in containers if str(row.get("image_id") or "") != held_to or not held_to
+            ]
+            if stray:
+                ids = ", ".join(
+                    f"{str(row.get('id'))[:12]} on {str(row.get('image_id') or 'an unknown image')[:19]}"
+                    for row in stray
                 )
-            )
+                out.append(
+                    Finding(
+                        False,
+                        f"{canary}: running ({ids}) but not on the {worker} image "
+                        f"{held_to[:19] or '(none in the manifest)'} that verification holds an "
+                        f"undeclared canary to. Before deploying, stop it (scale {canary} to 0), "
+                        f"or retag that {worker} image onto the canary image and recreate it with "
+                        f"--no-build.",
+                    )
+                )
+            else:
+                out.append(
+                    Finding(True, f"{canary}: running on the approved {worker} image")
+                )
         elif canary in services:
             out.append(Finding(True, f"{canary}: running, and declared by the release manifest"))
         else:
