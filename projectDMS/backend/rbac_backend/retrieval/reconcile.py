@@ -64,7 +64,10 @@ class VectorReconciler:
         document = await resolve_canonical_document(self.db, document_id)
         if not is_consumable(document):
             return self._untouched()
-        from .correspondence_payload import CorrespondencePayloadError, canonical_scope_id
+        from .correspondence_payload import (
+            CorrespondencePayloadError,
+            canonical_scope_id,
+        )
 
         try:
             document_scope = (
