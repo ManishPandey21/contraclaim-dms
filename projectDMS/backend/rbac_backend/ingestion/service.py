@@ -50,17 +50,17 @@ class IngestionService:
         return document
 
     async def is_governed_contract(self, document_id: str) -> bool:
-        """True when a Contract Master instrument names this document.
+        """True for a contract source: a contract upload, or a document a
+        Contract Master instrument names (``services.contract_source``).
 
         Resolved through the canonical Document so an ObjectId-keyed document
         named by its string id and a legacy string-keyed one answer alike.
         """
-        from ..services.document_service import governed_by_contract_master
+        from ..services.contract_source import is_contract_source
         from ..services.publication_policy import resolve_canonical_document
 
         document = await resolve_canonical_document(self.db, document_id)
-        stored_id = document.get("_id") if document else None
-        return await governed_by_contract_master(self.db, document_id, stored_id)
+        return await is_contract_source(self.db, document_id, document)
 
     async def get_job(self, job_id: str) -> Optional[IngestionJob]:
         return await self.pipeline.get_job(job_id)

@@ -35,6 +35,7 @@ from backend.rbac_backend.retrieval.correspondence_payload import (
     build_correspondence_chunks,
     rows_need_reprocess,
 )
+from backend.rbac_backend.services.contract_source import is_contract_upload
 from backend.rbac_backend.services.publication_policy import (
     is_consumable,
     resolve_canonical_document,
@@ -102,7 +103,7 @@ async def _repair_document(
     if not is_consumable(document):
         logger.info("Skipped repair for %s; document is not consumable", document_id)
         return None
-    if str((document or {}).get("uploadType") or "").strip().lower() == "contract":
+    if is_contract_upload(document):
         # A contract's points are clause points written by contract ingest; the
         # count above compares them with nothing correspondence-shaped, and the
         # rebuild below would replace every one with correspondence chunks and

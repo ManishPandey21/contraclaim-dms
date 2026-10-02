@@ -37,7 +37,9 @@ class VectorReconciler:
         }
 
     async def _is_contract_projection(self, document_id: str, document: Dict) -> bool:
-        if str((document or {}).get("uploadType") or "").lower() == "contract":
+        from ..services.contract_source import is_contract_upload
+
+        if is_contract_upload(document):
             return True
         from ..services.contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
 

@@ -1680,9 +1680,9 @@ class DocumentController:
 
             if await self.document_service.is_governed_contract(document_id):
                 raise DocumentError(
-                    "This contract is governed by Contract Master. Use the contract "
-                    "reindex; general reprocessing would replace the clause rows its "
-                    "evidence projection is built from.",
+                    "This is a contract (a contract upload, or governed by Contract "
+                    "Master). Use the contract reindex; general reprocessing would "
+                    "replace its clause rows and the evidence built from them.",
                     status.HTTP_409_CONFLICT,
                 )
 

@@ -208,14 +208,16 @@ async def create_ingestion_job(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
             ) from None
         raise
-    # A governed contract's evidence is rebuilt by the contract reindex and
-    # reprojection; this pipeline would prune it.
+    # A contract source's evidence (a contract upload, or a document Contract
+    # Master governs) is rebuilt by the contract reindex and reprojection; this
+    # pipeline would prune it.
     if await ingestion_service.is_governed_contract(payload.document_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "This document is governed by a Contract Master instrument; reindex "
-                "it through the contract reindex, which rebuilds its projection"
+                "This document is a contract source (a contract upload, or governed "
+                "by a Contract Master instrument); reindex it through the contract "
+                "reindex, which rebuilds its evidence"
             ),
         )
     job = await ingestion_service.create_job(payload)

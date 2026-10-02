@@ -32,6 +32,7 @@ from ..retrieval.correspondence_payload import (
     rows_need_reprocess,
 )
 from ..retrieval.vector_client import VectorClient
+from ..services.contract_source import CONTRACT_UPLOAD_TYPE, is_contract_upload
 from ..services.publication_policy import is_consumable
 from ..utils.error_handler import BaseDomainError
 
@@ -475,22 +476,12 @@ async def _governed_document_ids(db) -> List[Any]:
     return ids
 
 
-#: A contract upload's vectors are clause points written by contract ingest and
-#: rebuilt by the contract reindex, never correspondence chunks. Whether or not
-#: a Contract Master instrument names it yet, this module's correspondence
-#: repair must not touch them.
-CONTRACT_UPLOAD_TYPE = "contract"
-
-
-#: Query form of the same rule, in any casing the document model accepts, so a
-#: contract cannot take a slot of a candidate window. A missing uploadType
-#: still matches.
-_NOT_A_CONTRACT_UPLOAD = {"$not": re.compile(r"^\s*contract\s*$", re.IGNORECASE)}
-
-
-def _is_contract_upload(doc: Dict[str, Any]) -> bool:
-    """The upload-type rule ``retrieval.reconcile`` applies to the same rows."""
-    return str(doc.get("uploadType") or "").strip().lower() == CONTRACT_UPLOAD_TYPE
+#: Query form of ``services.contract_source.is_contract_upload``, in any casing
+#: the document model accepts, so a contract cannot take a slot of a candidate
+#: window. A missing uploadType still matches.
+_NOT_A_CONTRACT_UPLOAD = {
+    "$not": re.compile(rf"^\s*{CONTRACT_UPLOAD_TYPE}\s*$", re.IGNORECASE)
+}
 
 
 async def _verify_current_projection(
@@ -707,7 +698,7 @@ async def _resync_document_vectors(
             "projections": projections,
         }
 
-    if _is_contract_upload(doc):
+    if is_contract_upload(doc):
         # A contract no instrument names yet (not promoted). Its points are not
         # in correspondence shape, so the canonical count below reads 0 and the
         # rebuild replaced every clause point - and its clause and page
@@ -1121,7 +1112,7 @@ async def resync_bulk_vectors(
             continue
         # The query filter is exact-match; a contract stored in other casing is
         # still a contract.
-        if _is_contract_upload(doc):
+        if is_contract_upload(doc):
             continue
 
         status = await db.vector_sync_status.find_one({"document_id": doc_id})
@@ -1264,7 +1255,7 @@ async def reconcile_vectors(
         if not is_consumable(doc):
             continue
         # As in bulk resync: the query filter is exact-match.
-        if _is_contract_upload(doc):
+        if is_contract_upload(doc):
             continue
         scanned += 1
 

@@ -1176,15 +1176,20 @@ class DocumentService:
 
         document_id = str(job["document_id"])
         now = datetime.utcnow()
-        if await governed_by_contract_master(db, document_id):
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        if await is_contract_source(
+            db, document_id, await resolve_canonical_document(db, document_id)
+        ):
             # Refused before anything is written: marking the document
             # `processing` would make the projection builder see an ingest in
             # flight, and a retried refusal would walk the job to dead-letter
             # while holding it there. Closed once, terminally; the contract
-            # reindex is the path that re-reads a governed contract.
+            # reindex is the path that re-reads a contract, promoted or not.
             message = (
-                "Document is governed by a Contract Master instrument; reprocess it "
-                "through the contract reindex"
+                "Document is a contract source (a contract upload, or governed by a "
+                "Contract Master instrument); reprocess it through the contract reindex"
             )
             logger.warning("Document %s: %s", document_id, message)
             await db.document_processing_jobs.update_one(
@@ -1687,9 +1692,14 @@ class DocumentService:
             logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
     async def is_governed_contract(self, document_id: str) -> bool:
-        """True when a Contract Master instrument names this document."""
+        """True for a contract source: a contract upload, or a document a
+        Contract Master instrument names (``services.contract_source``)."""
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
         db = await self._get_db()
-        return await governed_by_contract_master(db, document_id)
+        document = await resolve_canonical_document(db, document_id)
+        return await is_contract_source(db, document_id, document)
 
     async def process_document_async(
         self,
@@ -1741,15 +1751,18 @@ class DocumentService:
                     document_id,
                 )
                 return False
-            if await governed_by_contract_master(db, document_id, stored.get("_id")):
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, document_id, stored):
                 # The general pipeline would replace the clause rows evidence
-                # reads with token chunks while the instrument stays CURRENT -
-                # evidence answering empty from a "current" projection. A
-                # governed contract is re-read by the contract reindex, whose
-                # completion re-opens the reprojection.
+                # reads with token chunks - while the instrument stays CURRENT
+                # (evidence answering empty from a "current" projection), or,
+                # before promotion, deleting the clause points and their page
+                # provenance. A contract is re-read by the contract reindex,
+                # whose completion re-opens the reprojection.
                 logger.warning(
-                    "Document %s is governed by a Contract Master instrument; the "
-                    "general pipeline will not reprocess it",
+                    "Document %s is a contract source; the general pipeline will "
+                    "not reprocess it",
                     document_id,
                 )
                 return False

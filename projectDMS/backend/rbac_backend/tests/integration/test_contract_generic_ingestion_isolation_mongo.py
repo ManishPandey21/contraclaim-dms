@@ -190,11 +190,17 @@ def test_a_contract_promoted_while_the_job_embeds_is_still_not_rewritten(databas
     async def run(db, client):
         pipeline = _pipeline(db, store)
         instruments = await db[CONTRACT_DOCUMENTS_COLLECTION].find({}).to_list(length=None)
-        # Hide the instrument for the entry check, restore it while embedding.
+        # The entry check must see a document that is not a contract source at
+        # all: no instrument, and an upload type that is not "contract" (an
+        # editable field). Both come back while the job embeds.
         await db[CONTRACT_DOCUMENTS_COLLECTION].delete_many({})
+        await db["documents"].update_one({"_id": DOC}, {"$set": {"uploadType": "incoming"}})
 
         class _RestoringEmbedder(_Embedder):
             async def embed(self, texts, model=None, **kwargs):
+                await db["documents"].update_one(
+                    {"_id": DOC}, {"$set": {"uploadType": "contract"}}
+                )
                 await db[CONTRACT_DOCUMENTS_COLLECTION].insert_many(instruments)
                 return await super().embed(texts, model=model, **kwargs)
 
@@ -398,3 +404,310 @@ def test_a_document_level_refusal_answers_the_same_404(database):
     )
     assert response.status_code == 404, response.text
     assert submitted == []
+
+
+# --------------------------------------------------------------------------- #
+# A contract upload with no Contract Master record yet (not promoted)
+# --------------------------------------------------------------------------- #
+#
+# Promotion is a later, separate step, so for a while a contract upload has no
+# instrument. Its evidence is still contract ingest's: clause rows with page
+# provenance and their points. The generic writers - this pipeline, the route
+# that submits to it, and the general reprocess path - answered "not governed"
+# and rewrote it. They now ask the one contract-source predicate.
+
+CONTRACT_ROWS = [
+    ("20.1", "Variations", [2]),
+    ("1.1", "Definitions", [1]),
+]
+
+
+def _contract_point_id(number: str) -> str:
+    return f"{DOC}-clause-{number}"
+
+
+def _unpromoted_contract(database, store: RecordingVectorStore) -> None:
+    """A completed contract upload as contract ingest leaves it, never promoted."""
+
+    async def seed(db, client):
+        from rbac_backend.tests.integration.test_contract_reprojection_runtime_mongo import (
+            _seed_completed_contract,
+        )
+
+        await _seed_completed_contract(db)
+        await db["documents"].update_one({"_id": DOC}, {"$set": {"ocrText": SOURCE_TEXT}})
+        await db.document_vectors.insert_many(
+            [
+                {
+                    "document_id": DOC,
+                    "organization_id": ORG,
+                    "project_id": PROJECT,
+                    "uploadType": "contract",
+                    "chunk_id": _contract_point_id(number),
+                    "clause_number": number,
+                    "clause_title": title,
+                    "page_numbers": pages,
+                    "page_start": pages[0],
+                    "page_end": pages[-1],
+                    "text": f"Clause {number} {title}",
+                }
+                for number, title, pages in CONTRACT_ROWS
+            ]
+        )
+
+    database.run(seed)
+    for number, title, pages in CONTRACT_ROWS:
+        store.points[_contract_point_id(number)] = {
+            "vector": [1.0, 0.5, 0.25],
+            "document_id": DOC,
+            "payload": {
+                "uploadType": "contract",
+                "clause_number": number,
+                "clause_title": title,
+                "page_start": pages[0],
+                "page_end": pages[-1],
+            },
+        }
+
+
+async def _contract_rows(db) -> List[Dict[str, Any]]:
+    rows = await db.document_vectors.find({"document_id": DOC}, {"_id": 0}).to_list(length=None)
+    return sorted(rows, key=lambda row: row["chunk_id"])
+
+
+def test_generic_ingestion_leaves_an_unpromoted_contract_untouched(database):
+    store = RecordingVectorStore()
+    _unpromoted_contract(database, store)
+    points_before = {key: dict(value) for key, value in store.points.items()}
+    rows_before = database.run(lambda db, client: _contract_rows(db))
+    assert (
+        database.run(lambda db, client: db[CONTRACT_DOCUMENTS_COLLECTION].count_documents({}))
+        == 0
+    ), "the fixture must have no Contract Master record"
+
+    job = _run_generic_job(database, store, DOC)
+
+    # Clause points, their clause and page payloads, and the rows they came
+    # from: exactly as contract ingest left them. Nothing generic was written.
+    assert store.points == points_before
+    assert database.run(lambda db, client: _contract_rows(db)) == rows_before
+    assert database.run(lambda db, client: db.chunks.count_documents({})) == 0
+    assert database.run(lambda db, client: db.vector_sync_status.count_documents({})) == 0
+    assert job["status"] == "failed", job
+    assert "contract" in (job.get("error") or "").lower(), job
+
+
+def test_the_route_refuses_an_unpromoted_contract(database):
+    store = RecordingVectorStore()
+    _unpromoted_contract(database, store)
+    client, submitted, policy = _route_client(database, store)
+
+    response = client.post(
+        "/api/v1/ingestion/jobs",
+        json={"org_id": ORG, "project_id": PROJECT, "document_id": DOC},
+    )
+
+    assert response.status_code == 409, response.text
+    assert "contract" in response.json()["detail"].lower()
+    assert submitted == []
+    assert policy.calls, "the refusal must come after authorisation, never before"
+
+
+def test_both_generic_entry_checks_name_an_unpromoted_contract(database):
+    """The reprocess route and the ingestion route ask these; a plain letter is
+    still not a contract source."""
+    store = RecordingVectorStore()
+    _unpromoted_contract(database, store)
+
+    async def ask(db, client):
+        from rbac_backend.ingestion.service import IngestionService
+        from rbac_backend.services.document_service import DocumentService
+
+        await db["documents"].insert_one(
+            {
+                "_id": "plain-letter",
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "uploadType": "incoming",
+                "processing_status": "completed",
+            }
+        )
+        ingestion = IngestionService.__new__(IngestionService)
+        ingestion.db = db
+        documents = DocumentService(db)
+        return [
+            await ingestion.is_governed_contract(DOC),
+            await documents.is_governed_contract(DOC),
+            await ingestion.is_governed_contract("plain-letter"),
+            await documents.is_governed_contract("plain-letter"),
+        ]
+
+    assert database.run(ask) == [True, True, False, False]
+
+
+# --------------------------------------------------------------------------- #
+# Promotion racing the general reprocess path (DatabaseService)
+# --------------------------------------------------------------------------- #
+
+
+class _ReplacingStore:
+    """LangChainVectorService.replace_document: every point of the document
+    goes, the new ones arrive."""
+
+    enabled = True
+
+    def __init__(self, store: RecordingVectorStore) -> None:
+        self.store = store
+        self.calls = 0
+
+    async def replace_document(self, payloads):
+        self.calls += 1
+        document_id = payloads[0]["payload"]["document_id"]
+        doomed = [k for k, p in self.store.points.items() if p["document_id"] == document_id]
+        for key in doomed:
+            del self.store.points[key]
+        for point in payloads:
+            self.store.points[point["point_id"]] = {
+                "vector": [0.0],
+                "document_id": document_id,
+                "payload": dict(point["payload"]),
+            }
+        return len(payloads)
+
+
+class _IndexStub:
+    embedding_model_name = "stub"
+
+    async def delete_vectors(self, refs):
+        return None
+
+    async def index_chunks(self, payloads, persist=False):
+        return []
+
+
+LETTER_BODY = (
+    "We refer to the instruction regarding the viaduct pier foundations and give "
+    "notice of delay caused by late access to the railway corridor. "
+) * 3
+
+
+def _general_writer(db, store: RecordingVectorStore):
+    from rbac_backend.config.document_processing_config import DocumentProcessingConfig
+    from rbac_backend.services.database_service import DatabaseService
+
+    config = DocumentProcessingConfig()
+    config.vector_store_enabled = True
+    config.vector_dual_write_enabled = True
+    service = DatabaseService(config)
+    service._db = db
+    replacing = _ReplacingStore(store)
+    service._langchain_vector_service = replacing
+    service._langchain_service_initialized = True
+    service._vector_service = _IndexStub()
+    return service, replacing
+
+
+async def _save(service):
+    from rbac_backend.services.source_text import OCR_TEXT_KIND_SOURCE, SOURCE_TEXT_COMPLETE
+    from rbac_backend.tests.correspondence_vector_harness import letter_metadata
+
+    return await service.save_document_data(
+        document_id=DOC,
+        file_path="/uploads/Particular Conditions.pdf",
+        parsed_metadata=letter_metadata(letter_no="L-1", subject="Delay", body=LETTER_BODY),
+        full_text=LETTER_BODY,
+        embedding_text=LETTER_BODY,
+        source_provenance={
+            "ocr_text_kind": OCR_TEXT_KIND_SOURCE,
+            "source_text_status": SOURCE_TEXT_COMPLETE,
+        },
+    )
+
+
+def test_a_promotion_during_a_general_reprocess_does_not_lose_contract_evidence(database):
+    """G1 starts on a document that is not a contract source and parks just
+    before its first destructive vector step (the awaited "pending" sync write,
+    after its payloads are built). The document then becomes a contract and is
+    promoted through the real migration path. G1 is released.
+
+    Trusting its start-of-run answer, G1 replaced every point of the now
+    governed document and deleted its document_vectors rows.
+    """
+    import asyncio
+
+    from rbac_backend.tests.integration.test_contract_reprojection_runtime_mongo import (
+        _promote_through_migration,
+    )
+
+    store = RecordingVectorStore()
+    _unpromoted_contract(database, store)
+    # The start-of-run checks must see a document that is not a contract.
+    database.run(
+        lambda db, client: db["documents"].update_one(
+            {"_id": DOC}, {"$set": {"uploadType": "incoming"}}
+        )
+    )
+    points_before = {key: dict(value) for key, value in store.points.items()}
+    rows_before = database.run(lambda db, client: _contract_rows(db))
+
+    async def scenario(db, client):
+        reached, release = asyncio.Event(), asyncio.Event()
+        service, replacing = _general_writer(db, store)
+        record_status = service._update_vector_sync_status
+
+        async def _parking_status(db_, document_id, *, status, **kwargs):
+            if status == "pending" and not release.is_set():
+                reached.set()
+                await release.wait()
+            return await record_status(db_, document_id, status=status, **kwargs)
+
+        service._update_vector_sync_status = _parking_status
+
+        g1 = asyncio.ensure_future(_save(service))
+        await asyncio.wait_for(reached.wait(), timeout=60)
+        await db["documents"].update_one({"_id": DOC}, {"$set": {"uploadType": "contract"}})
+        await _promote_through_migration(db, client)
+        release.set()
+        try:
+            outcome: Any = await g1
+        except Exception as exc:
+            outcome = exc
+        return outcome, replacing.calls
+
+    outcome, replace_calls = database.run(scenario)
+
+    governed = database.run(
+        lambda db, client: db[CONTRACT_DOCUMENTS_COLLECTION].count_documents({"document_id": DOC})
+    )
+    assert governed == 1, "the promotion must have committed during the race"
+    assert replace_calls == 0, "a generic writer replaced the points of a document promoted under it"
+    assert store.points == points_before
+    assert database.run(lambda db, client: _contract_rows(db)) == rows_before
+    assert isinstance(outcome, Exception), outcome
+    assert "contract" in str(outcome).lower(), outcome
+
+
+def test_the_general_writer_still_indexes_a_plain_letter(database):
+    """Positive control for the write-boundary re-check."""
+    store = RecordingVectorStore()
+
+    async def run(db, client):
+        await db["documents"].insert_one(
+            {
+                "_id": DOC,
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "uploadType": "incoming",
+                "filename": "Particular Conditions.pdf",
+                "status": "completed",
+                "processing_status": "completed",
+                "publication_status": "published",
+                "is_active": True,
+            }
+        )
+        service, replacing = _general_writer(db, store)
+        await _save(service)
+        return replacing.calls
+
+    assert database.run(run) == 1
+    assert store.points and all(p["document_id"] == DOC for p in store.points.values())

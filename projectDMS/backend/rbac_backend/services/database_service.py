@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - optional dependency
         def __init__(self, *args, **kwargs):
             raise ImportError("llama_index is not installed; enable it or switch to LangChain vector service.")
 from .langchain_vector_service import LangChainVectorService
+from .contract_source import ContractSourceWriteRefused, refuse_contract_source_write
 from .publication_policy import is_publication_blocked, resolve_canonical_document
 from .reference_parser import parse_legacy_reference_text
 from .falkor_graph_service import normalize_letter_code
@@ -196,6 +197,17 @@ class DatabaseService:
             )
             db = await self.get_database()
 
+            # This run's start-of-run check is long past (OCR, extraction): a
+            # promotion may have committed, or the upload type been edited,
+            # since. A contract source's text and evidence are not ours to write.
+            if document_id:
+                await refuse_contract_source_write(
+                    db,
+                    document_id,
+                    await resolve_canonical_document(db, document_id),
+                    step="the general pipeline's metadata write",
+                )
+
             # Save document metadata
             doc = await self._upsert_document_metadata(
                 db, document_id, file_path, parsed_metadata, full_text,
@@ -224,6 +236,8 @@ class DatabaseService:
             # successful OCR/metadata extraction; record them as partial failures.
             try:
                 chunks_created = await self._create_and_store_embeddings(db, doc, embedding_text)
+            except ContractSourceWriteRefused:
+                raise
             except Exception as exc:
                 chunks_created = 0
                 self.partial_failures["embeddings"] = {
@@ -243,6 +257,8 @@ class DatabaseService:
             )
             return chunks_created
 
+        except ContractSourceWriteRefused:
+            raise
         except Exception as exc:
             logger.error("Failed to save document data: %s", exc)
             raise DocumentProcessingError(f"Database save failed: {exc}") from exc
@@ -512,6 +528,14 @@ class DatabaseService:
             )
 
             if qdrant_enabled:
+                # Re-read immediately before the first destructive step:
+                # replace_document deletes every point of the document.
+                await refuse_contract_source_write(
+                    db,
+                    document_id,
+                    await resolve_canonical_document(db, doc.get("_id")),
+                    step="vector replacement",
+                )
                 qdrant_chunks = await langchain_service.replace_document(payloads)
                 if qdrant_chunks is None:
                     qdrant_chunks = 0
@@ -535,6 +559,14 @@ class DatabaseService:
                     bool(langchain_service and langchain_service.enabled),
                 )
 
+            # And before the Mongo rows go: they include a contract's clause
+            # rows, which its evidence projection is built from.
+            await refuse_contract_source_write(
+                db,
+                document_id,
+                await resolve_canonical_document(db, doc.get("_id")),
+                step="the document_vectors replacement",
+            )
             filter_query = {"document_id": document_id}
             existing_refs = await db.document_vectors.find(filter_query, {"vector_ref": 1, "_id": 0}).to_list(length=None)
             vector_refs = [item.get("vector_ref") for item in existing_refs if item.get("vector_ref")]
@@ -613,6 +645,10 @@ class DatabaseService:
 
             return mongo_chunks
 
+        except ContractSourceWriteRefused:
+            # Nothing of the contract's was touched, and its sync bookkeeping
+            # belongs to its own writers: no error status is recorded here.
+            raise
         except DocumentProcessingError:
             await self._update_vector_sync_status(
                 db,

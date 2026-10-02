@@ -264,9 +264,12 @@ class IngestionPipeline:
                     namespace=job.options.vector_namespace,
                 )
 
-            # Last check before the one destructive step: a promotion committing
-            # since the write-boundary check must still stop the prune.
-            await self._refuse_governed_contract(job.document_id, current_document)
+            # Last check before the one destructive step: a promotion committing,
+            # or an upload type edited, since the write-boundary check must still
+            # stop the prune - so the document is read again, too.
+            await self._refuse_governed_contract(
+                job.document_id, await self._load_document(job.document_id)
+            )
             await self._prune_stale_vectors(
                 job=job,
                 current_chunks=set(c.id for c in chunks),
@@ -345,21 +348,23 @@ class IngestionPipeline:
     async def _refuse_governed_contract(
         self, document_id: str, document: Dict[str, Any]
     ) -> None:
-        """A Contract Master instrument's document is not this pipeline's to write.
+        """A contract source is not this pipeline's to write.
 
-        Its derived evidence has one writer, the contract-worker's reprojection.
-        This pipeline chunks differently and then prunes every point of the
-        document it did not just write - in the namespace evidence reads - which
-        deleted a CURRENT projection's vectors and left evidence answering empty.
+        Its derived evidence has its own writers: contract ingest and the
+        contract reindex before promotion, the contract-worker's reprojection
+        after. This pipeline chunks differently and then prunes every point of
+        the document it did not just write - in the namespace evidence reads -
+        which deleted a CURRENT projection's vectors, and, for a contract upload
+        not yet promoted, its clause points and their page provenance.
         Raised before any chunk, point or sync record is written.
         """
-        from ..services.document_service import governed_by_contract_master
+        from ..services.contract_source import is_contract_source
 
-        if await governed_by_contract_master(self.db, document_id, document.get("_id")):
+        if await is_contract_source(self.db, document_id, document):
             raise GovernedContractIngestionRefused(
-                f"Document {document_id} is governed by a Contract Master instrument; "
-                "its evidence is rebuilt by the contract reindex and reprojection, "
-                "not by generic ingestion"
+                f"Document {document_id} is a contract source (a contract upload, or "
+                "governed by a Contract Master instrument); its evidence is rebuilt by "
+                "the contract ingest, reindex and reprojection, not by generic ingestion"
             )
 
     async def _load_document(self, document_id: str) -> Dict[str, Any]:
