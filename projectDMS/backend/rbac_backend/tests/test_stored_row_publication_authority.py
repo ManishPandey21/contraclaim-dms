@@ -235,3 +235,115 @@ def test_a_letter_that_numbers_its_particulars_is_not_refused_when_source_is_rec
     refuse_unpublishable_stored_rows(
         _document(ocrText=numbered, ocr_text_kind=OCR_TEXT_KIND_SOURCE), [numbered]
     )
+
+
+# --- review follow-ups ---------------------------------------------------------
+
+
+def test_the_reconciler_still_removes_orphan_points_when_rows_are_refused(
+    harness: QdrantHarness,
+) -> None:
+    """Refusing to re-embed must not also stop the safe direction: a point no
+    stored row backs is still removed."""
+    from rbac_backend.tests.correspondence_vector_harness import embed_text
+
+    document = _document(**REPORT_DOCUMENTS["labelled_report_with_advice"])
+    document_id = str(document["_id"])
+    db = Database([document])
+    _chunk_rows(db, document_id, REPORT_ROWS["labelled_report_with_advice"])
+    orphan = str(uuid.uuid4())
+    run(
+        harness.reader.upsert(
+            [embed_text(REPORT)],
+            [{"chunk_id": orphan, "document_id": document_id, "org_id": ORG,
+              "project_id": PROJECT, "text": REPORT}],
+        )
+    )
+
+    result = run(_reconciler(db, harness).reconcile_document(document_id, ORG, PROJECT))
+
+    assert result.get("skipped_unpublishable") == 1, result
+    assert result["removed"] == 1 and _points(harness, document_id) == []
+
+
+def test_the_reconciler_refuses_a_scope_that_is_not_the_documents(harness: QdrantHarness) -> None:
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document_id = str(document["_id"])
+    db = Database([document])
+    # Rows stamped with another tenant's scope, reconciled under that scope.
+    _chunk_rows(db, document_id, [LETTER], org_id=FOREIGN_ORG, project_id=FOREIGN_PROJECT)
+
+    result = run(
+        _reconciler(db, harness).reconcile_document(document_id, FOREIGN_ORG, FOREIGN_PROJECT)
+    )
+
+    assert result.get("skipped_scope_mismatch") == 1, result
+    assert _points(harness, document_id) == []
+
+
+def test_a_refused_document_is_recorded_and_stops_taking_bulk_slots(harness: QdrantHarness, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from rbac_backend.core.security import CurrentUser
+    from rbac_backend.routers import storage_sync
+
+    report = _document(**REPORT_DOCUMENTS["labelled_report_with_advice"])
+    letter = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    # The report document is the newest, so it heads the bulk window.
+    report["updatedAt"], letter["updatedAt"] = 2, 1
+    db = Database([report, letter])
+    _chunk_rows(db, str(report["_id"]), REPORT_ROWS["labelled_report_with_advice"])
+    _chunk_rows(db, str(letter["_id"]), [LETTER])
+
+    async def _database():
+        return db
+
+    async def _step_up(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _distinct(field: str):
+        return []
+
+    db["contract_documents"].distinct = _distinct  # type: ignore[attr-defined]
+    monkeypatch.setattr(storage_sync, "get_database", _database)
+    monkeypatch.setattr(storage_sync, "require_step_up", _step_up)
+    monkeypatch.setattr(storage_sync, "DocumentProcessingConfig", lambda: harness.config)
+    monkeypatch.setattr(storage_sync, "VectorClient", lambda _config: harness.reader)
+    monkeypatch.setattr(storage_sync, "EmbeddingClient", lambda _config: DeterministicEmbeddingClient())
+    superadmin = CurrentUser(id="sa", username="sa", email="sa@example.com", roles=["superadmin"])
+
+    def _bulk():
+        return run(
+            storage_sync.resync_bulk_vectors(
+                request=SimpleNamespace(), org_id=ORG, project_id=None, limit=1,
+                include_synced=True, current_user=superadmin,
+            )
+        )
+
+    first = _bulk()
+    assert [e["document_id"] for e in first["errors"]] == [str(report["_id"])], first
+    status = run(db.vector_sync_status.find_one({"document_id": str(report["_id"])}))
+    assert status["sync_status"] == "reprocess_required"
+    # The next run does not spend its only slot on it again.
+    second = _bulk()
+    assert [e["document_id"] for e in second["processed"]] == [str(letter["_id"])], second
+
+
+def test_storage_sync_refuses_to_publish_an_unscoped_document(harness: QdrantHarness) -> None:
+    from rbac_backend.routers import storage_sync
+
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document["organization_id"] = None
+    document_id = str(document["_id"])
+    db = Database([document])
+    _chunk_rows(db, document_id, [LETTER])
+
+    with pytest.raises(HTTPException) as refused:
+        run(
+            storage_sync._resync_document_vectors(
+                document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+            )
+        )
+
+    assert refused.value.status_code == 409
+    assert _points(harness, document_id) == []

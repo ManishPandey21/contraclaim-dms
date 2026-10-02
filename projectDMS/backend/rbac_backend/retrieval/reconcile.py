@@ -64,6 +64,21 @@ class VectorReconciler:
         document = await resolve_canonical_document(self.db, document_id)
         if not is_consumable(document):
             return self._untouched()
+        from .correspondence_payload import canonical_scope_id
+
+        if (
+            canonical_scope_id(document.get("organization_id"), "organization_id") != org_id
+            or canonical_scope_id(document.get("project_id"), "project_id") != project_id
+        ):
+            # The scope comes from the caller and selects the rows; it must be
+            # the document's own, or rows stamped with another scope would be
+            # republished into it.
+            logger.warning(
+                "Not reconciling %s under a scope that is not the document's", document_id
+            )
+            result = self._untouched()
+            result["skipped_scope_mismatch"] = 1
+            return result
         if await self._is_contract_projection(document_id, document):
             # Contract vectors are not described by ``chunks`` rows: every point
             # would read as "missing in Mongo" and be deleted, emptying the
@@ -96,6 +111,7 @@ class VectorReconciler:
         missing_in_mongo = qdrant_ids - chunk_ids
 
         repaired = 0
+        unpublishable = False
         if missing_in_qdrant:
             from .correspondence_payload import (
                 CorrespondencePayloadError,
@@ -115,19 +131,11 @@ class VectorReconciler:
                     "text, not the letter; reprocess the document",
                     document_id,
                 )
-                result = self._untouched()
-                result.update(
-                    missing_in_qdrant=len(missing_in_qdrant),
-                    missing_in_mongo=len(missing_in_mongo),
-                    qdrant_ids=len(qdrant_ids),
-                    mongo_chunks=len(chunks),
-                    skipped_unpublishable=1,
-                )
-                return result
+                unpublishable = True
             to_write = [
                 c for c in chunks if str(c.get("chunk_id")) in missing_in_qdrant
             ]
-            if to_write:
+            if to_write and not unpublishable:
                 vectors = await self.embedding_client.embed(
                     [c.get("text_original") or "" for c in to_write]
                 )
@@ -156,13 +164,15 @@ class VectorReconciler:
                 )
                 repaired = len(to_write)
 
+        # Removing points no stored row backs is the safe direction; it runs
+        # whether or not the rows themselves may be republished.
         removed = 0
         if missing_in_mongo:
             removed = await self.vector_client.delete(
                 list(missing_in_mongo), namespace=namespace
             )
 
-        return {
+        result = {
             "missing_in_qdrant": len(missing_in_qdrant),
             "missing_in_mongo": len(missing_in_mongo),
             "repaired": repaired,
@@ -170,3 +180,6 @@ class VectorReconciler:
             "qdrant_ids": len(qdrant_ids),
             "mongo_chunks": len(chunk_ids),
         }
+        if unpublishable:
+            result["skipped_unpublishable"] = 1
+        return result

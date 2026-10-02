@@ -29,6 +29,7 @@ from ..retrieval.correspondence_payload import (
     PAYLOAD_SCHEMA_VERSION_FIELD,
     CorrespondencePayloadError,
     build_correspondence_chunks,
+    canonical_scope_id,
     refuse_unpublishable_stored_rows,
 )
 from ..retrieval.vector_client import VectorClient
@@ -580,6 +581,29 @@ async def _compare_projection_points(
     return {"final": False, "expected": expected, "missing": missing, "extra": extra}
 
 
+#: A document whose stored rows are the extraction report: repair refuses it
+#: (``refuse_unpublishable_stored_rows``) and only reprocessing helps. Not
+#: "synced" or "delegated", so the status page counts it as stale.
+REPROCESS_REQUIRED = "reprocess_required"
+
+
+async def _record_reprocess_required(db, document_id: str, reason: str) -> None:
+    await db.vector_sync_status.update_one(
+        {"document_id": document_id},
+        {
+            "$set": {
+                "document_id": document_id,
+                "sync_status": REPROCESS_REQUIRED,
+                "details": reason,
+                "updatedAt": datetime.utcnow(),
+            },
+            "$unset": {"mongo_chunks": "", "qdrant_chunks": ""},
+            "$setOnInsert": {"createdAt": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+
+
 def _chunk_order(row: Dict[str, Any]) -> int:
     """Row order for a rebuild; a malformed index sorts last instead of raising."""
     try:
@@ -740,10 +764,22 @@ async def _resync_document_vectors(
                 doc, [c.get("text_original") or c.get("text") or "" for c in chunks]
             )
         except CorrespondencePayloadError as exc:
+            # Recorded, so the document is visible (stale, not synced) and the
+            # bulk and reconcile windows stop spending a slot on it every run:
+            # repair cannot help it, reprocessing it can.
+            await _record_reprocess_required(db, document_id, str(exc))
             raise HTTPException(
                 status_code=409,
                 detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
             ) from exc
+        org_id = canonical_scope_id(doc.get("organization_id"), "organization_id")
+        project_id = canonical_scope_id(doc.get("project_id"), "project_id")
+        if not org_id:
+            # The legacy branch's builder refuses an unscoped point; so does this.
+            raise HTTPException(
+                status_code=409,
+                detail="Document has no organisation; its vectors cannot be scoped",
+            )
         embedding_client = embedding_client or EmbeddingClient(config)
         texts = [c.get("text_enriched") or c.get("text_original") or c.get("text") or "" for c in chunks]
         vectors = await embedding_client.embed(texts)
@@ -756,8 +792,8 @@ async def _resync_document_vectors(
                     # Authority is the canonical document's, never the stored
                     # row's: a row stamped with another scope would otherwise
                     # publish this text to that tenant.
-                    "org_id": str(doc["organization_id"]) if doc.get("organization_id") else None,
-                    "project_id": str(doc["project_id"]) if doc.get("project_id") else None,
+                    "org_id": org_id,
+                    "project_id": project_id,
                     "page_start": c.get("page_start"),
                     "text": c.get("text_original") or c.get("text"),
                     "text_enriched": c.get("text_enriched"),
@@ -773,11 +809,8 @@ async def _resync_document_vectors(
             namespace=None,
         )
         qdrant_ids = await vector_client.list_chunk_ids(
-            {
-                "org_id": doc.get("organization_id"),
-                "project_id": doc.get("project_id"),
-                "document_id": document_id,
-            },
+            # The same canonical form the points were just written with.
+            {"org_id": org_id, "project_id": project_id, "document_id": document_id},
             namespace=None,
         )
         mongo_chunks = len(chunks)
@@ -806,6 +839,7 @@ async def _resync_document_vectors(
                 doc, legacy_texts, canonically_written=written_canonically
             )
         except CorrespondencePayloadError as exc:
+            await _record_reprocess_required(db, document_id, str(exc))
             raise HTTPException(
                 status_code=409,
                 detail="Stored vector rows carry extraction-report reply advice; reprocess the document",
@@ -1134,6 +1168,10 @@ async def resync_bulk_vectors(
             continue
 
         status = await db.vector_sync_status.find_one({"document_id": doc_id})
+        if status and status.get("sync_status") == REPROCESS_REQUIRED:
+            # Repair already refused it; it would only fail again and take a
+            # slot of the limit from a repairable document.
+            continue
         if (
             not include_synced
             and status
@@ -1274,6 +1312,12 @@ async def reconcile_vectors(
             continue
         # As in bulk resync: the query filter is exact-match.
         if is_contract_upload(doc):
+            continue
+        if await db.vector_sync_status.count_documents(
+            {"document_id": doc_id, "sync_status": REPROCESS_REQUIRED}
+        ):
+            # Repair refused its stored rows before; reprocessing clears this.
+            details.append({"document_id": doc_id, "status": REPROCESS_REQUIRED})
             continue
         scanned += 1
 
