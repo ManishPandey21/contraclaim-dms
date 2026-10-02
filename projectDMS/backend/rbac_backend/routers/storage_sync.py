@@ -770,6 +770,7 @@ async def _resync_document_vectors(
     document_ref_query = _candidate_field_query("document_id", document_id)
     chunks = [c async for c in db.chunks.find(document_ref_query)]
     vector_client = vector_client or VectorClient(config)
+    superseded_chunk_ids: List[str] = []
 
     if chunks:
         # Rows an older pipeline chunked may be the extraction report, reply
@@ -795,13 +796,14 @@ async def _resync_document_vectors(
                     detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
                 ) from exc
             # Reprocessing wrote canonical rows but leaves an older pipeline's
-            # chunks behind; those are the document now. Repair from them -
-            # replacing every point of the document, the stale chunk points
-            # included - instead of refusing on rows nothing reads any more.
+            # chunks behind; the canonical rows are the document now. Repair
+            # from them, and retire the superseded chunks (below) so neither
+            # their points nor their rows outlive this repair.
             logger.info(
                 "Repairing %s from its canonical rows; its stored chunks are not the letter",
                 document_id,
             )
+            superseded_chunk_ids = [str(c["chunk_id"]) for c in chunks if c.get("chunk_id")]
             chunks = []
 
     if chunks:
@@ -900,6 +902,13 @@ async def _resync_document_vectors(
         if not legacy_service.enabled:
             raise HTTPException(status_code=503, detail="Qdrant vector service is not available")
         await legacy_service.replace_document(payloads)
+        if superseded_chunk_ids:
+            # By id, not left to replace_document's best-effort delete: these
+            # points may carry the report text that made the rows unpublishable.
+            # Then the rows go too, or every reconcile would find their ids
+            # missing in Qdrant and rebuild the document again.
+            await vector_client.delete(superseded_chunk_ids, namespace=None)
+            await db.chunks.delete_many({"chunk_id": {"$in": superseded_chunk_ids}})
         mongo_chunks = len(payloads)
         qdrant_count = await _fetch_qdrant_document_count(config, document_id)
         qdrant_chunks = int(qdrant_count or 0)

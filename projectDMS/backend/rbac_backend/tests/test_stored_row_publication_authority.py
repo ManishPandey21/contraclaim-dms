@@ -473,3 +473,90 @@ def test_the_reconciler_refuses_a_document_whose_scope_is_not_an_id(harness: Qdr
 
     assert result.get("skipped_scope_mismatch") == 1, result
     assert _points(harness, document_id) == []
+
+
+def test_after_reprocessing_superseded_chunks_are_retired_and_reconcile_settles(
+    harness: QdrantHarness, monkeypatch
+) -> None:
+    """The stale chunk points (report text) are removed by id, the refused rows
+    go, and the next reconcile finds the document in sync instead of
+    rebuilding it on every run."""
+    from types import SimpleNamespace
+
+    from rbac_backend.core.security import CurrentUser
+    from rbac_backend.retrieval.correspondence_payload import (
+        CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+        PAYLOAD_SCHEMA_VERSION_FIELD,
+    )
+    from rbac_backend.routers import storage_sync
+    from rbac_backend.tests.correspondence_vector_harness import embed_text
+
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document_id = str(document["_id"])
+    db = Database([document])
+    stale_ids = _chunk_rows(db, document_id, REPORT_ROWS["labelled_report_with_advice"])
+    # What the older pipeline published from those rows.
+    run(
+        harness.reader.upsert(
+            [embed_text(REPORT)],
+            [{"chunk_id": stale_ids[0], "document_id": document_id, "org_id": ORG,
+              "project_id": PROJECT, "text": REPORT}],
+        )
+    )
+    run(
+        db.document_vectors.insert_one(
+            {
+                "document_id": document_id,
+                "chunk_index": 0,
+                "text": LETTER,
+                PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+            }
+        )
+    )
+
+    async def _count(_config, doc_id):
+        return harness.client.count(
+            collection_name=harness.config.qdrant_collection,
+            count_filter=storage_sync._qdrant_document_filter(harness.writer._qdrant_models, doc_id),
+            exact=True,
+        ).count
+
+    async def _database():
+        return db
+
+    async def _step_up(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _distinct(field: str):
+        return []
+
+    db["contract_documents"].distinct = _distinct  # type: ignore[attr-defined]
+    monkeypatch.setattr(storage_sync, "LangChainVectorService", lambda _config: harness.writer)
+    monkeypatch.setattr(storage_sync, "_fetch_qdrant_document_count", _count)
+    monkeypatch.setattr(storage_sync, "get_database", _database)
+    monkeypatch.setattr(storage_sync, "require_step_up", _step_up)
+    monkeypatch.setattr(storage_sync, "DocumentProcessingConfig", lambda: harness.config)
+    monkeypatch.setattr(storage_sync, "VectorClient", lambda _config: harness.reader)
+    monkeypatch.setattr(storage_sync, "EmbeddingClient", lambda _config: DeterministicEmbeddingClient())
+
+    repaired = run(
+        storage_sync._resync_document_vectors(
+            document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+        )
+    )
+
+    assert repaired["status"] == "synced", repaired
+    assert not {str(p.id) for p in _points(harness, document_id)} & set(stale_ids)
+    assert all(ADVICE not in (p.payload.get("text") or "") for p in _points(harness, document_id))
+    assert run(db.chunks.count_documents({"document_id": document_id})) == 0
+
+    superadmin = CurrentUser(id="sa", username="sa", email="sa@example.com", roles=["superadmin"])
+    settled = run(
+        storage_sync.reconcile_vectors(
+            request=SimpleNamespace(), org_id=ORG, project_id=PROJECT, limit=10,
+            dry_run=False, current_user=superadmin,
+        )
+    )
+    assert [d["status"] for d in settled["details"] if d["document_id"] == document_id] == [
+        "in_sync"
+    ], settled
