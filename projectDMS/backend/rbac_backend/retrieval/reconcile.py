@@ -64,14 +64,16 @@ class VectorReconciler:
         document = await resolve_canonical_document(self.db, document_id)
         if not is_consumable(document):
             return self._untouched()
-        from .correspondence_payload import canonical_scope_id
+        from .correspondence_payload import CorrespondencePayloadError, canonical_scope_id
 
-        if (
-            canonical_scope_id(document.get("organization_id"), "organization_id")
-            != org_id
-            or canonical_scope_id(document.get("project_id"), "project_id")
-            != project_id
-        ):
+        try:
+            document_scope = (
+                canonical_scope_id(document.get("organization_id"), "organization_id"),
+                canonical_scope_id(document.get("project_id"), "project_id"),
+            )
+        except CorrespondencePayloadError:
+            document_scope = None  # not an id: no caller scope can be the document's
+        if document_scope != (org_id, project_id):
             # The scope comes from the caller and selects the rows; it must be
             # the document's own, or rows stamped with another scope would be
             # republished into it.

@@ -347,3 +347,129 @@ def test_storage_sync_refuses_to_publish_an_unscoped_document(harness: QdrantHar
 
     assert refused.value.status_code == 409
     assert _points(harness, document_id) == []
+
+
+def test_a_reprocessed_document_is_repaired_from_its_canonical_rows(harness: QdrantHarness, monkeypatch) -> None:
+    """Reprocessing writes canonical document_vectors rows but leaves an older
+    pipeline's chunks behind. Repair uses the canonical rows - replacing the
+    stale chunk points - instead of refusing on chunks nothing reads, so
+    "reprocess the document" really ends the refusal."""
+    from rbac_backend.retrieval.correspondence_payload import (
+        CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+        PAYLOAD_SCHEMA_VERSION_FIELD,
+        assert_canonical_correspondence_payload,
+    )
+    from rbac_backend.routers import storage_sync
+
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document_id = str(document["_id"])
+    db = Database([document])
+    _chunk_rows(db, document_id, REPORT_ROWS["labelled_report_with_advice"])
+    run(
+        db.document_vectors.insert_one(
+            {
+                "document_id": document_id,
+                "chunk_index": 0,
+                "text": LETTER,
+                PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+            }
+        )
+    )
+    monkeypatch.setattr(storage_sync, "LangChainVectorService", lambda _config: harness.writer)
+
+    async def _count(_config, doc_id):
+        return harness.client.count(
+            collection_name=harness.config.qdrant_collection,
+            count_filter=storage_sync._qdrant_document_filter(harness.writer._qdrant_models, doc_id),
+            exact=True,
+        ).count
+
+    monkeypatch.setattr(storage_sync, "_fetch_qdrant_document_count", _count)
+
+    result = run(
+        storage_sync._resync_document_vectors(
+            document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+        )
+    )
+
+    assert result["status"] == "synced", result
+    points = _points(harness, document_id)
+    assert points
+    for point in points:
+        assert_canonical_correspondence_payload(point.payload)
+        assert ADVICE not in (point.payload.get("text") or "")
+    status = run(db.vector_sync_status.find_one({"document_id": document_id}))
+    assert status["sync_status"] == "synced"
+
+
+def test_refused_documents_cannot_crowd_the_bulk_window(harness: QdrantHarness, monkeypatch) -> None:
+    """Excluded in the query, not skipped after the window was cut: four
+    refused documents newer than the only repairable one, limit 1 (window 3)."""
+    from types import SimpleNamespace
+
+    from rbac_backend.core.security import CurrentUser
+    from rbac_backend.routers import storage_sync
+
+    refused = [_document(**REPORT_DOCUMENTS["labelled_report_with_advice"]) for _ in range(4)]
+    letter = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    for index, row in enumerate(refused):
+        row["updatedAt"] = 10 + index
+    letter["updatedAt"] = 1
+    db = Database([*refused, letter])
+    for row in refused:
+        _chunk_rows(db, str(row["_id"]), REPORT_ROWS["labelled_report_with_advice"])
+        run(
+            db.vector_sync_status.insert_one(
+                {"document_id": str(row["_id"]), "sync_status": "reprocess_required"}
+            )
+        )
+    _chunk_rows(db, str(letter["_id"]), [LETTER])
+
+    async def _database():
+        return db
+
+    async def _step_up(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _distinct(field: str):
+        return []
+
+    db["contract_documents"].distinct = _distinct  # type: ignore[attr-defined]
+    monkeypatch.setattr(storage_sync, "get_database", _database)
+    monkeypatch.setattr(storage_sync, "require_step_up", _step_up)
+    monkeypatch.setattr(storage_sync, "DocumentProcessingConfig", lambda: harness.config)
+    monkeypatch.setattr(storage_sync, "VectorClient", lambda _config: harness.reader)
+    monkeypatch.setattr(storage_sync, "EmbeddingClient", lambda _config: DeterministicEmbeddingClient())
+    # The query decides the window: the harness ignores sort and limit, so
+    # apply both the way Mongo does.
+    find = db.documents.find
+
+    def _windowed(filter, projection=None, *args, **kwargs):
+        cursor = find(filter, *args, **kwargs)
+        cursor._documents.sort(key=lambda row: row.get("updatedAt") or 0, reverse=True)  # type: ignore[attr-defined]
+        return cursor
+
+    db.documents.find = _windowed  # type: ignore[method-assign]
+    superadmin = CurrentUser(id="sa", username="sa", email="sa@example.com", roles=["superadmin"])
+
+    result = run(
+        storage_sync.resync_bulk_vectors(
+            request=SimpleNamespace(), org_id=ORG, project_id=None, limit=1,
+            include_synced=True, current_user=superadmin,
+        )
+    )
+
+    assert [entry["document_id"] for entry in result["processed"]] == [str(letter["_id"])], result
+
+
+def test_the_reconciler_refuses_a_document_whose_scope_is_not_an_id(harness: QdrantHarness) -> None:
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document["organization_id"] = {"$ne": None}
+    document_id = str(document["_id"])
+    db = Database([document])
+    _chunk_rows(db, document_id, [LETTER])
+
+    result = run(_reconciler(db, harness).reconcile_document(document_id, ORG, PROJECT))
+
+    assert result.get("skipped_scope_mismatch") == 1, result
+    assert _points(harness, document_id) == []

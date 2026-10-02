@@ -604,6 +604,21 @@ async def _record_reprocess_required(db, document_id: str, reason: str) -> None:
     )
 
 
+async def _reprocess_required_ids(db) -> List[Any]:
+    """Documents repair already refused, in both id spellings, for a ``$nin``."""
+    ids: List[Any] = []
+    async for row in db.vector_sync_status.find(
+        {"sync_status": REPROCESS_REQUIRED}, {"document_id": 1}
+    ):
+        value = row.get("document_id")
+        if not value:
+            continue
+        ids.append(str(value))
+        if ObjectId.is_valid(str(value)):
+            ids.append(ObjectId(str(value)))
+    return ids
+
+
 def _chunk_order(row: Dict[str, Any]) -> int:
     """Row order for a rebuild; a malformed index sorts last instead of raising."""
     try:
@@ -764,16 +779,39 @@ async def _resync_document_vectors(
                 doc, [c.get("text_original") or c.get("text") or "" for c in chunks]
             )
         except CorrespondencePayloadError as exc:
-            # Recorded, so the document is visible (stale, not synced) and the
-            # bulk and reconcile windows stop spending a slot on it every run:
-            # repair cannot help it, reprocessing it can.
-            await _record_reprocess_required(db, document_id, str(exc))
+            canonical_rows = await db.document_vectors.count_documents(
+                {
+                    **document_ref_query,
+                    PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+                }
+            )
+            if not canonical_rows:
+                # Recorded, so the document is visible (stale, not synced) and
+                # the bulk and reconcile windows exclude it: repair cannot help
+                # it, reprocessing it can.
+                await _record_reprocess_required(db, document_id, str(exc))
+                raise HTTPException(
+                    status_code=409,
+                    detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
+                ) from exc
+            # Reprocessing wrote canonical rows but leaves an older pipeline's
+            # chunks behind; those are the document now. Repair from them -
+            # replacing every point of the document, the stale chunk points
+            # included - instead of refusing on rows nothing reads any more.
+            logger.info(
+                "Repairing %s from its canonical rows; its stored chunks are not the letter",
+                document_id,
+            )
+            chunks = []
+
+    if chunks:
+        try:
+            org_id = canonical_scope_id(doc.get("organization_id"), "organization_id")
+            project_id = canonical_scope_id(doc.get("project_id"), "project_id")
+        except CorrespondencePayloadError as exc:
             raise HTTPException(
-                status_code=409,
-                detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
+                status_code=409, detail=f"Document scope is not an id: {exc}"
             ) from exc
-        org_id = canonical_scope_id(doc.get("organization_id"), "organization_id")
-        project_id = canonical_scope_id(doc.get("project_id"), "project_id")
         if not org_id:
             # The legacy branch's builder refuses an unscoped point; so does this.
             raise HTTPException(
@@ -1121,9 +1159,11 @@ async def resync_bulk_vectors(
     # had its reprojection backoff reset each time. Excluded in the query, so
     # they cannot crowd repairable documents out of the candidate window either;
     # the single-document repair still verifies and delegates them.
-    governed = await _governed_document_ids(db)
-    if governed:
-        doc_filter["_id"] = {"$nin": governed}
+    # Documents whose stored rows repair already refused are excluded the same
+    # way: skipped after the window was cut, they still crowded it.
+    excluded = await _governed_document_ids(db) + await _reprocess_required_ids(db)
+    if excluded:
+        doc_filter["_id"] = {"$nin": excluded}
     # Contract uploads not yet promoted are the contract reindex's for the same
     # reason; selected, the repair below only delegates them.
     doc_filter["uploadType"] = _NOT_A_CONTRACT_UPLOAD
@@ -1266,9 +1306,10 @@ async def reconcile_vectors(
     # As in bulk resync: governed contracts are the contract-worker's, and
     # selecting them spent the limit and reset a FAILED generation's backoff on
     # every run. The single-document repair still verifies and delegates them.
-    governed = await _governed_document_ids(db)
-    if governed:
-        doc_filter["_id"] = {"$nin": governed}
+    # And, as there, documents repair already refused (reprocess_required).
+    excluded = await _governed_document_ids(db) + await _reprocess_required_ids(db)
+    if excluded:
+        doc_filter["_id"] = {"$nin": excluded}
     # And contract uploads not yet promoted: only correspondence points are
     # counted below, so every contract read as missing vectors and was rebuilt
     # as correspondence.
