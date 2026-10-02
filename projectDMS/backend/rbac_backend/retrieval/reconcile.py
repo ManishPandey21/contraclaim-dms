@@ -67,14 +67,17 @@ class VectorReconciler:
         from .correspondence_payload import canonical_scope_id
 
         if (
-            canonical_scope_id(document.get("organization_id"), "organization_id") != org_id
-            or canonical_scope_id(document.get("project_id"), "project_id") != project_id
+            canonical_scope_id(document.get("organization_id"), "organization_id")
+            != org_id
+            or canonical_scope_id(document.get("project_id"), "project_id")
+            != project_id
         ):
             # The scope comes from the caller and selects the rows; it must be
             # the document's own, or rows stamped with another scope would be
             # republished into it.
             logger.warning(
-                "Not reconciling %s under a scope that is not the document's", document_id
+                "Not reconciling %s under a scope that is not the document's",
+                document_id,
             )
             result = self._untouched()
             result["skipped_scope_mismatch"] = 1
