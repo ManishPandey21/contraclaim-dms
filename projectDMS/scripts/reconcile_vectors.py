@@ -102,6 +102,17 @@ async def _repair_document(
     if not is_consumable(document):
         logger.info("Skipped repair for %s; document is not consumable", document_id)
         return None
+    if str((document or {}).get("uploadType") or "").strip().lower() == "contract":
+        # A contract's points are clause points written by contract ingest; the
+        # count above compares them with nothing correspondence-shaped, and the
+        # rebuild below would replace every one with correspondence chunks and
+        # drop their clause and page provenance. The contract reindex owns them,
+        # as storage-sync's repair already says; the mismatch stays reported.
+        logger.warning(
+            "Skipped repair for %s; contract uploads are rebuilt by the contract reindex",
+            document_id,
+        )
+        return None
     vector_docs.sort(key=lambda row: str(row.get("chunk_index") or 0).zfill(12))
     texts = [
         chunk["text"]

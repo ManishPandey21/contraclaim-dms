@@ -715,6 +715,9 @@ async def _resync_document_vectors(
                     "updatedAt": datetime.utcnow(),
                     "delegated_to": "contract_reindex",
                 },
+                # Counts a correspondence pass recorded belong to that pass; left
+                # beside "delegated" they would still read as indexed chunks.
+                "$unset": {"mongo_chunks": "", "qdrant_chunks": ""},
                 "$setOnInsert": {"createdAt": datetime.utcnow()},
             },
             upsert=True,
@@ -1086,6 +1089,7 @@ async def resync_bulk_vectors(
             {
                 "_id": 1,
                 "updatedAt": 1,
+                "uploadType": 1,
                 "processing_status": 1,
                 "duplicate_status": 1,
                 "lifecycle_state": 1,
@@ -1107,6 +1111,10 @@ async def resync_bulk_vectors(
         # publication barrier purged them deliberately, and a backfill that
         # re-upserts them silently undoes containment.
         if not is_consumable(doc):
+            continue
+        # The query filter is exact-match; a contract stored in other casing is
+        # still a contract.
+        if _is_contract_upload(doc):
             continue
 
         status = await db.vector_sync_status.find_one({"document_id": doc_id})
@@ -1225,6 +1233,7 @@ async def reconcile_vectors(
                 "_id": 1,
                 "organization_id": 1,
                 "project_id": 1,
+                "uploadType": 1,
                 "processing_status": 1,
                 "duplicate_status": 1,
                 "lifecycle_state": 1,
@@ -1246,6 +1255,9 @@ async def reconcile_vectors(
             continue
         # Same containment rule as the resync path above.
         if not is_consumable(doc):
+            continue
+        # As in bulk resync: the query filter is exact-match.
+        if _is_contract_upload(doc):
             continue
         scanned += 1
 

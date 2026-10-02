@@ -207,12 +207,13 @@ def _letter_with_legacy_rows(db: Database) -> str:
     return letter_id
 
 
+@pytest.mark.parametrize("upload_type", ["contract", "Contract"])
 def test_reconcile_leaves_an_unpromoted_contract_untouched_and_still_repairs_correspondence(
-    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch
+    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch, upload_type: str
 ) -> None:
     from rbac_backend.routers import storage_sync
 
-    contract = _contract_document()
+    contract = _contract_document(uploadType=upload_type)
     db = Database([contract])
     contract_id = _seed_contract(db, harness, contract)
     letter_id = _letter_with_legacy_rows(db)
@@ -261,12 +262,13 @@ def test_reconcile_leaves_an_unpromoted_contract_untouched_and_still_repairs_cor
     assert run(db.vector_sync_status.find_one({"document_id": letter_id}))["sync_status"] == "synced"
 
 
+@pytest.mark.parametrize("upload_type", ["contract", "Contract"])
 def test_reconcile_dry_run_does_not_offer_to_repair_a_contract(
-    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch
+    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch, upload_type: str
 ) -> None:
     from rbac_backend.routers import storage_sync
 
-    contract = _contract_document()
+    contract = _contract_document(uploadType=upload_type)
     db = Database([contract])
     contract_id = _seed_contract(db, harness, contract)
     _wire(monkeypatch, harness, db)
@@ -287,12 +289,13 @@ def test_reconcile_dry_run_does_not_offer_to_repair_a_contract(
     }
 
 
+@pytest.mark.parametrize("upload_type", ["contract", "Contract"])
 def test_bulk_resync_leaves_an_unpromoted_contract_untouched(
-    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch
+    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch, upload_type: str
 ) -> None:
     from rbac_backend.routers import storage_sync
 
-    contract = _contract_document()
+    contract = _contract_document(uploadType=upload_type)
     db = Database([contract])
     contract_id = _seed_contract(db, harness, contract)
     letter_id = _letter_with_legacy_rows(db)
@@ -315,16 +318,28 @@ def test_bulk_resync_leaves_an_unpromoted_contract_untouched(
     assert [entry["document_id"] for entry in result["processed"]] == [letter_id], result
 
 
+@pytest.mark.parametrize("upload_type", ["contract", "Contract"])
 def test_single_document_repair_delegates_an_unpromoted_contract(
-    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch
+    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch, upload_type: str
 ) -> None:
     from rbac_backend.routers import storage_sync
 
-    contract = _contract_document()
+    contract = _contract_document(uploadType=upload_type)
     db = Database([contract])
     contract_id = _seed_contract(db, harness, contract)
     _wire(monkeypatch, harness, db)
     points_before, rows_before = _points(harness, contract_id), _rows(db, contract_id)
+    # A row a correspondence pass wrote earlier: its counts must not survive.
+    run(
+        db.vector_sync_status.insert_one(
+            {
+                "document_id": contract_id,
+                "sync_status": "synced",
+                "mongo_chunks": 3,
+                "qdrant_chunks": 3,
+            }
+        )
+    )
 
     result = run(storage_sync._resync_document_vectors(contract_id, db, harness.config))
 
@@ -333,6 +348,8 @@ def test_single_document_repair_delegates_an_unpromoted_contract(
     assert _rows(db, contract_id) == rows_before
     status = run(db.vector_sync_status.find_one({"document_id": contract_id}))
     assert status["sync_status"] == "delegated"
+    assert "mongo_chunks" not in status and "qdrant_chunks" not in status
+    assert len([r for r in db.vector_sync_status._docs.values() if r["document_id"] == contract_id]) == 1
 
 
 def test_reconcile_still_excludes_an_instrument_governed_contract(
@@ -365,3 +382,34 @@ def test_reconcile_still_excludes_an_instrument_governed_contract(
 
     assert _points(harness, contract_id) == points_before
     assert contract_id not in {entry["document_id"] for entry in result["details"]}
+
+
+@pytest.mark.parametrize("upload_type", ["contract", "Contract"])
+def test_reconcile_vectors_script_refuses_to_rebuild_a_contract(
+    harness: QdrantHarness, monkeypatch: pytest.MonkeyPatch, upload_type: str
+) -> None:
+    """``scripts/reconcile_vectors.py --repair``: the same writer, the same rule."""
+    import importlib.util
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[3] / "scripts" / "reconcile_vectors.py"
+    spec = importlib.util.spec_from_file_location("reconcile_vectors_contract_guard", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    contract = _contract_document(uploadType=upload_type)
+    db = Database([contract])
+    contract_id = _seed_contract(db, harness, contract)
+    points_before, rows_before = _points(harness, contract_id), _rows(db, contract_id)
+
+    async def _resolve(_db, document_id):
+        return contract if str(document_id) == contract_id else None
+
+    monkeypatch.setattr(module, "resolve_canonical_document", _resolve)
+
+    repaired = run(module._repair_document(db, harness.writer, contract_id))
+
+    assert repaired is None
+    assert _points(harness, contract_id) == points_before
+    assert _rows(db, contract_id) == rows_before
