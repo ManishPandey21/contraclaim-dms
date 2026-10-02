@@ -655,3 +655,73 @@ def test_superseded_rows_stay_when_their_points_cannot_be_confirmed_gone(
     # Never reported synced, and the rows - the record of those points - kept.
     assert result["status"] == "mismatch", result
     assert run(db.chunks.count_documents({"chunk_id": chunk_id})) == 1
+
+
+def test_a_canonical_point_sharing_a_superseded_chunk_id_survives(
+    harness: QdrantHarness, monkeypatch
+) -> None:
+    """Pipeline and canonical chunk ids seed from the same parts, so a
+    superseded chunk can carry the id of the canonical chunk replace_document
+    just wrote. Only the superseded (non-canonical) point may go."""
+    from rbac_backend.retrieval.correspondence_payload import (
+        CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+        PAYLOAD_SCHEMA_VERSION_FIELD,
+        build_correspondence_chunks,
+    )
+    from rbac_backend.routers import storage_sync
+    from rbac_backend.tests.correspondence_vector_harness import embed_text
+
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document_id = str(document["_id"])
+    db = Database([document])
+    [canonical] = build_correspondence_chunks(
+        document, [LETTER], embedding_model=harness.config.openai_embedding_model
+    )
+    shared_id = canonical["payload"]["chunk_id"]
+    run(
+        db.chunks.insert_one(
+            {"chunk_id": shared_id, "document_id": document_id, "org_id": ORG,
+             "project_id": PROJECT, "chunk_index": 0, "text_original": REPORT}
+        )
+    )
+    models = harness.writer._qdrant_models
+    harness.client.upsert(
+        collection_name=harness.config.qdrant_collection,
+        points=[
+            models.PointStruct(
+                id=str(uuid.uuid4()),
+                vector=embed_text(REPORT),
+                payload={"chunk_id": shared_id, "document_id": document_id,
+                         "org_id": ORG, "project_id": PROJECT, "text": REPORT},
+            )
+        ],
+        wait=True,
+    )
+    run(
+        db.document_vectors.insert_one(
+            {"document_id": document_id, "chunk_index": 0, "text": LETTER,
+             PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION}
+        )
+    )
+
+    async def _count(_config, doc_id):
+        return harness.client.count(
+            collection_name=harness.config.qdrant_collection,
+            count_filter=storage_sync._qdrant_document_filter(models, doc_id),
+            exact=True,
+        ).count
+
+    monkeypatch.setattr(storage_sync, "LangChainVectorService", lambda _config: harness.writer)
+    monkeypatch.setattr(storage_sync, "_fetch_qdrant_document_count", _count)
+
+    result = run(
+        storage_sync._resync_document_vectors(
+            document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+        )
+    )
+
+    assert result["status"] == "synced", result
+    survivors = [p for p in harness.scroll() if (p.payload or {}).get("chunk_id") == shared_id]
+    assert [p.payload.get(PAYLOAD_SCHEMA_VERSION_FIELD) for p in survivors] == [
+        CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
+    ], survivors

@@ -399,10 +399,15 @@ class VectorClient:
                 if not (
                     str(entry["payload"].get("document_id")) == str(document_id)
                     and str(entry["payload"].get("chunk_id")) in wanted
+                    and entry["payload"].get(PAYLOAD_SCHEMA_VERSION_FIELD)
+                    != CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
                 )
             ]
             return 0
         qm = self._qmodels
+        # Never a canonical correspondence point: replace_document just wrote
+        # those, and a canonical chunk id can equal a superseded one (both
+        # seed from the document, the index and the text's start).
         selector = qm.Filter(
             must=[
                 qm.FieldCondition(
@@ -411,7 +416,13 @@ class VectorClient:
                 qm.FieldCondition(
                     key="chunk_id", match=qm.MatchAny(any=[str(c) for c in chunk_ids])
                 ),
-            ]
+            ],
+            must_not=[
+                qm.FieldCondition(
+                    key=PAYLOAD_SCHEMA_VERSION_FIELD,
+                    match=qm.MatchValue(value=CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION),
+                )
+            ],
         )
         try:
             await asyncio.to_thread(
