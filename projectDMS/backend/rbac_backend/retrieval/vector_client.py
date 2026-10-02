@@ -405,7 +405,9 @@ class VectorClient:
         qm = self._qmodels
         selector = qm.Filter(
             must=[
-                qm.FieldCondition(key="document_id", match=qm.MatchValue(value=str(document_id))),
+                qm.FieldCondition(
+                    key="document_id", match=qm.MatchValue(value=str(document_id))
+                ),
                 qm.FieldCondition(
                     key="chunk_id", match=qm.MatchAny(any=[str(c) for c in chunk_ids])
                 ),
