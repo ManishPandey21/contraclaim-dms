@@ -372,6 +372,63 @@ class VectorClient:
         except Exception:  # metrics must never break the failure path itself
             logger.debug("Failed to record vector store failure metric", exc_info=True)
 
+    async def delete_document_chunks(
+        self,
+        document_id: str,
+        chunk_ids: List[str],
+        namespace: Optional[str] = None,
+    ) -> int:
+        """Delete one document's points whose payload ``chunk_id`` is in ``chunk_ids``.
+
+        By payload, not by point id: a pipeline chunk id
+        (``<document>-<digest>``) is not a valid Qdrant point id, so a
+        ``PointIdsList`` delete of it fails, and LangChain-written points use
+        ``uuid5`` ids anyway. Scoped by document only, so a point stamped with
+        any tenant scope is found. Returns how many such points remain
+        afterwards (0 = all gone). Raises when the store cannot answer; an
+        unanswered delete is never reported as done.
+        """
+        if not chunk_ids:
+            return 0
+        collection = namespace or self.collection_name or self.config.qdrant_collection
+        if not (self.enabled and self._client and self._qmodels):
+            wanted = {str(chunk_id) for chunk_id in chunk_ids}
+            self._memory_index = [
+                entry
+                for entry in self._memory_index
+                if not (
+                    str(entry["payload"].get("document_id")) == str(document_id)
+                    and str(entry["payload"].get("chunk_id")) in wanted
+                )
+            ]
+            return 0
+        qm = self._qmodels
+        selector = qm.Filter(
+            must=[
+                qm.FieldCondition(key="document_id", match=qm.MatchValue(value=str(document_id))),
+                qm.FieldCondition(
+                    key="chunk_id", match=qm.MatchAny(any=[str(c) for c in chunk_ids])
+                ),
+            ]
+        )
+        try:
+            await asyncio.to_thread(
+                self._client.delete,
+                collection_name=collection,
+                points_selector=qm.FilterSelector(filter=selector),
+                wait=True,
+            )
+            remaining = await asyncio.to_thread(
+                self._client.count,
+                collection_name=collection,
+                count_filter=selector,
+                exact=True,
+            )
+        except Exception:
+            await self._record_failure("delete", collection)
+            raise
+        return int(getattr(remaining, "count", 0))
+
     async def list_points(
         self,
         filters: Dict[str, Any],

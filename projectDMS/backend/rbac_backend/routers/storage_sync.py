@@ -902,17 +902,33 @@ async def _resync_document_vectors(
         if not legacy_service.enabled:
             raise HTTPException(status_code=503, detail="Qdrant vector service is not available")
         await legacy_service.replace_document(payloads)
+        superseded_remaining = 0
         if superseded_chunk_ids:
-            # By id, not left to replace_document's best-effort delete: these
-            # points may carry the report text that made the rows unpublishable.
-            # Then the rows go too, or every reconcile would find their ids
-            # missing in Qdrant and rebuild the document again.
-            await vector_client.delete(superseded_chunk_ids, namespace=None)
-            await db.chunks.delete_many({"chunk_id": {"$in": superseded_chunk_ids}})
+            # Not left to replace_document's best-effort, scope-filtered delete:
+            # these points may carry the report text that made the rows
+            # unpublishable, under any scope. Deleted by payload, and confirmed.
+            try:
+                superseded_remaining = await vector_client.delete_document_chunks(
+                    document_id, superseded_chunk_ids, namespace=None
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not remove the superseded chunk points of %s: %s", document_id, exc
+                )
+                superseded_remaining = len(superseded_chunk_ids)
+            if not superseded_remaining:
+                # Only now: the rows are the record of those points, and
+                # without them every reconcile would find their ids missing in
+                # Qdrant and rebuild the document again.
+                await db.chunks.delete_many({"chunk_id": {"$in": superseded_chunk_ids}})
         mongo_chunks = len(payloads)
         qdrant_count = await _fetch_qdrant_document_count(config, document_id)
         qdrant_chunks = int(qdrant_count or 0)
-        status = "synced" if qdrant_chunks == mongo_chunks else "mismatch"
+        status = (
+            "synced"
+            if qdrant_chunks == mongo_chunks and not superseded_remaining
+            else "mismatch"
+        )
 
     await db.vector_sync_status.update_one(
         {"document_id": document_id},

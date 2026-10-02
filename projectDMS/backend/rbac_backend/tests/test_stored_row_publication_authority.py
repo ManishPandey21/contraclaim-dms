@@ -560,3 +560,98 @@ def test_after_reprocessing_superseded_chunks_are_retired_and_reconcile_settles(
     assert [d["status"] for d in settled["details"] if d["document_id"] == document_id] == [
         "in_sync"
     ], settled
+
+
+def _superseded_fixture(harness: QdrantHarness, monkeypatch):
+    """A reprocessed document: canonical rows, plus an older pipeline's refused
+    chunk rows with production chunk ids, whose point carries another
+    tenant's scope (the stamped-row case) and a uuid5 point id."""
+    from rbac_backend.ingestion.chunk_ids import deterministic_chunk_id
+    from rbac_backend.retrieval.correspondence_payload import (
+        CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION,
+        PAYLOAD_SCHEMA_VERSION_FIELD,
+    )
+    from rbac_backend.routers import storage_sync
+    from rbac_backend.tests.correspondence_vector_harness import embed_text
+
+    document = _document(ocrText=LETTER, ocr_text_kind=OCR_TEXT_KIND_SOURCE)
+    document_id = str(document["_id"])
+    db = Database([document])
+    chunk_id = deterministic_chunk_id(document_id, 0, None, REPORT)
+    run(
+        db.chunks.insert_one(
+            {"chunk_id": chunk_id, "document_id": document_id, "org_id": FOREIGN_ORG,
+             "project_id": FOREIGN_PROJECT, "chunk_index": 0, "text_original": REPORT}
+        )
+    )
+    models = harness.writer._qdrant_models
+    harness.client.upsert(
+        collection_name=harness.config.qdrant_collection,
+        points=[
+            models.PointStruct(
+                id=str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id)),
+                vector=embed_text(REPORT),
+                payload={"chunk_id": chunk_id, "document_id": document_id,
+                         "org_id": FOREIGN_ORG, "project_id": FOREIGN_PROJECT, "text": REPORT},
+            )
+        ],
+        wait=True,
+    )
+    run(
+        db.document_vectors.insert_one(
+            {"document_id": document_id, "chunk_index": 0, "text": LETTER,
+             PAYLOAD_SCHEMA_VERSION_FIELD: CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION}
+        )
+    )
+
+    async def _count(_config, doc_id):
+        return harness.client.count(
+            collection_name=harness.config.qdrant_collection,
+            count_filter=storage_sync._qdrant_document_filter(models, doc_id),
+            exact=True,
+        ).count
+
+    monkeypatch.setattr(storage_sync, "LangChainVectorService", lambda _config: harness.writer)
+    monkeypatch.setattr(storage_sync, "_fetch_qdrant_document_count", _count)
+    return db, document_id, chunk_id
+
+
+def test_superseded_points_with_production_ids_and_any_scope_are_removed(
+    harness: QdrantHarness, monkeypatch
+) -> None:
+    from rbac_backend.routers import storage_sync
+
+    db, document_id, chunk_id = _superseded_fixture(harness, monkeypatch)
+
+    result = run(
+        storage_sync._resync_document_vectors(
+            document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+        )
+    )
+
+    assert result["status"] == "synced", result
+    assert [p for p in harness.scroll() if (p.payload or {}).get("chunk_id") == chunk_id] == []
+    assert run(db.chunks.count_documents({"chunk_id": chunk_id})) == 0
+
+
+def test_superseded_rows_stay_when_their_points_cannot_be_confirmed_gone(
+    harness: QdrantHarness, monkeypatch
+) -> None:
+    from rbac_backend.routers import storage_sync
+
+    db, document_id, chunk_id = _superseded_fixture(harness, monkeypatch)
+
+    async def _unavailable(*_args, **_kwargs):
+        raise ConnectionError("vector store unavailable")
+
+    monkeypatch.setattr(harness.reader, "delete_document_chunks", _unavailable)
+
+    result = run(
+        storage_sync._resync_document_vectors(
+            document_id, db, harness.config, DeterministicEmbeddingClient(), harness.reader
+        )
+    )
+
+    # Never reported synced, and the rows - the record of those points - kept.
+    assert result["status"] == "mismatch", result
+    assert run(db.chunks.count_documents({"chunk_id": chunk_id})) == 1
