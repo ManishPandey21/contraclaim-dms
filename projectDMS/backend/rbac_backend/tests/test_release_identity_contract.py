@@ -1349,3 +1349,119 @@ def test_a_failing_rerun_withdraws_an_earlier_green_receipt(repo, tmp_path):
     assert not Path(str(target) + RM.RECEIPT_SUFFIX).exists(), (
         "the old receipt survived a failing run"
     )
+
+
+# --------------------------------------------------------------------------- #
+# an undeclared document-worker canary fails BEFORE the deploy, not after it
+# --------------------------------------------------------------------------- #
+#
+# A running canary with no manifest entry of its own is held to the
+# document-worker image. FULL and BACKEND_ONLY replace that image and the guide
+# never rebuilds or recreates the canary (no `image:` key: it is its own
+# `<project>-document-worker-canary` image), so post-deploy verification could
+# only fail - after production had already changed. `release_manifest.py
+# preflight` answers before any restart: stop the canary, or declare it.
+
+CANARY = "document-worker-canary"
+
+
+def _preflight_state(release: str):
+    state = {**{s: (10, release) for s in BACKEND_SERVICES}, "client": (11, release)}
+    return state
+
+
+@pytest.mark.parametrize("scope", ["FULL", "BACKEND_ONLY"])
+def test_preflight_passes_a_backend_deploy_with_no_canary(scope):
+    release = "a" * 40
+    target = _manifest(release, scope, _preflight_state(release))
+    findings = RM.preflight(scope, target, _running(_preflight_state("b" * 40)))
+    assert findings and _failures(findings) == [], findings
+
+
+@pytest.mark.parametrize("scope", ["FULL", "BACKEND_ONLY"])
+def test_preflight_fails_a_backend_deploy_while_an_undeclared_canary_runs(scope):
+    release = "a" * 40
+    target = _manifest(release, scope, _preflight_state(release))
+    running = _running({**_preflight_state("b" * 40), CANARY: (10, "b" * 40)})
+    failures = _failures(RM.preflight(scope, target, running))
+    assert len(failures) == 1, failures
+    message = failures[0]
+    assert message.startswith(CANARY), message
+    # It says what to do: stop it, or declare it in the manifest.
+    assert "stop" in message and "--image document-worker-canary=" in message, message
+
+
+@pytest.mark.parametrize("scope", ["FULL", "BACKEND_ONLY"])
+def test_preflight_passes_a_canary_the_manifest_declares(scope):
+    release = "a" * 40
+    target = _manifest(release, scope, {**_preflight_state(release), CANARY: (12, release)})
+    running = _running({**_preflight_state("b" * 40), CANARY: (10, "b" * 40)})
+    assert _failures(RM.preflight(scope, target, running)) == []
+
+
+def test_preflight_leaves_client_only_to_the_existing_canary_rule():
+    """CLIENT_ONLY does not touch the document-worker image, so a canary on it
+    stays as the verifier already judges it (held to the approved worker)."""
+    release = "a" * 40
+    target = _manifest(release, "CLIENT_ONLY", _preflight_state(release))
+    running = _running({**_preflight_state("b" * 40), CANARY: (10, "b" * 40)})
+    assert _failures(RM.preflight("CLIENT_ONLY", target, running)) == []
+
+
+@pytest.mark.parametrize(
+    ("scope", "target"),
+    [(None, "ok"), ("SOMETIMES", "ok"), ("FULL", None), ("FULL", "other_scope")],
+    ids=["no_scope", "bad_scope", "no_manifest", "manifest_for_another_scope"],
+)
+def test_preflight_fails_what_it_cannot_establish(scope, target):
+    release = "a" * 40
+    manifest = _manifest(release, "FULL", _preflight_state(release))
+    if target == "other_scope":
+        manifest["scope"] = "CLIENT_ONLY"
+    findings = RM.preflight(scope, manifest if target else None, _running(_preflight_state(release)))
+    assert _failures(findings), findings
+
+
+def test_preflight_cli_exits_non_zero_on_an_undeclared_canary(tmp_path):
+    release = "a" * 40
+    target = tmp_path / "target.json"
+    running = tmp_path / "running.json"
+    target.write_text(json.dumps(_manifest(release, "FULL", _preflight_state(release))))
+    running.write_text(
+        json.dumps(_running({**_preflight_state("b" * 40), CANARY: (10, "b" * 40)}))
+    )
+    args = ["preflight", "--scope", "FULL", "--target", str(target), "--running", str(running)]
+    assert RM.main(args) == 1
+    running.write_text(json.dumps(_running(_preflight_state("b" * 40))))
+    assert RM.main(args) == 0
+
+
+def test_post_deploy_still_holds_an_undeclared_canary_to_the_worker_image(repo):
+    """The fail-fast is in front of the deploy; the verifier is not loosened."""
+    root, c = repo
+    _git(root, "checkout", "-q", c["v3"])
+    state = {**{s: (10, c["v3"]) for s in BACKEND_SERVICES}, "client": (11, c["v3"])}
+    target = _manifest(c["v3"], "FULL", state)
+    stale_canary = _running({**state, CANARY: (99, c["v1"])})
+    failures = _failures(_check(root, "FULL", target, None, stale_canary))
+    assert any(m.startswith(CANARY) for m in failures), failures
+
+
+def test_the_guide_runs_the_preflight_before_each_backend_restart():
+    guide = (PROJECT / "docs" / "CONTRACLAIM_DOCKER_DEPLOYMENT_UPDATE_GUIDE.md").read_text(
+        encoding="utf-8"
+    )
+    preflight = guide.find("scripts/release_preflight.sh")
+    restart = guide.find("## 7. Restart the Updated Containers")
+    assert preflight != -1, "the guide never runs the release preflight"
+    assert restart != -1 and preflight < restart, "the preflight must run before any restart"
+
+
+def test_the_preflight_script_asks_the_manifest_tool_and_fails_closed():
+    text = (PROJECT / "scripts" / "release_preflight.sh").read_text(encoding="utf-8")
+    assert "set -euo pipefail" in text
+    assert "release_manifest.py\" preflight" in text or "release_manifest.py preflight" in text
+    assert "ps -q document-worker-canary" in text
+    # Read-only: it never changes a container.
+    for verb in (" up ", " stop ", " rm ", " restart ", " kill ", "--scale"):
+        assert verb not in text.replace("# ", ""), verb

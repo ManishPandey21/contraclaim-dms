@@ -26,6 +26,9 @@ Commands:
     confirm  turn that pending receipt into the receipt - post_deploy_verify.sh
              does it at the end of a run with no failure at all.
     promote  make a verified manifest the approved state (``current.json``).
+    preflight  before any restart: refuse a FULL or BACKEND_ONLY deploy while a
+             document-worker canary runs that the manifest does not declare
+             (release_preflight.sh calls it). Read-only.
 
 Policy (owner decision 2026-10-02 - strict, service-scoped):
 
@@ -535,6 +538,70 @@ def evaluate(
 BLOCKING_SEVERITIES = ("HIGH", "CRITICAL")
 
 
+def preflight(
+    scope: Optional[str], target: Optional[Mapping], running: Mapping
+) -> List[Finding]:
+    """What must hold before a deploy changes anything.
+
+    A canary with no manifest entry of its own is held to the document-worker
+    image (``CANARY_OF``). FULL and BACKEND_ONLY replace that image, and no
+    deploy step rebuilds or recreates the canary, so a canary running through
+    such a deploy can only fail verification - after production has changed.
+    It has to be stopped first, or declared: built, scanned, certified and
+    named in the manifest (``target --image document-worker-canary=...``),
+    which the verifier then holds it to. CLIENT_ONLY leaves the worker image as
+    approved, so the verifier's existing rule stands there. Nothing here
+    relaxes ``evaluate``.
+    """
+    out: List[Finding] = []
+    if scope not in SCOPES:
+        out.append(
+            Finding(False, f"deployment scope {scope!r} is not one of {', '.join(SCOPES)} (DEPLOY_SCOPE)")
+        )
+        return out
+    if not isinstance(target, Mapping) or target.get("schema") != SCHEMA:
+        out.append(
+            Finding(False, "no release manifest for this deploy (RELEASE_MANIFEST): write it before any restart")
+        )
+        return out
+    if scope != "UNCHANGED" and target.get("scope") != scope:
+        out.append(
+            Finding(
+                False,
+                f"release manifest was written for scope {target.get('scope')!r}, the deploy declares {scope}",
+            )
+        )
+        return out
+    services = target.get("services") or {}
+    for canary, worker in sorted(CANARY_OF.items()):
+        containers = [row for row in (running.get(canary) or []) if row]
+        if not containers:
+            out.append(Finding(True, f"{canary}: not running"))
+        elif worker not in SCOPES[scope]:
+            out.append(
+                Finding(
+                    True,
+                    f"{canary}: running; scope {scope} leaves the {worker} image it is held to as approved",
+                )
+            )
+        elif canary in services:
+            out.append(Finding(True, f"{canary}: running, and declared by the release manifest"))
+        else:
+            ids = ", ".join(str(row.get("id"))[:12] for row in containers)
+            out.append(
+                Finding(
+                    False,
+                    f"{canary}: {len(containers)} container(s) running ({ids}) that this {scope} "
+                    f"release manifest does not declare. The deploy replaces the {worker} image "
+                    f"it is held to and never recreates it, so verification would fail after the "
+                    f"restart. Before deploying, stop it (scale {canary} to 0), or declare it: "
+                    f"build, scan and certify its image and pass "
+                    f"--image {canary}=<image> to `release_manifest.py target`.",
+                )
+            )
+    return out
+
+
 def scan_problems(report: object, image_id: str) -> List[str]:
     """A Trivy JSON report (``trivy image --format json``) certifies an image
     only if it is a scan of THAT image id and holds no fixable HIGH/CRITICAL
@@ -802,7 +869,27 @@ def main(argv: Sequence[str]) -> int:
     p = sub.add_parser("promote", help="make a verified manifest the approved state")
     p.add_argument("--manifest", required=True)
     p.add_argument("--current", required=True)
+    f = sub.add_parser(
+        "preflight", help="before any restart: what must hold for this deploy (read-only)"
+    )
+    f.add_argument("--scope", default="")
+    f.add_argument("--target", default="")
+    f.add_argument(
+        "--running", required=True, help="JSON: service -> [{id, image_id, revision}]"
+    )
     args = parser.parse_args(argv)
+
+    if args.command == "preflight":
+        try:
+            running_rows = json.loads(Path(args.running).read_text(encoding="utf-8"))
+            target_doc = _load(args.target) if args.target else None
+        except (SystemExit, OSError, ValueError) as exc:
+            print(f"FAIL {exc}")
+            return 1
+        results = preflight(args.scope or None, target_doc, running_rows)
+        for finding in results:
+            print(("PASS " if finding.ok else "FAIL ") + finding.message)
+        return 0 if results and all(f.ok for f in results) else 1
 
     if args.command == "certify":
         head = _clean_head(args.checkout)
