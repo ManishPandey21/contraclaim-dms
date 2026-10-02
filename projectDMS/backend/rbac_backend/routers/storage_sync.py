@@ -474,6 +474,18 @@ async def _governed_document_ids(db) -> List[Any]:
     return ids
 
 
+#: A contract upload's vectors are clause points written by contract ingest and
+#: rebuilt by the contract reindex, never correspondence chunks. Whether or not
+#: a Contract Master instrument names it yet, this module's correspondence
+#: repair must not touch them.
+CONTRACT_UPLOAD_TYPE = "contract"
+
+
+def _is_contract_upload(doc: Dict[str, Any]) -> bool:
+    """The upload-type rule ``retrieval.reconcile`` applies to the same rows."""
+    return str(doc.get("uploadType") or "").strip().lower() == CONTRACT_UPLOAD_TYPE
+
+
 async def _verify_current_projection(
     db, instrument: Dict[str, Any], doc: Dict[str, Any], store: Any
 ) -> Dict[str, Any]:
@@ -686,6 +698,33 @@ async def _resync_document_vectors(
             "status": "delegated",
             "reason": "contract_master_reprojection",
             "projections": projections,
+        }
+
+    if _is_contract_upload(doc):
+        # A contract no instrument names yet (not promoted). Its points are not
+        # in correspondence shape, so the canonical count below reads 0 and the
+        # rebuild replaced every clause point - and its clause and page
+        # provenance - with correspondence chunks, then reported "synced".
+        # Delegated to the contract reindex instead; nothing is written.
+        await db.vector_sync_status.update_one(
+            {"document_id": document_id},
+            {
+                "$set": {
+                    "document_id": document_id,
+                    "sync_status": "delegated",
+                    "updatedAt": datetime.utcnow(),
+                    "delegated_to": "contract_reindex",
+                },
+                "$setOnInsert": {"createdAt": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+        return {
+            "document_id": document_id,
+            "mongo_chunks": 0,
+            "qdrant_chunks": 0,
+            "status": "delegated",
+            "reason": "contract_reindex",
         }
 
     document_ref_query = _candidate_field_query("document_id", document_id)
@@ -1032,6 +1071,9 @@ async def resync_bulk_vectors(
     governed = await _governed_document_ids(db)
     if governed:
         doc_filter["_id"] = {"$nin": governed}
+    # Contract uploads not yet promoted are the contract reindex's for the same
+    # reason; selected, the repair below only delegates them.
+    doc_filter["uploadType"] = {"$ne": CONTRACT_UPLOAD_TYPE}
 
     # Containment: this backfill RE-UPSERTS vectors, so it can undo the
     # publication barrier's purge for a blocked or quarantined document. The
@@ -1165,6 +1207,10 @@ async def reconcile_vectors(
     governed = await _governed_document_ids(db)
     if governed:
         doc_filter["_id"] = {"$nin": governed}
+    # And contract uploads not yet promoted: only correspondence points are
+    # counted below, so every contract read as missing vectors and was rebuilt
+    # as correspondence.
+    doc_filter["uploadType"] = {"$ne": CONTRACT_UPLOAD_TYPE}
     # Some datasets may use is_deleted; keep them included unless explicitly true
     doc_filter["is_deleted"] = {"$ne": True}
     if org_id:
