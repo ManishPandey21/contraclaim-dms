@@ -1403,6 +1403,20 @@ class DocumentService:
             )
             if not raw_doc:
                 return
+            from .contract_source import is_contract_source
+
+            if await is_contract_source(db, str(document_id), raw_doc):
+                # Asked again here, not trusted from the run's start: the
+                # document became a contract (or was promoted) while this run
+                # extracted, and its points and clause rows are the contract
+                # writers' - never this pipeline's to purge. An unreadable
+                # instrument collection raises, and the except below then
+                # leaves everything in place too.
+                logger.warning(
+                    "[document_pipeline] Not purging %s: it is a contract source",
+                    document_id,
+                )
+                return
             await self._delete_qdrant_vectors(raw_doc, str(document_id))
             await db.document_vectors.delete_many({"document_id": str(document_id)})
             logger.info(
@@ -1475,6 +1489,40 @@ class DocumentService:
         """Terminal, non-success state: automated recovery cannot finish this."""
         db = await self._get_db()
         now = datetime.utcnow()
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        if await is_contract_source(
+            db, document_id, await resolve_canonical_document(db, document_id)
+        ):
+            # The document became a contract source during this run. Its
+            # status and evidence belong to the contract writers: close the job
+            # the way the entry check would have, and touch nothing else.
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "dead_lettered",
+                        "stage": "skipped_governed_contract",
+                        "error": {
+                            "message": (
+                                "Document became a contract source (a contract upload, or "
+                                "governed by a Contract Master instrument) during processing; "
+                                "reprocess it through the contract reindex"
+                            ),
+                            "timestamp": now,
+                            "terminal": True,
+                        },
+                        "updated_at": now,
+                    }
+                },
+            )
+            logger.warning(
+                "[document_pipeline] Document %s became a contract source during "
+                "processing; not marking it for review or purging it",
+                document_id,
+            )
+            return
         remaining = list(checkpoint.get("remaining_page_numbers") or [])
         await db.document_processing_jobs.update_one(
             {"_id": job_id},

@@ -711,3 +711,89 @@ def test_the_general_writer_still_indexes_a_plain_letter(database):
 
     assert database.run(run) == 1
     assert store.points and all(p["document_id"] == DOC for p in store.points.values())
+
+
+# --------------------------------------------------------------------------- #
+# The job worker's human-review exit purges what an earlier run published
+# --------------------------------------------------------------------------- #
+
+
+def _human_review(database, *, upload_type: str, governed: bool):
+    """A job ends in human review for a document that, by then, is (or is not)
+    a contract source. Returns what the purge and the status writes did."""
+    from bson import ObjectId
+
+    from rbac_backend.services.document_service import DocumentService
+
+    oid = ObjectId()
+
+    async def run(db, client):
+        await db["documents"].insert_one(
+            {
+                "_id": oid,
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "uploadType": upload_type,
+                "processing_status": "processing",
+                "status": "completed",
+                "publication_status": "published",
+                "is_active": True,
+            }
+        )
+        await db.document_vectors.insert_many(
+            [
+                {"document_id": str(oid), "chunk_id": f"{oid}-clause-{n}", "uploadType": upload_type,
+                 "page_start": n, "text": f"clause {n}"}
+                for n in (1, 2)
+            ]
+        )
+        if governed:
+            await db[CONTRACT_DOCUMENTS_COLLECTION].insert_one(
+                {"_id": f"cd-{oid}", "document_id": str(oid), "classification_revision": 1}
+            )
+        await db.document_processing_jobs.insert_one(
+            {"_id": "job-hr", "document_id": str(oid), "status": "processing"}
+        )
+        service = DocumentService(db)
+        purged: List[str] = []
+
+        async def _record_delete(raw_doc, doc_id):
+            purged.append(doc_id)
+            return True
+
+        async def _no_graph(*_args, **_kwargs):
+            return None
+
+        service._delete_qdrant_vectors = _record_delete
+        service._invalidate_graph_contribution = _no_graph
+        await service._mark_human_review("job-hr", str(oid), {"remaining_page_numbers": [3]})
+        return {
+            "purged": purged,
+            "rows": await db.document_vectors.count_documents({"document_id": str(oid)}),
+            "document_status": (await db["documents"].find_one({"_id": oid}))["processing_status"],
+            "job": await db.document_processing_jobs.find_one({"_id": "job-hr"}),
+        }
+
+    return database.run(run)
+
+
+def test_human_review_never_purges_a_document_that_became_a_contract_source(database):
+    """The run passed its entry checks as a plain letter; by the time it ends
+    in human review the document is a promoted contract."""
+    outcome = _human_review(database, upload_type="contract", governed=True)
+
+    assert outcome["purged"] == [], "the contract's points were purged"
+    assert outcome["rows"] == 2, "the contract's clause rows were deleted"
+    assert outcome["document_status"] == "processing", "the contract's status was overwritten"
+    assert (outcome["job"]["status"], outcome["job"]["stage"]) == (
+        "dead_lettered",
+        "skipped_governed_contract",
+    )
+
+
+def test_human_review_still_purges_a_plain_letter(database):
+    outcome = _human_review(database, upload_type="incoming", governed=False)
+
+    assert len(outcome["purged"]) == 1
+    assert outcome["rows"] == 0
+    assert outcome["document_status"] == "human_review_required"

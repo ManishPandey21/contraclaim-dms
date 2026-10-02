@@ -646,8 +646,9 @@ class DatabaseService:
             return mongo_chunks
 
         except ContractSourceWriteRefused:
-            # Nothing of the contract's was touched, and its sync bookkeeping
-            # belongs to its own writers: no error status is recorded here.
+            # No evidence of the contract's was replaced or deleted. No error
+            # status is recorded over its sync row either; a "pending" written
+            # just before a late refusal is left for its own writers.
             raise
         except DocumentProcessingError:
             await self._update_vector_sync_status(
