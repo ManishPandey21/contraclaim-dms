@@ -173,6 +173,23 @@ def _wire(monkeypatch: pytest.MonkeyPatch, harness: QdrantHarness, db: Database)
         return sorted({row.get(field) for row in rows if row.get(field)})
 
     db[CONTRACT_DOCUMENTS_COLLECTION].distinct = _distinct  # type: ignore[attr-defined]
+
+    # The harness ignores projections; Mongo does not. Apply them, so a guard
+    # that reads a field the route forgot to project fails here too.
+    documents = db.documents
+    unprojected_find = documents.find
+
+    def _projected_find(filter: Dict[str, Any], projection: Any = None, *args: Any, **kwargs: Any):
+        cursor = unprojected_find(filter, *args, **kwargs)
+        if projection:
+            kept = {key for key, include in projection.items() if include}
+            cursor._documents = [  # type: ignore[attr-defined]
+                {key: value for key, value in row.items() if key in kept or key == "_id"}
+                for row in cursor._documents  # type: ignore[attr-defined]
+            ]
+        return cursor
+
+    documents.find = _projected_find  # type: ignore[method-assign]
     monkeypatch.setattr(storage_sync, "get_database", _database)
     monkeypatch.setattr(storage_sync, "require_step_up", _step_up)
     monkeypatch.setattr(storage_sync, "DocumentProcessingConfig", lambda: harness.config)

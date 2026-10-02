@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, Tuple, List, Set
@@ -479,6 +480,12 @@ async def _governed_document_ids(db) -> List[Any]:
 #: a Contract Master instrument names it yet, this module's correspondence
 #: repair must not touch them.
 CONTRACT_UPLOAD_TYPE = "contract"
+
+
+#: Query form of the same rule, in any casing the document model accepts, so a
+#: contract cannot take a slot of a candidate window. A missing uploadType
+#: still matches.
+_NOT_A_CONTRACT_UPLOAD = {"$not": re.compile(r"^\s*contract\s*$", re.IGNORECASE)}
 
 
 def _is_contract_upload(doc: Dict[str, Any]) -> bool:
@@ -1076,7 +1083,7 @@ async def resync_bulk_vectors(
         doc_filter["_id"] = {"$nin": governed}
     # Contract uploads not yet promoted are the contract reindex's for the same
     # reason; selected, the repair below only delegates them.
-    doc_filter["uploadType"] = {"$ne": CONTRACT_UPLOAD_TYPE}
+    doc_filter["uploadType"] = _NOT_A_CONTRACT_UPLOAD
 
     # Containment: this backfill RE-UPSERTS vectors, so it can undo the
     # publication barrier's purge for a blocked or quarantined document. The
@@ -1218,7 +1225,7 @@ async def reconcile_vectors(
     # And contract uploads not yet promoted: only correspondence points are
     # counted below, so every contract read as missing vectors and was rebuilt
     # as correspondence.
-    doc_filter["uploadType"] = {"$ne": CONTRACT_UPLOAD_TYPE}
+    doc_filter["uploadType"] = _NOT_A_CONTRACT_UPLOAD
     # Some datasets may use is_deleted; keep them included unless explicitly true
     doc_filter["is_deleted"] = {"$ne": True}
     if org_id:
