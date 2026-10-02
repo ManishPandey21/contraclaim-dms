@@ -33,7 +33,7 @@ from backend.rbac_backend.retrieval.correspondence_payload import (
     PAYLOAD_SCHEMA_VERSION_FIELD,
     CorrespondencePayloadError,
     build_correspondence_chunks,
-    rows_need_reprocess,
+    refuse_unpublishable_stored_rows,
 )
 from backend.rbac_backend.services.contract_source import is_contract_upload
 from backend.rbac_backend.services.publication_policy import (
@@ -124,10 +124,14 @@ async def _repair_document(
         row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
         for row in vector_docs
     )
-    if not written_canonically and rows_need_reprocess(document, texts):
+    try:
+        refuse_unpublishable_stored_rows(
+            document, texts, canonically_written=written_canonically
+        )
+    except CorrespondencePayloadError:
         logger.warning(
-            "Skipped repair for %s; stored rows carry extraction-report reply advice "
-            "(reprocess the document instead)",
+            "Skipped repair for %s; stored rows are extraction-report text, not the "
+            "letter (reprocess the document instead)",
             document_id,
         )
         return None

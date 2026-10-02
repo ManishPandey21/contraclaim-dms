@@ -29,7 +29,7 @@ from ..retrieval.correspondence_payload import (
     PAYLOAD_SCHEMA_VERSION_FIELD,
     CorrespondencePayloadError,
     build_correspondence_chunks,
-    rows_need_reprocess,
+    refuse_unpublishable_stored_rows,
 )
 from ..retrieval.vector_client import VectorClient
 from ..services.contract_source import CONTRACT_UPLOAD_TYPE, is_contract_upload
@@ -733,6 +733,17 @@ async def _resync_document_vectors(
     vector_client = vector_client or VectorClient(config)
 
     if chunks:
+        # Rows an older pipeline chunked may be the extraction report, reply
+        # advice included; re-embedding them republished it as evidence.
+        try:
+            refuse_unpublishable_stored_rows(
+                doc, [c.get("text_original") or c.get("text") or "" for c in chunks]
+            )
+        except CorrespondencePayloadError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Stored chunks are extraction-report text, not the letter; reprocess the document",
+            ) from exc
         embedding_client = embedding_client or EmbeddingClient(config)
         texts = [c.get("text_enriched") or c.get("text_original") or c.get("text") or "" for c in chunks]
         vectors = await embedding_client.embed(texts)
@@ -742,8 +753,11 @@ async def _resync_document_vectors(
                 {
                     "chunk_id": c.get("chunk_id"),
                     "document_id": c.get("document_id"),
-                    "org_id": c.get("org_id") or c.get("organization_id") or doc.get("organization_id"),
-                    "project_id": c.get("project_id") or doc.get("project_id"),
+                    # Authority is the canonical document's, never the stored
+                    # row's: a row stamped with another scope would otherwise
+                    # publish this text to that tenant.
+                    "org_id": str(doc["organization_id"]) if doc.get("organization_id") else None,
+                    "project_id": str(doc["project_id"]) if doc.get("project_id") else None,
                     "page_start": c.get("page_start"),
                     "text": c.get("text_original") or c.get("text"),
                     "text_enriched": c.get("text_enriched"),
@@ -784,14 +798,18 @@ async def _resync_document_vectors(
             row.get(PAYLOAD_SCHEMA_VERSION_FIELD) == CORRESPONDENCE_PAYLOAD_SCHEMA_VERSION
             for row in legacy_vectors
         )
-        if not written_canonically and rows_need_reprocess(doc, legacy_texts):
-            # These rows were chunked from the LLM extraction report, reply
-            # advice included, and a row boundary can split that item; they
-            # cannot be cleaned row by row. Reprocess the document instead.
+        try:
+            # These rows may have been chunked from the LLM extraction report,
+            # reply advice included, and a row boundary can split that item;
+            # they cannot be cleaned row by row. Reprocess the document instead.
+            refuse_unpublishable_stored_rows(
+                doc, legacy_texts, canonically_written=written_canonically
+            )
+        except CorrespondencePayloadError as exc:
             raise HTTPException(
                 status_code=409,
                 detail="Stored vector rows carry extraction-report reply advice; reprocess the document",
-            )
+            ) from exc
 
         # Authority comes from the canonical document row, never from the
         # stored vector rows; the payload from the one correspondence builder.

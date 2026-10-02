@@ -97,6 +97,33 @@ class VectorReconciler:
 
         repaired = 0
         if missing_in_qdrant:
+            from .correspondence_payload import (
+                CorrespondencePayloadError,
+                refuse_unpublishable_stored_rows,
+            )
+
+            try:
+                # Every row of the document, not only the missing ones: a row
+                # boundary can split the report's advice.
+                refuse_unpublishable_stored_rows(
+                    document,
+                    [c.get("text_original") or c.get("text") or "" for c in chunks],
+                )
+            except CorrespondencePayloadError:
+                logger.warning(
+                    "Not republishing the stored chunks of %s: they are extraction-report "
+                    "text, not the letter; reprocess the document",
+                    document_id,
+                )
+                result = self._untouched()
+                result.update(
+                    missing_in_qdrant=len(missing_in_qdrant),
+                    missing_in_mongo=len(missing_in_mongo),
+                    qdrant_ids=len(qdrant_ids),
+                    mongo_chunks=len(chunks),
+                    skipped_unpublishable=1,
+                )
+                return result
             to_write = [
                 c for c in chunks if str(c.get("chunk_id")) in missing_in_qdrant
             ]
@@ -110,8 +137,9 @@ class VectorReconciler:
                         {
                             "chunk_id": c.get("chunk_id"),
                             "document_id": c.get("document_id"),
-                            "org_id": c.get("org_id"),
-                            "project_id": c.get("project_id"),
+                            # The rows were read under exactly this scope.
+                            "org_id": org_id,
+                            "project_id": project_id,
                             "page_start": c.get("page_start"),
                             "text": c.get("text_original") or c.get("text"),
                             "text_enriched": c.get("text_enriched"),

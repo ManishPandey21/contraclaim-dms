@@ -250,6 +250,46 @@ def refuse_report_derived_text(
         )
 
 
+def refuse_unpublishable_stored_rows(
+    document: Mapping[str, Any],
+    row_texts: Sequence[str],
+    *,
+    canonically_written: bool = False,
+) -> None:
+    """The one rule for every path that republishes stored rows as evidence.
+
+    Storage-sync's chunk and legacy-row repairs, the vector reconciler and
+    ``scripts/reconcile_vectors.py`` re-embed text an earlier writer chunked -
+    before source authority, sometimes the extraction report itself, Key Reply
+    Points included. Rows this module's writer stored (schema marker) were
+    refused at write time if they were the report, and are trusted. Any other
+    rows are refused when they, a row boundary across them, or the document's
+    stored text carry the report's reply advice (``rows_need_reprocess``), or
+    when together they are the report rather than the letter
+    (``refuse_report_derived_text``; the report's shape is not judged when the
+    document records its ``ocrText`` as the extracted source).
+
+    Raises ``CorrespondencePayloadError``; nothing is published. Pass every
+    stored row of the document, not only the ones being repaired: a row
+    boundary can split the advice, and only the whole shows the report.
+    """
+    if canonically_written:
+        return
+    document_id = str(document.get("_id") or "")
+    if rows_need_reprocess(document, row_texts):
+        raise CorrespondencePayloadError(
+            f"document {document_id}: stored rows carry the extraction report's "
+            "reply advice; reprocess the document"
+        )
+    from ..services.source_text import OCR_TEXT_KIND_SOURCE
+
+    refuse_report_derived_text(
+        document_id,
+        "\n".join(text for text in row_texts if text),
+        recorded_source=document.get("ocr_text_kind") == OCR_TEXT_KIND_SOURCE,
+    )
+
+
 def canonical_scope_id(value: Any, field: str) -> Optional[str]:
     """One string form for an authority id, or ``None`` when absent.
 
