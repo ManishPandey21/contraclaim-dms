@@ -1179,9 +1179,8 @@ class DocumentService:
         from .contract_source import is_contract_source
         from .publication_policy import resolve_canonical_document
 
-        if await is_contract_source(
-            db, document_id, await resolve_canonical_document(db, document_id)
-        ):
+        entry_document = await resolve_canonical_document(db, document_id)
+        if await is_contract_source(db, document_id, entry_document):
             # Refused before anything is written: marking the document
             # `processing` would make the projection builder see an ingest in
             # flight, and a retried refusal would walk the job to dead-letter
@@ -1204,6 +1203,12 @@ class DocumentService:
                 },
             )
             return False
+        # What this run is about to overwrite, so a run that turns out to be
+        # on a contract source can hand the document back as it found it.
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {"$set": {"previous_processing_status": (entry_document or {}).get("processing_status")}},
+        )
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
@@ -1216,6 +1221,7 @@ class DocumentService:
             },
         )
         heartbeat_task = asyncio.create_task(self._heartbeat_processing_job(job_id))
+        failure: Optional[str] = None
         try:
             ok = await self.process_document_async(
                 document_id=document_id,
@@ -1228,11 +1234,22 @@ class DocumentService:
         except Exception as exc:
             logger.exception("Document processing job failed document_id=%s job_id=%s", document_id, job_id)
             ok = False
-            await self._mark_processing_failure(job, str(exc))
+            failure = str(exc)
         finally:
             heartbeat_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat_task
+
+        # Every status this run writes from here on - completed, retrying,
+        # failed, resumed, stored-only, human review - is decided by a check
+        # made minutes ago. The document may have become a contract source
+        # since (promotion, an upload-type edit); its status then belongs to
+        # the contract writers, and a contract extraction hold must not be
+        # lifted by this run's verdict.
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            return False
+        if failure is not None:
+            await self._mark_processing_failure(job, failure)
 
         if ok:
             # A successful processor return may still carry deferred, failed,
@@ -1334,6 +1351,70 @@ class DocumentService:
                     failure_message = str(document_error["message"])
             await self._mark_processing_failure(latest, failure_message)
         return False
+
+    async def _release_run_for_contract_source(
+        self, db: Any, job_id: str, document_id: str
+    ) -> bool:
+        """End a run whose document became a contract source while it worked.
+
+        Asks ``services.contract_source`` with the document read now. If it is
+        a contract source, the job is closed the way the entry check closes it
+        and the document gets back the status this run found - only while it
+        still carries this run's own ``processing`` marker, so a status a
+        contract writer set meanwhile (an extraction hold, a reindex) is never
+        overwritten. Returns whether the run was ended. Raises like the entry
+        check if governance cannot be read: nothing is written then.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        now = datetime.utcnow()
+        job = await db.document_processing_jobs.find_one({"_id": job_id}) or {}
+        await db.document_processing_jobs.update_one(
+            {"_id": job_id},
+            {
+                "$set": {
+                    "status": "dead_lettered",
+                    "stage": "skipped_governed_contract",
+                    "error": {
+                        "message": (
+                            "Document became a contract source (a contract upload, or "
+                            "governed by a Contract Master instrument) during processing; "
+                            "reprocess it through the contract reindex"
+                        ),
+                        "timestamp": now,
+                        "terminal": True,
+                    },
+                    "updated_at": now,
+                }
+            },
+        )
+        if document is not None:
+            # "processing" is what the contract projection reads as an ingest
+            # in flight; left behind by a dead-lettered run it would block the
+            # projection with nothing ever clearing it.
+            await db.documents.update_one(
+                {
+                    "_id": document["_id"],
+                    "processing_status": "processing",
+                    "processing_job_id": job_id,
+                },
+                {
+                    "$set": {
+                        "processing_status": job.get("previous_processing_status") or "queued",
+                        "updatedAt": now,
+                    }
+                },
+            )
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; the run was closed without writing its verdict",
+            document_id,
+        )
+        return True
 
     async def _schedule_page_resume(
         self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
@@ -1489,39 +1570,9 @@ class DocumentService:
         """Terminal, non-success state: automated recovery cannot finish this."""
         db = await self._get_db()
         now = datetime.utcnow()
-        from .contract_source import is_contract_source
-        from .publication_policy import resolve_canonical_document
-
-        if await is_contract_source(
-            db, document_id, await resolve_canonical_document(db, document_id)
-        ):
-            # The document became a contract source during this run. Its
-            # status and evidence belong to the contract writers: close the job
-            # the way the entry check would have, and touch nothing else.
-            await db.document_processing_jobs.update_one(
-                {"_id": job_id},
-                {
-                    "$set": {
-                        "status": "dead_lettered",
-                        "stage": "skipped_governed_contract",
-                        "error": {
-                            "message": (
-                                "Document became a contract source (a contract upload, or "
-                                "governed by a Contract Master instrument) during processing; "
-                                "reprocess it through the contract reindex"
-                            ),
-                            "timestamp": now,
-                            "terminal": True,
-                        },
-                        "updated_at": now,
-                    }
-                },
-            )
-            logger.warning(
-                "[document_pipeline] Document %s became a contract source during "
-                "processing; not marking it for review or purging it",
-                document_id,
-            )
+        if await self._release_run_for_contract_source(db, job_id, document_id):
+            # Its status and evidence belong to the contract writers: not
+            # marked for review, not purged.
             return
         remaining = list(checkpoint.get("remaining_page_numbers") or [])
         await db.document_processing_jobs.update_one(

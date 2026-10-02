@@ -735,6 +735,7 @@ def _human_review(database, *, upload_type: str, governed: bool):
                 "project_id": PROJECT,
                 "uploadType": upload_type,
                 "processing_status": "processing",
+                "processing_job_id": "job-hr",
                 "status": "completed",
                 "publication_status": "published",
                 "is_active": True,
@@ -752,7 +753,8 @@ def _human_review(database, *, upload_type: str, governed: bool):
                 {"_id": f"cd-{oid}", "document_id": str(oid), "classification_revision": 1}
             )
         await db.document_processing_jobs.insert_one(
-            {"_id": "job-hr", "document_id": str(oid), "status": "processing"}
+            {"_id": "job-hr", "document_id": str(oid), "status": "processing",
+             "previous_processing_status": "queued"}
         )
         service = DocumentService(db)
         purged: List[str] = []
@@ -784,7 +786,9 @@ def test_human_review_never_purges_a_document_that_became_a_contract_source(data
 
     assert outcome["purged"] == [], "the contract's points were purged"
     assert outcome["rows"] == 2, "the contract's clause rows were deleted"
-    assert outcome["document_status"] == "processing", "the contract's status was overwritten"
+    # Handed back as the run found it - never "processing", which the contract
+    # projection reads as an ingest in flight.
+    assert outcome["document_status"] == "queued", outcome["document_status"]
     assert (outcome["job"]["status"], outcome["job"]["stage"]) == (
         "dead_lettered",
         "skipped_governed_contract",
@@ -797,3 +801,131 @@ def test_human_review_still_purges_a_plain_letter(database):
     assert len(outcome["purged"]) == 1
     assert outcome["rows"] == 0
     assert outcome["document_status"] == "human_review_required"
+
+
+# --------------------------------------------------------------------------- #
+# The job runner's end-of-run status writes
+# --------------------------------------------------------------------------- #
+#
+# Every status a general processing job writes when it ends - completed,
+# retrying/failed, resumed, human review - was decided by a contract-source
+# check made at its start. A document that became a contract source while the
+# job worked kept "processing" (which the contract projection reads as an
+# ingest in flight, and nothing would clear), or had a contract extraction
+# hold overwritten by "retrying"/"completed", which made unread pages
+# consumable.
+
+
+def _run_job_into_a_promotion(database, outcome: str, *, hold: bool = False):
+    from bson import ObjectId
+
+    from rbac_backend.services.document_service import DocumentService
+
+    oid = ObjectId()
+    job_id = f"job-{oid}"
+
+    async def run(db, client):
+        await db["documents"].insert_one(
+            {
+                "_id": oid,
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "uploadType": "incoming",
+                "processing_status": "queued",
+                "processing_job_id": job_id,
+                "status": "completed",
+                "publication_status": "published",
+                "is_active": True,
+            }
+        )
+        await db.document_processing_jobs.insert_one(
+            {
+                "_id": job_id,
+                "document_id": str(oid),
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "file_path": "/uploads/x.pdf",
+                "status": "queued",
+                "attempts": 0,
+                "max_attempts": 3,
+            }
+        )
+        service = DocumentService(db)
+
+        async def _becomes_a_contract(**_kwargs):
+            # While the job extracts: the upload type is edited and Contract
+            # Master adopts the document; a contract ingest may hold it.
+            update = {"uploadType": "contract"}
+            if hold:
+                update.update(
+                    processing_status="human_review_required",
+                    processing_error={"source": "contract_extraction", "pages": [4]},
+                )
+            await db["documents"].update_one({"_id": oid}, {"$set": update})
+            await db[CONTRACT_DOCUMENTS_COLLECTION].insert_one(
+                {"_id": f"cd-{oid}", "document_id": str(oid), "classification_revision": 1}
+            )
+            if outcome == "raises":
+                raise RuntimeError("extraction blew up")
+            return outcome == "completed"
+
+        service.process_document_async = _becomes_a_contract
+        await service.process_document_job(job_id)
+        return (
+            await db["documents"].find_one({"_id": oid}),
+            await db.document_processing_jobs.find_one({"_id": job_id}),
+        )
+
+    return database.run(run)
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "raises"])
+def test_a_job_that_ends_on_a_contract_source_hands_the_status_back(database, outcome):
+    document, job = _run_job_into_a_promotion(database, outcome)
+
+    assert (job["status"], job["stage"]) == ("dead_lettered", "skipped_governed_contract"), job
+    # Not "processing" (an ingest in flight to the projection, for ever), not
+    # this run's verdict: the status the run found.
+    assert document["processing_status"] == "queued", document
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "raises"])
+def test_a_job_never_lifts_a_contract_extraction_hold(database, outcome):
+    document, job = _run_job_into_a_promotion(database, outcome, hold=True)
+
+    assert job["status"] == "dead_lettered", job
+    assert document["processing_status"] == "human_review_required", document
+    assert document["processing_error"]["source"] == "contract_extraction", document
+
+
+def test_a_plain_letter_job_still_records_its_failure(database):
+    from bson import ObjectId
+
+    from rbac_backend.services.document_service import DocumentService
+
+    oid = ObjectId()
+
+    async def run(db, client):
+        await db["documents"].insert_one(
+            {"_id": oid, "organization_id": ORG, "project_id": PROJECT, "uploadType": "incoming",
+             "processing_status": "queued", "status": "completed", "is_active": True}
+        )
+        await db.document_processing_jobs.insert_one(
+            {"_id": "job-plain", "document_id": str(oid), "file_path": "/uploads/x.pdf",
+             "status": "queued", "attempts": 0, "max_attempts": 3}
+        )
+        service = DocumentService(db)
+
+        async def _fails(**_kwargs):
+            raise RuntimeError("extraction blew up")
+
+        service.process_document_async = _fails
+        await service.process_document_job("job-plain")
+        return (
+            await db["documents"].find_one({"_id": oid}),
+            await db.document_processing_jobs.find_one({"_id": "job-plain"}),
+        )
+
+    document, job = database.run(run)
+    assert job["status"] == "retrying", job
+    assert document["processing_status"] == "retrying", document
