@@ -116,6 +116,10 @@ class _Database:
         self.documents = _Collection(documents)
         self.document_vectors = _Collection()
         self.vector_sync_status = _Collection()
+        # Every real database has it; the writer asks it before each
+        # destructive step (services.contract_source), and an unreadable one
+        # fails closed by design.
+        self.contract_documents = _Collection()
 
 
 class _PersistentQdrant:

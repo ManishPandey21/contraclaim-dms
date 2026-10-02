@@ -1416,6 +1416,51 @@ class DocumentService:
         )
         return True
 
+    async def _verdict_withheld_for_contract_source(
+        self,
+        db: Any,
+        document_id: str,
+        doc_oid: Any,
+        job_id: Optional[str],
+        run_marker_job_id: Optional[str],
+        status_before_run: Optional[str],
+    ) -> bool:
+        """Should process_document_async write no verdict onto this document?
+
+        Asked immediately before its terminal document write: the run's entry
+        check is minutes old, and a document that became a contract source
+        since (promotion, an upload-type edit) has its status and error owned
+        by the contract writers - a contract extraction hold must survive.
+        True means nothing was written; on the no-job path the document gets
+        back the status this run found, only while it still carries this
+        run's "processing" marker. A job's own end-of-run step
+        (``_release_run_for_contract_source``) does that for the job path.
+        """
+        from .contract_source import is_contract_source
+        from .publication_policy import resolve_canonical_document
+
+        document = await resolve_canonical_document(db, document_id)
+        if not await is_contract_source(db, document_id, document):
+            return False
+        logger.warning(
+            "[document_pipeline] Document %s became a contract source during "
+            "processing; its verdict was not written",
+            document_id,
+        )
+        if not job_id:
+            marker = {"_id": doc_oid, "processing_status": "processing"}
+            marker["processing_job_id"] = run_marker_job_id
+            await db.documents.update_one(
+                marker,
+                {
+                    "$set": {
+                        "processing_status": status_before_run or "completed",
+                        "updatedAt": datetime.utcnow(),
+                    }
+                },
+            )
+        return True
+
     async def _schedule_page_resume(
         self, job_id: str, document_id: str, checkpoint: Dict[str, Any]
     ) -> None:
@@ -1830,6 +1875,8 @@ class DocumentService:
         initial_publication_authorized = False
         db: Optional[Database] = None
         doc_oid: Optional[ObjectId] = None
+        status_before_run: Optional[str] = None
+        run_marker_job_id: Optional[str] = None
         try:
             db = await self._get_db()
             doc_oid = self._validate_document_id(document_id)
@@ -1923,12 +1970,17 @@ class DocumentService:
                 upload,
             )
             now = datetime.utcnow()
+            # Handed back if the document turns out to be a contract source by
+            # the time this run would write its verdict (no-job path only; a
+            # job hands back what it recorded at claim).
+            status_before_run = getattr(document, "processing_status", None)
+            run_marker_job_id = job_id or getattr(document, "processing_job_id", None)
             await db.documents.update_one(
                 {"_id": doc_oid},
                 {
                     "$set": {
                         "processing_status": "processing",
-                        "processing_job_id": job_id or getattr(document, "processing_job_id", None),
+                        "processing_job_id": run_marker_job_id,
                         "updatedAt": now,
                     }
                 },
@@ -2217,6 +2269,10 @@ class DocumentService:
                         else:
                             update_fields.pop(field, None)
 
+            if await self._verdict_withheld_for_contract_source(
+                db, document_id, doc_oid, job_id, run_marker_job_id, status_before_run
+            ):
+                return False
             await db.documents.update_one({"_id": doc_oid}, {"$set": update_fields})
             logger.info("[document_pipeline] Database record updated for %s", document_id)
             if job_id:
@@ -2334,7 +2390,18 @@ class DocumentService:
                 "timestamp": datetime.utcnow(),
             }
             try:
-                if db is not None and doc_oid is not None:
+                if (
+                    db is not None
+                    and doc_oid is not None
+                    and not await self._verdict_withheld_for_contract_source(
+                        db,
+                        document_id,
+                        doc_oid,
+                        job_id,
+                        run_marker_job_id,
+                        status_before_run,
+                    )
+                ):
                     await db.documents.update_one(
                         {"_id": doc_oid},
                         {

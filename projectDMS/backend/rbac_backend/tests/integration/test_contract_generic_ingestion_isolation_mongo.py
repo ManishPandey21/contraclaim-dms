@@ -929,3 +929,95 @@ def test_a_plain_letter_job_still_records_its_failure(database):
     document, job = database.run(run)
     assert job["status"] == "retrying", job
     assert document["processing_status"] == "retrying", document
+
+
+# --------------------------------------------------------------------------- #
+# process_document_async's own terminal write (the no-job reprocess path, and
+# the job path before the runner's end-of-run step)
+# --------------------------------------------------------------------------- #
+
+
+def _reprocess_into_a_promotion(database, monkeypatch, tmp_path, outcome: str, *, hold: bool, with_job: bool):
+    from types import SimpleNamespace
+
+    from bson import ObjectId
+
+    from rbac_backend.services import document_service as document_service_module
+    from rbac_backend.services.document_service import DocumentService
+    from rbac_backend.tests.correspondence_vector_harness import correspondence_document
+
+    source = tmp_path / "letter.pdf"
+    source.write_bytes(b"%PDF-1.4 test")
+    row = correspondence_document(
+        organization_id=ORG,
+        project_id=PROJECT,
+        letter_no="L/RACE",
+        subject="Race",
+        processing_status="completed",
+        filepath_local=str(source),
+    )
+    oid = row["_id"]
+    job_id = f"job-{ObjectId()}" if with_job else None
+
+    class _RacingProcessor:
+        """Stands in for OCR/extraction: while it runs the document becomes a
+        promoted contract (and, optionally, a contract ingest holds it)."""
+
+        def __init__(self, db):
+            self.db = db
+
+        async def process_document(self, **_kwargs):
+            update: Dict[str, Any] = {"uploadType": "contract"}
+            if hold:
+                update.update(
+                    processing_status="human_review_required",
+                    processing_error={"source": "contract_extraction", "pages": [4]},
+                )
+            await self.db["documents"].update_one({"_id": oid}, {"$set": update})
+            await self.db[CONTRACT_DOCUMENTS_COLLECTION].insert_one(
+                {"_id": f"cd-{oid}", "document_id": str(oid), "classification_revision": 1}
+            )
+            if outcome == "raises":
+                raise RuntimeError("extraction blew up")
+            return SimpleNamespace(success=False, error="refused: a contract source", metadata=None)
+
+    async def run(db, client):
+        await db["documents"].insert_one(row)
+        if with_job:
+            await db.document_processing_jobs.insert_one(
+                {"_id": job_id, "document_id": str(oid), "file_path": str(source),
+                 "status": "queued", "attempts": 0, "max_attempts": 3}
+            )
+        service = DocumentService(db)
+        monkeypatch.setattr(
+            document_service_module, "create_document_processor", lambda: _RacingProcessor(db)
+        )
+        if with_job:
+            await service.process_document_job(job_id)
+        else:
+            await service.process_document_async(document_id=str(oid), file_path=str(source))
+        return await db["documents"].find_one({"_id": oid})
+
+    return database.run(run)
+
+
+@pytest.mark.parametrize("outcome", ["failed", "raises"])
+def test_a_no_job_reprocess_hands_a_contract_source_back(database, monkeypatch, tmp_path, outcome):
+    document = _reprocess_into_a_promotion(
+        database, monkeypatch, tmp_path, outcome, hold=False, with_job=False
+    )
+    # Not left "processing" (an ingest in flight to the projection, with no job
+    # or recovery ever to clear it), not this run's failure: what it found.
+    assert document["processing_status"] == "completed", document
+
+
+@pytest.mark.parametrize("with_job", [False, True], ids=["no_job", "job"])
+@pytest.mark.parametrize("outcome", ["failed", "raises"])
+def test_a_reprocess_never_erases_a_contract_extraction_hold(
+    database, monkeypatch, tmp_path, outcome, with_job
+):
+    document = _reprocess_into_a_promotion(
+        database, monkeypatch, tmp_path, outcome, hold=True, with_job=with_job
+    )
+    assert document["processing_status"] == "human_review_required", document
+    assert document["processing_error"]["source"] == "contract_extraction", document
