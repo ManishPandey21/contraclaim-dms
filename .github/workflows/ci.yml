@@ -260,11 +260,27 @@ jobs:
           cache-dependency-path: projectDMS/client/package-lock.json
       - name: Scan frontend dependencies
         working-directory: projectDMS/client
+        # `npm audit --audit-level=high`, plus ONE time-bound exception: R3,
+        # GHSA-vfj7-8cjw-p6xm (CVE-2026-93687), braces <=3.0.3 with no patched
+        # release, reached only through build/test tooling and absent from the
+        # client runtime image (projectDMS/docs/NOFIX_ADVISORY_ACCEPTANCE.md).
+        # The gate fails on any CRITICAL, on any HIGH not rooted in exactly that
+        # advisory, after 2026-10-10, when a patched braces is published, and
+        # on any npm or report failure. Its own tests run first.
         run: |
           node --version && npm --version
           npm ci
           git diff --exit-code -- package-lock.json
-          npm audit --audit-level=high
+          python -m pip install pytest
+          python -m pytest -q ../../.github/scripts/test_npm_audit_gate.py
+          python ../../.github/scripts/npm_audit_gate.py --client-dir . --raw-out npm-audit.json
+      - name: Keep the raw npm audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: projectDMS/client/npm-audit.json
+          if-no-files-found: warn
 
   docker-build-and-scan:
     name: Docker build and image scan

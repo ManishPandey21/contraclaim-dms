@@ -3,10 +3,15 @@
 **Status:** owner-approved, in force from `release/contraclaim-rc1`.
 **Decided:** 2026-09-04. **Re-derived against:** pip-audit 2.10.1, llama-index-core 0.14.22.
 
-One advisory is accepted for this release. It is **not** waived, and it is not a
-policy for no-fix findings in general: `dependency-scan` ignores exactly one
-advisory id and fails on everything else, including a second advisory in the
-same package.
+Two advisories are accepted for this release, one per scanner. Neither is
+waived, and neither is a policy for no-fix findings in general: each scanner in
+`dependency-scan` excepts exactly one advisory and fails on everything else,
+including a second advisory in the same package.
+
+| Scanner | Accepted advisory | Until |
+|---|---|---|
+| pip-audit | `PYSEC-2026-3740` (NLTK) | `release/contraclaim-rc1` review triggers |
+| npm audit | `GHSA-vfj7-8cjw-p6xm` (braces), R3 | **2026-10-10**, enforced by the gate |
 
 ---
 
@@ -131,3 +136,82 @@ This acceptance expires on **any** of the following. It is not permanent.
 
 **The correct statement of the gate's result is "dependency-scan passed with one
 formally accepted no-fix advisory exception", never "0 vulnerabilities".**
+
+---
+
+## R3: GHSA-vfj7-8cjw-p6xm, braces stack-exhaustion DoS
+
+| | |
+|---|---|
+| **Advisory** | `GHSA-vfj7-8cjw-p6xm` (alias `CVE-2026-93687`), npm advisory source `1240992`, CWE-674 |
+| **Package** | `braces` |
+| **Affected / installed** | `<=3.0.3` / `3.0.3` (one installed copy) |
+| **Fix available** | **No.** 3.0.3 is braces' `latest`; no newer release is published (2026-10-03). |
+| **Upstream severity** | HIGH. The gate does not key on a CVSS score, because sources report different CVSS versions. |
+| **Decided** | 2026-10-03, by the release owner, on the evidence below |
+| **Accepted for** | the integrate/prod-20261002 release, **until 2026-10-10** |
+
+### What the advisory says
+
+A deeply nested brace pattern exhausts the stack in braces' parser. To exploit it,
+an attacker-controlled pattern must reach braces.
+
+### Dependency chain
+
+npm reports 17 HIGH packages. They are all one advisory, propagated: every HIGH
+entry resolves through `via` to `GHSA-vfj7-8cjw-p6xm` alone. (The only other root
+in the report is a MODERATE, `GHSA-82fw-gwwq-j7x9` in vitest.)
+
+- `tailwindcss` 3.4.17 -> `chokidar` 3.6.0 / `micromatch` 4.0.8 / `fast-glob` 3.3.2 -> `braces` 3.0.3.
+  This also covers its plugins `tailwindcss-animate` and `@tailwindcss/typography`, and `lovable-tagger`.
+- `typescript-eslint` 8.11.0 -> `@typescript-eslint/typescript-estree` -> `fast-glob` -> `micromatch` -> `braces`
+- `@types/testing-library__jest-dom` -> `@types/jest` -> `expect` -> `jest-message-util` -> `micromatch` -> `braces`
+
+### Reachability
+
+**Application source: none.** Nothing under `projectDMS/client/src` imports
+braces, micromatch, chokidar, fast-glob, or any package above. Only the build
+configuration does: `tailwind.config.ts`, `eslint.config.js`, and `vite.config.ts`.
+`vite.config.ts` loads `lovable-tagger` in development mode only.
+
+**Deployed client image: absent.** This was verified on an image built from
+2883e4b (`sha256:3ead9b6c...`), and is re-verified on the final release image:
+
+- The runtime stage runs `node scripts/serve-dist.mjs`, a static server that imports only `node:` built-ins.
+- No application `node_modules` is present, and `/usr/local/lib/node_modules` is empty.
+- npm, npx, corepack and yarn are removed.
+- No file named braces, micromatch, chokidar or fast-glob exists anywhere in the image.
+- The bundle contains none of braces' own identifiers.
+- The image SBOM has zero npm components.
+- Trivy's scan of the image reports no braces finding.
+
+Node is present in the image by design, to serve static files. It never loads
+braces or this dependency chain.
+
+### Classification
+
+**Pre-existing, build/test toolchain only; not present in the deployed runtime.**
+The lockfile is unchanged since base `e02b71b`; the advisory was published after it.
+
+### Review triggers
+
+This acceptance expires on **any** of the following. It is not permanent, and it
+does not cover any other advisory.
+
+1. **2026-10-10.** After that date the gate fails, whatever else is true.
+2. braces publishes a release above 3.0.3. The gate then fails and demands the upgrade.
+3. The advisory's identity changes (package, GHSA, npm source id or range), or another HIGH or CRITICAL appears.
+4. An installed braces other than 3.0.3 appears in the lockfile.
+5. braces, or any package in the chain, reaches the client runtime image or is imported by `src/`.
+
+### Enforcement
+
+| | |
+|---|---|
+| CI | `.github/workflows/ci.yml`, job `dependency-scan`, step "Scan frontend dependencies": `.github/scripts/npm_audit_gate.py`, with the raw report kept as the `npm-audit-report` artifact |
+| Gate tests | `.github/scripts/test_npm_audit_gate.py`, which runs in the same step before the gate |
+| Visibility | The gate prints `TEMPORARY OWNER-APPROVED SECURITY EXCEPTION: GHSA-vfj7-8cjw-p6xm ... expires 2026-10-10` on every pass that uses it. |
+| Guards | `test_ci_static_gates.py` pins that the step runs the gate and its tests, that nothing swallows or weakens it, and that the gate hard-codes this one advisory and expiry. |
+
+**The correct statement of the gate's result is "npm audit passed with one
+time-bound owner-approved exception (R3)", never "0 vulnerabilities".**
