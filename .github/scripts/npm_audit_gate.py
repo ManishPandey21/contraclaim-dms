@@ -9,19 +9,22 @@ release. `braces` reaches the client only through build/test tooling
 carries no npm package at all. The owner accepted it until EXPIRES.
 
 This is deliberately not a general ignore list. Exactly one advisory, one
-package, one installed version and one expiry are hard-coded, and the gate
-fails - closed - on anything else:
+package, one installed version, one set of dependents and one expiry are
+hard-coded, and the gate fails - closed - on anything else:
 
 - any CRITICAL finding;
 - any HIGH finding whose root advisory is not this one (npm reports the
   packages that depend on braces as HIGH too; each must resolve to it alone);
 - the advisory's identity changing (package, GHSA, npm source id, range);
-- an installed braces other than the accepted lineage;
-- the date passing EXPIRES;
+- a package outside EXPECTED_DEPENDENTS reaching braces, or application
+  source (client/src) importing any package of the chain: the acceptance
+  rests on braces staying in build/test tooling;
+- an installed braces (aliases included) other than the accepted version;
+- the date passing EXPIRES (UTC, inclusive);
 - a braces release newer than the affected range being published (upgrade
-  instead of extending the exception);
-- npm audit failing to run, or answering with anything but a well-formed
-  report.
+  instead of extending the exception), or a version list it cannot read;
+- npm audit failing to run, or answering with anything but a well-formed,
+  self-consistent report.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -41,7 +45,42 @@ PACKAGE = "braces"
 NPM_SOURCE_ID = 1240992
 AFFECTED_RANGE = "<=3.0.3"
 INSTALLED_VERSION = "3.0.3"
-EXPIRES = dt.date(2026, 10, 10)  # last day the exception applies (UTC)
+EXPIRES = dt.date(2026, 10, 10)  # last day the exception applies (UTC, inclusive)
+
+# The packages npm reported HIGH through braces when R3 was accepted - all
+# build/test tooling. A package outside this set reaching braces is a new
+# exposure question and fails; a smaller set (a path removed) is fine.
+EXPECTED_DEPENDENTS = frozenset(
+    {
+        "braces",
+        "chokidar",
+        "fast-glob",
+        "micromatch",
+        "tailwindcss",
+        "tailwindcss-animate",
+        "@tailwindcss/typography",
+        "lovable-tagger",
+        "typescript-eslint",
+        "@typescript-eslint/eslint-plugin",
+        "@typescript-eslint/parser",
+        "@typescript-eslint/type-utils",
+        "@typescript-eslint/typescript-estree",
+        "@typescript-eslint/utils",
+        "@types/jest",
+        "expect",
+        "jest-message-util",
+    }
+)
+
+AUDIT_COMMAND = ("npm", "audit", "--json")
+SEVERITIES = ("info", "low", "moderate", "high", "critical")
+SOURCE_SUFFIXES = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+# An import/require/re-export of a chain package (or a subpath of one).
+_CHAIN_IMPORT = re.compile(
+    r"(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s+)[\"']("
+    + "|".join(re.escape(n) for n in sorted(EXPECTED_DEPENDENTS, key=len, reverse=True))
+    + r")(?:/[^\"']*)?[\"']"
+)
 
 BANNER = (
     "\n" + "!" * 78 + "\n"
@@ -122,9 +161,17 @@ def evaluate_report(report: Any) -> bool:
         severity = node.get("severity")
         if severity == "critical":
             raise GateFailure(f"CRITICAL finding: {name}")
+        if severity not in SEVERITIES:
+            raise GateFailure(f"unknown severity {severity!r} for {name}")
         roots = _root_advisories(vulnerabilities, name)
         if not roots:
             raise GateFailure(f"{name!r} resolves to no advisory")
+        for root in roots:
+            if root.get("severity") not in SEVERITIES:
+                raise GateFailure(
+                    f"unknown severity {root.get('severity')!r} on an advisory "
+                    f"under {name}"
+                )
         serious = [r for r in roots if r.get("severity") in ("high", "critical")]
         for root in serious:
             if root.get("severity") == "critical" or not _is_exception_advisory(root):
@@ -133,19 +180,32 @@ def evaluate_report(report: Any) -> bool:
                     f"{root.get('name')} {root.get('url')} ({root.get('severity')})"
                 )
         if severity == "high":
-            # A HIGH package must be HIGH because of the excepted advisory alone.
+            # A HIGH package must be HIGH because of the excepted advisory alone,
+            # and must be one of the build/test packages it was accepted for.
             if not serious:
                 raise GateFailure(
                     f"{name} is HIGH but no HIGH root advisory explains it"
                 )
+            if name not in EXPECTED_DEPENDENTS:
+                raise GateFailure(
+                    f"{name} now reaches {PACKAGE}; R3 covers only the build/test "
+                    "tooling it was accepted for - re-establish runtime non-exposure"
+                )
             exception_used = True
-        elif severity not in ("info", "low", "moderate"):
-            raise GateFailure(f"unknown severity {severity!r} for {name}")
 
-    reported_high = int(counts.get("high", 0) or 0)
-    if reported_high and not exception_used:
+    for severity in SEVERITIES:
+        listed = sum(
+            1 for n in vulnerabilities.values() if n.get("severity") == severity
+        )
+        if int(counts.get(severity, 0) or 0) != listed:
+            raise GateFailure(
+                f"metadata counts {counts.get(severity)!r} {severity}, the report "
+                f"lists {listed}"
+            )
+    if int(counts.get("total", 0) or 0) != len(vulnerabilities):
         raise GateFailure(
-            f"metadata reports {reported_high} HIGH finding(s) the report does not explain"
+            f"metadata total {counts.get('total')!r} != {len(vulnerabilities)} "
+            "listed packages"
         )
     if exception_used and PACKAGE not in vulnerabilities:
         raise GateFailure(
@@ -155,7 +215,8 @@ def evaluate_report(report: Any) -> bool:
 
 
 def check_installed_lineage(lockfile: Dict[str, Any]) -> None:
-    """Every installed braces is the accepted version."""
+    """Every installed braces - under its own name or an alias - is the
+    accepted version."""
     packages = lockfile.get("packages")
     if not isinstance(packages, dict):
         raise GateFailure("package-lock.json has no 'packages' map")
@@ -164,6 +225,7 @@ def check_installed_lineage(lockfile: Dict[str, Any]) -> None:
         for path, meta in packages.items()
         if path == f"node_modules/{PACKAGE}"
         or path.endswith(f"/node_modules/{PACKAGE}")
+        or (isinstance(meta, dict) and meta.get("name") == PACKAGE)
     }
     if not versions:
         raise GateFailure(f"no installed {PACKAGE} in package-lock.json")
@@ -174,28 +236,49 @@ def check_installed_lineage(lockfile: Dict[str, Any]) -> None:
         )
 
 
-def _version_tuple(version: str) -> Optional[Tuple[int, int, int]]:
-    core = version.split("+", 1)[0]
-    if "-" in core:  # a pre-release is not a patched release
-        return None
-    parts = core.split(".")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
-        return None
-    return int(parts[0]), int(parts[1]), int(parts[2])
+def check_runtime_sources(client_dir: Path) -> None:
+    """Application source imports no package of the braces chain."""
+    src = client_dir / "src"
+    if not src.is_dir():
+        raise GateFailure(f"no application source tree at {src}")
+    offenders = []
+    for path in sorted(src.rglob("*")):
+        if path.suffix not in SOURCE_SUFFIXES or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for match in _CHAIN_IMPORT.finditer(text):
+            offenders.append(
+                f"{path.relative_to(client_dir).as_posix()}: {match.group(1)}"
+            )
+    if offenders:
+        raise GateFailure(
+            f"application source imports the {PACKAGE} chain, which R3 accepted "
+            f"only as build/test tooling: {offenders}"
+        )
+
+
+_STABLE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+_PRERELEASE = re.compile(r"^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$")
 
 
 def check_no_patched_release(published: Any) -> None:
-    """Fail when braces has published a release above the affected range."""
+    """Fail when braces has published a release above the affected range, or
+    when the list cannot be read with certainty."""
     if isinstance(published, str):
         published = [published]
     if not isinstance(published, list) or not published:
         raise GateFailure("could not read the published braces versions")
-    ceiling = _version_tuple(INSTALLED_VERSION)
-    newer = [
-        v
-        for v in published
-        if (t := _version_tuple(str(v))) is not None and t > ceiling
-    ]
+    ceiling = tuple(int(p) for p in INSTALLED_VERSION.split("."))
+    newer = []
+    for version in published:
+        text = version.split("+", 1)[0] if isinstance(version, str) else None
+        if text is not None and _PRERELEASE.match(text):
+            continue  # a pre-release is not a patched release
+        stable = _STABLE.match(text) if text is not None else None
+        if stable is None:
+            raise GateFailure(f"unrecognised published {PACKAGE} version {version!r}")
+        if tuple(int(p) for p in stable.groups()) > ceiling:
+            newer.append(text)
     if newer:
         raise GateFailure(
             f"{PACKAGE} {', '.join(newer)} is published; upgrade it instead of "
@@ -219,7 +302,7 @@ def run_gate(
     runner = runner or _run
     today = today or dt.datetime.now(dt.timezone.utc).date()
     try:
-        code, out, err = runner(["npm", "audit", "--json"], client_dir)
+        code, out, err = runner(list(AUDIT_COMMAND), client_dir)
     except OSError as exc:
         raise GateFailure(f"npm audit could not run: {exc}") from exc
     if raw_out is not None:
@@ -235,6 +318,7 @@ def run_gate(
         return "npm audit: no HIGH or CRITICAL findings; the exception was not needed"
 
     check_not_expired(today)
+    check_runtime_sources(client_dir)
     try:
         lockfile = json.loads(
             (client_dir / "package-lock.json").read_text(encoding="utf-8")

@@ -1,7 +1,9 @@
 # Accepted no-fix advisories
 
-**Status:** owner-approved, in force from `release/contraclaim-rc1`.
-**Decided:** 2026-09-04. **Re-derived against:** pip-audit 2.10.1, llama-index-core 0.14.22.
+**Status:** owner-approved. PYSEC-2026-3740 in force from `release/contraclaim-rc1`;
+R3 (GHSA-vfj7-8cjw-p6xm) in force until 2026-10-10.
+**Decided:** 2026-09-04 (PYSEC-2026-3740, re-derived against pip-audit 2.10.1,
+llama-index-core 0.14.22) and 2026-10-03 (R3, npm 10.8.2).
 
 Two advisories are accepted for this release, one per scanner. Neither is
 waived, and neither is a policy for no-fix findings in general: each scanner in
@@ -134,8 +136,10 @@ This acceptance expires on **any** of the following. It is not permanent.
 | Guards | `test_ci_static_gates.py` pins that exactly this one id is ignored, that no package-wide or severity-wide ignore exists, and that this document records the id |
 | Reachability | `test_nltk_advisory_reachability.py` |
 
-**The correct statement of the gate's result is "dependency-scan passed with one
-formally accepted no-fix advisory exception", never "0 vulnerabilities".**
+**The correct statement of the pip-audit result is "passed with one formally
+accepted no-fix advisory exception", never "0 vulnerabilities".** While R3 is in
+force, `dependency-scan` as a whole passes with **two** such exceptions, one per
+scanner.
 
 ---
 
@@ -191,6 +195,15 @@ braces or this dependency chain.
 ### Classification
 
 **Pre-existing, build/test toolchain only; not present in the deployed runtime.**
+
+npm's own classification is not the evidence here. `node_modules/braces` is
+**not** marked `dev` in package-lock.json, because `tailwindcss-animate` sits in
+`dependencies` and peer-depends on `tailwindcss`, which pulls the whole chain
+into npm's production tree. A dev/prod check therefore cannot guard this
+exception. What keeps braces out of the runtime is that the plugin is only
+`require`d from `tailwind.config.ts` at build time, and that the image copies
+only `dist/` and `serve-dist.mjs`. The gate enforces both halves it can see:
+the set of packages that reach braces, and the absence of chain imports in `src/`.
 The lockfile is unchanged since base `e02b71b`; the advisory was published after it.
 
 ### Review triggers
@@ -198,7 +211,10 @@ The lockfile is unchanged since base `e02b71b`; the advisory was published after
 This acceptance expires on **any** of the following. It is not permanent, and it
 does not cover any other advisory.
 
-1. **2026-10-10.** After that date the gate fails, whatever else is true.
+1. **2026-10-10 (UTC, inclusive).** From 2026-10-11 00:00 UTC (05:30 IST) the gate
+   fails, whatever else is true. The gate runs only when CI runs, so a commit that
+   went green earlier is not re-gated by itself. Deploy only from an exact-head CI
+   run made within the window.
 2. braces publishes a release above 3.0.3. The gate then fails and demands the upgrade.
 3. The advisory's identity changes (package, GHSA, npm source id or range), or another HIGH or CRITICAL appears.
 4. An installed braces other than 3.0.3 appears in the lockfile.
@@ -211,7 +227,8 @@ does not cover any other advisory.
 | CI | `.github/workflows/ci.yml`, job `dependency-scan`, step "Scan frontend dependencies": `.github/scripts/npm_audit_gate.py`, with the raw report kept as the `npm-audit-report` artifact |
 | Gate tests | `.github/scripts/test_npm_audit_gate.py`, which runs in the same step before the gate |
 | Visibility | The gate prints `TEMPORARY OWNER-APPROVED SECURITY EXCEPTION: GHSA-vfj7-8cjw-p6xm ... expires 2026-10-10` on every pass that uses it. |
-| Guards | `test_ci_static_gates.py` pins that the step runs the gate and its tests, that nothing swallows or weakens it, and that the gate hard-codes this one advisory and expiry. |
+| Runtime basis | The gate fails if a package outside the 17 accepted build/test dependents reaches braces, or if any file under `client/src` imports a package of the chain. |
+| Guards | `test_ci_static_gates.py` pins that the step runs the gate and its tests, and that nothing swallows or weakens it. It also loads the gate and pins the audit command, every identity constant, the expiry, the dependent set, and that `_is_exception_advisory` rejects each identity variant. |
 
 **The correct statement of the gate's result is "npm audit passed with one
 time-bound owner-approved exception (R3)", never "0 vulnerabilities".**

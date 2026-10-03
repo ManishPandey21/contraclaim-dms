@@ -41,6 +41,7 @@ def _report() -> Dict[str, Any]:
 
 def _client(tmp_path: Path, lockfile: Dict[str, Any] = LOCKFILE) -> Path:
     (tmp_path / "package-lock.json").write_text(json.dumps(lockfile), encoding="utf-8")
+    (tmp_path / "src").mkdir(exist_ok=True)
     return tmp_path
 
 
@@ -345,3 +346,113 @@ def test_main_returns_nonzero_on_failure_and_writes_the_raw_report(
         ]
         == 18
     )
+
+
+# --- the runtime non-exposure basis (security review MEDIUM) ------------------------------
+
+
+def test_a_new_package_reaching_braces_fails(tmp_path):
+    """The acceptance rests on WHICH packages bring braces in. A new dependent
+    (say a runtime library that bundles micromatch) is a new exposure question."""
+    report = _report()
+    dependent = copy.deepcopy(report["vulnerabilities"]["micromatch"])
+    dependent["name"] = "glob-runtime-lib"
+    dependent["nodes"] = ["node_modules/glob-runtime-lib"]
+    dependent["via"] = ["micromatch"]
+    report["vulnerabilities"]["glob-runtime-lib"] = dependent
+    report["metadata"]["vulnerabilities"]["high"] += 1
+    report["metadata"]["vulnerabilities"]["total"] += 1
+    with pytest.raises(gate.GateFailure, match="glob-runtime-lib"):
+        _gate(tmp_path, _Npm(report))
+
+
+def test_a_shrinking_dependent_set_still_passes(tmp_path):
+    """Dropping a path to braces (e.g. upgrading typescript-eslint) is safe."""
+    report = _report()
+    for name in [n for n in report["vulnerabilities"] if "typescript-eslint" in n]:
+        del report["vulnerabilities"][name]
+        report["metadata"]["vulnerabilities"]["high"] -= 1
+        report["metadata"]["vulnerabilities"]["total"] -= 1
+    assert "EXCEPTION" in _gate(tmp_path, _Npm(report))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'import micromatch from "micromatch";',
+        "import { expand } from 'braces';",
+        'const chokidar = require("chokidar");',
+        'const fg = await import("fast-glob");',
+        'export { default } from "tailwindcss/lib/util";',
+        'import plugin from "@typescript-eslint/parser";',
+    ],
+)
+def test_application_source_importing_the_chain_fails(tmp_path, line):
+    client = _client(tmp_path)
+    (client / "src" / "lib").mkdir(parents=True)
+    (client / "src" / "lib" / "glob.ts").write_text(
+        f"{line}\nexport const x = 1;\n", encoding="utf-8"
+    )
+    with pytest.raises(gate.GateFailure, match="src/lib/glob.ts"):
+        gate.run_gate(client, runner=_Npm(_report()), today=BEFORE_EXPIRY)
+
+
+def test_application_source_naming_braces_innocently_passes(tmp_path):
+    client = _client(tmp_path)
+    (client / "src" / "parse.ts").write_text(
+        "let braces = 0;\n// micromatch is not used\n", encoding="utf-8"
+    )
+    assert "EXCEPTION" in gate.run_gate(
+        client, runner=_Npm(_report()), today=BEFORE_EXPIRY
+    )
+
+
+def test_a_missing_application_source_tree_fails_closed(tmp_path):
+    client = _client(tmp_path)
+    (client / "src").rmdir()
+    with pytest.raises(gate.GateFailure, match="src"):
+        gate.run_gate(client, runner=_Npm(_report()), today=BEFORE_EXPIRY)
+
+
+# --- review LOWs ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("severity", ["High", None, "severe"])
+def test_an_unknown_root_advisory_severity_fails_closed(tmp_path, severity):
+    report = _report()
+    advisory = {
+        "source": 7,
+        "name": "micromatch",
+        "dependency": "micromatch",
+        "title": "x",
+        "url": "https://github.com/advisories/GHSA-zzzz-zzzz-zzzz",
+        "range": "*",
+    }
+    if severity is not None:
+        advisory["severity"] = severity
+    report["vulnerabilities"]["micromatch"]["via"].append(advisory)
+    with pytest.raises(gate.GateFailure, match="severity"):
+        _gate(tmp_path, _Npm(report))
+
+
+@pytest.mark.parametrize("field, value", [("high", 999), ("moderate", 0), ("total", 1)])
+def test_metadata_counts_must_match_the_report(tmp_path, field, value):
+    report = _report()
+    report["metadata"]["vulnerabilities"][field] = value
+    with pytest.raises(gate.GateFailure, match="metadata"):
+        _gate(tmp_path, _Npm(report))
+
+
+def test_an_aliased_braces_install_is_part_of_the_lineage(tmp_path):
+    lockfile = copy.deepcopy(LOCKFILE)
+    lockfile["packages"]["node_modules/bx"] = {"name": "braces", "version": "2.3.2"}
+    with pytest.raises(gate.GateFailure, match="not the accepted 3.0.3"):
+        _gate(tmp_path, _Npm(_report()), lockfile=lockfile)
+
+
+@pytest.mark.parametrize(
+    "published", [PUBLISHED + ["v3.0.4"], PUBLISHED + [3.1], PUBLISHED + ["3.0.4.1"]]
+)
+def test_an_unparseable_published_version_fails_closed(tmp_path, published):
+    with pytest.raises(gate.GateFailure, match="unrecognised"):
+        _gate(tmp_path, _Npm(_report(), view=published))
