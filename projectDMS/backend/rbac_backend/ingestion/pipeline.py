@@ -25,6 +25,10 @@ from ..retrieval.vector_client import VectorClient
 logger = logging.getLogger(__name__)
 
 
+class GovernedContractIngestionRefused(ValueError):
+    """Generic ingestion may not rewrite a governed contract's derived evidence."""
+
+
 class IngestionPipeline:
     """Orchestrated ingestion pipeline with idempotent stages."""
 
@@ -94,6 +98,8 @@ class IngestionPipeline:
             extract_start = time.perf_counter()
             await _update_stage(IngestionStage.EXTRACTING, progress=0.05)
             document = await self._load_document(job.document_id)
+            self._refuse_foreign_scope(job, document)
+            await self._refuse_governed_contract(job.document_id, document)
             text = self._extract_text(document)
             if not text:
                 raise ValueError("Document has no text to ingest")
@@ -228,6 +234,9 @@ class IngestionPipeline:
                 raise ValueError(
                     f"Document {job.document_id} is no longer authoritative for publication"
                 )
+            # Re-read at the write boundary: a promotion that committed while
+            # this job was embedding makes the document governed from here on.
+            await self._refuse_governed_contract(job.document_id, current_document)
             await self._persist_chunks(chunks, job.content_hash, job.options)
 
             changed_chunks = [chunks[i] for i in embed_indices]
@@ -255,6 +264,9 @@ class IngestionPipeline:
                     namespace=job.options.vector_namespace,
                 )
 
+            # Last check before the one destructive step: a promotion committing
+            # since the write-boundary check must still stop the prune.
+            await self._refuse_governed_contract(job.document_id, current_document)
             await self._prune_stale_vectors(
                 job=job,
                 current_chunks=set(c.id for c in chunks),
@@ -319,6 +331,35 @@ class IngestionPipeline:
                         "stage_timings": [st.model_dump() for st in stage_timings],
                     }
                 },
+            )
+
+    @staticmethod
+    def _refuse_foreign_scope(job: IngestionJob, document: Dict[str, Any]) -> None:
+        """The job's scope is what its chunks are stamped with; it must be the
+        document's own, or another tenant's text is indexed under this one."""
+        if str(document.get("organization_id") or "") != str(job.org_id or "") or str(
+            document.get("project_id") or ""
+        ) != str(job.project_id or ""):
+            raise ValueError(f"Document {job.document_id} is not in the job's scope")
+
+    async def _refuse_governed_contract(
+        self, document_id: str, document: Dict[str, Any]
+    ) -> None:
+        """A Contract Master instrument's document is not this pipeline's to write.
+
+        Its derived evidence has one writer, the contract-worker's reprojection.
+        This pipeline chunks differently and then prunes every point of the
+        document it did not just write - in the namespace evidence reads - which
+        deleted a CURRENT projection's vectors and left evidence answering empty.
+        Raised before any chunk, point or sync record is written.
+        """
+        from ..services.document_service import governed_by_contract_master
+
+        if await governed_by_contract_master(self.db, document_id, document.get("_id")):
+            raise GovernedContractIngestionRefused(
+                f"Document {document_id} is governed by a Contract Master instrument; "
+                "its evidence is rebuilt by the contract reindex and reprojection, "
+                "not by generic ingestion"
             )
 
     async def _load_document(self, document_id: str) -> Dict[str, Any]:

@@ -207,7 +207,44 @@ async def reconcile(args: argparse.Namespace) -> None:
 
     summary: List[Tuple[str, str, int, Optional[int]]] = []
 
+    from backend.rbac_backend.services.document_service import governed_by_contract_master
+
     for document_id in document_ids:
+        if await governed_by_contract_master(db, document_id):
+            # The contract-worker's reprojection is the only writer of a
+            # governed contract's evidence. Replacing its points here (LangChain
+            # shape, no revision tag) would rewrite a CURRENT projection behind
+            # its fence; storage repair delegates the same way.
+            logger.info("document=%s status=delegated (Contract Master reprojection)", document_id)
+            if args.repair and not args.dry_run:
+                # Never over "mismatch": storage repair records a damaged or
+                # unverifiable projection that way, and it must stay counted.
+                # One row per document: no upsert against a filter a "mismatch"
+                # row would fail, which inserted a second row beside it.
+                existing = await db.vector_sync_status.find_one({"document_id": document_id})
+                if existing is None:
+                    await db.vector_sync_status.insert_one(
+                        {
+                            "document_id": document_id,
+                            "sync_status": "delegated",
+                            "delegated_to": "contract_master_reprojection",
+                            "updatedAt": datetime.utcnow(),
+                            "createdAt": datetime.utcnow(),
+                        }
+                    )
+                elif existing.get("sync_status") != "mismatch":
+                    await db.vector_sync_status.update_one(
+                        {"_id": existing["_id"], "sync_status": {"$ne": "mismatch"}},
+                        {
+                            "$set": {
+                                "sync_status": "delegated",
+                                "delegated_to": "contract_master_reprojection",
+                                "updatedAt": datetime.utcnow(),
+                            }
+                        },
+                    )
+            summary.append((document_id, "delegated", 0, None))
+            continue
         mongo_count = await db.document_vectors.count_documents({"document_id": document_id})
         qdrant_count = await _fetch_qdrant_count(qclient, config.qdrant_collection, document_id)
 

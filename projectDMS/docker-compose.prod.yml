@@ -165,6 +165,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     environment:
       <<: *backend-env
@@ -207,6 +214,9 @@ services:
     build:
       context: ./client
       dockerfile: Dockerfile
+      # Release identity baked into the image (client/Dockerfile).
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     depends_on:
       backend:
@@ -228,12 +238,22 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     environment:
       <<: *backend-env
       START_BACKGROUND_SERVICES: "false"
       START_CONTRACT_QUEUE_WORKERS: "true"
+      # Contract Master reprojection (PENDING -> CURRENT). Exactly one service
+      # runs it; the claim lease keeps extra replicas safe, not useful.
+      START_CONTRACT_REPROJECTION_WORKERS: "true"
       START_DOCUMENT_EXTRACTION_WORKERS: "false"
       START_DRAFTING_QUEUE_WORKERS: "${START_DRAFTING_QUEUE_WORKERS:-false}"
       START_FILING_EXPORT_QUEUE_WORKERS: "${START_FILING_EXPORT_QUEUE_WORKERS:-true}"
@@ -262,6 +282,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     environment:
@@ -321,6 +348,13 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      # Release identity: baked into the image (revision label + RELEASE_SHA
+      # environment) by backend/Dockerfile, never set at `up`, so a recreated
+      # container cannot claim a release its code is not. Build with
+      # RELEASE_SHA="$(git rev-parse HEAD)" (OPERATIONS 7a); unset, the image
+      # says `unknown` and post_deploy_verify.sh fails.
+      args:
+        RELEASE_SHA: "${RELEASE_SHA:-unknown}"
     restart: unless-stopped
     command: ["python", "-m", "rbac_backend.worker"]
     deploy:

@@ -1585,6 +1585,14 @@ class DocumentController:
                     status.HTTP_409_CONFLICT,
                 )
 
+            if await self.document_service.is_governed_contract(document_id):
+                raise DocumentError(
+                    "This contract is governed by Contract Master. Use the contract "
+                    "reindex; general reprocessing would replace the clause rows its "
+                    "evidence projection is built from.",
+                    status.HTTP_409_CONFLICT,
+                )
+
             file_path = await self._materialize_for_processing(document)
 
             await self.document_service.process_document_async(

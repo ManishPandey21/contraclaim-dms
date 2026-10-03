@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import pytest
@@ -478,6 +479,332 @@ def test_claim_state_is_not_stored_on_the_authoritative_record() -> None:
             record = await _record(fixture)
             for operational in ("owner_token", "worker_id", "lease_expires_at", "claimed_at"):
                 assert operational not in record
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+async def _expire_lease(fixture: "_Fixture", revision: int = 1) -> None:
+    """Move the live lease into the past, as the clock would."""
+    await fixture.db["contract_reprojection_claims"].update_one(
+        {"_id": f"contract-reprojection:{CD}:{revision}"},
+        {"$set": {"lease_expires_at": datetime(2000, 1, 1, tzinfo=timezone.utc)}},
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Lease hardening - the worker has a runtime owner now, so these are live paths
+# --------------------------------------------------------------------------- #
+
+
+def test_an_expired_claim_is_reclaimed_atomically() -> None:
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            first = await worker.claim(CD, revision=1, worker_id="W1")
+            assert first is not None
+            await _expire_lease(fixture)
+
+            # Two contenders for the expired lease: exactly one wins.
+            results = await asyncio.gather(
+                worker.claim(CD, revision=1, worker_id="W2"),
+                worker.claim(CD, revision=1, worker_id="W3"),
+            )
+            winners = [claim for claim in results if claim is not None]
+            assert len(winners) == 1, f"expired lease taken by {len(winners)} workers"
+
+            claims = await fixture.db["contract_reprojection_claims"].find({}).to_list(None)
+            assert len(claims) == 1
+            assert claims[0]["owner_token"] == winners[0].owner_token
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_stale_owner_cannot_complete_or_fail_after_reclaim() -> None:
+    # LostProjectionClaim is a StaleWorkerGeneration: asserted by the base class
+    # so the same test runs (and fails) against the pre-lease implementation.
+    LostProjectionClaim = StaleWorkerGeneration
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            stale = await worker.claim(CD, revision=1, worker_id="W1")
+            await _expire_lease(fixture)
+            fresh = await worker.claim(CD, revision=1, worker_id="W2")
+            assert fresh is not None
+
+            with pytest.raises(LostProjectionClaim):
+                await worker.complete(stale)
+            with pytest.raises(LostProjectionClaim):
+                await worker.fail(stale, reason="late failure")
+            with pytest.raises(LostProjectionClaim):
+                await worker.renew(stale)
+
+            record = await _record(fixture)
+            assert record["projection_status"] == ProjectionStatus.IN_PROGRESS.value
+            assert record["projection_revision"] is None
+
+            await worker.complete(fresh)
+            record = await _record(fixture)
+            assert record["projection_status"] == ProjectionStatus.CURRENT.value
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_live_claim_is_contention_not_an_error() -> None:
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            assert await worker.claim(CD, revision=1, worker_id="W1") is not None
+            results = await asyncio.gather(
+                *(worker.claim(CD, revision=1, worker_id=f"W{n}") for n in range(2, 8))
+            )
+            assert results == [None] * 6
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_database_outage_is_not_reported_as_contention() -> None:
+    """The claim write failing must raise, never read as "someone else has it"."""
+    from pymongo.errors import AutoReconnect
+
+    class _Unavailable:
+        async def update_one(self, *args, **kwargs):
+            raise AutoReconnect("connection closed (test outage)")
+
+        async def insert_one(self, *args, **kwargs):
+            raise AutoReconnect("connection closed (test outage)")
+
+        async def find_one(self, *args, **kwargs):
+            raise AutoReconnect("connection closed (test outage)")
+
+    class _PartiallyDown:
+        """Instruments readable, the claims collection unreachable."""
+
+        def __init__(self, db) -> None:
+            self._db = db
+            self.client = db.client
+
+        def __getitem__(self, name):
+            if name == "contract_reprojection_claims":
+                return _Unavailable()
+            return self._db[name]
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(_PartiallyDown(fixture.db))
+            with pytest.raises(AutoReconnect):
+                await worker.claim(CD, revision=1, worker_id="W1")
+
+            unreachable = AsyncIOMotorClient(
+                "mongodb://127.0.0.1:1/?directConnection=true", serverSelectionTimeoutMS=300
+            )
+            try:
+                from pymongo.errors import ServerSelectionTimeoutError
+
+                with pytest.raises(ServerSelectionTimeoutError):
+                    await ContractReprojectionWorker(unreachable["down"]).claim(
+                        CD, revision=1, worker_id="W1"
+                    )
+            finally:
+                unreachable.close()
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_failure_backs_off_and_then_becomes_claimable_again() -> None:
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            claim = await worker.claim(CD, revision=1, worker_id="W1")
+            await worker.fail(claim, reason="embedder down")
+
+            assert await worker.claim(CD, revision=1, worker_id="W2") is None, (
+                "a failure was retried inside its backoff"
+            )
+            await fixture.db["contract_reprojection_claims"].update_one(
+                {"_id": f"contract-reprojection:{CD}:1"},
+                {"$set": {"next_attempt_at": datetime(2000, 1, 1, tzinfo=timezone.utc)}},
+            )
+            retried = await worker.claim(CD, revision=1, worker_id="W2")
+            assert retried is not None
+            await worker.complete(retried)
+            assert (await _record(fixture))["projection_status"] == ProjectionStatus.CURRENT.value
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_clean_failures_keep_retrying_and_never_exhaust() -> None:
+    """An outage longer than the backoff series must not strand the generation."""
+    from rbac_backend.services.contract_reprojection_worker import REPROJECTION_MAX_ATTEMPTS
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            claims = fixture.db["contract_reprojection_claims"]
+            for _ in range(REPROJECTION_MAX_ATTEMPTS + 3):
+                claim = await worker.claim(CD, revision=1, worker_id="W")
+                assert claim is not None, "a cleanly failing generation stopped being retried"
+                await worker.fail(claim, reason="qdrant down")
+                await claims.update_one(
+                    {"_id": f"contract-reprojection:{CD}:1"},
+                    {"$set": {"next_attempt_at": datetime(2000, 1, 1, tzinfo=timezone.utc)}},
+                )
+            row = await claims.find_one({"_id": f"contract-reprojection:{CD}:1"})
+            assert row["exhausted"] is False
+            assert row["failures"] == REPROJECTION_MAX_ATTEMPTS + 3
+            assert (await _record(fixture))["projection_status"] == ProjectionStatus.FAILED.value
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_crash_looping_generation_becomes_visibly_failed() -> None:
+    """Each attempt dies without fail(): after the budget it stops being reclaimed
+    and the instrument goes FAILED instead of sitting IN_PROGRESS forever."""
+    from rbac_backend.services.contract_reprojection_worker import REPROJECTION_MAX_ATTEMPTS
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            for _ in range(REPROJECTION_MAX_ATTEMPTS):
+                claim = await worker.claim(CD, revision=1, worker_id="W")
+                assert claim is not None
+                await _expire_lease(fixture)  # the worker died; the lease runs out
+            assert await worker.claim(CD, revision=1, worker_id="W") is None
+            assert (await _record(fixture))["projection_status"] == ProjectionStatus.IN_PROGRESS.value
+
+            assert await worker.exhaust_crashed_claims() == 1
+            row = await fixture.db["contract_reprojection_claims"].find_one({})
+            assert row["status"] == "failed" and row["exhausted"] is True
+            assert (await _record(fixture))["projection_status"] == ProjectionStatus.FAILED.value
+
+            # An operator retry re-opens it; a new revision would too.
+            result = await worker.request_retry(CD)
+            assert result["retry_scheduled"] is True
+            assert await worker.claim(CD, revision=1, worker_id="W") is not None
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_stalled_claimant_cannot_demote_a_published_generation() -> None:
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            claim = await worker.claim(CD, revision=1, worker_id="W1")
+            await worker.complete(claim)
+            # A claimant whose IN_PROGRESS write lands late (it stalled past its
+            # lease) finds CURRENT and leaves it alone.
+            await fixture.db[CONTRACT_DOCUMENTS_COLLECTION].update_one(
+                {
+                    "_id": CD,
+                    "classification_revision": 1,
+                    "projection_status": {"$ne": ProjectionStatus.CURRENT.value},
+                },
+                {"$set": {"projection_status": ProjectionStatus.IN_PROGRESS.value}},
+            )
+            assert (await _record(fixture))["projection_status"] == ProjectionStatus.CURRENT.value
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# A retry request racing a completion must never strand the generation
+# --------------------------------------------------------------------------- #
+
+
+def test_a_retry_racing_a_completion_never_strands_the_generation() -> None:
+    """Review HIGH-1: the re-ingest hook's retry lands while ``complete`` is open.
+
+    The completion transaction has already moved the claim to ``complete`` and
+    the instrument to CURRENT (uncommitted) when the retry arrives. Whatever the
+    interleaving, afterwards the generation must be rebuildable: the source it
+    was built from has just been replaced. PENDING beside a ``complete`` claim
+    is the stranded state - every later ``claim`` answers "held" forever.
+    """
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            claim = await worker.claim(CD, revision=1, worker_id="W1")
+            assert claim is not None
+            entered, release = asyncio.Event(), asyncio.Event()
+
+            async def publish(session: Any) -> None:
+                entered.set()
+                await release.wait()
+
+            completion = asyncio.create_task(worker.complete(claim, publish=publish))
+            await entered.wait()
+            retry = asyncio.create_task(
+                ContractReprojectionWorker(fixture.db).request_retry(CD, reason="source re-ingested")
+            )
+            await asyncio.sleep(0.5)
+            release.set()
+            outcomes = await asyncio.gather(completion, retry, return_exceptions=True)
+            assert not isinstance(outcomes[1], BaseException), outcomes
+
+            record = await _record(fixture)
+            assert record["projection_status"] != ProjectionStatus.CURRENT.value, (
+                "the retry was requested because the source changed; the old "
+                "generation must not stay CURRENT"
+            )
+            again = await worker.claim(CD, revision=1, worker_id="W2")
+            assert again is not None, "generation stranded: due, but never claimable"
+        finally:
+            await _drop(fixture)
+
+    _run(scenario())
+
+
+def test_a_due_instrument_beside_a_completed_claim_is_reclaimed() -> None:
+    """The stranded shape itself - however it arose - heals instead of wedging."""
+
+    async def scenario() -> None:
+        fixture = await _fresh()
+        try:
+            worker = ContractReprojectionWorker(fixture.db)
+            claim = await worker.claim(CD, revision=1, worker_id="W1")
+            await worker.complete(claim)
+            # Due again for its live revision, with the claim still ``complete``.
+            await fixture.db[CONTRACT_DOCUMENTS_COLLECTION].update_one(
+                {"_id": CD}, {"$set": {"projection_status": ProjectionStatus.PENDING.value}}
+            )
+            again = await worker.claim(CD, revision=1, worker_id="W2")
+            assert again is not None
+            await worker.complete(again)
+            record = await _record(fixture)
+            assert (record["projection_status"], record["projection_revision"]) == (
+                ProjectionStatus.CURRENT.value,
+                1,
+            )
+            # And a CURRENT generation is still not reclaimable.
+            assert await worker.claim(CD, revision=1, worker_id="W3") is None
         finally:
             await _drop(fixture)
 

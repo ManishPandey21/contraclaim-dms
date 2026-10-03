@@ -75,6 +75,7 @@ class FakeCollection:
 class FakeDB:
     def __init__(self):
         self.documents = FakeCollection()
+        self.contract_documents = FakeCollection()
         self.document_processing_jobs = FakeCollection()
 
 

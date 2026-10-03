@@ -243,10 +243,12 @@ scripts/production_restore_volumes.sh --apply <project>_redis_data /var/backups/
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-Post-restore verification:
+Post-restore verification. A restore changes data, not app images, so the scope is
+`UNCHANGED` (deployment guide, 5a-7a):
 
 ```bash
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 SMOKE_BASE_URL=https://<host> SMOKE_CHECK_OPERATIONS=true METRICS_TOKEN=<token> python scripts/smoke_health.py
 ```
 
@@ -317,10 +319,12 @@ any of the three items closes.
 
 ## 6. Post-Deploy Verification
 
-Run:
+Run it with the deployment's declared scope and release manifest (deployment guide,
+5a-7a); a missing scope or manifest is a failure, not a skip:
 
 ```bash
-scripts/post_deploy_verify.sh
+DEPLOY_SCOPE=<FULL|BACKEND_ONLY|CLIENT_ONLY|UNCHANGED> RELEASE_MANIFEST=<release manifest> \
+  APPROVED_MANIFEST=<current.json, for BACKEND_ONLY or CLIENT_ONLY> scripts/post_deploy_verify.sh
 ```
 
 This checks container status, `/health/live`, `/health/ready`,
@@ -391,6 +395,125 @@ Verify after deploy:
 - Worker logs show scheduler startup.
 - `scheduler_locks` contains short-lived locks while jobs run.
 - No duplicate daily or weekly notifications are emitted.
+
+## 7a. Contract Master Reprojection Ownership
+
+A promoted or corrected contract instrument is written `projection_status=PENDING`
+in the same transaction that makes its classification authoritative. Only the
+reprojection runtime moves it to `CURRENT`, and until then Contract Master
+evidence for that contract answers `409 projection_not_current`. The 2026-09-25
+staging rehearsal failed exactly here: PENDING was written and no process owned
+it. A deploy that ships the code without a running owner reproduces that
+incident, so ownership is verified after every deploy, not assumed.
+
+| Service | `START_CONTRACT_REPROJECTION_WORKERS` | Owns |
+|---|---|---|
+| `contract-worker` | `true` (exactly one service) | reprojection, contract ingest queue, scheduler |
+| `backend` (web) | unset / `false` | must never reproject |
+| `document-worker` | unset / `false` | page extraction (`START_DOCUMENT_EXTRACTION_WORKERS=true`) |
+
+**Build every image with the release identity.** Each service builds its own
+image from `./backend`, so rebuilding only `backend` leaves `contract-worker` on
+the previous code while the checkout says otherwise. The build argument
+`RELEASE_SHA` is baked into the image twice by `backend/Dockerfile`: the label
+`org.opencontainers.image.revision` and the process environment variable
+`RELEASE_SHA` the runtime heartbeat records. It is a **build-time** value only -
+`up` neither needs nor overrides it - so a container recreated later cannot claim
+a release its code is not:
+
+```bash
+RELEASE_SHA="$(git rev-parse HEAD)" docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml build backend contract-worker document-worker document-worker-canary
+docker compose -f docker-compose.prod.yml -f docker-compose.mongo-replicaset.yml up -d --no-deps backend contract-worker document-worker
+```
+
+An image built without `RELEASE_SHA` is labelled `unknown`, which the check below
+reports as a failure: it cannot prove what code is running. A certified image is
+retagged, not rebuilt, and keeps the identity it was certified with.
+
+**Which image each service must run is scoped and strict** (owner decision
+2026-10-02). The deploy declares `DEPLOY_SCOPE` - `FULL`, `CLIENT_ONLY` or
+`BACKEND_ONLY` - and a release manifest (`scripts/release_manifest.py`) records
+the exact image id and build commit of every app service. A service the scope
+deploys must run the manifest's image, built from the deployed commit; a service
+it does not deploy must run exactly the image the approved manifest of the
+previous release recorded, with an unchanged build context; a running service the
+manifest does not name is drift. A client-only deploy therefore rebuilds and
+restarts nothing but `client`, and still proves every backend image unchanged.
+The deployment guide (sections 5a-7a) has the commands.
+
+**What `scripts/post_deploy_verify.sh` asserts** (section "Contract Master
+reprojection ownership"; read-only, it writes nothing):
+
+1. `contract-worker` is running with `START_CONTRACT_REPROJECTION_WORKERS=true`.
+2. `backend` and every `document-worker*` container do **not** have it set. A
+   second owner would be safe (the claim lease) but is a topology error.
+3. `document-worker` still owns extraction (`START_DOCUMENT_EXTRACTION_WORKERS=true`).
+4. The `contract-worker` process `RELEASE_SHA` equals its image's revision label
+   (FAIL: something set it at `up`). Which image it - and every other app service -
+   must run is the section "Release images", against the release manifest (FAIL on
+   any mismatch, drift, missing scope or manifest).
+5. The runtime recorded liveness in `contract_reprojection_runtime_heartbeats`
+   within three poll intervals (`CONTRACT_REPROJECTION_POLL_SECONDS`, at least
+   180 s), from a running `contract-worker` container, on the deployed
+   `RELEASE_SHA` - and no running `backend` or `document-worker` container has a
+   fresh row. Liveness is written throughout a pass, so a long pass over a
+   backlog does not read as a dead owner; the pass start is recorded too, and a
+   pass still running after 30 minutes (the claim lease) fails the check as
+   stuck. A stopped runtime deletes its row, and rows of processes that
+   died expire after 7 days (TTL); a row left by the container a deploy
+   replaced names a host that no longer runs and is ignored. The heartbeat's
+   release must be the revision of a running `contract-worker` image (which
+   the release-image check ties to the manifest), so this proves the loop is
+   running the approved code, not only that the flag is set.
+
+**Staging only: a deterministic PENDING generation.** Promote a fixture contract
+on staging (the Contract Master runtime harness, or the migration adjudication
+flow by hand), then run the verifier with its instrument id:
+
+```bash
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST="$MANIFESTS/current.json" \
+  REPROJECTION_PROBE_INSTRUMENT_ID=<contract_documents._id> scripts/post_deploy_verify.sh
+```
+
+It waits up to `REPROJECTION_PROBE_TIMEOUT_SECONDS` (default 300) for the
+instrument to leave PENDING, and passes only when it is `CURRENT` at its live
+revision **and** its completed claim names a worker id that heartbeated from a
+`contract-worker` container. The probe only reads; the promotion that creates the
+PENDING generation is the operator's, so run it only against a fixture made for
+the purpose, never a production instrument.
+
+**When a generation does not reach CURRENT.** `GET
+/api/contract-master/instruments/{id}/projection` shows the claim state:
+`failures`, `next_attempt_at` and an operator-safe `last_error`. A FAILED
+generation retries by itself with capped backoff (1, 2, 4 … 60 minutes); an
+operator retry is `python -m rbac_backend.scripts.contract_reprojection_retry
+--contract-document-id <instrument id>` inside the contract-worker container.
+
+| `last_error` says | Meaning | Action |
+|---|---|---|
+| `embedding unavailable` / `vector publication failed` | a derived store is down | none; it retries |
+| `the source of … is mutating` | an ingest (upload, OCR retry, reindex) is writing the text | none; the ingest re-opens the generation when it settles |
+| `the source of … is failed` | the last ingest stopped part-way; its text is half-written | reindex the contract |
+| `no persisted page text` | a PDF contract ingested before the page store existed | reindex the contract |
+
+**Generic pipelines never repair a governed contract.** `POST
+/api/v1/ingestion/jobs` answers `409` for a document a Contract Master instrument
+names (that pipeline prunes every point it did not write, which deleted the
+projection's vectors), general reprocess answers `409`, and storage repair
+delegates: a CURRENT projection whose points are missing from the vector store is
+handed back to reprojection (PENDING), a FAILED one is re-opened, and bulk resync
+skips governed documents entirely.
+
+**One writer of a contract's source.** A contract ingest holds a durable lease
+on the document (`contract_source_leases`, 10 minutes, renewed every minute). A
+second ingest of the same document is not started: the queue puts it back
+without spending a retry, or leaves it to the run that holds the lease when it
+is a redelivered copy of that run. An ingest that cannot renew for 7 minutes
+stops itself (recorded as a failed, retried ingest) before its lease can lapse;
+one whose lease was taken marks the source tainted. A lease that lapses while
+`mutating` is a crashed ingest; a failed or tainted source is not projected
+until another ingest settles it cleanly - the projection route then says
+`the source of … is failed`, and the fix is a reindex.
 
 ## 8. Security Operations
 

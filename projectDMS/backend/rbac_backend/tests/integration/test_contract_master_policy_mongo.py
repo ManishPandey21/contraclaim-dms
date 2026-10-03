@@ -1457,6 +1457,12 @@ def _requests():
 
 #: (persona, selection) -> {route: expected status}. Selection: A1 / A2 project,
 #: "org" = organisation only, None = nothing selected.
+#:
+#: Evidence after a successful applicability is 409 ``projection_not_current``:
+#: the row applies the seeded PENDING instrument to A1 and then searches. That is
+#: past every authorisation gate (a refusal would be 400/403), and it is the honest
+#: answer - an applicable, unprojected instrument is not "zero applicable", so it
+#: must not read as valid_empty.
 MATRIX = {
     ("org_admin", PROJ_A1): {
         "catalogue": 200,
@@ -1464,7 +1470,7 @@ MATRIX = {
         "projection": 200,
         "classification": 200,
         "applicability": 201,
-        "evidence": 200,
+        "evidence": 409,
         "inventory": 200,
         "materialise": 200,
         "review": 200,
@@ -1562,7 +1568,7 @@ MATRIX = {
         "projection": 200,
         "classification": 200,
         "applicability": 201,
-        "evidence": 200,
+        "evidence": 409,
         "inventory": 200,
         "materialise": 200,
         "review": 200,
@@ -1613,7 +1619,7 @@ MATRIX = {
         "projection": 200,
         "classification": 403,
         "applicability": 201,
-        "evidence": 200,
+        "evidence": 409,
         "inventory": 403,
         "materialise": 403,
         "review": 200,

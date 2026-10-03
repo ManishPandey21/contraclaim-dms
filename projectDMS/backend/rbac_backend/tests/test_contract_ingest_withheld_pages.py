@@ -319,6 +319,22 @@ class _Harness:
             for field in ("raw_text", "cleaned_text")
         ]
 
+    async def reprojected(self) -> None:
+        """The completed ingest withdrew the projection; stand in for its rebuild.
+
+        A completed ingest rewrites the document's rows, so it moves the
+        instrument back to PENDING and the contract-worker rebuilds it
+        (``test_contract_reprojection_runtime_mongo`` drives that real path on a
+        replica set). Here the rebuild is stood in for by the CURRENT stamp alone.
+        """
+        record = await self.db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": "cd-1"})
+        assert record is not None
+        assert record["projection_status"] == "PENDING", "the ingest must withdraw the projection"
+        assert await self.evidence_ready() is False
+        await self.db[CONTRACT_DOCUMENTS_COLLECTION].update_one(
+            {"_id": "cd-1"}, {"$set": {"projection_status": "CURRENT", "projection_revision": 1}}
+        )
+
     async def evidence_ready(self) -> bool:
         record = await self.db[CONTRACT_DOCUMENTS_COLLECTION].find_one({"_id": "cd-1"})
         assert record is not None
@@ -415,6 +431,7 @@ async def test_fully_readable_contract_completes_and_is_evidence(
     assert harness.clause_index_runs == [str(harness.document_id)]
     published = " ".join(harness.published_texts())
     assert "PAGEONEMARKER" in published and "PAGETHREEMARKER" in published
+    await harness.reprojected()
     assert await harness.evidence_ready() is True
     assert await harness.evidence_document_ids() == frozenset({str(harness.document_id)})
     assert _ScriptedOcr.requested == []
@@ -484,6 +501,7 @@ async def test_retry_resolves_withheld_page_and_preserves_resolved_ocr(
     )
     _assert_no_cid(harness.published_texts())
     _assert_no_cid(await harness.published_page_texts())
+    await harness.reprojected()
     assert await harness.evidence_ready() is True
     assert await harness.evidence_document_ids() == frozenset({str(harness.document_id)})
 

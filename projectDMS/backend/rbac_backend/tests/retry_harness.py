@@ -180,12 +180,20 @@ class FakeCollection:
         update: Dict[str, Any],
         sort: Any = None,
         return_document: Any = None,
+        upsert: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        # ``return_document`` follows pymongo: ReturnDocument.BEFORE is False.
+        after = return_document is None or bool(return_document)
         found = await self.find_one(query, sort=sort)
         if not found:
-            return None
+            if not upsert:
+                return None
+            await self.update_one(
+                {"_id": query["_id"]} if "_id" in query else {}, update, upsert=True
+            )
+            return await self.find_one({"_id": query["_id"]}) if after and "_id" in query else None
         await self.update_one({"_id": found["_id"]}, update)
-        return await self.find_one({"_id": found["_id"]})
+        return await self.find_one({"_id": found["_id"]}) if after else found
 
     async def delete_many(self, query: Dict[str, Any]) -> SimpleNamespace:
         removed = [key for key, doc in self.docs.items() if _matches(doc, query)]

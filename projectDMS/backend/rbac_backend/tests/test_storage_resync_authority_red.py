@@ -71,6 +71,23 @@ class _DB:
         self.chunks = _Chunks()
         self.vector_sync_status = _SyncStatus()
 
+    def __getitem__(self, name: str) -> Any:
+        # The repair asks whether a Contract Master instrument governs the
+        # document (it would then delegate to reprojection); none does here.
+        assert name == "contract_documents", name
+        return _NoInstruments()
+
+
+class _NoInstruments:
+    async def find_one(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def find(self, *_args: Any, **_kwargs: Any) -> "_NoInstruments":
+        return self
+
+    async def to_list(self, length: Any = None) -> list:
+        return []
+
 
 class _EmbeddingBoundary:
     async def embed(self, texts):

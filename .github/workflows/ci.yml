@@ -140,26 +140,52 @@ jobs:
           CONTRACT_REHEARSAL_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           CONTRACT_UPLOAD_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
           CONTRACT_DURABILITY_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Reprojection runtime: the promotion -> PENDING -> worker -> CURRENT gate
+          # (2026-09-25 staging NO-GO) and the claim-lease fences it depends on.
+          CONTRACT_MASTER_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_REPROJECTION_RUNTIME_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          # Contract Master evidence cutover and provenance: exported nowhere until
+          # the inverted coverage rule (test_ci_real_mongo_coverage.py) found them.
+          CONTRACT_EVIDENCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+          CONTRACT_PROVENANCE_MONGODB_URI: mongodb://localhost:27018/?replicaSet=rs0&directConnection=true
+        # Every real-Mongo module is in this list or excused by name, with a
+        # reason, in test_ci_real_mongo_coverage.py: a module in neither is red.
+        # That is how the reprojection review, source-mutation and
+        # generic-ingestion suites shipped unexecuted.
         run: |
-          python -m pytest -q -rs \
-            backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py \
-            backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py \
-            backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py \
-            backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py \
-            backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_migration_claim_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_promotion_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_post_promotion_mongo.py \
-            backend/rbac_backend/tests/integration/test_migration_rehearsal_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_upload_scope_mongo.py \
-            backend/rbac_backend/tests/integration/test_contract_upload_durability_mongo.py \
+          suites=(
+            backend/rbac_backend/tests/integration/test_document_relationships_cl1_mongo.py
+            backend/rbac_backend/tests/integration/test_variation_relationships_cl2_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3a_variation_hindrance_mongo.py
+            backend/rbac_backend/tests/integration/test_cl3b_programme_chronology_mongo.py
+            backend/rbac_backend/tests/integration/test_cl4a_core_active_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_policy_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_master_routes_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_migration_claim_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_post_promotion_mongo.py
+            backend/rbac_backend/tests/integration/test_migration_rehearsal_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_scope_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_upload_durability_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_document_persistence_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_lexical_containment_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_permission_seeding_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_evidence_cutover_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_provenance_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_worker_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_runtime_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_reprojection_review3_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_source_mutation_mongo.py
+            backend/rbac_backend/tests/integration/test_contract_generic_ingestion_isolation_mongo.py
+          )
+          python -m pytest -q -rs --junitxml=real-mongo-relationships.xml "${suites[@]}" \
             | tee real-mongo-relationships.log
           if grep -qE "[0-9]+ skipped" real-mongo-relationships.log; then
             echo "real-Mongo relationship suites skipped: no transaction evidence" >&2
             exit 1
           fi
+          # Per module: at least one test executed and none skipped.
+          python scripts/assert_suites_ran.py real-mongo-relationships.xml "${suites[@]}"
 
   frontend-checks:
     name: Frontend lint, tests, and build
@@ -275,7 +301,9 @@ jobs:
       # Python runtime is still built on every change so a 3.12 incompatibility
       # cannot stay hidden until an operator enables the profile.
       - name: Build the backend image
-        run: docker build --pull -t projectdms-backend:${{ github.sha }} projectDMS/backend
+        # The scanned image carries its release identity like a deployed one
+        # (backend/Dockerfile, OPERATIONS 7a).
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-backend:${{ github.sha }} projectDMS/backend
       - name: Scan backend image
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -295,7 +323,7 @@ jobs:
       - name: Drop the backend image
         run: docker image rm projectdms-backend:${{ github.sha }}
       - name: Build the client image
-        run: docker build --pull -t projectdms-client:${{ github.sha }} projectDMS/client
+        run: docker build --pull --build-arg RELEASE_SHA=${{ github.sha }} -t projectdms-client:${{ github.sha }} projectDMS/client
       - name: Client runtime image carries no package manager
         # The client image serves static files with `node scripts/serve-dist.mjs`.
         # node:*-slim bundles npm, corepack and yarn, and npm's vendored

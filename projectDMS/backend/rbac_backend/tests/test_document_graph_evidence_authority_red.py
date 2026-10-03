@@ -142,6 +142,7 @@ class _Database:
         self.ai_extractions = _Collection()
         self.project_events = _Collection()
         self.event_links = _Collection()
+        self.contract_documents = _Collection()
 
 
 class _PersistentFalkor:

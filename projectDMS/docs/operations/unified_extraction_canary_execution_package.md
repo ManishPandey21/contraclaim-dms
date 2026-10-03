@@ -573,8 +573,10 @@ ORG="<approved-demo-org-id>"
 # S3.3 recreate only the two workers
 $DC up -d --no-deps document-worker document-worker-canary
 
-# S3.4 confirm topology from the running containers
-scripts/post_deploy_verify.sh
+# S3.4 confirm topology from the running containers. No image changes: the canary
+#      runs the approved document-worker image, so the scope is UNCHANGED.
+DEPLOY_SCOPE=UNCHANGED RELEASE_MANIFEST=/opt/contraclaim-dms/release-manifests/current.json \
+  scripts/post_deploy_verify.sh
 ```
 
 **Hard acceptance requirement — prove from actual Mongo job data:**

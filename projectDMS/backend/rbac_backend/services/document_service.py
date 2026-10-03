@@ -1163,6 +1163,29 @@ class DocumentService:
 
         document_id = str(job["document_id"])
         now = datetime.utcnow()
+        if await governed_by_contract_master(db, document_id):
+            # Refused before anything is written: marking the document
+            # `processing` would make the projection builder see an ingest in
+            # flight, and a retried refusal would walk the job to dead-letter
+            # while holding it there. Closed once, terminally; the contract
+            # reindex is the path that re-reads a governed contract.
+            message = (
+                "Document is governed by a Contract Master instrument; reprocess it "
+                "through the contract reindex"
+            )
+            logger.warning("Document %s: %s", document_id, message)
+            await db.document_processing_jobs.update_one(
+                {"_id": job_id},
+                {
+                    "$set": {
+                        "status": "dead_lettered",
+                        "stage": "skipped_governed_contract",
+                        "error": {"message": message, "timestamp": now, "terminal": True},
+                        "updated_at": now,
+                    }
+                },
+            )
+            return False
         await db.documents.update_one(
             {"_id": self._validate_document_id(document_id)},
             {
@@ -1650,6 +1673,11 @@ class DocumentService:
         except Exception:
             logger.debug("Failed to emit processing failure audit for %s", job.get("document_id"), exc_info=True)
 
+    async def is_governed_contract(self, document_id: str) -> bool:
+        """True when a Contract Master instrument names this document."""
+        db = await self._get_db()
+        return await governed_by_contract_master(db, document_id)
+
     async def process_document_async(
         self,
         document_id: str,
@@ -1697,6 +1725,18 @@ class DocumentService:
                 logger.warning(
                     "Document %s is held by contract extraction; the general "
                     "pipeline will not reprocess it",
+                    document_id,
+                )
+                return False
+            if await governed_by_contract_master(db, document_id, stored.get("_id")):
+                # The general pipeline would replace the clause rows evidence
+                # reads with token chunks while the instrument stays CURRENT -
+                # evidence answering empty from a "current" projection. A
+                # governed contract is re-read by the contract reindex, whose
+                # completion re-opens the reprojection.
+                logger.warning(
+                    "Document %s is governed by a Contract Master instrument; the "
+                    "general pipeline will not reprocess it",
                     document_id,
                 )
                 return False
@@ -3397,3 +3437,28 @@ class DocumentService:
 def create_document_service(db: Database) -> DocumentService:
     """Create document service instance"""
     return DocumentService(db)
+
+
+async def governed_by_contract_master(db: Any, document_id: Any, stored_id: Any = None) -> bool:
+    """Whether a Contract Master instrument names this document.
+
+    Such a document's derived rows and vectors have one writer: the
+    contract-worker's reprojection (fed by the contract ingest). Any other
+    pipeline that rewrites them leaves a CURRENT projection describing rows that
+    no longer exist.
+    """
+    from .contract_document_store import CONTRACT_DOCUMENTS_COLLECTION
+    from .publication_policy import _collection
+
+    ids = sorted({str(value) for value in (document_id, stored_id) if value is not None})
+    if not ids:
+        return False
+    instruments = _collection(db, CONTRACT_DOCUMENTS_COLLECTION)
+    if instruments is None:
+        # Unknown is not "ungoverned": answering False here would hand a
+        # governed contract to a pipeline that rewrites its evidence.
+        raise RuntimeError("Contract Master instruments are not readable; governance unknown")
+    return (
+        await instruments.find_one({"document_id": {"$in": ids}}, {"_id": 1})
+        is not None
+    )
