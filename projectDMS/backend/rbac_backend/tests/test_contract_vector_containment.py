@@ -74,7 +74,9 @@ def _memory_client() -> VectorClient:
     client._client = None
     client._qmodels = None
     client._memory_index = []
-    client.collection_name = "contract_clauses"
+    client.default_collection = "contract_clauses"
+    client._resolved_collections = {}
+    client._vector_names = {}
     return client
 
 

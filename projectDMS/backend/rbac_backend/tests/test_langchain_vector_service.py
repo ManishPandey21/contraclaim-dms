@@ -176,7 +176,9 @@ async def test_canonical_payload_is_not_reconciled_as_chunks_and_is_deleted_by_d
         native_client._client = service._client
         native_client._qmodels = service._qdrant_models
         native_client.enabled = True
-        native_client.collection_name = config.qdrant_collection
+        native_client.default_collection = config.qdrant_collection
+        native_client._resolved_collections = {}
+        native_client._vector_names = {}
         native_client._memory_index = []
 
         assert written == 1, service._init_error

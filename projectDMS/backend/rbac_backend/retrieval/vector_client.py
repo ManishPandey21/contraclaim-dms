@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
@@ -13,6 +14,13 @@ from .correspondence_payload import (
 from .source_metadata import normalize_source_payload
 
 logger = logging.getLogger(__name__)
+
+# The collection the current task's most recent upsert wrote to, per client
+# (keyed by ``id(client)``). A report for the caller that just wrote, never an
+# input: no operation resolves its collection from it.
+_LAST_UPSERT_COLLECTION: ContextVar[Optional[tuple[int, str]]] = ContextVar(
+    "vector_client_last_upsert_collection", default=None
+)
 
 
 class VectorStoreUnavailableError(RuntimeError):
@@ -78,8 +86,44 @@ class VectorClient:
         self._qmodels = None
         self.enabled = False
         self._memory_index: List[Dict[str, Any]] = []
-        self.collection_name: Optional[str] = self.config.qdrant_collection
+        # One client serves every caller in the process (``get_vector_client``),
+        # so the collection is chosen per operation: a call that names a
+        # namespace uses it for that call only, and the configured default is
+        # fixed here for the client's life. Nothing below assigns either.
+        self.default_collection: str = self.config.qdrant_collection
+        # Per logical namespace: the physical collection after the dimension-
+        # mismatch fallback; per physical collection: the vector name found
+        # there. Keyed, idempotent facts about one collection each - never a
+        # shared "current" collection.
+        self._resolved_collections: Dict[str, str] = {}
+        self._vector_names: Dict[str, Optional[str]] = {}
         self._initialize()
+
+    @property
+    def collection_name(self) -> str:
+        """The collection this task's most recent ``upsert`` on this client wrote
+        to - after any dimension fallback - else the default's collection.
+
+        The contract projection reads it right after its own upsert to refuse a
+        write that landed outside its evidence namespace. Per task, so a
+        concurrent write elsewhere cannot change the answer; and only a report:
+        no operation takes its collection from it.
+        """
+        last = _LAST_UPSERT_COLLECTION.get()
+        if last is not None and last[0] == id(self):
+            return last[1]
+        return self._collection_for(None)
+
+    def _logical_collection(self, namespace: Optional[str]) -> str:
+        return namespace or self.default_collection or self.config.qdrant_collection
+
+    def _collection_for(self, namespace: Optional[str]) -> str:
+        """The physical collection for this call's namespace (``None`` = default)."""
+        logical = self._logical_collection(namespace)
+        return self._resolved_collections.get(logical, logical)
+
+    def _vector_name_for(self, collection: str) -> Optional[str]:
+        return self._vector_names.get(collection, self.config.qdrant_vector_name)
 
     def _initialize(self) -> None:
         if not self.config.qdrant_url:
@@ -106,10 +150,13 @@ class VectorClient:
         Ensure a collection exists with the configured vector size/distance.
         If an existing collection has a mismatched dimension, fall back to a
         suffix-based collection name to avoid repeated 400 errors.
+
+        Returns the physical collection for THIS call's namespace. It records
+        that namespace's fallback, and the vector name found in the collection,
+        under their own keys; it never changes the default collection or the
+        shared config, so a call for one namespace cannot redirect another.
         """
-        base_collection = (
-            namespace or self.collection_name or self.config.qdrant_collection
-        )
+        base_collection = self._logical_collection(namespace)
         desired_size = self.config.qdrant_vector_size
         desired_distance = (
             getattr(
@@ -123,8 +170,12 @@ class VectorClient:
         )
 
         if not (self.enabled and self._client and self._qmodels):
-            self.collection_name = base_collection
             return base_collection
+
+        def _resolved(physical: str, vector_name: Optional[str]) -> str:
+            self._resolved_collections[base_collection] = physical
+            self._vector_names[physical] = vector_name
+            return physical
 
         def _extract_vectors(
             info: Any,
@@ -196,23 +247,20 @@ class VectorClient:
                 logger.warning("Failed to create Qdrant collection %s: %s", name, exc)
 
         collection_to_use = base_collection
+        vector_name = self.config.qdrant_vector_name
         try:
             info = self._client.get_collection(collection_to_use)
             size, detected_name, available = _extract_vectors(info)
-            if detected_name and not self.config.qdrant_vector_name:
-                self.config.qdrant_vector_name = detected_name
-            elif (
-                self.config.qdrant_vector_name
-                and available
-                and self.config.qdrant_vector_name not in available
-            ):
+            if detected_name and not vector_name:
+                vector_name = detected_name
+            elif vector_name and available and vector_name not in available:
                 logger.warning(
                     "Vector '%s' not found in collection '%s'; available=%s. Falling back to first vector.",
-                    self.config.qdrant_vector_name,
+                    vector_name,
                     collection_to_use,
                     available,
                 )
-                self.config.qdrant_vector_name = available[0]
+                vector_name = available[0]
 
             if size is None:
                 logger.info(
@@ -220,12 +268,10 @@ class VectorClient:
                     collection_to_use,
                     desired_size,
                 )
-                self.collection_name = collection_to_use
-                return collection_to_use
+                return _resolved(collection_to_use, vector_name)
 
             if desired_size and int(size) == int(desired_size):
-                self.collection_name = collection_to_use
-                return collection_to_use
+                return _resolved(collection_to_use, vector_name)
             # Dimension mismatch: fall back to suffixed collection
             fallback = f"{collection_to_use}_dim{desired_size}"
             logger.warning(
@@ -236,14 +282,12 @@ class VectorClient:
                 fallback,
             )
             _create_collection(fallback)
-            self.collection_name = fallback
-            self.config.qdrant_collection = fallback
-            return fallback
+            # The fallback is created with the configured vector name.
+            return _resolved(fallback, self.config.qdrant_vector_name)
         except Exception:
             # Collection likely missing; try to create it
             _create_collection(collection_to_use)
-            self.collection_name = collection_to_use
-            return collection_to_use
+            return _resolved(collection_to_use, self.config.qdrant_vector_name)
 
     def is_healthy(self) -> bool:
         if not (self.enabled and self._client):
@@ -269,6 +313,7 @@ class VectorClient:
         if not chunks or not vectors:
             return 0
         collection = self._ensure_collection(namespace)
+        vector_name = self._vector_name_for(collection)
         payloads: List[Dict[str, Any]] = []
         for vector, chunk in zip(vectors, chunks):
             payload = {
@@ -302,7 +347,7 @@ class VectorClient:
                 {
                     "vector": vector,
                     "payload": payload,
-                    "namespace": namespace or self.config.qdrant_collection,
+                    "namespace": collection,
                 }
             )
 
@@ -316,9 +361,7 @@ class VectorClient:
                 )
                 point = self._qmodels.PointStruct(
                     id=point_id,
-                    vector={self.config.qdrant_vector_name: vector}
-                    if self.config.qdrant_vector_name
-                    else vector,
+                    vector={vector_name: vector} if vector_name else vector,
                     payload=payload,
                 )
                 points.append(point)
@@ -328,6 +371,7 @@ class VectorClient:
                 points=points,
                 wait=True,
             )
+        _LAST_UPSERT_COLLECTION.set((id(self), collection))
         return len(payloads)
 
     async def delete(
@@ -341,7 +385,7 @@ class VectorClient:
         point ids otherwise."""
         if not chunk_ids:
             return 0
-        collection = namespace or self.collection_name or self.config.qdrant_collection
+        collection = self._collection_for(namespace)
         removed = 0
         if self.enabled and self._client and self._qmodels:
             try:
@@ -409,7 +453,7 @@ class VectorClient:
         """
         if not chunk_ids:
             return 0
-        collection = namespace or self.collection_name or self.config.qdrant_collection
+        collection = self._collection_for(namespace)
         if not (self.enabled and self._client and self._qmodels):
             wanted = {str(chunk_id) for chunk_id in chunk_ids}
             self._memory_index = [
@@ -474,7 +518,7 @@ class VectorClient:
         deletes nothing. Enabled-but-failing raises, like ``list_chunk_ids``.
         """
         self._require_tenant_scope(filters, False)
-        collection = namespace or self.collection_name or self.config.qdrant_collection
+        collection = self._collection_for(namespace)
         if not (self.enabled and self._client and self._qmodels):
             return [
                 {
@@ -527,7 +571,7 @@ class VectorClient:
         letter would see its searchable vectors as stale and delete them.
         """
         self._require_tenant_scope(filters, allow_global)
-        collection = namespace or self.collection_name or self.config.qdrant_collection
+        collection = self._collection_for(namespace)
         if self.enabled and self._client and self._qmodels:
             try:
                 ids: List[str] = []
@@ -604,8 +648,9 @@ class VectorClient:
         if not query_vector:
             return []
         self._require_tenant_scope(filters, allow_global)
-        collection = namespace or self.collection_name or self.config.qdrant_collection
+        collection = self._collection_for(namespace)
         if self.enabled and self._client and self._qmodels:
+            vector_name = self._vector_name_for(collection)
             qfilter = self._build_filter(filters)
             try:
                 # Qdrant 1.x ships `search_points`; older releases expose `search`.
@@ -618,8 +663,8 @@ class VectorClient:
                 results = await asyncio.to_thread(
                     search_fn,
                     collection_name=collection,
-                    query_vector={self.config.qdrant_vector_name: query_vector}
-                    if self.config.qdrant_vector_name
+                    query_vector={vector_name: query_vector}
+                    if vector_name
                     else query_vector,
                     query_filter=qfilter,
                     limit=limit,

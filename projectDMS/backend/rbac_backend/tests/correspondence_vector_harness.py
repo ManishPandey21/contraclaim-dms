@@ -296,7 +296,9 @@ class QdrantHarness:
             reader._client = self.writer._client
             reader._qmodels = self.writer._qdrant_models
             reader.enabled = True
-            reader.collection_name = config.qdrant_collection
+            reader.default_collection = config.qdrant_collection
+            reader._resolved_collections = {}
+            reader._vector_names = {}
             reader._memory_index = []
             self.reader = reader
         assert self.reader.enabled

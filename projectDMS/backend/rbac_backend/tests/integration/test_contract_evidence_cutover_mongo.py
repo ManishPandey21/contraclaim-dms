@@ -180,7 +180,9 @@ def _vector_client() -> VectorClient:
     client._client = None
     client._qmodels = None
     client._memory_index = []
-    client.collection_name = "document_vectors"
+    client.default_collection = "document_vectors"
+    client._resolved_collections = {}
+    client._vector_names = {}
 
     def seed(document_id: str, clause_number: str, vector, position: int):
         client._memory_index.append(
