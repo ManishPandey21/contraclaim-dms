@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..services.publication_policy import is_consumable, resolve_canonical_document
 from .embeddings import EmbeddingClient
+from .namespaces import selectable_vector_namespace
 from .point_ids import generic_chunk_point_id
 from .vector_client import VectorClient
 
@@ -62,6 +63,10 @@ class VectorReconciler:
         project_id: str,
         namespace: Optional[str] = None,
     ) -> Dict[str, int]:
+        # Before anything else: an upsert would create the collection it names.
+        namespace = selectable_vector_namespace(
+            namespace, getattr(self.vector_client, "default_collection", None)
+        )
         document = await resolve_canonical_document(self.db, document_id)
         if not is_consumable(document):
             return self._untouched()

@@ -147,6 +147,8 @@ class _Database:
 
 class _PersistentQdrant:
     enabled = True
+    # The job names it: a request may select only the configured default.
+    default_collection = "authority-test"
 
     def __init__(self) -> None:
         self.config = type("Config", (), {"qdrant_vector_size": 2})()

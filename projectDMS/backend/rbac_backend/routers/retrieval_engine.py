@@ -22,6 +22,7 @@ from ..retrieval.dependencies import (
     get_llm_generator,
     get_vector_client,
 )
+from ..retrieval.namespaces import UnsupportedVectorNamespace
 from ..retrieval.models import (
     ContractQARequest,
     ContractQAResponse,
@@ -220,7 +221,12 @@ async def create_ingestion_job(
                 "reindex, which rebuilds its evidence"
             ),
         )
-    job = await ingestion_service.create_job(payload)
+    try:
+        job = await ingestion_service.create_job(payload)
+    except UnsupportedVectorNamespace as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from None
     return job
 
 
@@ -406,9 +412,14 @@ async def reconcile_vectors(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Superadmin required for reconciliation",
         )
-    return await reconciler.reconcile_document(
-        document_id=document_id,
-        org_id=org_id,
-        project_id=project_id,
-        namespace=namespace,
-    )
+    try:
+        return await reconciler.reconcile_document(
+            document_id=document_id,
+            org_id=org_id,
+            project_id=project_id,
+            namespace=namespace,
+        )
+    except UnsupportedVectorNamespace as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from None

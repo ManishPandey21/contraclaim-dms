@@ -20,6 +20,7 @@ from .models import (
 )
 from ..observability.service import ObservabilityService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.namespaces import selectable_vector_namespace
 from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
 
@@ -46,12 +47,27 @@ class IngestionPipeline:
         self.observability = observability_service
         self.enricher = ChunkEnricher(embedding_client)
 
+    def _selectable_namespace(self, requested: Optional[str]) -> Optional[str]:
+        """The request's namespace, if it may select it (``retrieval.namespaces``)."""
+        return selectable_vector_namespace(
+            requested, getattr(self.vector_client, "default_collection", None)
+        )
+
     async def create_job(self, payload: IngestionJobCreate) -> IngestionJob:
+        # Refused before the job exists: an unselectable namespace never reaches
+        # VectorClient, which would create the collection it names.
+        options = payload.options.model_copy(
+            update={
+                "vector_namespace": self._selectable_namespace(
+                    payload.options.vector_namespace
+                )
+            }
+        )
         job = IngestionJob(
             org_id=payload.org_id,
             project_id=payload.project_id,
             document_id=payload.document_id,
-            options=payload.options,
+            options=options,
             content_hash=payload.content_hash,
         )
         await self.db.ingestion_jobs.insert_one(
@@ -90,6 +106,11 @@ class IngestionPipeline:
             )
 
         try:
+            # A job stored before the allowlist, or around create_job, is refused
+            # here - before any vector work - and fails visibly.
+            job.options.vector_namespace = self._selectable_namespace(
+                job.options.vector_namespace
+            )
             existing_chunks: Dict[str, Dict[str, Any]] = {
                 chunk["chunk_id"]: chunk
                 async for chunk in self.db.chunks.find({"document_id": job.document_id})

@@ -1021,3 +1021,49 @@ def test_a_reprocess_never_erases_a_contract_extraction_hold(
     )
     assert document["processing_status"] == "human_review_required", document
     assert document["processing_error"]["source"] == "contract_extraction", document
+
+
+def test_the_route_answers_422_for_an_unselectable_vector_namespace(database):
+    """``options.vector_namespace`` is request input; only the configured
+    default may be selected. Anything else is a validation error, before any
+    job exists (and so before any vector write)."""
+    store = RecordingVectorStore()
+
+    async def seed(db, client):
+        await db["documents"].insert_one(
+            {
+                "_id": "plain-doc",
+                "organization_id": ORG,
+                "project_id": PROJECT,
+                "status": "completed",
+                "processing_status": "completed",
+                "publication_status": "published",
+                "is_active": True,
+                "ocrText": SOURCE_TEXT,
+            }
+        )
+
+    database.run(seed)
+    client, submitted, _policy = _route_client(database, store)
+
+    for namespace in ("contract_clauses", "attacker-namespace", "", " document_vectors"):
+        response = client.post(
+            "/api/v1/ingestion/jobs",
+            json={
+                "org_id": ORG,
+                "project_id": PROJECT,
+                "document_id": "plain-doc",
+                "options": {"vector_namespace": namespace},
+            },
+        )
+        assert response.status_code == 422, (namespace, response.text)
+    assert submitted == []
+    assert database.run(lambda db, client: db.ingestion_jobs.count_documents({})) == 0
+    assert store.points == {}
+
+    # Positive control: omitted, the same request is accepted.
+    response = client.post(
+        "/api/v1/ingestion/jobs",
+        json={"org_id": ORG, "project_id": PROJECT, "document_id": "plain-doc"},
+    )
+    assert response.status_code == 200, response.text
