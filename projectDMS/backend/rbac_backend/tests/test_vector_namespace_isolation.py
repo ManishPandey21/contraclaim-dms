@@ -446,3 +446,125 @@ def test_the_clause_sha1_point_id_is_still_refused_by_real_qdrant(store: Store) 
         )
     assert "400" in str(refused.value) or "format" in str(refused.value).lower()
     _assert_default_untouched(store)
+
+
+# --- a proven fallback is kept, reused, and read with its own vector name ----------------
+
+
+class _Spy:
+    """Records every call into the wrapped client; fails the named methods once."""
+
+    def __init__(self, inner: Any, fail_once: tuple[str, ...] = ()) -> None:
+        self._inner = inner
+        self._fail = set(fail_once)
+        self.calls: List[tuple[str, Any]] = []
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            self.calls.append((name, kwargs.get("collection_name", args[0] if args else None)))
+            if name in self._fail:
+                self._fail.discard(name)
+                raise RuntimeError(f"transient {name} failure")
+            return attr(*args, **kwargs)
+
+        return call
+
+
+def _mismatched(store: Store, collection: str) -> str:
+    store.client.create_collection(
+        collection_name=collection,
+        vectors_config=store.models.VectorParams(size=8, distance=store.models.Distance.COSINE),
+    )
+    return f"{collection}_dim{DIMENSIONS}"
+
+
+def test_a_transient_error_does_not_erase_a_proven_fallback(store: Store) -> None:
+    evidence = store.name("document_vectors")
+    fallback = _mismatched(store, evidence)
+    first = _contract_chunk("proven fallback")
+    asyncio.run(_explicit_upsert(store.vc, evidence, first))
+    assert store.chunk_ids(fallback) == [first["chunk_id"]]
+
+    original = store.vc._client
+    store.vc._client = _Spy(original, fail_once=("get_collection", "upsert"))
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("blip")))
+    finally:
+        store.vc._client = original
+
+    # The namespace still reads, and next writes, its proven fallback.
+    assert asyncio.run(store.vc.list_chunk_ids(_scope(first), namespace=evidence)) == [
+        first["chunk_id"]
+    ]
+    later = _contract_chunk("after the blip")
+    asyncio.run(_explicit_upsert(store.vc, evidence, later))
+    assert store.chunk_ids(fallback) == sorted([first["chunk_id"], later["chunk_id"]])
+    assert store.chunk_ids(evidence) == []
+    _assert_default_untouched(store)
+
+
+def test_a_proven_fallback_is_reused_without_recreating_it(store: Store) -> None:
+    evidence = store.name("document_vectors")
+    fallback = _mismatched(store, evidence)
+    asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk("first")))
+
+    spy = _Spy(store.vc._client)
+    store.vc._client = spy
+    try:
+        for i in range(3):
+            asyncio.run(_explicit_upsert(store.vc, evidence, _contract_chunk(f"again {i}")))
+    finally:
+        store.vc._client = spy._inner
+
+    names = [name for name, _ in spy.calls]
+    assert names.count("create_collection") == 0, spy.calls
+    assert names.count("get_collection") == 0, spy.calls
+    assert [c for n, c in spy.calls if n == "upsert"] == [fallback] * 3
+    assert len(store.chunk_ids(fallback)) == 4
+
+
+def test_an_existing_fallback_is_written_with_its_own_vector_name(store: Store) -> None:
+    """A ``_dimN`` collection made earlier with a named vector: the name it
+    actually has is used, not the configured (unnamed) one."""
+    evidence = store.name("document_vectors")
+    fallback = _mismatched(store, evidence)
+    store.client.create_collection(
+        collection_name=fallback,
+        vectors_config={
+            "dense": store.models.VectorParams(
+                size=DIMENSIONS, distance=store.models.Distance.COSINE
+            )
+        },
+    )
+    chunk = _contract_chunk("named fallback")
+
+    assert asyncio.run(_explicit_upsert(store.vc, evidence, chunk)) == 1
+    assert store.chunk_ids(fallback) == [chunk["chunk_id"]]
+    assert store.chunk_ids(evidence) == []
+    _assert_default_untouched(store)
+
+
+def test_a_default_dimension_fallback_is_followed_by_default_reads(store: Store) -> None:
+    fallback = _mismatched(store, store.default)
+    chunk = _generic_chunk("default fallback")
+
+    async def go() -> Optional[str]:
+        await _generic_upsert(store.vc, chunk)
+        return store.vc.collection_name
+
+    assert asyncio.run(go()) == fallback
+    assert store.chunk_ids(fallback) == [chunk["chunk_id"]]
+    assert asyncio.run(store.vc.list_chunk_ids(_scope(chunk))) == [chunk["chunk_id"]]
+    assert asyncio.run(
+        store.vc.list_points({"org_id": ORG, "project_id": PROJECT, "document_id": chunk["document_id"]})
+    )
+    assert asyncio.run(
+        store.vc.delete_document_chunks(chunk["document_id"], [chunk["chunk_id"]])
+    ) == 0
+    assert store.chunk_ids(fallback) == []
+    _assert_default_untouched(store)

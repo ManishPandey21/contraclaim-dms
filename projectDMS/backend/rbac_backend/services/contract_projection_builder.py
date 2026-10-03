@@ -489,9 +489,13 @@ class ContractProjectionBuilder:
                 f"vector store accepted {written} of {len(payloads)} points; a partial "
                 "vector projection is not a current one"
             )
-        # The store may still have written elsewhere: the client's dimension-
-        # mismatch fallback to ``<name>_dim<N>`` is a collection evidence never
-        # reads - not a current projection.
+        # The store may still have written elsewhere: on a dimension mismatch the
+        # client writes this namespace to ``<name>_dim<N>`` instead. That
+        # fallback is local to the namespace and to the process that proved it:
+        # this process's later evidence reads follow it, but another process (or
+        # this one after a restart, until it writes) reads the base collection.
+        # So a fallback write is not a current projection. ``collection_name``
+        # reports, for this task only, where its own last upsert wrote.
         written_to = getattr(self.vector_store, "collection_name", None)
         if isinstance(written_to, str) and written_to != EVIDENCE_VECTOR_NAMESPACE:
             raise ProjectionUnavailable(

@@ -172,6 +172,13 @@ class VectorClient:
         if not (self.enabled and self._client and self._qmodels):
             return base_collection
 
+        known = self._resolved_collections.get(base_collection)
+        if known is not None and known != base_collection:
+            # A dimension fallback this namespace already proved: reuse it, with
+            # the vector name recorded for it, rather than re-checking the base
+            # and re-creating the fallback on every call.
+            return known
+
         def _resolved(physical: str, vector_name: Optional[str]) -> str:
             self._resolved_collections[base_collection] = physical
             self._vector_names[physical] = vector_name
@@ -228,7 +235,24 @@ class VectorClient:
             size = _size_from_params(vectors_conf)
             return size, chosen_name, available
 
-        def _create_collection(name: str) -> None:
+        def _name_in(
+            detected_name: Optional[str], available: list[str], where: str
+        ) -> Optional[str]:
+            """The vector name to write in collection ``where``."""
+            name = self.config.qdrant_vector_name
+            if detected_name and not name:
+                return detected_name
+            if name and available and name not in available:
+                logger.warning(
+                    "Vector '%s' not found in collection '%s'; available=%s. Falling back to first vector.",
+                    name,
+                    where,
+                    available,
+                )
+                return available[0]
+            return name
+
+        def _create_collection(name: str) -> bool:
             vec_params = self._qmodels.VectorParams(
                 size=desired_size, distance=desired_distance
             )
@@ -243,24 +267,16 @@ class VectorClient:
                     vectors_config=vectors_config,
                 )
                 logger.info("Created Qdrant collection %s (dim=%s)", name, desired_size)
+                return True
             except Exception as exc:
                 logger.warning("Failed to create Qdrant collection %s: %s", name, exc)
+                return False
 
         collection_to_use = base_collection
-        vector_name = self.config.qdrant_vector_name
         try:
             info = self._client.get_collection(collection_to_use)
             size, detected_name, available = _extract_vectors(info)
-            if detected_name and not vector_name:
-                vector_name = detected_name
-            elif vector_name and available and vector_name not in available:
-                logger.warning(
-                    "Vector '%s' not found in collection '%s'; available=%s. Falling back to first vector.",
-                    vector_name,
-                    collection_to_use,
-                    available,
-                )
-                vector_name = available[0]
+            vector_name = _name_in(detected_name, available, collection_to_use)
 
             if size is None:
                 logger.info(
@@ -281,13 +297,26 @@ class VectorClient:
                 desired_size,
                 fallback,
             )
-            _create_collection(fallback)
-            # The fallback is created with the configured vector name.
-            return _resolved(fallback, self.config.qdrant_vector_name)
         except Exception:
-            # Collection likely missing; try to create it
-            _create_collection(collection_to_use)
-            return _resolved(collection_to_use, self.config.qdrant_vector_name)
+            # Unreadable: missing, or a transient error. Never let it replace what
+            # this namespace already proved; record only a collection this call
+            # created itself.
+            if _create_collection(collection_to_use) and known is None:
+                return _resolved(collection_to_use, self.config.qdrant_vector_name)
+            return known or collection_to_use
+        # Dimension mismatch, the only way out of the try without a return: use
+        # an existing fallback with the vector name it actually has, or create
+        # it with the configured one. Recorded only once proven.
+        try:
+            fallback_info = self._client.get_collection(fallback)
+        except Exception:
+            if _create_collection(fallback):
+                return _resolved(fallback, self.config.qdrant_vector_name)
+            return fallback
+        _size, fallback_name, fallback_available = _extract_vectors(fallback_info)
+        return _resolved(
+            fallback, _name_in(fallback_name, fallback_available, fallback)
+        )
 
     def is_healthy(self) -> bool:
         if not (self.enabled and self._client):
