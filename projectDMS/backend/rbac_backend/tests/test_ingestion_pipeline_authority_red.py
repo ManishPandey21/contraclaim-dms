@@ -152,7 +152,7 @@ class _PersistentQdrant:
         self.config = type("Config", (), {"qdrant_vector_size": 2})()
         self.points: dict[str, dict] = {}
 
-    async def upsert(self, vectors, chunks, namespace=None) -> int:
+    async def upsert(self, vectors, chunks, namespace=None, point_id_for=None) -> int:
         for vector, chunk in zip(vectors, chunks):
             self.points[str(chunk["chunk_id"])] = {
                 "vector": deepcopy(vector),
@@ -169,7 +169,7 @@ class _PersistentQdrant:
             and all(point["payload"].get(key) == value for key, value in filters.items())
         ][:limit]
 
-    async def delete(self, chunk_ids, namespace=None) -> int:
+    async def delete(self, chunk_ids, namespace=None, point_id_for=None) -> int:
         deleted = 0
         for chunk_id in list(chunk_ids):
             point = self.points.get(str(chunk_id))

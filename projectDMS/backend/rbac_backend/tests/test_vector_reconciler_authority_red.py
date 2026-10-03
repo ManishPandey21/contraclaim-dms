@@ -97,12 +97,12 @@ class _QdrantBoundary:
             and point.get("document_id") == filters.get("document_id")
         )
 
-    async def upsert(self, _vectors, chunks, namespace=None):
+    async def upsert(self, _vectors, chunks, namespace=None, point_id_for=None):
         for chunk in chunks:
             self.points[str(chunk["chunk_id"])] = dict(chunk)
         return len(chunks)
 
-    async def delete(self, chunk_ids, namespace=None):
+    async def delete(self, chunk_ids, namespace=None, point_id_for=None):
         removed = 0
         for chunk_id in chunk_ids:
             if self.points.pop(str(chunk_id), None) is not None:

@@ -32,6 +32,7 @@ from ..retrieval.correspondence_payload import (
     canonical_scope_id,
     refuse_unpublishable_stored_rows,
 )
+from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
 from ..services.contract_source import CONTRACT_UPLOAD_TYPE, is_contract_upload
 from ..services.publication_policy import is_consumable
@@ -847,6 +848,7 @@ async def _resync_document_vectors(
                 for c in chunks
             ],
             namespace=None,
+            point_id_for=generic_chunk_point_id,
         )
         qdrant_ids = await vector_client.list_chunk_ids(
             # The same canonical form the points were just written with.

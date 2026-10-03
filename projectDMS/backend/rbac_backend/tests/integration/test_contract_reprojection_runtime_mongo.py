@@ -291,7 +291,7 @@ class RecordingVectorStore:
         self.available = True
         self.points: Dict[str, Dict[str, Any]] = {}
 
-    async def upsert(self, vectors, chunks, namespace=None):
+    async def upsert(self, vectors, chunks, namespace=None, point_id_for=None):
         if not self.available:
             raise ConnectionError("vector store unavailable (test outage)")
         for vector, chunk in zip(vectors, chunks):
@@ -311,7 +311,7 @@ class RecordingVectorStore:
             if point["document_id"] == filters.get("document_id")
         ]
 
-    async def delete(self, chunk_ids, namespace=None):
+    async def delete(self, chunk_ids, namespace=None, point_id_for=None):
         for chunk_id in chunk_ids:
             self.points.pop(str(chunk_id), None)
         return len(chunk_ids)

@@ -7,6 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..services.publication_policy import is_consumable, resolve_canonical_document
 from .embeddings import EmbeddingClient
+from .point_ids import generic_chunk_point_id
 from .vector_client import VectorClient
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ class VectorReconciler:
                         for c in to_write
                     ],
                     namespace=namespace,
+                    point_id_for=generic_chunk_point_id,
                 )
                 repaired = len(to_write)
 
@@ -177,7 +179,9 @@ class VectorReconciler:
         removed = 0
         if missing_in_mongo:
             removed = await self.vector_client.delete(
-                list(missing_in_mongo), namespace=namespace
+                list(missing_in_mongo),
+                namespace=namespace,
+                point_id_for=generic_chunk_point_id,
             )
 
         result = {

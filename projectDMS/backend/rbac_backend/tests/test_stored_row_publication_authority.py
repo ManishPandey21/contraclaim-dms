@@ -26,6 +26,7 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
+from rbac_backend.retrieval.point_ids import generic_chunk_point_id
 from rbac_backend.services.source_text import OCR_TEXT_KIND_REPORT, OCR_TEXT_KIND_SOURCE
 from rbac_backend.tests.correspondence_vector_harness import (
     QDRANT_BACKENDS,
@@ -158,7 +159,7 @@ def test_storage_sync_still_repairs_letter_chunks_under_the_documents_authority(
     )
 
     points = _points(harness, document_id)
-    assert [str(p.id) for p in points] == ids, result
+    assert [p.payload["chunk_id"] for p in points] == ids, result
     assert points[0].payload["org_id"] == ORG
     assert points[0].payload["project_id"] == PROJECT
     assert points[0].payload["text"] == LETTER
@@ -198,7 +199,7 @@ def test_the_reconciler_still_repairs_letter_chunks_under_the_documents_authorit
     result = run(_reconciler(db, harness).reconcile_document(document_id, ORG, PROJECT))
 
     points = _points(harness, document_id)
-    assert [str(p.id) for p in points] == ids
+    assert [p.payload["chunk_id"] for p in points] == ids
     assert result["repaired"] == 1
     assert (points[0].payload["org_id"], points[0].payload["project_id"]) == (ORG, PROJECT)
 
@@ -257,6 +258,7 @@ def test_the_reconciler_still_removes_orphan_points_when_rows_are_refused(
             [embed_text(REPORT)],
             [{"chunk_id": orphan, "document_id": document_id, "org_id": ORG,
               "project_id": PROJECT, "text": REPORT}],
+            point_id_for=generic_chunk_point_id,
         )
     )
 
@@ -501,6 +503,7 @@ def test_after_reprocessing_superseded_chunks_are_retired_and_reconcile_settles(
             [embed_text(REPORT)],
             [{"chunk_id": stale_ids[0], "document_id": document_id, "org_id": ORG,
               "project_id": PROJECT, "text": REPORT}],
+            point_id_for=generic_chunk_point_id,
         )
     )
     run(

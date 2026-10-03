@@ -100,7 +100,7 @@ class _QdrantBoundary:
     def __init__(self) -> None:
         self.points: Dict[str, Dict[str, Any]] = {}
 
-    async def upsert(self, _vectors, chunks, namespace=None):
+    async def upsert(self, _vectors, chunks, namespace=None, point_id_for=None):
         for chunk in chunks:
             self.points[str(chunk["chunk_id"])] = dict(chunk)
         return len(chunks)

@@ -185,6 +185,7 @@ class StubVector:
         vectors: List[List[float]],
         chunks: List[Dict[str, Any]],
         namespace: Optional[str] = None,
+        point_id_for: Any = None,
     ) -> int:
         for vector, chunk in zip(vectors, chunks):
             self.writes.append({"vector": vector, "chunk": chunk})
@@ -207,7 +208,10 @@ class StubVector:
         ]
 
     async def delete(
-        self, chunk_ids: List[str], namespace: Optional[str] = None
+        self,
+        chunk_ids: List[str],
+        namespace: Optional[str] = None,
+        point_id_for: Any = None,
     ) -> int:
         before = len(self.writes)
         self.writes = [

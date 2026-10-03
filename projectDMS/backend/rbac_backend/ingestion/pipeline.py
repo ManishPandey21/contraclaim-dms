@@ -20,6 +20,7 @@ from .models import (
 )
 from ..observability.service import ObservabilityService
 from ..retrieval.embeddings import EmbeddingClient
+from ..retrieval.point_ids import generic_chunk_point_id
 from ..retrieval.vector_client import VectorClient
 
 logger = logging.getLogger(__name__)
@@ -262,6 +263,7 @@ class IngestionPipeline:
                         for c in changed_chunks
                     ],
                     namespace=job.options.vector_namespace,
+                    point_id_for=generic_chunk_point_id,
                 )
 
             # Last check before the one destructive step: a promotion committing,
@@ -459,7 +461,9 @@ class IngestionPipeline:
             return
         stale = [cid for cid in existing_ids if cid not in current_chunks]
         if stale:
-            await self.vector_client.delete(stale, namespace=namespace)
+            await self.vector_client.delete(
+                stale, namespace=namespace, point_id_for=generic_chunk_point_id
+            )
 
     async def _update_vector_sync(
         self, job: IngestionJob, expected: int, namespace: Optional[str]

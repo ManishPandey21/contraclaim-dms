@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config.document_processing_config import DocumentProcessingConfig
 from .correspondence_payload import (
@@ -260,7 +260,12 @@ class VectorClient:
         vectors: List[List[float]],
         chunks: List[Dict[str, Any]],
         namespace: Optional[str] = None,
+        point_id_for: Optional[Callable[[str], str]] = None,
     ) -> int:
+        """``point_id_for`` maps each chunk's logical ``chunk_id`` to its Qdrant
+        point id (``retrieval.point_ids``); without it the chunk id IS the point
+        id, as the contract writers' own UUID ids are. The payload always
+        keeps the logical ``chunk_id``. ``delete`` takes the same function."""
         if not chunks or not vectors:
             return 0
         collection = self._ensure_collection(namespace)
@@ -304,7 +309,11 @@ class VectorClient:
         if self.enabled and self._client and self._qmodels:
             points = []
             for vector, payload in zip(vectors, payloads):
-                point_id = payload["chunk_id"]
+                point_id = (
+                    point_id_for(str(payload["chunk_id"]))
+                    if point_id_for is not None
+                    else payload["chunk_id"]
+                )
                 point = self._qmodels.PointStruct(
                     id=point_id,
                     vector={self.config.qdrant_vector_name: vector}
@@ -322,8 +331,14 @@ class VectorClient:
         return len(payloads)
 
     async def delete(
-        self, chunk_ids: List[str], namespace: Optional[str] = None
+        self,
+        chunk_ids: List[str],
+        namespace: Optional[str] = None,
+        point_id_for: Optional[Callable[[str], str]] = None,
     ) -> int:
+        """Delete points by id. ``chunk_ids`` are logical chunk ids when
+        ``point_id_for`` is given (the same mapping their upsert used), and
+        point ids otherwise."""
         if not chunk_ids:
             return 0
         collection = namespace or self.collection_name or self.config.qdrant_collection
@@ -333,7 +348,11 @@ class VectorClient:
                 await asyncio.to_thread(
                     self._client.delete,
                     collection_name=collection,
-                    points_selector=self._qmodels.PointIdsList(points=chunk_ids),
+                    points_selector=self._qmodels.PointIdsList(
+                        points=[point_id_for(str(c)) for c in chunk_ids]
+                        if point_id_for is not None
+                        else chunk_ids
+                    ),
                     wait=True,
                 )
                 removed = len(chunk_ids)
